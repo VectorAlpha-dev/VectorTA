@@ -16,7 +16,7 @@
 //! ## Developer Status
 //! - **AVX2 kernel**: STUB - Falls back to scalar implementation
 //! - **AVX512 kernel**: STUB - Falls back to scalar implementation
-//! - **Streaming update**: O(n) - Recalculates EMA from scratch each update
+//! - **Streaming update**: O(1) - Closed-form discrete gain selection with batch-parity seeding
 //! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
 //! - **Decision note**: Scalar kernel optimized to O(1) per bar using a closed-form minimizer on the discrete gain grid; SIMD remains stubbed due to strict loop-carried dependency across time.
 
@@ -1067,22 +1067,31 @@ pub fn ehlers_ecema_batch_par_slice(
 }
 
 // ==================== STREAMING SUPPORT ====================
+/// Decision: Streaming uses O(1) closed-form discrete gain selection; batch-parity seeding.
 #[derive(Debug, Clone)]
 pub struct EhlersEcemaStream {
+    // Params
     length: usize,
     gain_limit: usize,
+    // Derived constants
+    gain_limit_i32: i32,
     alpha: f64,
     beta: f64,
+    slope_scale: f64, // alpha * 0.1 (grid step of 0.1 encoded once)
+    // State
     count: usize,
-    ema_mean: f64,
-    ema_filled: bool,
-    prev_ecema: f64,
+    ema_mean: f64,    // EMA state (or SMA during warmup in regular mode)
+    ema_filled: bool, // true after the first 'length' samples in regular mode
+    warm_sum: f64,    // running sum to seed EMA with SMA (regular mode)
+    prev_ecema: f64,  // last EC-EMA output
+    // Modes
     pine_compatible: bool,
     confirmed_only: bool,
-    prev_value: Option<f64>, // For confirmed_only mode
+    prev_value: Option<f64>, // prior raw input for confirmed_only
 }
 
 impl EhlersEcemaStream {
+    #[inline]
     pub fn try_new(params: EhlersEcemaParams) -> Result<Self, EhlersEcemaError> {
         let length = params.length.unwrap_or(20);
         let gain_limit = params.gain_limit.unwrap_or(50);
@@ -1090,27 +1099,27 @@ impl EhlersEcemaStream {
         let confirmed_only = params.confirmed_only.unwrap_or(false);
 
         if length == 0 {
-            return Err(EhlersEcemaError::InvalidPeriod {
-                period: length,
-                data_len: 0,
-            });
+            return Err(EhlersEcemaError::InvalidPeriod { period: length, data_len: 0 });
         }
-
         if gain_limit == 0 {
             return Err(EhlersEcemaError::InvalidGainLimit { gain_limit });
         }
 
+        // Standard EMA alpha = 2/(L+1); beta = 1 - alpha.
         let alpha = 2.0 / (length as f64 + 1.0);
         let beta = 1.0 - alpha;
 
         Ok(Self {
             length,
             gain_limit,
+            gain_limit_i32: gain_limit as i32,
             alpha,
             beta,
+            slope_scale: alpha * 0.1, // grid is in tenths per Ehlers’ loop
             count: 0,
             ema_mean: 0.0,
             ema_filled: false,
+            warm_sum: 0.0,
             prev_ecema: 0.0,
             pine_compatible,
             confirmed_only,
@@ -1118,22 +1127,54 @@ impl EhlersEcemaStream {
         })
     }
 
+    /// Fast rounding to the nearest integer with ties toward the smaller integer.
+    /// This reproduces a discrete scan that updates on strict '<' (first/lowest k wins).
+    #[inline(always)]
+    fn round_nearest_tie_down(x: f64) -> i32 {
+        let f = x.floor();
+        let r = x - f;           // r in [0,1)
+        if r > 0.5 { (f + 1.0) as i32 } else { f as i32 }
+    }
+
+    /// One EC-EMA step using the closed-form minimizer on the discrete grid.
+    /// Prev EC is `prev_ec`, EMA at this bar is `ema_i`, input price is `src`.
+    #[inline(always)]
+    fn step(&self, prev_ec: f64, src: f64, ema_i: f64) -> f64 {
+        // base = alpha*ema_i + beta*prev_ec
+        let base = self.alpha.mul_add(ema_i, self.beta * prev_ec);
+
+        // s = alpha*(src - prev_ec)/10  (grid step is 0.1)
+        let delta = src - prev_ec;
+        let s = self.slope_scale * delta;
+
+        // minimize |d - s*k| over integer k in [-gL, gL], where d = src - base
+        let d = src - base;
+
+        let k_best: i32 = if !s.is_finite() || !d.is_finite() || s.abs() <= f64::MIN_POSITIVE {
+            // Error independent of k -> choose first scanned k == -gL
+            -self.gain_limit_i32
+        } else {
+            let k_cont = d / s; // ideal real-valued minimizer
+            let k = Self::round_nearest_tie_down(k_cont);
+            k.clamp(-self.gain_limit_i32, self.gain_limit_i32)
+        };
+
+        // EC = base + s*k_best  (use FMA for precision/perf)
+        (k_best as f64).mul_add(s, base)
+    }
+
+    /// O(1) streaming update
+    #[inline]
     pub fn next(&mut self, value: f64) -> f64 {
         if !value.is_finite() {
             return f64::NAN;
         }
 
-        // Handle confirmed_only mode (use previous value as source)
+        // confirmed_only uses the previous bar as the source when available
         let src = if self.confirmed_only {
             match self.prev_value {
-                Some(prev) => {
-                    self.prev_value = Some(value);
-                    prev
-                }
-                None => {
-                    self.prev_value = Some(value);
-                    value // First value, no previous to use
-                }
+                Some(prev) => { self.prev_value = Some(value); prev }
+                None => { self.prev_value = Some(value); value }
             }
         } else {
             value
@@ -1141,73 +1182,45 @@ impl EhlersEcemaStream {
 
         self.count += 1;
 
-        // Calculate EMA based on mode
-        let ema_value = if self.pine_compatible {
-            // Pine-style: zero-seeded EMA
-            self.ema_mean = self.alpha * src + self.beta * self.ema_mean;
-            self.ema_mean
-        } else {
-            // Regular mode: running mean for warmup
-            if !self.ema_filled {
-                self.ema_mean =
-                    ((self.count as f64 - 1.0) * self.ema_mean + src) / self.count as f64;
-                if self.count >= self.length {
-                    self.ema_filled = true;
-                }
-                self.ema_mean
-            } else {
-                self.ema_mean = self.beta * self.ema_mean + self.alpha * src;
-                self.ema_mean
-            }
-        };
-
-        // Determine if we should output value based on mode
-        if !self.pine_compatible && self.count < self.length {
-            self.prev_ecema = ema_value;
-            return f64::NAN;
+        if self.pine_compatible {
+            // Pine-style EMA is zero-seeded and updated from bar 1 onward.
+            self.ema_mean = self.alpha.mul_add(src, self.beta * self.ema_mean);
+            // Seed EC with zero on the very first bar (batch parity).
+            let prev_ec = if self.count == 1 { 0.0 } else { self.prev_ecema };
+            let ec = self.step(prev_ec, src, self.ema_mean);
+            self.prev_ecema = ec;
+            return ec;
         }
 
-        // Set initial prev_ecema for Pine mode
-        if self.pine_compatible && self.count == 1 {
-            self.prev_ecema = 0.0; // Pine: nz(ecEma[1]) = 0 on first bar
+        // Regular mode: SMA seed, then EMA thereafter; warmup returns NaN.
+        if !self.ema_filled {
+            self.warm_sum += src;
+            if self.count < self.length {
+                return f64::NAN;
+            }
+            // First output bar: seed EMA with SMA and seed EC with EMA_i (batch parity).
+            self.ema_mean = self.warm_sum / self.length as f64;
+            self.ema_filled = true;
+
+            let prev_ec = self.ema_mean; // prev_ec = ema_i at the first output bar
+            let ec = self.step(prev_ec, src, self.ema_mean);
+            self.prev_ecema = ec;
+            return ec;
         }
 
-        // Closed-form minimizer on discrete gain grid (tenths)
-        let gL: i32 = self.gain_limit as i32;
-        let delta = src - self.prev_ecema;
-        let c = self.alpha * delta;
-        let base = self.alpha.mul_add(ema_value, self.beta * self.prev_ecema);
-        let d = src - base;
-        let s = c * 0.1;
-        let k_best: i32 = if !s.is_finite() || !d.is_finite() || s.abs() <= f64::MIN_POSITIVE {
-            -gL
-        } else {
-            let k_cont = d / s;
-            if k_cont <= (-(gL as f64) - 1.0) {
-                -gL
-            } else if k_cont >= (gL as f64 + 1.0) {
-                gL
-            } else {
-                let mut k0 = k_cont.floor() as i32;
-                let mut k1 = k0 + 1;
-                if k0 < -gL { k0 = -gL; } else if k0 > gL { k0 = gL; }
-                if k1 < -gL { k1 = -gL; } else if k1 > gL { k1 = gL; }
-                let e0 = (d - s * (k0 as f64)).abs();
-                let e1 = (d - s * (k1 as f64)).abs();
-                if e0 <= e1 { k0 } else { k1 }
-            }
-        };
-
-        // Final EC-EMA with best k
-        let ec_ema = (k_best as f64).mul_add(s, base);
-        self.prev_ecema = ec_ema;
-        ec_ema
+        // After warmup, regular EMA recursion
+        self.ema_mean = self.beta * self.ema_mean + self.alpha * src;
+        let ec = self.step(self.prev_ecema, src, self.ema_mean);
+        self.prev_ecema = ec;
+        ec
     }
 
+    #[inline]
     pub fn reset(&mut self) {
         self.count = 0;
         self.ema_mean = 0.0;
         self.ema_filled = false;
+        self.warm_sum = 0.0;
         self.prev_ecema = 0.0;
         self.prev_value = None;
     }

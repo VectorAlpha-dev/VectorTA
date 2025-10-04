@@ -746,30 +746,39 @@ unsafe fn chande_fast_unchecked(
     }
 }
 
+// Decision note: Streaming kernel uses O(1) monotonic deque + Wilder ATR with TR identity; FMA used for tail.
 #[derive(Debug, Clone)]
 pub struct ChandeStream {
+    // Parameters
     period: usize,
     mult: f64,
     direction: String,
-    high_buf: Vec<f64>,
-    low_buf: Vec<f64>,
-    close_prev: f64,
+    is_long: bool,
+
+    // Precomputed constant
+    alpha: f64, // 1.0 / period
+
+    // State
     atr: f64,
-    buffer_filled: usize,
-    filled: bool,
-    buffer_idx: usize, // Ring buffer index
-    // Monotonic deque for O(1) max/min tracking
-    // Stores (value, index) pairs
-    max_deque: VecDeque<(f64, usize)>,
-    min_deque: VecDeque<(f64, usize)>,
-    current_time: usize, // Logical time for tracking window
+    close_prev: f64,
+    t: usize,     // logical time (0-based)
+    warm: usize,  // number of samples accumulated (<= period)
+    filled: bool, // window is “full” -> outputs are valid
+
+    // Monotonic queues (store (value, time))
+    max_deque: std::collections::VecDeque<(f64, usize)>,
+    min_deque: std::collections::VecDeque<(f64, usize)>,
 }
 
 impl ChandeStream {
     pub fn try_new(params: ChandeParams) -> Result<Self, ChandeError> {
         let period = params.period.unwrap_or(22);
         let mult = params.mult.unwrap_or(3.0);
-        let direction = params.direction.unwrap_or_else(|| "long".into());
+        let direction = params
+            .direction
+            .unwrap_or_else(|| "long".into())
+            .to_lowercase();
+
         if period == 0 {
             return Err(ChandeError::InvalidPeriod {
                 period,
@@ -779,109 +788,143 @@ impl ChandeStream {
         if direction != "long" && direction != "short" {
             return Err(ChandeError::InvalidDirection { direction });
         }
-        let mut high_buf = vec![0.0; period];
-        let mut low_buf = vec![0.0; period];
 
+        let is_long = direction == "long";
         Ok(Self {
             period,
             mult,
             direction,
-            high_buf,
-            low_buf,
-            close_prev: f64::NAN,
+            is_long,
+            alpha: 1.0 / period as f64,
             atr: 0.0,
-            buffer_filled: 0,
+            close_prev: f64::NAN,
+            t: 0,
+            warm: 0,
             filled: false,
-            buffer_idx: 0,
-            max_deque: VecDeque::with_capacity(period),
-            min_deque: VecDeque::with_capacity(period),
-            current_time: 0,
+            max_deque: std::collections::VecDeque::with_capacity(period),
+            min_deque: std::collections::VecDeque::with_capacity(period),
         })
     }
 
-    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        // Calculate TR
-        let tr = if self.buffer_filled == 0 {
+    #[inline(always)]
+    fn evict_old(&mut self) {
+        // keep window [t - (period - 1), t]
+        let window_start = self.t.saturating_sub(self.period - 1);
+        if self.is_long {
+            while let Some(&(_, idx)) = self.max_deque.front() {
+                if idx < window_start {
+                    self.max_deque.pop_front();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            while let Some(&(_, idx)) = self.min_deque.front() {
+                if idx < window_start {
+                    self.min_deque.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn push_max(&mut self, v: f64) {
+        // maintain non-increasing deque for highs
+        while let Some(&(back, _)) = self.max_deque.back() {
+            if back <= v {
+                self.max_deque.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.max_deque.push_back((v, self.t));
+    }
+
+    #[inline(always)]
+    fn push_min(&mut self, v: f64) {
+        // maintain non-decreasing deque for lows
+        while let Some(&(back, _)) = self.min_deque.back() {
+            if back >= v {
+                self.min_deque.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.min_deque.push_back((v, self.t));
+    }
+
+    #[inline(always)]
+    fn tr(&self, high: f64, low: f64) -> f64 {
+        // Wilder’s TR identity:
+        // TR = max(high, prev_close) - min(low, prev_close)
+        // First observation falls back to high - low
+        if self.warm == 0 {
             high - low
         } else {
-            let hl = high - low;
-            let hc = (high - self.close_prev).abs();
-            let lc = (low - self.close_prev).abs();
-            hl.max(hc).max(lc)
-        };
+            let max_h = if high > self.close_prev { high } else { self.close_prev };
+            let min_l = if low < self.close_prev { low } else { self.close_prev };
+            max_h - min_l
+        }
+    }
 
-        // Update ATR
-        if self.buffer_filled < self.period {
-            // Warmup period
+    #[inline(always)]
+    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        // --- compute TR
+        let tr = self.tr(high, low);
+
+        if !self.filled {
+            // Warmup: build initial window + accumulate TR
+            if self.is_long {
+                self.push_max(high);
+            } else {
+                self.push_min(low);
+            }
             self.atr += tr;
-            self.buffer_filled += 1;
+            self.warm += 1;
 
-            // Store in buffer during warmup
-            self.high_buf[self.buffer_filled - 1] = high;
-            self.low_buf[self.buffer_filled - 1] = low;
-
-            // Update deques during warmup
-            // Remove elements that can't be max/min
-            while !self.max_deque.is_empty() && self.max_deque.back().unwrap().0 <= high {
-                self.max_deque.pop_back();
-            }
-            self.max_deque.push_back((high, self.current_time));
-
-            while !self.min_deque.is_empty() && self.min_deque.back().unwrap().0 >= low {
-                self.min_deque.pop_back();
-            }
-            self.min_deque.push_back((low, self.current_time));
-
-            if self.buffer_filled == self.period {
-                self.atr /= self.period as f64;
+            let now_ready = self.warm == self.period;
+            if now_ready {
+                self.atr *= self.alpha; // initial ATR = mean(TR[0..period-1])
                 self.filled = true;
             }
-        } else {
-            // Normal operation - use RMA
-            let alpha = 1.0 / self.period as f64;
-            self.atr += alpha * (tr - self.atr);
 
-            // Store in ring buffer
-            let old_idx = self.buffer_idx;
-            self.high_buf[self.buffer_idx] = high;
-            self.low_buf[self.buffer_idx] = low;
-            self.buffer_idx = (self.buffer_idx + 1) % self.period;
+            self.close_prev = close;
+            self.t = self.t.wrapping_add(1);
 
-            // Remove elements outside window from deques
-            let window_start = self.current_time.saturating_sub(self.period - 1);
-            while !self.max_deque.is_empty() && self.max_deque.front().unwrap().1 < window_start {
-                self.max_deque.pop_front();
+            if !now_ready {
+                return None;
             }
-            while !self.min_deque.is_empty() && self.min_deque.front().unwrap().1 < window_start {
-                self.min_deque.pop_front();
-            }
-
-            // Add new elements to deques (monotonic property)
-            while !self.max_deque.is_empty() && self.max_deque.back().unwrap().0 <= high {
-                self.max_deque.pop_back();
-            }
-            self.max_deque.push_back((high, self.current_time));
-
-            while !self.min_deque.is_empty() && self.min_deque.back().unwrap().0 >= low {
-                self.min_deque.pop_back();
-            }
-            self.min_deque.push_back((low, self.current_time));
-        }
-
-        self.close_prev = close;
-        self.current_time += 1;
-
-        if self.filled {
-            // Get max/min from deque front in O(1)
-            if self.direction == "long" {
-                let m = self.max_deque.front().map(|(val, _)| *val).unwrap_or(high);
-                Some(m - self.atr * self.mult)
+            // Emit the first value at the instant the window fills
+            if self.is_long {
+                let m = self.max_deque.front().unwrap().0;
+                Some((-self.atr).mul_add(self.mult, m)) // m - ATR*mult with FMA
             } else {
-                let m = self.min_deque.front().map(|(val, _)| *val).unwrap_or(low);
-                Some(m + self.atr * self.mult)
+                let m = self.min_deque.front().unwrap().0;
+                Some(self.atr.mul_add(self.mult, m)) // m + ATR*mult with FMA
             }
         } else {
-            None
+            // Steady-state: O(1) maintenance
+            self.evict_old();
+            if self.is_long {
+                self.push_max(high);
+            } else {
+                self.push_min(low);
+            }
+            // Wilder RMA: atr += alpha * (tr - atr)
+            self.atr = self.alpha.mul_add(tr - self.atr, self.atr);
+
+            self.close_prev = close;
+            self.t = self.t.wrapping_add(1);
+
+            if self.is_long {
+                let m = self.max_deque.front().unwrap().0;
+                Some((-self.atr).mul_add(self.mult, m))
+            } else {
+                let m = self.min_deque.front().unwrap().0;
+                Some(self.atr.mul_add(self.mult, m))
+            }
         }
     }
 }

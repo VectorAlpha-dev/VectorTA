@@ -18,12 +18,14 @@
 //! ## Developer Notes
 //! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
 //! - **AVX512 kernel**: ❌ Stub only - falls back to scalar implementation
-//! - **Streaming update**: ✅ O(1) complexity - efficient exponential smoothing with alpha/beta coefficients
+//! - **Streaming update**: ✅ O(1) complexity – uses precomputed reciprocals + FMA in warmup for fewer divisions
 //! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
 //! - **Note**: EMA is inherently sequential (each value depends on the previous), making SIMD parallelization
 //!   less beneficial than for window-based indicators. The scalar implementation is already optimal.
 //! - **Batch (rows) SIMD**: ❌ Not implemented; EMA row kernels retain a scalar per-row update with unchecked indexing
 //!   and fast finite checks. Vertical SIMD across rows may be revisited if typical row-counts justify the complexity.
+//!
+//! Decision: Streaming kernel uses FMA and precomputed 1/n for warmup; outputs match batch within existing tolerances.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -431,51 +433,66 @@ pub struct EmaStream {
     count: usize,
     mean: f64,
     filled: bool,
+    // Precomputed reciprocals 1..=period to remove divisions during warm-up.
+    inv: Box<[f64]>,
 }
 
 impl EmaStream {
+    #[inline]
     pub fn try_new(params: EmaParams) -> Result<Self, EmaError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(EmaError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(EmaError::InvalidPeriod { period, data_len: 0 });
         }
+        // α = 2/(period+1), β = 1 - α
         let alpha = 2.0 / (period as f64 + 1.0);
+        let beta = 1.0 - alpha;
+
+        // Precompute exact reciprocals 1/n for n = 1..=period (warm-up only).
+        let mut inv = Vec::with_capacity(period);
+        for n in 1..=period {
+            inv.push(1.0 / n as f64);
+        }
+
         Ok(Self {
             period,
             alpha,
-            beta: 1.0 - alpha,
+            beta,
             count: 0,
             mean: f64::NAN,
             filled: false,
+            inv: inv.into_boxed_slice(),
         })
     }
 
+    /// O(1) update. Returns None until the stream has seen `period` finite values.
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        if !x.is_finite() {
-            // Return current state for NaN input, but don't update
+        // Ignore NaN/±Inf; carry previous state if filled, else remain None
+        if !is_finite_fast(x) {
             return if self.filled { Some(self.mean) } else { None };
         }
+
         self.count += 1;
-        if self.count == 1 {
+        let c = self.count;
+
+        if c == 1 {
+            // Initialize with first finite sample
             self.mean = x;
-        } else if self.count > self.period {
-            self.mean = self.beta.mul_add(self.mean, self.alpha * x);
+        } else if c <= self.period {
+            // Warm-up as running mean: mean += (x - mean) / c
+            // Use precomputed 1/c and FMA to reduce divisions and rounding.
+            let inv = self.inv[c - 1];
+            self.mean = (x - self.mean).mul_add(inv, self.mean);
         } else {
-            self.mean = ((self.count as f64 - 1.0) * self.mean + x) / self.count as f64;
+            // EMA phase: ema = β*ema + α*x
+            self.mean = self.beta.mul_add(self.mean, self.alpha * x);
         }
 
-        if !self.filled && self.count >= self.period {
+        if !self.filled && c >= self.period {
             self.filled = true;
         }
-        if self.filled {
-            Some(self.mean)
-        } else {
-            None
-        }
+        if self.filled { Some(self.mean) } else { None }
     }
 }
 

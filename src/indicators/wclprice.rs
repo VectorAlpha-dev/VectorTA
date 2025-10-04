@@ -18,6 +18,8 @@
 //!   - Stable scalar-only bench (legacy group `wclprice_bench`): ~31 µs after scalar optimizations.
 //! - Scalar path optimized: branch-free NaN propagation, unrolled by 8/4, uses `mul_add`.
 //! - Streaming Performance: O(1) per element; stateless.
+//! - Decision: Streaming path uses `mul_add` and reciprocal multiplies to match scalar/SIMD rounding
+//!   and avoid division; returns `None` if any input is NaN. No fast-math beyond FMA-style `mul_add`.
 //! - Memory: uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batch.
 //! - Batch: single-row only (no params); row SIMD reuses single-series kernels.
 
@@ -779,11 +781,14 @@ impl Default for WclpriceStream {
 impl WclpriceStream {
     #[inline(always)]
     pub fn update(&mut self, h: f64, l: f64, c: f64) -> Option<f64> {
-        if h.is_nan() || l.is_nan() || c.is_nan() {
-            None
-        } else {
-            Some((h + l + 2.0 * c) / 4.0)
+        // Fast reject: if any input is NaN, signal missing with None.
+        // Use non-short-circuit OR to keep a single branch.
+        if h.is_nan() | l.is_nan() | c.is_nan() {
+            return None;
         }
+        // Match scalar/SIMD arithmetic and rounding:
+        // y = c*0.5 + (h + l)*0.25 (FMA-friendly)
+        Some(c.mul_add(0.5, (h + l) * 0.25))
     }
 }
 

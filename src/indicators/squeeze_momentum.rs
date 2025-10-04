@@ -19,7 +19,7 @@
 //! ## Developer Notes
 //! - Decision: SIMD disabled by default. Hot paths rely on monotonic deques (rolling highs/lows) and O(1) sliding OLS, which are branchy/memory‑bound and did not show clear SIMD wins. Runtime selection short‑circuits to scalar.
 //! - Scalar: Optimized classic scalar kernel with O(n) rolling updates (no O(N·W) temporaries). Bench (100k): ~2.31 ms vs ~10.6 ms baseline on native CPU.
-//! - Streaming Performance: O(n) per update (recomputes full series). Potential future work: maintain incremental state.
+//! - Streaming Performance: O(1) per update via rings + accumulators; BB vs KC squeeze classification avoids sqrt (exact). Matches scalar outputs.
 //! - Memory: Uses `alloc_with_nan_prefix`/`make_uninit_matrix` and zero‑copy batching.
 //! - Batch Optimization (ScalarBatch): Shared precompute across rows (TR, SMA(close), TR SMA, rolling highs/lows, RAW → momentum/signal) keyed by unique `length_kc`/`length_bb`, then per‑row band classification; removes redundant work when sweeping params.
 
@@ -1474,28 +1474,158 @@ fn linear_regression_last_point(window: &[f64]) -> f64 {
 }
 
 // --- Streaming Support ---
+//
+// O(1) streaming kernel:
+// - Rolling BB (mean/variance) via sliding sums and sums-of-squares
+// - Rolling KC mid and TR (ATR) via sliding sums and rings
+// - Highest/Lowest over KC window via monotonic deques (ring-backed, no alloc)
+// - Momentum = OLS endpoint of RAW over lkc via two accumulators (S0, S1)
+// - Signal = compare current momentum to previous momentum (1/-1 accelerating, 2/-2 decelerating)
+// - Squeeze classification avoids sqrt by comparing BB variance to KC distances (exact, no approx)
 
 /// Streaming implementation for Squeeze Momentum indicator
 pub struct SqueezeMomentumStream {
-    high_buffer: Vec<f64>,
-    low_buffer: Vec<f64>,
-    close_buffer: Vec<f64>,
+    // original config
     params: SqueezeMomentumParams,
-    max_period: usize,
+    rp: ResolvedParams,
+
+    // counters
+    n: usize,                 // number of ticks processed so far
+    ready_bb: bool,           // BB window filled once
+    ready_kc: bool,           // KC/TR window filled once
+    ready_raw: bool,          // RAW regression window filled once
+
+    // --- Bollinger Bands state (window = lbb) ---
+    lbb: usize,
+    inv_lbb: f64,
+    sum_bb: f64,
+    sumsq_bb: f64,
+    rb_close_bb: Vec<f64>,    // ring for close (length lbb)
+    bb_pos: usize,            // write position in rb_close_bb
+
+    // --- Keltner Channels state (window = lkc) ---
+    lkc: usize,
+    inv_lkc: f64,
+    mbb: f64,
+    mkc: f64,
+
+    // SMA(close, lkc)
+    sum_kc: f64,
+    rb_close_kc: Vec<f64>,    // ring for close (length lkc)
+    kc_pos: usize,
+
+    // ATR = SMA(TR, lkc)
+    sum_tr: f64,
+    rb_tr: Vec<f64>,          // ring for TR (length lkc)
+
+    prev_close: f64,          // previous close (for TR)
+
+    // --- rolling highest/lowest over lkc using monotone deques ---
+    ring_high: Vec<f64>,      // last lkc highs at indices i % lkc
+    ring_low: Vec<f64>,       // last lkc lows  at indices i % lkc
+
+    dq_hi_idx: Vec<usize>,    // stores absolute indices (capacity lkc)
+    dq_hi_head: usize,
+    dq_hi_len: usize,
+
+    dq_lo_idx: Vec<usize>,    // stores absolute indices (capacity lkc)
+    dq_lo_head: usize,
+    dq_lo_len: usize,
+
+    // --- O(1) sliding OLS on RAW over lkc ---
+    raw_ring: Vec<f64>,       // ring buffer for RAW (length lkc)
+    raw_pos: usize,
+    raw_count: usize,
+    S0: f64,                  // sum y
+    S1: f64,                  // sum j*y, j=1..p
+
+    // precomputed constants for fixed x = 1..p
+    p_f64: f64,
+    sum_x: f64,
+    sum_x2: f64,
+    inv_denom: f64,
+    x_last_minus_xbar: f64,
+
+    // last momentum (for signal)
+    last_momentum: f64,
 }
 
 impl SqueezeMomentumStream {
-    /// Create a new SqueezeMomentumStream with given parameters
+    /// Create a new SqueezeMomentumStream with given parameters (validated & resolved).
     pub fn try_new(params: SqueezeMomentumParams) -> Result<Self, SqueezeMomentumError> {
-        let p = params.resolve();
-        let max_period = p.length_bb.max(p.length_kc).max(12); // 12 for momentum calculation
+        let rp = params.resolve();
+        if rp.length_bb == 0 || rp.length_kc == 0 {
+            return Err(SqueezeMomentumError::InvalidLength { length: rp.length_bb.max(rp.length_kc), data_len: 0 });
+        }
+
+        let lbb = rp.length_bb;
+        let lkc = rp.length_kc;
+
+        let inv_lbb = 1.0 / (lbb as f64);
+        let inv_lkc = 1.0 / (lkc as f64);
+
+        // OLS precompute for x = 1..p
+        let p = lkc as f64;
+        let sum_x = 0.5 * p * (p + 1.0);
+        let sum_x2 = p * (p + 1.0) * (2.0 * p + 1.0) / 6.0;
+        let denom = p * sum_x2 - sum_x * sum_x;
+        let inv_denom = if denom.abs() < f64::EPSILON { 0.0 } else { 1.0 / denom };
+        let x_last_minus_xbar = p - sum_x * inv_lkc;
 
         Ok(Self {
-            high_buffer: Vec::with_capacity(max_period + 1),
-            low_buffer: Vec::with_capacity(max_period + 1),
-            close_buffer: Vec::with_capacity(max_period + 1),
             params,
-            max_period,
+            rp,
+
+            n: 0,
+            ready_bb: false,
+            ready_kc: false,
+            ready_raw: false,
+
+            lbb,
+            inv_lbb,
+            sum_bb: 0.0,
+            sumsq_bb: 0.0,
+            rb_close_bb: vec![0.0; lbb],
+            bb_pos: 0,
+
+            lkc,
+            inv_lkc,
+            mbb: rp.mult_bb,
+            mkc: rp.mult_kc,
+
+            sum_kc: 0.0,
+            rb_close_kc: vec![0.0; lkc],
+            kc_pos: 0,
+
+            sum_tr: 0.0,
+            rb_tr: vec![0.0; lkc],
+
+            prev_close: f64::NAN,
+
+            ring_high: vec![0.0; lkc],
+            ring_low: vec![0.0; lkc],
+
+            dq_hi_idx: vec![0; lkc],
+            dq_hi_head: 0,
+            dq_hi_len: 0,
+
+            dq_lo_idx: vec![0; lkc],
+            dq_lo_head: 0,
+            dq_lo_len: 0,
+
+            raw_ring: vec![0.0; lkc],
+            raw_pos: 0,
+            raw_count: 0,
+            S0: 0.0,
+            S1: 0.0,
+
+            p_f64: p,
+            sum_x,
+            sum_x2,
+            inv_denom,
+            x_last_minus_xbar,
+
+            last_momentum: f64::NAN,
         })
     }
 
@@ -1504,58 +1634,247 @@ impl SqueezeMomentumStream {
         Self::try_new(SqueezeMomentumParams::default()).unwrap()
     }
 
-    /// Update the stream with new data
-    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64, f64)> {
-        self.high_buffer.push(high);
-        self.low_buffer.push(low);
-        self.close_buffer.push(close);
+    #[inline(always)]
+    fn dq_back(head: usize, len: usize, cap: usize) -> usize {
+        (head + len - 1) % cap
+    }
+    #[inline(always)]
+    fn dq_push_back(dq: &mut [usize], head: &mut usize, len: &mut usize, cap: usize, idx: usize) {
+        let pos = (*head + *len) % cap;
+        dq[pos] = idx;
+        *len += 1;
+    }
+    #[inline(always)]
+    fn dq_pop_front(len: &mut usize, head: &mut usize, cap: usize) {
+        *head = (*head + 1) % cap;
+        *len -= 1;
+    }
+    #[inline(always)]
+    fn dq_pop_back(len: &mut usize) { *len -= 1; }
 
-        // Keep buffer size manageable
-        if self.high_buffer.len() > self.max_period * 2 {
-            self.high_buffer
-                .drain(0..self.high_buffer.len() - self.max_period);
-            self.low_buffer
-                .drain(0..self.low_buffer.len() - self.max_period);
-            self.close_buffer
-                .drain(0..self.close_buffer.len() - self.max_period);
+    /// Classification without sqrt:
+    /// Returns -1.0 (on), 0.0 (neutral), 1.0 (off).
+    #[inline(always)]
+    fn classify_squeeze_no_sqrt(mean_bb: f64, var_bb: f64, kc_mid: f64, tr_avg: f64, mbb: f64, mkc: f64) -> f64 {
+        let upper_kc = kc_mid + mkc * tr_avg;
+        let lower_kc = kc_mid - mkc * tr_avg;
+
+        // distances from BB mean to KC rails
+        let d1 = mean_bb - lower_kc;         // must be > m*std for ON
+        let d2 = upper_kc - mean_bb;         // must be > m*std for ON
+
+        let m = mbb.abs(); // safety
+
+        // ON: require both distances positive and variance below both thresholds
+        if d1 > 0.0 && d2 > 0.0 {
+            let thr = (d1.min(d2) / m);
+            if var_bb < thr * thr {
+                return -1.0;
+            }
         }
 
-        // Check if we have enough data
-        let p = self.params.resolve();
-        // For SMI, we need at least max(length_bb, length_kc) for BB/KC calculations
-        // plus 12 for momentum calculation - but momentum uses the same data
-        let warmup = p.length_bb.max(p.length_kc).max(12);
+        // OFF: require m*std > max(d1,d2) (clip negatives to zero)
+        let t1 = d1.max(0.0);
+        let t2 = d2.max(0.0);
+        let thr_off = (t1.max(t2) / m);
+        if var_bb > thr_off * thr_off {
+            return 1.0;
+        }
+        0.0
+    }
 
-        if self.close_buffer.len() < warmup {
+    /// Update the stream with a new (high, low, close).
+    /// Returns None until both windows are warm and the 1‑bar lagged signal is available.
+    pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64, f64)> {
+        // reject non-finite inputs: match batch/scalar expectations of NaN propagation
+        if !(high.is_finite() && low.is_finite() && close.is_finite()) {
+            self.n = self.n.saturating_add(1);
             return None;
         }
 
-        // Calculate indicator values
-        let input = SqueezeMomentumInput::from_slices(
-            &self.high_buffer,
-            &self.low_buffer,
-            &self.close_buffer,
-            self.params,
-        );
+        let i = self.n;
+        let lbb = self.lbb;
+        let lkc = self.lkc;
 
-        match squeeze_momentum(&input) {
-            Ok(output) => {
-                let idx = output.squeeze.len() - 1;
-                Some((
-                    output.squeeze[idx],
-                    output.momentum[idx],
-                    output.momentum_signal[idx],
-                ))
+        // -----------------------------
+        // 1) Maintain BB rolling sums
+        // -----------------------------
+        if self.ready_bb {
+            // evict oldest
+            let old = self.rb_close_bb[self.bb_pos];
+            self.sum_bb += close - old;
+            self.sumsq_bb += close * close - old * old;
+            self.rb_close_bb[self.bb_pos] = close;
+            self.bb_pos += 1;
+            if self.bb_pos == lbb { self.bb_pos = 0; }
+        } else {
+            self.sum_bb += close;
+            self.sumsq_bb += close * close;
+            self.rb_close_bb[self.bb_pos] = close;
+            self.bb_pos += 1;
+            if self.bb_pos == lbb { self.bb_pos = 0; self.ready_bb = true; }
+        }
+
+        // -----------------------------
+        // 2) Maintain KC SMA(close) and ATR = SMA(TR)
+        // -----------------------------
+        // TR for this bar
+        let tr = if i == 0 || !self.prev_close.is_finite() {
+            (high - low).abs()
+        } else {
+            let pc = self.prev_close;
+            let tr1 = (high - low).abs();
+            let tr2 = (high - pc).abs();
+            let tr3 = (low - pc).abs();
+            tr1.max(tr2).max(tr3)
+        };
+        self.prev_close = close;
+
+        if self.ready_kc {
+            let old_c = self.rb_close_kc[self.kc_pos];
+            let old_tr = self.rb_tr[self.kc_pos];
+            self.sum_kc += close - old_c;
+            self.sum_tr += tr    - old_tr;
+            self.rb_close_kc[self.kc_pos] = close;
+            self.rb_tr[self.kc_pos]       = tr;
+            // advance
+            self.kc_pos += 1;
+            if self.kc_pos == lkc { self.kc_pos = 0; }
+        } else {
+            self.sum_kc += close;
+            self.sum_tr += tr;
+            self.rb_close_kc[self.kc_pos] = close;
+            self.rb_tr[self.kc_pos]       = tr;
+            self.kc_pos += 1;
+            if self.kc_pos == lkc { self.kc_pos = 0; self.ready_kc = true; }
+        }
+
+        // ------------------------------------
+        // 3) Maintain deque highs/lows (lkc)
+        // ------------------------------------
+        let slot = i % lkc;
+        self.ring_high[slot] = high;
+        self.ring_low[slot]  = low;
+
+        // evict stale from fronts: while idx + lkc <= i
+        while self.dq_hi_len > 0 {
+            let idx = self.dq_hi_idx[self.dq_hi_head];
+            if idx + lkc <= i { Self::dq_pop_front(&mut self.dq_hi_len, &mut self.dq_hi_head, lkc); }
+            else { break; }
+        }
+        while self.dq_lo_len > 0 {
+            let idx = self.dq_lo_idx[self.dq_lo_head];
+            if idx + lkc <= i { Self::dq_pop_front(&mut self.dq_lo_len, &mut self.dq_lo_head, lkc); }
+            else { break; }
+        }
+
+        // maintain decreasing deque for highs
+        while self.dq_hi_len > 0 {
+            let back = Self::dq_back(self.dq_hi_head, self.dq_hi_len, lkc);
+            let idx = self.dq_hi_idx[back];
+            let v_back = self.ring_high[idx % lkc];
+            if v_back <= high { Self::dq_pop_back(&mut self.dq_hi_len); } else { break; }
+        }
+        Self::dq_push_back(&mut self.dq_hi_idx, &mut self.dq_hi_head, &mut self.dq_hi_len, lkc, i);
+
+        // maintain increasing deque for lows
+        while self.dq_lo_len > 0 {
+            let back = Self::dq_back(self.dq_lo_head, self.dq_lo_len, lkc);
+            let idx = self.dq_lo_idx[back];
+            let v_back = self.ring_low[idx % lkc];
+            if v_back >= low { Self::dq_pop_back(&mut self.dq_lo_len); } else { break; }
+        }
+        Self::dq_push_back(&mut self.dq_lo_idx, &mut self.dq_lo_head, &mut self.dq_lo_len, lkc, i);
+
+        // -----------------------------
+        // 4) If KC window ready, build RAW and update OLS
+        // -----------------------------
+        let mut momentum = f64::NAN;
+        if self.ready_kc {
+            let hi_idx = self.dq_hi_idx[self.dq_hi_head];
+            let lo_idx = self.dq_lo_idx[self.dq_lo_head];
+            let highest = self.ring_high[hi_idx % lkc];
+            let lowest  = self.ring_low[lo_idx % lkc];
+            let kc_mid  = self.sum_kc * self.inv_lkc;
+
+            // RAW = close - 0.25*(highest+lowest) - 0.5*kc_mid
+            let raw_i = close - 0.25 * (highest + lowest) - 0.5 * kc_mid;
+
+            if self.raw_count < lkc {
+                // growing stage: append at raw_pos (== slot)
+                self.raw_ring[slot] = raw_i;
+                self.raw_count += 1;
+                // update S0, S1 with j = raw_count
+                let j = self.raw_count as f64;
+                self.S0 += raw_i;
+                self.S1 = f64::mul_add(j, raw_i, self.S1);
+                if self.raw_count == lkc {
+                    self.ready_raw = true;
+                }
+            } else {
+                // steady stage: O(1) update
+                let y_old = self.raw_ring[slot];
+                self.raw_ring[slot] = raw_i;
+
+                // S1' = S1 - S0 + p*y_new
+                // S0' = S0 - y_old + y_new
+                self.S1 = (self.S1 - self.S0) + self.p_f64 * raw_i;
+                self.S0 = (self.S0 - y_old) + raw_i;
             }
-            Err(_) => None,
+
+            // compute momentum when regression window is ready
+            if self.ready_raw {
+                let ybar = self.S0 * self.inv_lkc;
+                // b = (-sum_x*S0 + p*S1) / denom; handle denom == 0 -> b = 0
+                let b_num = -self.sum_x * self.S0 + self.p_f64 * self.S1;
+                let b = if self.inv_denom == 0.0 { 0.0 } else { b_num * self.inv_denom };
+                momentum = f64::mul_add(b, self.x_last_minus_xbar, ybar);
+            }
+        }
+
+        // -----------------------------
+        // 5) Compute squeeze classification (no sqrt)
+        // -----------------------------
+        let mut squeeze = f64::NAN;
+        if self.ready_bb && self.ready_kc {
+            let mean_bb = self.sum_bb * self.inv_lbb;
+            let var_bb  = f64::mul_add(self.sumsq_bb * self.inv_lbb, 1.0, -mean_bb * mean_bb); // E[x^2] - (E[x])^2
+            let kc_mid  = self.sum_kc * self.inv_lkc;
+            let tr_avg  = self.sum_tr * self.inv_lkc;
+            squeeze = Self::classify_squeeze_no_sqrt(mean_bb, var_bb.max(0.0), kc_mid, tr_avg, self.mbb, self.mkc);
+        }
+
+        // -----------------------------
+        // 6) Signal (needs previous momentum)
+        // -----------------------------
+        let mut signal = f64::NAN;
+        if self.ready_raw && self.last_momentum.is_finite() && momentum.is_finite() {
+            signal = if momentum > 0.0 {
+                if momentum > self.last_momentum { 1.0 } else { 2.0 }
+            } else {
+                if momentum < self.last_momentum { -1.0 } else { -2.0 }
+            };
+        }
+
+        // update prev momentum after signal decision
+        if momentum.is_finite() {
+            self.last_momentum = momentum;
+        }
+
+        // tick++
+        self.n = i + 1;
+
+        // warmup: return only when we can output all three
+        if squeeze.is_finite() && momentum.is_finite() && signal.is_finite() {
+            Some((squeeze, momentum, signal))
+        } else {
+            None
         }
     }
 }
 
 impl Default for SqueezeMomentumStream {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 // --- Python Bindings ---

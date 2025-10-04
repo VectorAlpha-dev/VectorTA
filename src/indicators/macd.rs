@@ -20,6 +20,10 @@
 //! - Streaming: O(1) for EMA type, O(n) fallback for other MA types. Non-EMA stream
 //!   remains a simple fallback; further optimization is out of scope here.
 //! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
+//!
+//! Decision: Streaming path updated to O(1) per tick for EMA/RMA/SMA/WMA.
+//! Seed EMAs by SMA; signal seeded by SMA of MACD. Matches batch warmups.
+//! Unknown MA types fall back to Unsupported in the stream path.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -242,70 +246,306 @@ pub enum MacdError {
     InvalidKernel(String),
 }
 
+#[derive(Debug, Clone)]
 pub struct MacdStream {
     fast: usize,
     slow: usize,
     signal: usize,
-    ma_type: String,
-    ema_fast: Option<f64>,
-    ema_slow: Option<f64>,
-    ema_signal: Option<f64>,
-    count: usize,
+    kind: MaKind,
+    inner: StreamImpl,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaKind {
+    Ema,     // α = 2/(n+1); seeded with SMA
+    Rma,     // Wilders: α = 1/n; seeded with SMA
+    Sma,
+    Wma,     // Linear weights 1..n (aka LWMA)
+    Unknown, // Fallback
+}
+
+impl MaKind {
+    #[inline]
+    fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "ema" => MaKind::Ema,
+            "rma" | "wilders" | "smma" => MaKind::Rma,
+            "sma" => MaKind::Sma,
+            "wma" | "lwma" => MaKind::Wma,
+            _ => MaKind::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum StreamImpl {
+    // EMA / RMA (Wilders) seeded by SMA, then classic recurrence
+    Ema(EmaState),
+    // Pure SMA MACD + SMA signal via rolling sums
+    Sma(SmaState),
+    // Linear WMA(1..n) MACD + WMA signal via O(1) weighted-sum update
+    Wma(WmaState),
+    // If MA type not supported in stream path
+    Unsupported,
+}
+
+#[derive(Debug, Clone)]
+struct EmaState {
+    // constants
+    af: f64,   // 2/(fast+1) or 1/fast (RMA)
+    omf: f64,  // 1 - af
+    aslow: f64,
+    oms: f64,
+    asig: f64,
+    omsi: f64,
+    inv_fast: f64,
+    inv_slow: f64,
+    inv_sig: f64,
+
+    // seeding (SMA) accumulators
+    fsum: f64,
+    ssum: f64,
+    fcnt: usize,
+    scnt: usize,
+
+    // EMA state once seeded
+    fast_ema: Option<f64>,
+    slow_ema: Option<f64>,
+
+    // signal seeding (SMA of MACD), then EMA
+    sig_accum: f64,
+    sig_cnt: usize,
+    sig_ema: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct SmaState {
+    fast: RollingSma,
+    slow: RollingSma,
+    sig:  RollingSma,
+}
+
+#[derive(Debug, Clone)]
+struct WmaState {
+    fast: RollingWma,
+    slow: RollingWma,
+    sig:  RollingWma,
+}
+
+// ---------- Rolling helpers (alloc once, O(1) updates) ----------
+
+#[derive(Debug, Clone)]
+struct RollingSma {
+    n: usize,
+    inv_n: f64,
+    buf: Vec<f64>,
+    sum: f64,
+    idx: usize,
+    cnt: usize,
+}
+
+impl RollingSma {
+    #[inline]
+    fn new(n: usize) -> Self {
+        Self { n, inv_n: 1.0 / n as f64, buf: vec![0.0; n], sum: 0.0, idx: 0, cnt: 0 }
+    }
+    #[inline]
+    fn push(&mut self, x: f64) -> Option<f64> {
+        if !x.is_finite() { return None; } // ignore NaNs/Infs in stream
+        if self.cnt < self.n {
+            self.sum += x;
+            self.buf[self.idx] = x;
+            self.idx = (self.idx + 1) % self.n;
+            self.cnt += 1;
+            if self.cnt == self.n { Some(self.sum * self.inv_n) } else { None }
+        } else {
+            let old = self.buf[self.idx];
+            self.buf[self.idx] = x;
+            self.idx = (self.idx + 1) % self.n;
+            self.sum += x - old;
+            Some(self.sum * self.inv_n)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RollingWma {
+    n: usize,
+    inv_denom: f64, // 2 / (n*(n+1))
+    buf: Vec<f64>,
+    idx: usize,
+    cnt: usize,
+    sum: f64,   // S = sum of window
+    wsum: f64,  // W = sum_{k=1..n} k*x
+}
+
+impl RollingWma {
+    #[inline]
+    fn new(n: usize) -> Self {
+        let denom = (n as f64) * (n as f64 + 1.0) * 0.5;
+        Self { n, inv_denom: 1.0 / denom, buf: vec![0.0; n], idx: 0, cnt: 0, sum: 0.0, wsum: 0.0 }
+    }
+    #[inline]
+    fn push(&mut self, x: f64) -> Option<f64> {
+        if !x.is_finite() { return None; }
+        if self.cnt < self.n {
+            // Build initial window: W += (cnt+1)*x
+            self.cnt += 1;
+            self.sum += x;
+            self.wsum += (self.cnt as f64) * x;
+            self.buf[self.idx] = x;
+            self.idx = (self.idx + 1) % self.n;
+            if self.cnt == self.n { Some(self.wsum * self.inv_denom) } else { None }
+        } else {
+            // Use O(1) recurrence: W' = W + n*x_new - S_prev, then update S
+            let s_prev = self.sum;
+            let old = self.buf[self.idx];
+            self.buf[self.idx] = x;
+            self.idx = (self.idx + 1) % self.n;
+
+            self.wsum = self.wsum + (self.n as f64) * x - s_prev;
+            self.sum  = s_prev + x - old;
+            Some(self.wsum * self.inv_denom)
+        }
+    }
+}
+
+// ----------------- MacdStream public API -----------------
 
 impl MacdStream {
     pub fn new(fast: usize, slow: usize, signal: usize, ma_type: &str) -> Self {
-        Self {
-            fast,
-            slow,
-            signal,
-            ma_type: ma_type.to_string(),
-            ema_fast: None,
-            ema_slow: None,
-            ema_signal: None,
-            count: 0,
-        }
+        let kind = MaKind::from_str(ma_type);
+        let inner = match kind {
+            MaKind::Ema | MaKind::Rma => {
+                let (af, aslow) = match kind {
+                    MaKind::Ema => (
+                        2.0 / (fast as f64 + 1.0),
+                        2.0 / (slow as f64 + 1.0),
+                    ),
+                    MaKind::Rma => (
+                        1.0 / fast as f64, // Wilders
+                        1.0 / slow as f64,
+                    ),
+                    _ => unreachable!(),
+                };
+                let asig = match kind {
+                    MaKind::Ema => 2.0 / (signal as f64 + 1.0),
+                    MaKind::Rma => 1.0 / signal as f64,
+                    _ => unreachable!(),
+                };
+                StreamImpl::Ema(EmaState {
+                    af, omf: 1.0 - af,
+                    aslow, oms: 1.0 - aslow,
+                    asig, omsi: 1.0 - asig,
+                    inv_fast: 1.0 / fast as f64,
+                    inv_slow: 1.0 / slow as f64,
+                    inv_sig: 1.0 / signal as f64,
+                    fsum: 0.0, ssum: 0.0, fcnt: 0, scnt: 0,
+                    fast_ema: None, slow_ema: None,
+                    sig_accum: 0.0, sig_cnt: 0, sig_ema: None,
+                })
+            }
+            MaKind::Sma => StreamImpl::Sma(SmaState {
+                fast: RollingSma::new(fast),
+                slow: RollingSma::new(slow),
+                sig:  RollingSma::new(signal),
+            }),
+            MaKind::Wma => StreamImpl::Wma(WmaState {
+                fast: RollingWma::new(fast),
+                slow: RollingWma::new(slow),
+                sig:  RollingWma::new(signal),
+            }),
+            MaKind::Unknown => StreamImpl::Unsupported,
+        };
+
+        Self { fast, slow, signal, kind, inner }
     }
 
+    /// Update with the next value. Returns (macd, signal, hist) once warmed up; otherwise None.
+    /// NaN/Inf inputs are ignored (no state change; returns None).
     pub fn update(&mut self, x: f64) -> Option<(f64, f64, f64)> {
-        self.count += 1;
-        if !self.ma_type.eq_ignore_ascii_case("ema") {
-            return None; // Only optimized for EMA
+        if !x.is_finite() { return None; }
+
+        match &mut self.inner {
+            StreamImpl::Ema(st) => {
+                // --- seed or advance FAST ---
+                if st.fcnt < self.fast {
+                    st.fcnt += 1;
+                    st.fsum += x;
+                    if st.fcnt == self.fast {
+                        st.fast_ema = Some(st.fsum * st.inv_fast);
+                    }
+                } else {
+                    // classic EMA with FMA
+                    let fe = st.fast_ema.unwrap();
+                    st.fast_ema = Some(x.mul_add(st.af, st.omf * fe));
+                }
+
+                // --- seed or advance SLOW ---
+                if st.scnt < self.slow {
+                    st.scnt += 1;
+                    st.ssum += x;
+                    if st.scnt == self.slow {
+                        st.slow_ema = Some(st.ssum * st.inv_slow);
+                    }
+                } else {
+                    let se = st.slow_ema.unwrap();
+                    st.slow_ema = Some(x.mul_add(st.aslow, st.oms * se));
+                }
+
+                // MACD becomes available when slow is seeded
+                if st.scnt >= self.slow {
+                    let m = st.fast_ema.unwrap() - st.slow_ema.unwrap();
+
+                    // Seed signal with SMA of the first `signal` MACD values, then EMA
+                    if st.sig_ema.is_none() {
+                        st.sig_cnt += 1;
+                        st.sig_accum += m;
+                        if st.sig_cnt == self.signal {
+                            let se = st.sig_accum * st.inv_sig;
+                            st.sig_ema = Some(se);
+                            let hist = m - se;
+                            return Some((m, se, hist));
+                        }
+                        return None;
+                    } else {
+                        let prev = st.sig_ema.unwrap();
+                        let se = m.mul_add(st.asig, st.omsi * prev);
+                        st.sig_ema = Some(se);
+                        let hist = m - se;
+                        return Some((m, se, hist));
+                    }
+                }
+                None
+            }
+
+            StreamImpl::Sma(st) => {
+                let f = st.fast.push(x)?;
+                let s = st.slow.push(x)?;
+                let m = f - s;
+                if let Some(se) = st.sig.push(m) {
+                    Some((m, se, m - se))
+                } else {
+                    None
+                }
+            }
+
+            StreamImpl::Wma(st) => {
+                let f = st.fast.push(x)?;
+                let s = st.slow.push(x)?;
+                let m = f - s;
+                if let Some(se) = st.sig.push(m) {
+                    Some((m, se, m - se))
+                } else {
+                    None
+                }
+            }
+
+            StreamImpl::Unsupported => {
+                // keep prior behavior: return None; caller may fall back
+                None
+            }
         }
-
-        let af = 2.0 / (self.fast as f64 + 1.0);
-        let aslow = 2.0 / (self.slow as f64 + 1.0);
-        let asig = 2.0 / (self.signal as f64 + 1.0);
-
-        self.ema_fast = Some(match self.ema_fast {
-            None => x,
-            Some(p) => af * x + (1.0 - af) * p,
-        });
-        self.ema_slow = Some(match self.ema_slow {
-            None => x,
-            Some(p) => aslow * x + (1.0 - aslow) * p,
-        });
-
-        // warmups
-        let macd_ready = self.count >= self.slow;
-        if !macd_ready {
-            return None;
-        }
-
-        let macd = self.ema_fast.unwrap() - self.ema_slow.unwrap();
-        self.ema_signal = Some(match self.ema_signal {
-            None => macd,
-            Some(p) => asig * macd + (1.0 - asig) * p,
-        });
-
-        let sig_ready = self.count >= self.slow + self.signal - 1;
-        if !sig_ready {
-            return None;
-        }
-
-        let signal = self.ema_signal.unwrap();
-        let hist = macd - signal;
-        Some((macd, signal, hist))
     }
 }
 

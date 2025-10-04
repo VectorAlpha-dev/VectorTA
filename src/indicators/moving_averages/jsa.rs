@@ -17,6 +17,7 @@
 //! ## Developer Notes
 //! - **SIMD status**: ✅ AVX2 and AVX512 enabled; exact `(x + y) * 0.5` order for bit‑exact match to scalar.
 //! - **Streaming update**: ✅ O(1) average of current value with value at period offset.
+//! - **Decision**: Streaming kernel switched to modulo-free wrap (compare+branch) for predictable performance; bit-exact outputs preserved.
 //! - **Memory**: ✅ `alloc_with_nan_prefix` and init helpers ensure zero-copy/uninitialized semantics.
 //! - **Batch row SIMD**: ✅ Per-row AVX2/AVX512 variants; no shared precompute to exploit across rows.
 //! - **Rationale**: Kernel is bandwidth-bound but benefits from fewer loop branches and wider lanes.
@@ -470,17 +471,30 @@ impl JsaStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        // Produce output only after we've seen `period` samples.
+        // Keep the exact `(x + y) * 0.5` order for bit‑exact parity.
         let out = if self.filled {
             let past = self.buffer[self.head];
             Some((value + past) * 0.5)
         } else {
             None
         };
+
+        // Write the new sample into the slot that will be `period` steps old next wrap.
         self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
-            self.filled = true;
+
+        // Branch-once wraparound instead of `% self.period` (avoids integer division).
+        let next = self.head + 1;
+        if next == self.period {
+            self.head = 0;
+            if !self.filled {
+                // Becomes true exactly after inserting the first `period` samples.
+                self.filled = true;
+            }
+        } else {
+            self.head = next;
         }
+
         out
     }
 }

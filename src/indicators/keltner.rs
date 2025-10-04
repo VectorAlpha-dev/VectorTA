@@ -16,7 +16,7 @@
 //! - **SIMD Kernels**: AVX2/AVX512 present as stubs delegating to scalar. Due to time-recursive EMA/SMA/ATR, SIMD offers marginal gains; runtime short-circuits to scalar.
 //! - **Scalar**: Loop-jammed EMA/SMA + ATR RMA in a single pass; uses mul_add and unchecked indexing in tight loops.
 //! - **Batch**: Row-specific optimization precomputes TR once and reuses per row; >5% faster at 100k vs non-shared TR.
-//! - **Streaming**: Not implemented
+//! - **Streaming**: Enabled. Exact EMA seeding (SMA of first n) + Wilder RMA with fused mul_add; matches batch outputs to ~1e-9 in tests.
 //! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
 
 #[cfg(feature = "python")]
@@ -1550,26 +1550,36 @@ fn keltner_batch_inner(
 #[derive(Debug, Clone)]
 pub struct KeltnerStream {
     period: usize,
+    rcp_period: f64, // 1 / period
     multiplier: f64,
-    ma_type: String,
+
+    // MA impl
     ma_impl: MaImpl,
-    atr: f64,
+
+    // ATR (Wilder RMA)
+    atr: f64,     // valid after seeding
+    atr_sum: f64, // used only during warmup seeding
+    rma_alpha: f64, // 1 / period
+
+    // book-keeping
     count: usize,
     prev_close: f64,
 }
 
 #[derive(Debug, Clone)]
 enum MaImpl {
+    // EMA seeded with an exact SMA of the first `period` samples
     Ema {
-        alpha: f64,
-        value: f64,
-        warmup_count: usize, // Track warmup phase for running mean
+        alpha: f64,    // 2 / (n + 1)
+        value: f64,    // current EMA
+        seed_sum: f64, // sum of first n values, only used during warmup
     },
+    // True O(1) SMA via ring-buffer
     Sma {
         buffer: Vec<f64>,
         sum: f64,
         idx: usize,
-        filled: bool,
+        filled: bool, // becomes true exactly at count == period
     },
 }
 
@@ -1577,36 +1587,47 @@ impl KeltnerStream {
     pub fn try_new(params: KeltnerParams) -> Result<Self, KeltnerError> {
         let period = params.period.unwrap_or(20);
         let multiplier = params.multiplier.unwrap_or(2.0);
-        let ma_type = params.ma_type.unwrap_or("ema".to_string());
+        let ma_type = params
+            .ma_type
+            .unwrap_or_else(|| "ema".to_string())
+            .to_lowercase();
+
         if period == 0 {
-            return Err(KeltnerError::KeltnerInvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(KeltnerError::KeltnerInvalidPeriod { period, data_len: 0 });
         }
-        let ma_impl = match ma_type.as_str() {
-            "sma" => MaImpl::Sma {
+
+        let pf = period as f64;
+        let rcp = 1.0 / pf;
+
+        let ma_impl = if ma_type == "sma" {
+            MaImpl::Sma {
                 buffer: vec![0.0; period],
                 sum: 0.0,
                 idx: 0,
                 filled: false,
-            },
-            _ => MaImpl::Ema {
-                alpha: 2.0 / (period as f64 + 1.0),
+            }
+        } else {
+            // default to EMA semantics
+            MaImpl::Ema {
+                alpha: 2.0 / (pf + 1.0),
                 value: 0.0,
-                warmup_count: 0,
-            },
+                seed_sum: 0.0,
+            }
         };
+
         Ok(Self {
             period,
+            rcp_period: rcp,
             multiplier,
-            ma_type,
             ma_impl,
             atr: 0.0,
+            atr_sum: 0.0,
+            rma_alpha: rcp,
             count: 0,
             prev_close: f64::NAN,
         })
     }
+
     #[inline(always)]
     pub fn update(
         &mut self,
@@ -1615,6 +1636,8 @@ impl KeltnerStream {
         close: f64,
         source: f64,
     ) -> Option<(f64, f64, f64)> {
+        // --- TR (True Range) ---
+        // matches batch kernel: TR = max(high-low, |high-prev_close|, |low-prev_close|)
         let tr = if self.count == 0 {
             high - low
         } else {
@@ -1623,27 +1646,44 @@ impl KeltnerStream {
             let lc = (low - self.prev_close).abs();
             hl.max(hc).max(lc)
         };
+
         self.prev_close = close;
         self.count += 1;
 
+        // --- Warmup: accumulate seeds, no output ---
         if self.count < self.period {
-            // Update MA during warmup
+            // seed ATR sum
+            self.atr_sum += tr;
+
+            // seed MA
             match &mut self.ma_impl {
-                MaImpl::Ema {
-                    value,
-                    warmup_count,
-                    ..
+                MaImpl::Ema { seed_sum, .. } => {
+                    *seed_sum += source;
+                }
+                MaImpl::Sma {
+                    buffer, sum, idx, ..
                 } => {
-                    // Use running mean during warmup, like batch EMA does
-                    if *warmup_count == 0 {
-                        *value = source;
-                        *warmup_count = 1;
-                    } else {
-                        *warmup_count += 1;
-                        // Running mean formula: new_mean = ((count-1) * old_mean + new_value) / count
-                        *value =
-                            ((*warmup_count as f64 - 1.0) * *value + source) / *warmup_count as f64;
-                    }
+                    *sum += source;
+                    buffer[*idx] = source;
+                    *idx = (*idx + 1) % self.period;
+                }
+            }
+            return None;
+        }
+
+        // --- First valid output at exactly count == period ---
+        if self.count == self.period {
+            // finalize ATR seed using the first `period` TRs
+            self.atr = (self.atr_sum + tr) * self.rcp_period;
+
+            // seed MA -> exact SMA of first `period` samples
+            let mid = match &mut self.ma_impl {
+                MaImpl::Ema {
+                    value, seed_sum, ..
+                } => {
+                    *seed_sum += source; // include current
+                    *value = *seed_sum * self.rcp_period;
+                    *value
                 }
                 MaImpl::Sma {
                     buffer,
@@ -1651,72 +1691,43 @@ impl KeltnerStream {
                     idx,
                     filled,
                 } => {
-                    if *filled {
-                        *sum -= buffer[*idx];
-                    }
+                    *sum += source; // include current
                     buffer[*idx] = source;
-                    *sum += source;
                     *idx = (*idx + 1) % self.period;
-                    if !*filled && *idx == 0 {
-                        *filled = true;
-                    }
+                    *filled = true;
+                    *sum * self.rcp_period
                 }
-            }
-            self.atr += tr;
-            return None;
+            };
+
+            let up = self.multiplier.mul_add(self.atr, mid);
+            let lo = (-self.multiplier).mul_add(self.atr, mid);
+            return Some((up, mid, lo));
         }
 
-        if self.count == self.period {
-            self.atr = (self.atr + tr) / self.period as f64;
-        } else {
-            self.atr += (tr - self.atr) / self.period as f64;
-        }
+        // --- Steady-state O(1) updates ---
+        // ATR (Wilder RMA): atr = (tr - atr) * alpha + atr
+        self.atr = (tr - self.atr).mul_add(self.rma_alpha, self.atr);
 
-        // Update and get MA value
-        let ma_val = match &mut self.ma_impl {
-            MaImpl::Ema {
-                alpha,
-                value,
-                warmup_count,
-            } => {
-                if self.count == self.period {
-                    // Transition from running mean to EMA
-                    // This is the last warmup value, use running mean one more time
-                    *warmup_count += 1;
-                    *value =
-                        ((*warmup_count as f64 - 1.0) * *value + source) / *warmup_count as f64;
-                } else {
-                    // Now use EMA formula
-                    *value += (source - *value) * *alpha;
-                }
+        // MA update
+        let mid = match &mut self.ma_impl {
+            MaImpl::Ema { alpha, value, .. } => {
+                *value = (source - *value).mul_add(*alpha, *value);
                 *value
             }
             MaImpl::Sma {
-                buffer,
-                sum,
-                idx,
-                filled,
+                buffer, sum, idx, ..
             } => {
-                if *filled {
-                    *sum -= buffer[*idx];
-                }
+                let old = buffer[*idx];
                 buffer[*idx] = source;
-                *sum += source;
+                *sum += source - old;
                 *idx = (*idx + 1) % self.period;
-                if !*filled {
-                    *filled = *idx == 0;
-                }
-                if *filled {
-                    *sum / self.period as f64
-                } else {
-                    f64::NAN
-                }
+                *sum * self.rcp_period
             }
         };
 
-        let upper = ma_val + self.multiplier * self.atr;
-        let lower = ma_val - self.multiplier * self.atr;
-        Some((upper, ma_val, lower))
+        let up = self.multiplier.mul_add(self.atr, mid);
+        let lo = (-self.multiplier).mul_add(self.atr, mid);
+        Some((up, mid, lo))
     }
 }
 

@@ -22,8 +22,10 @@
 //! - SIMD status: AVX2/AVX512 entry points are present and feature-gated. They currently delegate to
 //!   the scalar fused path to guarantee identical results (previous momentum-only vectorization showed
 //!   minor divergence under property tests). Runtime selection continues to prefer the scalar path.
-//! - Streaming update: O(n) per call due to `ma()` over full history; can be improved by incremental
-//!   MA state in a follow-up.
+//! - Streaming update: O(1) per tick via ring buffer for momentum and NaN-aware EMA/SMA windows
+//!   (matches fused scalar behavior, see Decision Logging below).
+//! - Decision: SIMD paths remain stubbed to scalar for correctness; streaming kernel enabled and
+//!   fastest by >O(n) vs prior version at identical outputs.
 //! - Memory optimization: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix,
 //!   init_matrix_prefixes) and removes branches in hot loops where IEEE-754 NaN propagation suffices.
 //! - Decision: Mixed MA combos (EMA→SMA, SMA→EMA) fused variants are implemented, but the main
@@ -852,16 +854,61 @@ pub unsafe fn rsmk_avx512_long(
     rsmk_avx512_short(lr, lookback, period, signal_period, input, first_valid, mom)
 }
 
+// Decision Logging (streaming): O(1) kernel enabled; maintains ring buffer for log-ratio momentum
+// and NaN-aware EMA/SMA windows; matches fused scalar behavior including warm-ups and NaN rules.
 #[derive(Debug, Clone)]
 pub struct RsmkStream {
     lookback: usize,
     period: usize,
     signal_period: usize,
+    // Keep original strings for API parity, plus precomputed flags for hot path
     matype: String,
     signal_matype: String,
-    lr: Vec<f64>,       // full ordered lr history
-    mom: Vec<f64>,      // full ordered momentum history
-    ind_hist: Vec<f64>, // indicator history for signal MA
+    main_is_ema: bool,
+    signal_is_ema: bool,
+
+    // log-ratio ring for momentum in O(1)
+    lr_buf: Vec<f64>,
+    lr_head: usize,
+    lr_len: usize,
+
+    // momentum first-valid detection boundary
+    saw_first_finite_mom: bool,
+    // EMA(main) seed trackers (SMA over first `period` after mom_fv)
+    ema_seed_pos: usize,
+    ema_seed_sum: f64,
+    ema_seed_cnt: usize,
+    ema_ind: f64,
+    ema_ind_seeded: bool,
+    ema_ind_dead: bool, // sticky NaN tail if seed had 0 finite samples
+
+    // SMA(main) window (NaN-aware)
+    ind_win_buf: Vec<f64>,
+    ind_win_head: usize,
+    ind_win_len: usize,
+    ind_win_sum: f64,
+    ind_win_cnt: usize,
+
+    // Latch when indicator becomes available (even if NaN by window) to start signal timing
+    indicator_started: bool,
+
+    // EMA(signal)
+    alpha_sig: f64,
+    ema_sig: f64,
+    ema_sig_seeded: bool,
+    ema_sig_seed_pos: usize,
+    ema_sig_seed_sum: f64,
+    ema_sig_seed_cnt: usize,
+
+    // SMA(signal)
+    sig_win_buf: Vec<f64>,
+    sig_win_head: usize,
+    sig_win_len: usize,
+    sig_win_sum: f64,
+    sig_win_cnt: usize,
+
+    // Precomputed alpha for EMA(main)
+    alpha_main: f64,
 }
 
 impl RsmkStream {
@@ -875,59 +922,281 @@ impl RsmkStream {
                 data_len: 0,
             });
         }
+        let matype = params.matype.unwrap_or_else(|| "ema".to_string());
+        let signal_matype = params
+            .signal_matype
+            .unwrap_or_else(|| "ema".to_string());
+        let main_is_ema = matype.eq_ignore_ascii_case("ema");
+        let signal_is_ema = signal_matype.eq_ignore_ascii_case("ema");
+
         Ok(Self {
             lookback,
             period,
             signal_period,
-            matype: params.matype.unwrap_or_else(|| "ema".to_string()),
-            signal_matype: params.signal_matype.unwrap_or_else(|| "ema".to_string()),
-            lr: Vec::new(),
-            mom: Vec::new(),
-            ind_hist: Vec::new(),
+            matype,
+            signal_matype,
+            main_is_ema,
+            signal_is_ema,
+
+            lr_buf: vec![f64::NAN; lookback],
+            lr_head: 0,
+            lr_len: 0,
+
+            saw_first_finite_mom: false,
+            ema_seed_pos: 0,
+            ema_seed_sum: 0.0,
+            ema_seed_cnt: 0,
+            ema_ind: f64::NAN,
+            ema_ind_seeded: false,
+            ema_ind_dead: false,
+
+            ind_win_buf: vec![f64::NAN; period],
+            ind_win_head: 0,
+            ind_win_len: 0,
+            ind_win_sum: 0.0,
+            ind_win_cnt: 0,
+
+            indicator_started: false,
+
+            alpha_sig: 2.0 / (signal_period as f64 + 1.0),
+            ema_sig: f64::NAN,
+            ema_sig_seeded: false,
+            ema_sig_seed_pos: 0,
+            ema_sig_seed_sum: 0.0,
+            ema_sig_seed_cnt: 0,
+
+            sig_win_buf: vec![f64::NAN; signal_period],
+            sig_win_head: 0,
+            sig_win_len: 0,
+            sig_win_sum: 0.0,
+            sig_win_cnt: 0,
+
+            alpha_main: 2.0 / (period as f64 + 1.0),
         })
     }
 
+    #[inline(always)]
+    fn push_ring(buf: &mut [f64], head: &mut usize, len: &mut usize, v: f64) -> Option<f64> {
+        let cap = buf.len();
+        if cap == 0 {
+            return None;
+        }
+        let evicted = if *len < cap {
+            buf[*head] = v;
+            *len += 1;
+            None
+        } else {
+            let old = core::mem::replace(&mut buf[*head], v);
+            Some(old)
+        };
+        *head += 1;
+        if *head == cap {
+            *head = 0;
+        }
+        evicted
+    }
+
+    #[inline(always)]
+    fn window_push(
+        buf: &mut [f64],
+        head: &mut usize,
+        len: &mut usize,
+        sum: &mut f64,
+        cnt: &mut usize,
+        v: f64,
+    ) {
+        let cap = buf.len();
+        if cap == 0 {
+            return;
+        }
+        if *len < cap {
+            buf[*head] = v;
+            if v.is_finite() {
+                *sum += v;
+                *cnt += 1;
+            }
+            *len += 1;
+        } else {
+            let old = core::mem::replace(&mut buf[*head], v);
+            if old.is_finite() {
+                *sum -= old;
+                *cnt -= 1;
+            }
+            if v.is_finite() {
+                *sum += v;
+                *cnt += 1;
+            }
+        }
+        *head += 1;
+        if *head == cap {
+            *head = 0;
+        }
+    }
+
+    /// Streaming update: O(1). Returns (indicator, signal) for the new point.
     pub fn update(&mut self, main: f64, compare: f64) -> Option<(f64, f64)> {
+        // 1) log-ratio with domain checks (NaN if compare==0 or any NaN)
         let lr = if main.is_nan() || compare.is_nan() || compare == 0.0 {
             f64::NAN
         } else {
             (main / compare).ln()
         };
-        self.lr.push(lr);
 
-        // Need at least lookback+1 lr points to form first momentum
-        if self.lr.len() > self.lookback {
-            let a = *self.lr.last().unwrap();
-            let b = self.lr[self.lr.len() - 1 - self.lookback];
-            self.mom.push(if a.is_nan() || b.is_nan() {
-                f64::NAN
-            } else {
-                a - b
-            });
-        } else {
-            self.mom.push(f64::NAN);
+        // 2) momentum = lr_t - lr_{t-lookback} via ring buffer
+        let evicted = Self::push_ring(&mut self.lr_buf, &mut self.lr_head, &mut self.lr_len, lr);
+        let mom = match evicted {
+            None => f64::NAN,
+            Some(old_lr) => {
+                if lr.is_nan() || old_lr.is_nan() {
+                    f64::NAN
+                } else {
+                    lr - old_lr
+                }
+            }
+        };
+
+        if !self.saw_first_finite_mom && mom.is_finite() {
+            self.saw_first_finite_mom = true;
         }
 
-        // Indicator (last value of MA over ordered momentum)
-        let ind = ma(&self.matype, MaData::Slice(&self.mom), self.period)
-            .ok()
-            .and_then(|v| v.last().copied())
-            .unwrap_or(f64::NAN)
-            * 100.0;
+        // 3) Indicator path (EMA or SMA)
+        let indicator = if self.main_is_ema {
+            self.update_indicator_ema(mom)
+        } else {
+            self.update_indicator_sma(mom)
+        };
 
-        self.ind_hist.push(ind);
+        // 4) Signal path (EMA or SMA over indicator)
+        let signal = if self.signal_is_ema {
+            self.update_signal_ema(indicator)
+        } else {
+            self.update_signal_sma(indicator)
+        };
 
-        // Signal (last value of MA over ordered indicator history)
-        let sig = ma(
-            &self.signal_matype,
-            MaData::Slice(&self.ind_hist),
-            self.signal_period,
-        )
-        .ok()
-        .and_then(|v| v.last().copied())
-        .unwrap_or(f64::NAN);
+        Some((indicator, signal))
+    }
 
-        Some((ind, sig))
+    #[inline(always)]
+    fn update_indicator_ema(&mut self, mom: f64) -> f64 {
+        if self.ema_ind_dead {
+            return f64::NAN;
+        }
+        if !self.saw_first_finite_mom {
+            return f64::NAN;
+        }
+        if !self.ema_ind_seeded {
+            self.ema_seed_pos += 1;
+            if mom.is_finite() {
+                self.ema_seed_sum += mom;
+                self.ema_seed_cnt += 1;
+            }
+            if self.ema_seed_pos < self.period {
+                return f64::NAN;
+            }
+            if self.ema_seed_cnt == 0 {
+                self.ema_ind_dead = true;
+                self.indicator_started = true;
+                return f64::NAN;
+            }
+            self.ema_ind = (self.ema_seed_sum / self.ema_seed_cnt as f64) * 100.0;
+            self.ema_ind_seeded = true;
+            self.indicator_started = true;
+            return self.ema_ind;
+        }
+        if mom.is_finite() {
+            let src100 = mom * 100.0;
+            self.ema_ind = (src100 - self.ema_ind).mul_add(self.alpha_main, self.ema_ind);
+        }
+        self.ema_ind
+    }
+
+    #[inline(always)]
+    fn update_indicator_sma(&mut self, mom: f64) -> f64 {
+        if !self.saw_first_finite_mom {
+            return f64::NAN;
+        }
+        Self::window_push(
+            &mut self.ind_win_buf,
+            &mut self.ind_win_head,
+            &mut self.ind_win_len,
+            &mut self.ind_win_sum,
+            &mut self.ind_win_cnt,
+            mom,
+        );
+
+        if self.ind_win_len < self.period {
+            return f64::NAN;
+        }
+        let ind = if self.ind_win_cnt > 0 {
+            (self.ind_win_sum / self.ind_win_cnt as f64) * 100.0
+        } else {
+            f64::NAN
+        };
+        if !self.indicator_started {
+            self.indicator_started = true;
+        }
+        ind
+    }
+
+    #[inline(always)]
+    fn update_signal_ema(&mut self, indicator: f64) -> f64 {
+        if self.ema_ind_dead {
+            return f64::NAN;
+        }
+        if !self.indicator_started {
+            return f64::NAN;
+        }
+        if !self.ema_sig_seeded {
+            self.ema_sig_seed_pos += 1;
+            if indicator.is_finite() {
+                self.ema_sig_seed_sum += indicator;
+                self.ema_sig_seed_cnt += 1;
+            }
+            if self.ema_sig_seed_pos < self.signal_period {
+                return f64::NAN;
+            }
+            self.ema_sig = if self.ema_sig_seed_cnt > 0 {
+                self.ema_sig_seed_sum / self.ema_sig_seed_cnt as f64
+            } else {
+                f64::NAN
+            };
+            self.ema_sig_seeded = true;
+            return self.ema_sig;
+        }
+        if indicator.is_finite() && self.ema_sig.is_finite() {
+            self.ema_sig = (indicator - self.ema_sig).mul_add(self.alpha_sig, self.ema_sig);
+        } else if indicator.is_finite() && !self.ema_sig.is_finite() {
+            if !self.main_is_ema {
+                self.ema_sig = indicator;
+            }
+        }
+        self.ema_sig
+    }
+
+    #[inline(always)]
+    fn update_signal_sma(&mut self, indicator: f64) -> f64 {
+        if self.ema_ind_dead {
+            return f64::NAN;
+        }
+        if !self.indicator_started {
+            return f64::NAN;
+        }
+        Self::window_push(
+            &mut self.sig_win_buf,
+            &mut self.sig_win_head,
+            &mut self.sig_win_len,
+            &mut self.sig_win_sum,
+            &mut self.sig_win_cnt,
+            indicator,
+        );
+        if self.sig_win_len < self.signal_period {
+            return f64::NAN;
+        }
+        if self.sig_win_cnt > 0 {
+            self.sig_win_sum / self.sig_win_cnt as f64
+        } else {
+            f64::NAN
+        }
     }
 }
 

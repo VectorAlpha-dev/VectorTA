@@ -525,6 +525,7 @@ impl ViStream {
             sum_vm: 0.0,
         })
     }
+    // Decision: Streaming O(1) kernel with ring-head wrap and single reciprocal; behavior matches formula.
     pub fn update(
         &mut self,
         high: f64,
@@ -534,24 +535,49 @@ impl ViStream {
         prev_high: f64,
         prev_close: f64,
     ) -> Option<(f64, f64)> {
-        let i = self.idx % self.period;
-        let tr = (high - low)
-            .max((high - prev_close).abs())
-            .max((low - prev_close).abs());
-        let vp = (high - prev_low).abs();
-        let vm = (low - prev_high).abs();
-        self.sum_tr += tr - self.tr[i];
-        self.sum_vp += vp - self.vp[i];
-        self.sum_vm += vm - self.vm[i];
-        self.tr[i] = tr;
-        self.vp[i] = vp;
-        self.vm[i] = vm;
+        // keep signature; silence potential "unused" warning for `close`
+        let _ = close;
+
+        // ring head index (no modulus)
+        let i = self.idx;
+
+        // True Range = max(H-L, |H - prev_close|, |L - prev_close|)
+        let hl = high - low;
+        let hc = (high - prev_close).abs();
+        let lc = (low - prev_close).abs();
+        let tr_new = hl.max(hc.max(lc));
+
+        // Vortex movements
+        let vp_new = (high - prev_low).abs(); // VM+
+        let vm_new = (low - prev_high).abs(); // VM-
+
+        // slide window: subtract oldest, add newest
+        let tr_old = self.tr[i];
+        let vp_old = self.vp[i];
+        let vm_old = self.vm[i];
+
+        self.sum_tr += tr_new - tr_old;
+        self.sum_vp += vp_new - vp_old;
+        self.sum_vm += vm_new - vm_old;
+
+        // overwrite ring slot
+        self.tr[i] = tr_new;
+        self.vp[i] = vp_new;
+        self.vm[i] = vm_new;
+
+        // advance ring head (wrap and mark filled on first wrap)
         self.idx += 1;
-        if !self.filled && self.idx >= self.period {
+        if self.idx == self.period {
+            self.idx = 0;
             self.filled = true;
         }
+
+        // once warmed, use a single reciprocal for both outputs
         if self.filled {
-            Some((self.sum_vp / self.sum_tr, self.sum_vm / self.sum_tr))
+            let inv_tr = 1.0 / self.sum_tr;
+            let vi_p = self.sum_vp * inv_tr;
+            let vi_m = self.sum_vm * inv_tr;
+            Some((vi_p, vi_m))
         } else {
             None
         }

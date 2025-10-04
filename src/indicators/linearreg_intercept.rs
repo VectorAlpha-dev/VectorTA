@@ -19,7 +19,7 @@
 //! - Runtime selection short-circuits to Scalar for `Kernel::Auto` because the
 //!   O(1) sliding update dominates and SIMD underperforms overall at 100k.
 //!   Benchmarks (target-cpu=native, 100k): scalar ≈ 104µs; AVX2/AVX512 ≈ 200µs.
-//! - Streaming: Not implemented.
+//! - Streaming: O(1) from first output; no warmup rescan.
 //! - Memory optimization: ✅ Uses `alloc_with_nan_prefix` (zero-copy) for warmup.
 //! - Batch operations: ✅ Implemented with parallel processing support.
 
@@ -508,31 +508,19 @@ pub struct LinearRegInterceptStream {
 }
 
 impl LinearRegInterceptStream {
+    #[inline]
     pub fn try_new(params: LinearRegInterceptParams) -> Result<Self, LinearRegInterceptError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(LinearRegInterceptError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(LinearRegInterceptError::InvalidPeriod { period, data_len: 0 });
         }
 
-        // period==1 allowed
-        let (sum_x, sum_x2, n, bd) = if period == 1 {
-            (1.0, 1.0, 1.0, 0.0)
-        } else {
-            let mut sx = 0.0;
-            let mut sx2 = 0.0;
-            for i in 0..period {
-                let x = (i + 1) as f64;
-                sx += x;
-                sx2 += x * x;
-            }
-            let n = period as f64;
-            let denom = n * sx2 - sx * sx;
-            let bd = 1.0 / denom;
-            (sx, sx2, n, bd)
-        };
+        // Closed-form precomputation (no loop) for x = 1..n
+        let n = period as f64;
+        let sum_x = 0.5_f64 * n * (n + 1.0); // n(n+1)/2
+        let sum_x2 = (n * (n + 1.0) * (2.0 * n + 1.0)) / 6.0; // n(n+1)(2n+1)/6
+        let denom = n * sum_x2 - sum_x * sum_x;
+        let bd = if period == 1 { 0.0 } else { 1.0 / denom };
 
         Ok(Self {
             period,
@@ -540,7 +528,7 @@ impl LinearRegInterceptStream {
             head: 0,
             filled: false,
             sum_x,
-            sum_x2,
+            sum_x2, // kept; not used after init
             n,
             bd,
             sum_y: 0.0,
@@ -548,43 +536,53 @@ impl LinearRegInterceptStream {
         })
     }
 
+    /// O(1) update from the very first output; no O(n) "first wrap" recompute.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        // Fast path
         if self.period == 1 {
             return Some(value);
         }
 
+        // Position to overwrite this tick (also the outgoing element if already filled)
         let tail = self.head;
-        let prev = self.buffer[tail];
-        self.buffer[tail] = value;
-        self.head = (self.head + 1) % self.period;
+        let y_out = self.buffer[tail];
 
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-            self.sum_y = self.buffer.iter().sum();
-            self.sum_xy = self
-                .buffer
-                .iter()
-                .enumerate()
-                .map(|(i, v)| v * ((i + 1) as f64))
-                .sum();
-        } else if self.filled {
-            let sum_y_old = self.sum_y;
-            // slide window sums
-            self.sum_y = sum_y_old + value - prev;
-            self.sum_xy = self.sum_xy + self.n * value - sum_y_old;
-        } else {
-            self.sum_y += value;
-            self.sum_xy += value * (self.head as f64);
-        }
+        // Write incoming element and advance head
+        self.buffer[tail] = value;
+        self.head = if self.head + 1 == self.period { 0 } else { self.head + 1 };
 
         if !self.filled {
-            return None;
+            // Warmup: maintain Σy and Σ(xy) with correct x index = (tail + 1)
+            // so the last warmup insert uses x = n (no need to rescan).
+            let x = (tail as f64) + 1.0; // x in [1..n]
+            self.sum_y += value;
+            self.sum_xy = value.mul_add(x, self.sum_xy); // sum_xy += value * x
+
+            // We become "filled" precisely after writing into the last slot.
+            if self.head == 0 {
+                self.filled = true;
+                // fall through to compute first output for the just-filled window
+            } else {
+                return None;
+            }
+        } else {
+            // Steady state: true O(1) slide
+            let sum_y_old = self.sum_y;
+            self.sum_y = sum_y_old + value - y_out;
+            // Σ(xy)' = Σ(xy) − Σy(old) + n·y_in
+            self.sum_xy = (self.sum_xy - sum_y_old) + self.n * value;
         }
 
-        let b = (self.n * self.sum_xy - self.sum_x * self.sum_y) * self.bd;
-        let a = (self.sum_y - b * self.sum_x) / self.n;
-        Some(a + b)
+        // Emit y at the "last point" with our reference convention: a + b
+        // a + b = Σy/n + b*(1 − Σx/n)
+        let inv_n = 1.0 / self.n;
+        let k = 1.0 - self.sum_x * inv_n;
+        // b = (n·Σ(xy) − Σx·Σy) * bd   (use mul_add to encourage FMA)
+        let t = self.n.mul_add(self.sum_xy, -(self.sum_x * self.sum_y));
+        let b = t * self.bd;
+        let y = self.sum_y.mul_add(inv_n, b * k);
+        Some(y)
     }
 }
 

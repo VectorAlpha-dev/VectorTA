@@ -14,6 +14,7 @@
 //! - SIMD enabled: AVX2/AVX512 accelerate initial denominator build; streaming body remains scalar for exactness. >5% faster vs scalar at 100k on AVX2/AVX512.
 //! - Scalar path: O(n) rolling-sum kernel with no extra allocations; writes only computed region.
 //! - Batch (row): Scalar batch uses shared prefix sums of |Δ| for O(1) denominators per step; warmup prefixes preserved.
+//! - Streaming: O(1) update via rolling sum of |Δ|; exact and matches batch outputs.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -480,53 +481,107 @@ pub unsafe fn er_avx512_long(data: &[f64], period: usize, first: usize, out: &mu
 #[derive(Debug, Clone)]
 pub struct ErStream {
     period: usize,
-    buffer: Vec<f64>,
-    head: usize,
-    filled: bool,
+    buffer: Vec<f64>, // ring buffer of length period
+    head: usize,      // index of the oldest element (also next write position)
+    filled: bool,     // becomes true once we have period samples
+    len: usize,       // number of valid samples currently in the buffer (<= period)
+    denom: f64,       // rolling sum of |Δ| across the current window (has period-1 terms)
 }
 
 impl ErStream {
     pub fn try_new(params: ErParams) -> Result<Self, ErError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(ErError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(ErError::InvalidPeriod { period, data_len: 0 });
         }
         Ok(Self {
             period,
             buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
+            len: 0,
+            denom: 0.0,
         })
     }
+
+    /// O(1) update:
+    /// - Grow: build denom by adding |new - prev| as samples arrive.
+    /// - Steady state: denom += |new - newest| - |second_oldest - oldest|.
+    /// - Numerator is |new - oldest|.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
-        self.head = (self.head + 1) % self.period;
-        if !self.filled && self.head == 0 {
+        // Fast path for period == 1: window has no internal diffs => denom == 0 => ER = 0.
+        if self.period == 1 {
+            self.buffer[0] = value;
+            self.head = 0;       // oldest == newest
             self.filled = true;
+            self.len = 1;
+            self.denom = 0.0;
+            return Some(0.0);
         }
+
+        // --- Phase 1: window build-up (len < period) -------------------------
         if !self.filled {
-            return None;
+            if self.len == 0 {
+                // First sample initializes the buffer; no denom contribution yet.
+                self.buffer[self.head] = value;
+                self.head = (self.head + 1) % self.period;
+                self.len = 1;
+                return None;
+            } else {
+                // Add the new |Δ| against the previously inserted sample.
+                let prev_idx = if self.head == 0 { self.period - 1 } else { self.head - 1 };
+                self.denom += (value - self.buffer[prev_idx]).abs();
+
+                self.buffer[self.head] = value;
+                self.head = (self.head + 1) % self.period;
+                self.len += 1;
+
+                if self.len < self.period {
+                    return None;
+                }
+
+                // Window just became full on this tick.
+                self.filled = true;
+
+                // Compute first ER for the fully formed window.
+                let start = self.head; // oldest after the insertion above
+                let end = if start == 0 { self.period - 1 } else { start - 1 };
+                debug_assert!(self.len == self.period);
+
+                let delta = (self.buffer[end] - self.buffer[start]).abs();
+                if self.denom > 0.0 {
+                    // Saturate to 1.0 without a divide when possible (cheaper than min()).
+                    return Some(if delta >= self.denom { 1.0 } else { delta / self.denom });
+                } else {
+                    return Some(0.0);
+                }
+            }
         }
-        let mut sum = 0.0;
-        let mut last = self.head;
-        let mut prev = last;
-        for _ in 1..self.period {
-            prev = (prev + 1) % self.period;
-            let a = self.buffer[last];
-            let b = self.buffer[prev];
-            sum += (b - a).abs();
-            last = prev;
-        }
-        let start = self.head;
-        let end = (self.head + self.period - 1) % self.period;
-        let delta = (self.buffer[end] - self.buffer[start]).abs();
-        if sum > 0.0 {
-            // Clamp to [0.0, 1.0] to handle floating point precision issues
-            Some((delta / sum).min(1.0))
+
+        // --- Phase 2: steady-state streaming (len == period) -----------------
+        // Current ring layout in order: [oldest=head, ..., newest=head+period-1]
+        let start = self.head;                                // oldest (to be overwritten)
+        let second = if start + 1 == self.period { 0 } else { start + 1 };
+        let end_prev = if start == 0 { self.period - 1 } else { start - 1 }; // current newest
+
+        // Update the rolling denominator in O(1):
+        // Remove the outgoing edge (oldest -> second_oldest), add the incoming edge (newest -> new).
+        let sub = (self.buffer[second] - self.buffer[start]).abs();
+        let add = (value - self.buffer[end_prev]).abs();
+        let new_denom = self.denom + add - sub;
+
+        // Numerator uses the new window's oldest (second_oldest) vs the incoming value.
+        // After sliding forward by one, window endpoints are [second .. value].
+        let delta = (value - self.buffer[second]).abs();
+
+        // Commit state.
+        self.denom = new_denom;
+        self.buffer[start] = value;
+        self.head = second; // advance oldest pointer
+
+        if self.denom > 0.0 {
+            Some(if delta >= self.denom { 1.0 } else { delta / self.denom })
         } else {
             Some(0.0)
         }

@@ -614,17 +614,23 @@ unsafe fn ao_avx512_prefixsum(
         *dst.add(t) = y.mul_add(1.0 / (short as f64), -(z * (1.0 / (long as f64))));
     }
 }
-// Streaming AO
+// Streaming AO — single-ring, modulo-free O(1) updates.
+// Decision: Switched to one circular buffer (size = long), no modulo or NaN sentinels; identical outputs, faster hot path.
 #[derive(Debug, Clone)]
 pub struct AoStream {
     short: usize,
     long: usize,
+    inv_short: f64,
+    inv_long: f64,
+    // Circular buffer of last `long` values
+    buf: Vec<f64>,
+    // Next write position in `buf`
+    head: usize,
+    // Number of valid elements currently in the buffer (<= long)
+    filled: usize,
+    // Running sums
     short_sum: f64,
     long_sum: f64,
-    short_buf: Vec<f64>,
-    long_buf: Vec<f64>,
-    head: usize,
-    filled: bool,
 }
 
 impl AoStream {
@@ -640,42 +646,73 @@ impl AoStream {
         Ok(Self {
             short,
             long,
+            inv_short: 1.0 / (short as f64),
+            inv_long: 1.0 / (long as f64),
+            buf: vec![0.0; long],
+            head: 0,
+            filled: 0,
             short_sum: 0.0,
             long_sum: 0.0,
-            short_buf: vec![f64::NAN; short],
-            long_buf: vec![f64::NAN; long],
-            head: 0,
-            filled: false,
         })
     }
 
+    /// Push one hl2 value. Returns AO after warmup (when `filled == long`), else `None`.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let idx_short = self.head % self.short;
-        let idx_long = self.head % self.long;
+        // Value leaving the long window (valid once buffer is full)
+        let old_long = if self.filled == self.long {
+            self.buf[self.head]
+        } else {
+            0.0
+        };
 
-        let old_short = self.short_buf[idx_short];
-        let old_long = self.long_buf[idx_long];
+        // Value leaving the short window (valid once we have at least `short` samples)
+        let old_short = if self.filled >= self.short {
+            let idx = if self.head >= self.short {
+                self.head - self.short
+            } else {
+                self.head + self.long - self.short
+            };
+            self.buf[idx]
+        } else {
+            0.0
+        };
 
-        self.short_buf[idx_short] = value;
-        self.long_buf[idx_long] = value;
+        // Write the new sample
+        self.buf[self.head] = value;
 
-        if !old_short.is_nan() {
-            self.short_sum -= old_short;
-        }
-        if !old_long.is_nan() {
-            self.long_sum -= old_long;
-        }
-        self.short_sum += value;
-        self.long_sum += value;
-
+        // Advance head with predictable wrap (avoid `%`)
         self.head += 1;
-        if self.head >= self.long {
-            let short_sma = self.short_sum / (self.short as f64);
-            let long_sma = self.long_sum / (self.long as f64);
-            Some(short_sma - long_sma)
+        if self.head == self.long {
+            self.head = 0;
+        }
+
+        // Update counts
+        if self.filled < self.long {
+            self.filled += 1;
+        }
+
+        // Update rolling sums in O(1)
+        self.long_sum += value - old_long;
+        self.short_sum += value - old_short;
+
+        // Emit AO when long window is ready
+        if self.filled == self.long {
+            Some(self.short_sum.mul_add(self.inv_short, -(self.long_sum * self.inv_long)))
         } else {
             None
+        }
+    }
+
+    /// Optional: reset internal state without reallocating the buffer
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.head = 0;
+        self.filled = 0;
+        self.short_sum = 0.0;
+        self.long_sum = 0.0;
+        for x in &mut self.buf {
+            *x = 0.0;
         }
     }
 }

@@ -573,95 +573,149 @@ pub unsafe fn di_avx512_long(
     di_avx512(high, low, close, period, first_idx)
 }
 
-// Streaming (single-point update)
+// Streaming (single-point update) — O(1) per new bar after warmup
+// Decision: Streaming uses Wilder recurrence with one-time O(p) warmup; matches scalar outputs.
 #[derive(Debug, Clone)]
 pub struct DiStream {
+    // Config
     period: usize,
-    buffer_high: Vec<f64>,
-    buffer_low: Vec<f64>,
-    buffer_close: Vec<f64>,
-    head: usize,
-    filled: bool,
-    prev_high: f64,
-    prev_low: f64,
-    prev_close: f64,
+    keep: f64, // 1 - 1/p
+
+    // Previous bar (needed to form increments)
+    prev_h: f64,
+    prev_l: f64,
+    prev_c: f64,
+    have_prev: bool,
+
+    // Warmup accumulators (sum over first `period`-1 increments)
+    warm_plus: f64,
+    warm_minus: f64,
+    warm_tr: f64,
+    warm_count: usize, // counts bars since first prev was set
+
+    // Smoothed Wilder state (valid once warmed == true)
+    cur_plus: f64,
+    cur_minus: f64,
+    cur_tr: f64,
+    warmed: bool,
 }
 
 impl DiStream {
     pub fn try_new(params: DiParams) -> Result<Self, DiError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(DiError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(DiError::InvalidPeriod { period, data_len: 0 });
         }
+        let pf = period as f64;
         Ok(Self {
             period,
-            buffer_high: vec![f64::NAN; period],
-            buffer_low: vec![f64::NAN; period],
-            buffer_close: vec![f64::NAN; period],
-            head: 0,
-            filled: false,
-            prev_high: f64::NAN,
-            prev_low: f64::NAN,
-            prev_close: f64::NAN,
+            keep: 1.0 - pf.recip(),
+
+            prev_h: f64::NAN,
+            prev_l: f64::NAN,
+            prev_c: f64::NAN,
+            have_prev: false,
+
+            warm_plus: 0.0,
+            warm_minus: 0.0,
+            warm_tr: 0.0,
+            warm_count: 0,
+
+            cur_plus: 0.0,
+            cur_minus: 0.0,
+            cur_tr: 0.0,
+            warmed: false,
         })
     }
 
     #[inline(always)]
+    fn reset(&mut self) {
+        self.prev_h = f64::NAN;
+        self.prev_l = f64::NAN;
+        self.prev_c = f64::NAN;
+        self.have_prev = false;
+
+        self.warm_plus = 0.0;
+        self.warm_minus = 0.0;
+        self.warm_tr = 0.0;
+        self.warm_count = 0;
+
+        self.cur_plus = 0.0;
+        self.cur_minus = 0.0;
+        self.cur_tr = 0.0;
+        self.warmed = false;
+    }
+
+    /// Branchless true range using the Wilder-equivalent identity:
+    /// TR = max(high, prevClose) - min(low, prevClose)
+    #[inline(always)]
+    fn tr_fast(high: f64, low: f64, prev_close: f64) -> f64 {
+        let hi = if high > prev_close { high } else { prev_close };
+        let lo = if low < prev_close { low } else { prev_close };
+        hi - lo // never negative
+    }
+
+    /// Push a new (high, low, close). Returns (+DI, -DI) once warmup is complete.
+    /// Warmup behavior: returns `None` until `period` bars have been incorporated.
+    #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        self.buffer_high[self.head] = high;
-        self.buffer_low[self.head] = low;
-        self.buffer_close[self.head] = close;
-        self.head = (self.head + 1) % self.period;
-
-        if !self.filled && self.head == 0 {
-            self.filled = true;
-        }
-
-        if !self.filled {
-            self.prev_high = high;
-            self.prev_low = low;
-            self.prev_close = close;
+        // Guard: if any input is NaN, reset and wait for a new start.
+        if high.is_nan() || low.is_nan() || close.is_nan() {
+            self.reset();
             return None;
         }
 
-        let mut plus_dm_sum = 0.0;
-        let mut minus_dm_sum = 0.0;
-        let mut tr_sum = 0.0;
-        let mut prev_h = self.buffer_high[self.head];
-        let mut prev_l = self.buffer_low[self.head];
-        let mut prev_c = self.buffer_close[self.head];
-        for i in 0..self.period {
-            let idx = (self.head + i) % self.period;
-            let h = self.buffer_high[idx];
-            let l = self.buffer_low[idx];
-            let c = self.buffer_close[idx];
-            let diff_p = h - prev_h;
-            let diff_m = prev_l - l;
-            if diff_p > 0.0 && diff_p > diff_m {
-                plus_dm_sum += diff_p;
-            }
-            if diff_m > 0.0 && diff_m > diff_p {
-                minus_dm_sum += diff_m;
-            }
-            tr_sum += true_range(h, l, prev_c);
-            prev_h = h;
-            prev_l = l;
-            prev_c = c;
+        // First valid observation: seed prev_* and wait for next bar to form increments.
+        if !self.have_prev {
+            self.prev_h = high;
+            self.prev_l = low;
+            self.prev_c = close;
+            self.have_prev = true;
+            self.warm_count = 1; // first bar seen
+            return None;
         }
-        let plus = if tr_sum == 0.0 {
-            0.0
-        } else {
-            (plus_dm_sum / tr_sum) * 100.0
-        };
-        let minus = if tr_sum == 0.0 {
-            0.0
-        } else {
-            (minus_dm_sum / tr_sum) * 100.0
-        };
-        Some((plus, minus))
+
+        // Compute single-bar increments (Wilder rules: only one DM can be positive)
+        let dp = high - self.prev_h;
+        let dm = self.prev_l - low;
+
+        let inc_p = if dp > dm && dp > 0.0 { dp } else { 0.0 };
+        let inc_m = if dm > dp && dm > 0.0 { dm } else { 0.0 };
+        let tr = Self::tr_fast(high, low, self.prev_c);
+
+        // Advance prev_* for next tick
+        self.prev_h = high;
+        self.prev_l = low;
+        self.prev_c = close;
+
+        // Warmup: accumulate raw sums for first `period` bars (one-time O(p))
+        if !self.warmed {
+            self.warm_plus += inc_p;
+            self.warm_minus += inc_m;
+            self.warm_tr += tr;
+            self.warm_count += 1;
+
+            if self.warm_count < self.period {
+                return None;
+            }
+
+            // First output at the end of warmup (matches scalar’s first write at stop-1)
+            self.cur_plus = self.warm_plus;
+            self.cur_minus = self.warm_minus;
+            self.cur_tr = self.warm_tr;
+            self.warmed = true;
+
+            let scale = if self.cur_tr == 0.0 { 0.0 } else { 100.0 / self.cur_tr };
+            return Some((self.cur_plus * scale, self.cur_minus * scale));
+        }
+
+        // O(1) Wilder smoothing for subsequent ticks (uses FMA where available)
+        self.cur_plus = self.cur_plus.mul_add(self.keep, inc_p);
+        self.cur_minus = self.cur_minus.mul_add(self.keep, inc_m);
+        self.cur_tr = self.cur_tr.mul_add(self.keep, tr);
+
+        let scale = if self.cur_tr == 0.0 { 0.0 } else { 100.0 / self.cur_tr };
+        Some((self.cur_plus * scale, self.cur_minus * scale))
     }
 }
 

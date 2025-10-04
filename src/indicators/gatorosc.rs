@@ -24,7 +24,7 @@
 //! ## Developer Notes
 //! - **SIMD status**: AVX2/AVX512 update the three EMA states in packed lanes per step (broadcast price); modest wins (>5% at 100k) since the time-axis is sequential. Runtime detects and falls back to scalar when unsupported.
 //! - **Batch status**: Row-specific optimizations not added; batch executes per-row single-series kernels (benefits from SIMD when enabled). Little cross-row reuse available beyond identical lengths with different shifts.
-//! - **Streaming**: Not implemented
+//! - **Streaming**: O(1) per update via small EMA rings; exact and matches batch warmups.
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all four outputs (lines 280-283)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
 
@@ -1023,17 +1023,70 @@ pub fn gatorosc_into_slice(
     Ok(())
 }
 
+// --- Streaming kernel (O(1) per update) -------------------------------------
+
 #[derive(Debug, Clone)]
 pub struct GatorOscStream {
-    jaws: EmaStream,
-    teeth: EmaStream,
-    lips: EmaStream,
+    // EMA coefficients (alpha) and state
+    ja: f64,
+    ta: f64,
+    la: f64,
+    jema: f64,
+    tema: f64,
+    lema: f64,
+    initialized: bool,
+
+    // Shifts (display offsets)
     jaws_shift: usize,
     teeth_shift: usize,
     lips_shift: usize,
-    buf: AVec<f64>,
+
+    // Small fixed-size rings of EMA values for shift lookbacks
+    jring: AVec<f64>,
+    tring: AVec<f64>,
+    lring: AVec<f64>,
+    rpos: usize, // write position in rings
+
+    // Index of next update (acts like "i" in vectorized kernels)
     idx: usize,
-    warmup_period: usize,
+
+    // Warmup bookkeeping relative to first valid index
+    first_valid: Option<usize>,
+    upper_needed: usize,
+    lower_needed: usize,
+    warmup_upper: usize, // absolute index where upper first valid
+    warmup_lower: usize, // absolute index where lower first valid
+    warmup_uc: usize,    // absolute index where upper_change first valid
+    warmup_lc: usize,    // absolute index where lower_change first valid
+
+    // For 1-bar momentum
+    prev_u: f64,
+    prev_l: f64,
+    have_prev_u: bool,
+    have_prev_l: bool,
+}
+
+// --- fast tiny helpers -------------------------------------------------------
+
+#[inline(always)]
+fn ema_update(prev: f64, x: f64, a: f64) -> f64 {
+    // y_t = y_{t-1} + a * (x_t - y_{t-1}); fused if FMA is available
+    (x - prev).mul_add(a, prev)
+}
+
+#[inline(always)]
+fn fast_abs_f64(x: f64) -> f64 {
+    // bitwise abs; identical to x.abs() for all finite values & NaN-preserving
+    f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+}
+
+#[inline(always)]
+fn wrap_back(pos: usize, len: usize, back: usize) -> usize {
+    let mut idx = pos + len - back;
+    if idx >= len {
+        idx -= len;
+    }
+    idx
 }
 
 impl GatorOscStream {
@@ -1049,130 +1102,143 @@ impl GatorOscStream {
             return Err(GatorOscError::InvalidSettings);
         }
 
-        // Calculate the warmup period using gator_warmups logic
-        // Note: we use 0 as first since stream starts from index 0
-        let (_, _, _, lcw) = gator_warmups(
-            0,
-            jaws_length,
-            jaws_shift,
-            teeth_length,
-            teeth_shift,
-            lips_length,
-            lips_shift,
-        );
-        // Use the maximum warmup period (lower_change_warmup is always the largest)
-        let warmup_period = lcw;
+        // EMA alphas
+        let ja = 2.0 / (jaws_length as f64 + 1.0);
+        let ta = 2.0 / (teeth_length as f64 + 1.0);
+        let la = 2.0 / (lips_length as f64 + 1.0);
+
+        // Rings sized to max shift + 1 (match offline kernels)
+        let buf_len = jaws_shift.max(teeth_shift).max(lips_shift) + 1;
+        let mut jring: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, buf_len);
+        let mut tring: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, buf_len);
+        let mut lring: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, buf_len);
+        jring.resize(buf_len, 0.0);
+        tring.resize(buf_len, 0.0);
+        lring.resize(buf_len, 0.0);
+
+        // Bars required for each output (relative, not absolute)
+        let upper_needed = jaws_length.max(teeth_length) + jaws_shift.max(teeth_shift);
+        let lower_needed = teeth_length.max(lips_length) + teeth_shift.max(lips_shift);
 
         Ok(Self {
-            jaws: EmaStream::new(jaws_length),
-            teeth: EmaStream::new(teeth_length),
-            lips: EmaStream::new(lips_length),
+            ja,
+            ta,
+            la,
+            jema: 0.0,
+            tema: 0.0,
+            lema: 0.0,
+            initialized: false,
+
             jaws_shift,
             teeth_shift,
             lips_shift,
-            buf: {
-                let mut buf: AVec<f64> = AVec::with_capacity(
-                    CACHELINE_ALIGN,
-                    jaws_shift.max(teeth_shift).max(lips_shift) + 1,
-                );
-                buf.resize(jaws_shift.max(teeth_shift).max(lips_shift) + 1, f64::NAN);
-                buf
-            },
+
+            jring,
+            tring,
+            lring,
+            rpos: 0,
             idx: 0,
-            warmup_period,
+
+            first_valid: None,
+            upper_needed,
+            lower_needed,
+            warmup_upper: usize::MAX,
+            warmup_lower: usize::MAX,
+            warmup_uc: usize::MAX,
+            warmup_lc: usize::MAX,
+
+            prev_u: 0.0,
+            prev_l: 0.0,
+            have_prev_u: false,
+            have_prev_l: false,
         })
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64, f64)> {
-        let jaws_val = self.jaws.update(value);
-        let teeth_val = self.teeth.update(value);
-        let lips_val = self.lips.update(value);
+        let i = self.idx; // current bar index
+        self.idx = i + 1;
 
-        let buf_idx = self.idx % self.buf.len();
-        self.buf[buf_idx] = value;
-        let i = self.idx;
-        self.idx += 1;
+        // Delay initialization until first finite value (like offline first-valid)
+        if !self.initialized {
+            if !value.is_finite() {
+                return None; // still warming up on NaNs
+            }
+            self.jema = value;
+            self.tema = value;
+            self.lema = value;
+            self.initialized = true;
+            self.first_valid = Some(i);
 
-        // Return None if we're still in the warmup period
-        if self.idx < self.warmup_period {
+            // Convert relative warmups to absolute indices
+            self.warmup_upper = i + self.upper_needed.saturating_sub(1);
+            self.warmup_lower = i + self.lower_needed.saturating_sub(1);
+            self.warmup_uc = self.warmup_upper + 1;
+            self.warmup_lc = self.warmup_lower + 1;
+        } else {
+            let x = if value.is_nan() { self.jema } else { value };
+            self.jema = ema_update(self.jema, x, self.ja);
+            self.tema = ema_update(self.tema, x, self.ta);
+            self.lema = ema_update(self.lema, x, self.la);
+        }
+
+        // Push current EMA states into the rings
+        let r = self.rpos;
+        self.jring[r] = self.jema;
+        self.tring[r] = self.tema;
+        self.lring[r] = self.lema;
+
+        // Compute shifted indices
+        let len = self.jring.len();
+        let jj = wrap_back(r, len, self.jaws_shift);
+        let tt = wrap_back(r, len, self.teeth_shift);
+        let ll = wrap_back(r, len, self.lips_shift);
+
+        // Advance ring position
+        let mut next = r + 1;
+        if next == len {
+            next = 0;
+        }
+        self.rpos = next;
+
+        // Prime prev values when each output first becomes defined
+        if i == self.warmup_upper {
+            let u0 = fast_abs_f64(self.jring[jj] - self.tring[tt]);
+            self.prev_u = u0;
+            self.have_prev_u = true;
+        }
+        if i == self.warmup_lower {
+            let l0 = -fast_abs_f64(self.tring[tt] - self.lring[ll]);
+            self.prev_l = l0;
+            self.have_prev_l = true;
+        }
+
+        // Respect original API: emit only after lower_change warmup is satisfied
+        if i < self.warmup_lc {
             return None;
         }
 
-        let jaws_idx = i.checked_sub(self.jaws_shift)?;
-        let teeth_idx = i.checked_sub(self.teeth_shift)?;
-        let lips_idx = i.checked_sub(self.lips_shift)?;
+        // Compute outputs for this bar
+        let u = fast_abs_f64(self.jring[jj] - self.tring[tt]);
+        let l = -fast_abs_f64(self.tring[tt] - self.lring[ll]);
 
-        let jaws = self.jaws.value_at(jaws_idx)?;
-        let teeth = self.teeth.value_at(teeth_idx)?;
-        let lips = self.lips.value_at(lips_idx)?;
-
-        let upper = (jaws - teeth).abs();
-        let lower = -(teeth - lips).abs();
-
-        let prev_upper = if i > 0 {
-            let pj = jaws_idx.checked_sub(1)?;
-            let pt = teeth_idx.checked_sub(1)?;
-            let jaws_p = self.jaws.value_at(pj)?;
-            let teeth_p = self.teeth.value_at(pt)?;
-            (jaws_p - teeth_p).abs()
+        // 1-bar momentum
+        let uc = if i >= self.warmup_uc && self.have_prev_u {
+            let d = u - self.prev_u;
+            self.prev_u = u;
+            d
+        } else {
+            f64::NAN
+        };
+        let lc = if i >= self.warmup_lc && self.have_prev_l {
+            let d = self.prev_l - l; // == -(l - prev_l)
+            self.prev_l = l;
+            d
         } else {
             f64::NAN
         };
 
-        let prev_lower = if i > 0 {
-            let pt = teeth_idx.checked_sub(1)?;
-            let pl = lips_idx.checked_sub(1)?;
-            let teeth_p = self.teeth.value_at(pt)?;
-            let lips_p = self.lips.value_at(pl)?;
-            -(teeth_p - lips_p).abs()
-        } else {
-            f64::NAN
-        };
-
-        let upper_change = if !prev_upper.is_nan() {
-            upper - prev_upper
-        } else {
-            f64::NAN
-        };
-        let lower_change = if !prev_lower.is_nan() {
-            -(lower - prev_lower)
-        } else {
-            f64::NAN
-        };
-        Some((upper, lower, upper_change, lower_change))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct EmaStream {
-    alpha: f64,
-    state: Vec<f64>,
-    period: usize,
-    idx: usize,
-}
-
-impl EmaStream {
-    fn new(period: usize) -> Self {
-        Self {
-            alpha: 2.0 / (period as f64 + 1.0),
-            state: Vec::new(),
-            period,
-            idx: 0,
-        }
-    }
-    fn update(&mut self, value: f64) -> f64 {
-        let ema = if self.idx == 0 {
-            value
-        } else {
-            self.alpha * value + (1.0 - self.alpha) * self.state[self.idx - 1]
-        };
-        self.state.push(ema);
-        self.idx += 1;
-        ema
-    }
-    fn value_at(&self, idx: usize) -> Option<f64> {
-        self.state.get(idx).copied()
+        Some((u, l, uc, lc))
     }
 }
 

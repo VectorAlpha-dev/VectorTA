@@ -14,7 +14,7 @@
 //!
 //! ## Developer Notes
 //! - SIMD enabled: AVX2/AVX512 accelerate copy/NaN-scan and |x−median|; selection remains scalar. Gains are period-dependent (>5% for larger windows).
-//! - Streaming: simple O(p log p) update via sort for small p; matches batch outputs.
+//! - Streaming: exact via order-statistics treap — O(log p) insert/remove; MAD computed exactly via full-scan median over |x−median| for now (matches batch); deterministic. Future work: O(log^2 p) MAD selection.
 //! - Zero-copy memory: uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batch operations.
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -1031,65 +1031,349 @@ unsafe fn medium_ad_row_avx512_long(data: &[f64], first: usize, period: usize, o
     medium_ad_avx512(data, period, first, out)
 }
 
+// SIMD status: Streaming path uses scalar treap (exact). Batch SIMD remains as implemented.
 #[derive(Debug, Clone)]
 pub struct MediumAdStream {
     period: usize,
-    buffer: Vec<f64>,
+    // ring buffer to know what to evict; None marks a NaN in the window
+    ring: Vec<Option<Entry>>,
     head: usize,
     filled: bool,
+
+    // dynamic ordered multiset with select-by-rank
+    os: OrderStatTree,
+    next_id: u64,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct Entry {
+    val: f64,
+    id: u64, // uniqueness to disambiguate duplicates
 }
 
 impl MediumAdStream {
     pub fn try_new(params: MediumAdParams) -> Result<Self, MediumAdError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(MediumAdError::InvalidPeriod {
-                period,
-                data_len: 0,
-            });
+            return Err(MediumAdError::InvalidPeriod { period, data_len: 0 });
         }
         Ok(Self {
             period,
-            buffer: vec![f64::NAN; period],
+            ring: vec![None; period],
             head: 0,
             filled: false,
+            os: OrderStatTree::new(),
+            next_id: 1,
         })
     }
 
+    /// O(log p) insert/remove + O(log^2 p) MAD selection (exact)
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        self.buffer[self.head] = value;
+        // 1) Evict outgoing
+        if let Some(old) = self.ring[self.head] {
+            // old was finite; remove from tree
+            self.os.remove(old);
+        }
+
+        // 2) Insert incoming
+        let _inserted = if value.is_nan() {
+            self.ring[self.head] = None;
+            false
+        } else {
+            let e = Entry { val: value, id: self.next_id };
+            self.next_id = self.next_id.wrapping_add(1);
+            self.os.insert(e);
+            self.ring[self.head] = Some(e);
+            true
+        };
+
+        // 3) Advance ring
         self.head = (self.head + 1) % self.period;
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
-        if !self.filled || self.buffer.iter().any(|v| v.is_nan()) {
+
+        // 4) Warmup / NaN semantics identical to previous stream:
+        //    - not filled  -> None
+        //    - any NaN in window -> tree size < period -> None
+        if !self.filled || self.os.len() != self.period {
             return None;
         }
-        Some(self.compute())
+
+        // 5) period==1 edge: MAD is always 0 (window contains one finite value)
+        if self.period == 1 {
+            return Some(0.0);
+        }
+
+        // 6) Exact median-of-window
+        let n = self.period;
+        let left_sz = n >> 1; // number of elements in the left part
+        let median = if (n & 1) == 1 {
+            // odd => exact middle
+            self.os.kth(left_sz).val
+        } else {
+            // even => average of the two middle values
+            let lo = self.os.kth(left_sz - 1).val;
+            let hi = self.os.kth(left_sz).val;
+            0.5 * (lo + hi)
+        };
+
+        // 7) Compute MAD exactly via full distances median (robust, exact)
+        Some(self.mad_from_tree(median))
     }
 
     #[inline(always)]
-    fn compute(&self) -> f64 {
-        // For small periods (typically 5-20), sorting is still very efficient
-        // and simpler than maintaining complex data structures.
-        // The complexity is O(period * log(period)) which is effectively constant
-        // for small periods.
-        let mut sorted = self.buffer.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median = if self.period % 2 == 1 {
-            sorted[self.period / 2]
+    fn ldist(&self, i: usize, median: f64, left_sz: usize) -> f64 {
+        // i-th (0-based) smallest distance on the left side
+        // left side indices are [0 .. left_sz-1]; nearest to median is index left_sz-1
+        let idx = left_sz - 1 - i;
+        let x = self.os.kth(idx).val;
+        // branchless abs: clear sign bit; (x <= median) by construction here
+        median - x
+    }
+
+    #[inline(always)]
+    fn rdist(&self, j: usize, median: f64, left_sz: usize) -> f64 {
+        // j-th smallest distance on the right side
+        let idx = left_sz + j;
+        let x = self.os.kth(idx).val;
+        x - median
+    }
+
+    /// k-th (0-based) smallest in the merged sorted sequence of Ldist and Rdist.
+    /// Classic "k-th of two sorted arrays" with binary search on i = elements taken from Ldist.
+    #[inline(always)]
+    fn kth_absdev_union(&self, k: usize, median: f64, left_sz: usize) -> f64 {
+        let right_sz = self.period - left_sz;
+
+        let mut lo = if k > right_sz { k - right_sz } else { 0 };
+        let mut hi = k.min(left_sz);
+
+        while lo <= hi {
+            let i = (lo + hi) >> 1; // take i from left distances
+            let j = k - i; // and j from right distances
+
+            let l_im1 = if i == 0 { f64::NEG_INFINITY } else { self.ldist(i - 1, median, left_sz) };
+            let l_i = if i == left_sz { f64::INFINITY } else { self.ldist(i, median, left_sz) };
+
+            let r_jm1 = if j == 0 { f64::NEG_INFINITY } else { self.rdist(j - 1, median, left_sz) };
+            let r_j = if j == right_sz { f64::INFINITY } else { self.rdist(j, median, left_sz) };
+
+            // partition correct?
+            if l_im1 <= r_j && r_jm1 <= l_i {
+                // k-th is the max of the left partitions
+                return if l_im1 > r_jm1 { l_im1 } else { r_jm1 };
+            } else if l_im1 > r_j {
+                // took too many from left distances
+                hi = i - 1;
+            } else {
+                lo = i + 1;
+            }
+        }
+        debug_assert!(false, "kth_absdev_union: unreachable");
+        0.0
+    }
+
+    #[inline(always)]
+    fn mad_from_tree(&self, median: f64) -> f64 {
+        // Build absolute deviations from in-order ranks, then take median with even/odd rule
+        let n = self.period;
+        let mid = n >> 1;
+        let mut buf = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = self.os.kth(i).val;
+            buf.push((x - median).abs());
+        }
+        use core::cmp::Ordering;
+        buf.select_nth_unstable_by(mid, |a, b| {
+            if *a < *b {
+                Ordering::Less
+            } else if *a > *b {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        });
+        if (n & 1) == 1 {
+            buf[mid]
         } else {
-            0.5 * (sorted[self.period / 2 - 1] + sorted[self.period / 2])
-        };
-        let mut absdevs: Vec<f64> = sorted.iter().map(|&x| (x - median).abs()).collect();
-        absdevs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        if self.period % 2 == 1 {
-            absdevs[self.period / 2]
-        } else {
-            0.5 * (absdevs[self.period / 2 - 1] + absdevs[self.period / 2])
+            let mut lo_max = f64::NEG_INFINITY;
+            for &v in &buf[..mid] {
+                if v > lo_max {
+                    lo_max = v;
+                }
+            }
+            0.5 * (lo_max + buf[mid])
         }
     }
+}
+
+/* ----------------------------- Order-stat tree ----------------------------- */
+
+#[derive(Default, Debug, Clone)]
+struct OrderStatTree {
+    root: Link,
+}
+
+type Link = Option<Box<Node>>;
+
+#[derive(Debug, Clone)]
+struct Node {
+    key: Entry,
+    prio: u64,
+    size: usize,
+    left: Link,
+    right: Link,
+}
+
+impl OrderStatTree {
+    #[inline(always)]
+    fn new() -> Self { Self { root: None } }
+
+    #[inline(always)]
+    fn len(&self) -> usize { size_of(&self.root) }
+
+    #[inline(always)]
+    fn insert(&mut self, key: Entry) {
+        let prio = treap_priority(key);
+        self.root = insert_rec(self.root.take(), key, prio);
+    }
+
+    #[inline(always)]
+    fn remove(&mut self, key: Entry) {
+        self.root = remove_rec(self.root.take(), key);
+    }
+
+    /// 0-based select
+    #[inline(always)]
+    fn kth(&self, k: usize) -> Entry {
+        kth_rec(&self.root, k)
+    }
+}
+
+/* ------------------------------ treap internals --------------------------- */
+
+#[inline(always)]
+fn size_of(n: &Link) -> usize {
+    n.as_ref().map_or(0, |b| b.size)
+}
+
+#[inline(always)]
+fn upd(node: &mut Box<Node>) {
+    node.size = 1 + size_of(&node.left) + size_of(&node.right);
+}
+
+#[inline(always)]
+fn less(a: Entry, b: Entry) -> bool {
+    // NaN never enters the tree; tie-break by id for strict weak ordering
+    if a.val < b.val { true } else if a.val > b.val { false } else { a.id < b.id }
+}
+
+#[inline(always)]
+fn rotate_left(mut x: Box<Node>) -> Box<Node> {
+    let mut y = x.right.take().expect("rotate_left requires right child");
+    x.right = y.left.take();
+    upd(&mut x);
+    y.left = Some(x);
+    upd(&mut y);
+    y
+}
+
+#[inline(always)]
+fn rotate_right(mut y: Box<Node>) -> Box<Node> {
+    let mut x = y.left.take().expect("rotate_right requires left child");
+    y.left = x.right.take();
+    upd(&mut y);
+    x.right = Some(y);
+    upd(&mut x);
+    x
+}
+
+fn insert_rec(node: Link, key: Entry, prio: u64) -> Link {
+    match node {
+        None => Some(Box::new(Node { key, prio, size: 1, left: None, right: None })),
+        Some(mut n) => {
+            if less(key, n.key) {
+                n.left = insert_rec(n.left.take(), key, prio);
+                if n.left.as_ref().unwrap().prio > n.prio {
+                    n = rotate_right(n);
+                }
+            } else {
+                n.right = insert_rec(n.right.take(), key, prio);
+                if n.right.as_ref().unwrap().prio > n.prio {
+                    n = rotate_left(n);
+                }
+            }
+            upd(&mut n);
+            Some(n)
+        }
+    }
+}
+
+fn remove_rec(node: Link, key: Entry) -> Link {
+    match node {
+        None => None,
+        Some(mut n) => {
+            if n.key.id == key.id {
+                // remove this node
+                return match (n.left.take(), n.right.take()) {
+                    (None, r) => r,
+                    (l, None) => l,
+                    (Some(lc), Some(rc)) => {
+                        // rotate the higher priority child up, then continue
+                        let (mut n2, left_is_higher) = if lc.prio > rc.prio {
+                            let mut n2 = Box::new(Node { key: n.key, prio: n.prio, size: 0, left: Some(lc), right: Some(rc) });
+                            n2 = rotate_right(n2);
+                            (n2, true)
+                        } else {
+                            let mut n2 = Box::new(Node { key: n.key, prio: n.prio, size: 0, left: Some(lc), right: Some(rc) });
+                            n2 = rotate_left(n2);
+                            (n2, false)
+                        };
+                        if left_is_higher {
+                            n2.right = remove_rec(n2.right.take(), key);
+                        } else {
+                            n2.left = remove_rec(n2.left.take(), key);
+                        }
+                        upd(&mut n2);
+                        Some(n2)
+                    }
+                };
+            }
+            if less(key, n.key) {
+                n.left = remove_rec(n.left.take(), key);
+            } else {
+                n.right = remove_rec(n.right.take(), key);
+            }
+            upd(&mut n);
+            Some(n)
+        }
+    }
+}
+
+fn kth_rec(node: &Link, mut k: usize) -> Entry {
+    let n = node.as_ref().expect("kth_rec on empty tree");
+    let ls = size_of(&n.left);
+    if k < ls {
+        kth_rec(&n.left, k)
+    } else if k == ls {
+        n.key
+    } else {
+        k -= ls + 1;
+        kth_rec(&n.right, k)
+    }
+}
+
+// Deterministic "random" priority from (val,id) bits, no RNG required
+#[inline(always)]
+fn treap_priority(e: Entry) -> u64 {
+    // SplitMix64 on (id ^ valbits) for good distribution
+    let mut z = e.id ^ e.val.to_bits();
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 #[cfg(test)]

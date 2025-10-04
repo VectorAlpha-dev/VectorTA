@@ -30,7 +30,8 @@
 //! - Scalar: Kept as reference path. Hot loop avoids extra work; warmup and allocation follow alma.rs.
 //! - Batch: Parallel rows supported. A row-specific optimized batch is feasible via shared TR and
 //!   prefix sums (S, SS) across rows; not implemented in this pass to keep scope minimal.
-//! - Streaming: O(n) per call; future improvement is possible by maintaining incremental state.
+//! - Streaming: O(1) per-bar kernel integrated. Uses counter-based ATR seeding, branch ring-wraps,
+//!   precomputed reciprocals, and a single-sqrt std-ratio; matches scalar outputs.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -1503,52 +1504,65 @@ pub unsafe fn damiani_volatmeter_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct DamianiVolatmeterStream<'a> {
-    // The three parallel slices:
-    high: &'a [f64],
-    low: &'a [f64],
+    // Data
+    high:  &'a [f64],
+    low:   &'a [f64],
     close: &'a [f64],
 
+    // Params
     vis_atr: usize,
     vis_std: usize,
     sed_atr: usize,
     sed_std: usize,
     threshold: f64,
 
-    // "index" = which bar we are on, 0..len-1
+    // Indices & warmup bookkeeping
+    start: usize,
     index: usize,
+    needed_all: usize,
 
-    // Running state:
+    // ATR state (Wilder)
     atr_vis_val: f64,
     atr_sed_val: f64,
-    sum_vis: f64,
-    sum_sed: f64,
+    sum_vis_seed: f64,
+    sum_sed_seed: f64,
+    vis_seed_cnt: usize,
+    sed_seed_cnt: usize,
     prev_close: f64,
-    have_prev: bool, // Track if we have a valid prev_close
+    have_prev: bool,
 
+    // Rolling stddev state (NaN→0 policy)
     ring_vis: Vec<f64>,
     ring_sed: Vec<f64>,
-    sum_vis_std: f64,
-    sum_sq_vis_std: f64,
-    sum_sed_std: f64,
-    sum_sq_sed_std: f64,
     idx_vis: usize,
     idx_sed: usize,
     filled_vis: usize,
     filled_sed: usize,
+    sum_vis_std: f64,
+    sum_sq_vis_std: f64,
+    sum_sed_std: f64,
+    sum_sq_sed_std: f64,
 
-    // Lag values for vol: we need to maintain vol[i-1], vol[i-2], vol[i-3]
-    vol_history: [f64; 3], // Changed from p1, p3 to a proper buffer
+    // Lag for vol
+    vol_hist: [f64; 3],
     lag_s: f64,
+
+    // Precomputed reciprocals / constants
+    inv_vis_atr: f64,
+    inv_sed_atr: f64,
+    inv_vis_std: f64,
+    inv_sed_std: f64,
+    vis_atr_m1:  f64,
+    sed_atr_m1:  f64,
 }
 
 impl<'a> DamianiVolatmeterStream<'a> {
+    #[inline]
     pub fn new_from_candles(
         candles: &'a Candles,
         src: &str,
         params: DamianiVolatmeterParams,
     ) -> Result<Self, DamianiVolatmeterError> {
-        // Use source_type to respect the src parameter for close data
-        // But always use actual high/low for TR calculation
         Self::new_from_slices(
             source_type(candles, "high"),
             source_type(candles, "low"),
@@ -1557,6 +1571,7 @@ impl<'a> DamianiVolatmeterStream<'a> {
         )
     }
 
+    #[inline]
     pub fn new_from_slices(
         high: &'a [f64],
         low: &'a [f64],
@@ -1564,9 +1579,7 @@ impl<'a> DamianiVolatmeterStream<'a> {
         params: DamianiVolatmeterParams,
     ) -> Result<Self, DamianiVolatmeterError> {
         let len = close.len();
-        if len == 0 {
-            return Err(DamianiVolatmeterError::EmptyData);
-        }
+        if len == 0 { return Err(DamianiVolatmeterError::EmptyData); }
 
         let vis_atr = params.vis_atr.unwrap_or(13);
         let vis_std = params.vis_std.unwrap_or(20);
@@ -1574,212 +1587,177 @@ impl<'a> DamianiVolatmeterStream<'a> {
         let sed_std = params.sed_std.unwrap_or(100);
         let threshold = params.threshold.unwrap_or(1.4);
 
-        if vis_atr == 0
-            || vis_std == 0
-            || sed_atr == 0
-            || sed_std == 0
-            || vis_atr > len
-            || vis_std > len
-            || sed_atr > len
-            || sed_std > len
+        if vis_atr == 0 || vis_std == 0 || sed_atr == 0 || sed_std == 0
+            || vis_atr > len || vis_std > len || sed_atr > len || sed_std > len
         {
             return Err(DamianiVolatmeterError::InvalidPeriod {
-                data_len: len,
-                vis_atr,
-                vis_std,
-                sed_atr,
-                sed_std,
+                data_len: len, vis_atr, vis_std, sed_atr, sed_std
             });
         }
 
-        let first = close
-            .iter()
-            .position(|&x| !x.is_nan())
+        let start = close.iter().position(|&x| !x.is_nan())
             .ok_or(DamianiVolatmeterError::AllValuesNaN)?;
-        let needed = *[vis_atr, vis_std, sed_atr, sed_std, 3]
-            .iter()
-            .max()
-            .unwrap();
-        if (len - first) < needed {
+        let needed_all = *[vis_atr, vis_std, sed_atr, sed_std, 3].iter().max().unwrap();
+        if len - start < needed_all {
             return Err(DamianiVolatmeterError::NotEnoughValidData {
-                needed,
-                valid: len - first,
+                needed: needed_all,
+                valid: len - start,
             });
         }
-
-        // Don't initialize prev_close to a potentially NaN value
-        // We'll set it when we encounter the first finite value
 
         Ok(Self {
-            high,
-            low,
-            close,
-            vis_atr,
-            vis_std,
-            sed_atr,
-            sed_std,
-            threshold,
+            high, low, close,
+            vis_atr, vis_std, sed_atr, sed_std, threshold,
 
-            index: first, // Start from first non-NaN index
+            start,
+            index: start,
+            needed_all,
+
             atr_vis_val: f64::NAN,
             atr_sed_val: f64::NAN,
-            sum_vis: 0.0,
-            sum_sed: 0.0,
-            prev_close: f64::NAN, // Initialize to NaN, will be set when we find first finite close
-            have_prev: false,     // Initialize to false
+            sum_vis_seed: 0.0,
+            sum_sed_seed: 0.0,
+            vis_seed_cnt: 0,
+            sed_seed_cnt: 0,
+            prev_close: f64::NAN,
+            have_prev: false,
 
             ring_vis: vec![0.0; vis_std],
             ring_sed: vec![0.0; sed_std],
-            sum_vis_std: 0.0,
-            sum_sq_vis_std: 0.0,
-            sum_sed_std: 0.0,
-            sum_sq_sed_std: 0.0,
             idx_vis: 0,
             idx_sed: 0,
             filled_vis: 0,
             filled_sed: 0,
+            sum_vis_std: 0.0,
+            sum_sq_vis_std: 0.0,
+            sum_sed_std: 0.0,
+            sum_sq_sed_std: 0.0,
 
-            vol_history: [f64::NAN; 3], // Initialize with NaN
+            vol_hist: [f64::NAN; 3],
             lag_s: 0.5,
+
+            inv_vis_atr: 1.0 / (vis_atr as f64),
+            inv_sed_atr: 1.0 / (sed_atr as f64),
+            inv_vis_std: 1.0 / (vis_std as f64),
+            inv_sed_std: 1.0 / (sed_std as f64),
+            vis_atr_m1:  (vis_atr as f64) - 1.0,
+            sed_atr_m1:  (sed_atr as f64) - 1.0,
         })
     }
 
+    /// Single-bar update. Returns Some((vol, anti)) after warmup; None during warmup.
+    #[inline(always)]
     pub fn update(&mut self) -> Option<(f64, f64)> {
         let i = self.index;
         let len = self.close.len();
-        if i >= len {
-            return None;
-        }
+        if i >= len { return None; }
 
-        // Compute "True Range" exactly like scalar - use have_prev gating
-        let tr = if self.have_prev && self.close[i].is_finite() {
-            let hi = self.high[i];
-            let lo = self.low[i];
-            let pc = self.prev_close;
+        let cl = self.close[i];
+        let hi = self.high[i];
+        let lo = self.low[i];
 
+        let tr = if self.have_prev && cl.is_finite() {
             let tr1 = hi - lo;
-            let tr2 = (hi - pc).abs();
-            let tr3 = (lo - pc).abs();
+            let tr2 = (hi - self.prev_close).abs();
+            let tr3 = (lo - self.prev_close).abs();
             tr1.max(tr2).max(tr3)
-        } else {
-            0.0
-        };
+        } else { 0.0 };
 
-        // Update prev_close only if current close is finite
-        if self.close[i].is_finite() {
-            self.prev_close = self.close[i];
-            self.have_prev = true;
+        if cl.is_finite() {
+            self.prev_close = cl;
+            self.have_prev  = true;
         }
 
-        // ----- ATR for "vis" -----
-        if i < self.vis_atr {
-            self.sum_vis += tr;
-            if i == self.vis_atr - 1 {
-                self.atr_vis_val = self.sum_vis / (self.vis_atr as f64);
+        // ATR (vis)
+        if self.vis_seed_cnt < self.vis_atr {
+            self.sum_vis_seed += tr;
+            self.vis_seed_cnt += 1;
+            if self.vis_seed_cnt == self.vis_atr {
+                self.atr_vis_val = self.sum_vis_seed * self.inv_vis_atr;
             }
-        } else if self.atr_vis_val.is_finite() {
-            self.atr_vis_val =
-                ((self.vis_atr as f64 - 1.0) * self.atr_vis_val + tr) / (self.vis_atr as f64);
-        }
-
-        // ----- ATR for "sed" -----
-        if i < self.sed_atr {
-            self.sum_sed += tr;
-            if i == self.sed_atr - 1 {
-                self.atr_sed_val = self.sum_sed / (self.sed_atr as f64);
-            }
-        } else if self.atr_sed_val.is_finite() {
-            self.atr_sed_val =
-                ((self.sed_atr as f64 - 1.0) * self.atr_sed_val + tr) / (self.sed_atr as f64);
-        }
-
-        // ---- Insert price‐for‐StdDev (use close, treat NaN as 0) ----
-        let val = if self.close[i].is_nan() {
-            0.0
         } else {
-            self.close[i]
-        };
+            self.atr_vis_val = self.atr_vis_val.mul_add(self.vis_atr_m1, tr) * self.inv_vis_atr;
+        }
 
-        // Update "vis" ring buffer:
+        // ATR (sed)
+        if self.sed_seed_cnt < self.sed_atr {
+            self.sum_sed_seed += tr;
+            self.sed_seed_cnt += 1;
+            if self.sed_seed_cnt == self.sed_atr {
+                self.atr_sed_val = self.sum_sed_seed * self.inv_sed_atr;
+            }
+        } else {
+            self.atr_sed_val = self.atr_sed_val.mul_add(self.sed_atr_m1, tr) * self.inv_sed_atr;
+        }
+
+        // Rolling stddev rings (NaN→0)
+        let v = if cl.is_nan() { 0.0 } else { cl };
+
+        // vis
         let old_v = self.ring_vis[self.idx_vis];
-        self.ring_vis[self.idx_vis] = val;
-        self.idx_vis = (self.idx_vis + 1) % self.vis_std;
+        self.ring_vis[self.idx_vis] = v;
+        self.idx_vis += 1;
+        if self.idx_vis == self.vis_std { self.idx_vis = 0; }
         if self.filled_vis < self.vis_std {
-            self.filled_vis += 1;
-            self.sum_vis_std += val;
-            self.sum_sq_vis_std += val * val;
+            self.filled_vis     += 1;
+            self.sum_vis_std    += v;
+            self.sum_sq_vis_std = v.mul_add(v, self.sum_sq_vis_std);
         } else {
-            self.sum_vis_std = self.sum_vis_std - old_v + val;
-            self.sum_sq_vis_std = self.sum_sq_vis_std - (old_v * old_v) + (val * val);
+            self.sum_vis_std    += v - old_v;
+            self.sum_sq_vis_std += v.mul_add(v, -old_v * old_v);
         }
 
-        // Update "sed" ring buffer:
+        // sed
         let old_s = self.ring_sed[self.idx_sed];
-        self.ring_sed[self.idx_sed] = val;
-        self.idx_sed = (self.idx_sed + 1) % self.sed_std;
+        self.ring_sed[self.idx_sed] = v;
+        self.idx_sed += 1;
+        if self.idx_sed == self.sed_std { self.idx_sed = 0; }
         if self.filled_sed < self.sed_std {
-            self.filled_sed += 1;
-            self.sum_sed_std += val;
-            self.sum_sq_sed_std += val * val;
+            self.filled_sed     += 1;
+            self.sum_sed_std    += v;
+            self.sum_sq_sed_std = v.mul_add(v, self.sum_sq_sed_std);
         } else {
-            self.sum_sed_std = self.sum_sed_std - old_s + val;
-            self.sum_sq_sed_std = self.sum_sq_sed_std - (old_s * old_s) + (val * val);
+            self.sum_sed_std    += v - old_s;
+            self.sum_sq_sed_std += v.mul_add(v, -old_s * old_s);
         }
 
-        // Increment index for next call
-        self.index += 1;
+        // Advance absolute index
+        self.index = i + 1;
 
-        // Only start computing vol/anti once we have _all_ lookbacks:
-        let needed = *[self.vis_atr, self.vis_std, self.sed_atr, self.sed_std, 3]
-            .iter()
-            .max()
-            .unwrap();
-        if i < needed {
-            return None;
-        }
+        // Warmup gating (match scalar: absolute index threshold)
+        if i < self.needed_all { return None; }
 
-        // Get previous vol values from history
-        let p1 = if !self.vol_history[0].is_nan() {
-            self.vol_history[0]
-        } else {
-            0.0
-        };
-        let p3 = if !self.vol_history[2].is_nan() {
-            self.vol_history[2]
-        } else {
-            0.0
-        };
-
-        // Avoid divide‐by‐zero on sed:
+        // Lag terms
+        let p1 = if self.vol_hist[0].is_nan() { 0.0 } else { self.vol_hist[0] };
+        let p3 = if self.vol_hist[2].is_nan() { 0.0 } else { self.vol_hist[2] };
         let sed_safe = if self.atr_sed_val.is_finite() && self.atr_sed_val != 0.0 {
             self.atr_sed_val
-        } else {
-            self.atr_sed_val + f64::EPSILON
-        };
+        } else { f64::EPSILON };
+        let vol_now = (self.atr_vis_val / sed_safe) + self.lag_s * (p1 - p3);
 
-        // Compute vol[i]:
-        let vol_val = (self.atr_vis_val / sed_safe) + self.lag_s * (p1 - p3);
+        // Shift history
+        self.vol_hist[2] = self.vol_hist[1];
+        self.vol_hist[1] = self.vol_hist[0];
+        self.vol_hist[0] = vol_now;
 
-        // Shift the vol history buffer
-        self.vol_history[2] = self.vol_history[1];
-        self.vol_history[1] = self.vol_history[0];
-        self.vol_history[0] = vol_val;
+        // Std ratio via one sqrt
+        let mean_v  = self.sum_vis_std * self.inv_vis_std;
+        let mean2_v = self.sum_sq_vis_std * self.inv_vis_std;
+        let var_v   = (mean2_v - mean_v * mean_v).max(0.0);
 
-        // Compute anti[i] only if both StdDev windows are full:
-        let anti_val = if self.filled_vis == self.vis_std && self.filled_sed == self.sed_std {
-            let std_vis = stddev(self.sum_vis_std, self.sum_sq_vis_std, self.vis_std);
-            let std_sed = stddev(self.sum_sed_std, self.sum_sq_sed_std, self.sed_std);
-            let ratio = if std_sed != 0.0 {
-                std_vis / std_sed
-            } else {
-                std_vis / (std_sed + f64::EPSILON)
-            };
-            self.threshold - ratio
-        } else {
-            f64::NAN
-        };
+        let mean_s  = self.sum_sed_std * self.inv_sed_std;
+        let mean2_s = self.sum_sq_sed_std * self.inv_sed_std;
+        let var_s   = (mean2_s - mean_s * mean_s).max(0.0);
 
-        Some((vol_val, anti_val))
+        let ratio = Self::sqrt_ratio(var_v, var_s);
+        let anti_now = self.threshold - ratio;
+
+        Some((vol_now, anti_now))
+    }
+
+    #[inline(always)]
+    fn sqrt_ratio(num_var: f64, den_var: f64) -> f64 {
+        (num_var / (if den_var > 0.0 { den_var } else { f64::EPSILON })).sqrt()
     }
 }
 

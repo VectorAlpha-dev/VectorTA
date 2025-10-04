@@ -17,8 +17,8 @@
 //! - SIMD status: Not implemented. Generic PNR relies on order-statistic selection with irregular
 //!   control flow; prior attempts (Introselect/partial selection) underperformed the simple
 //!   sort-based scalar path at realistic window sizes. Runtime selection short-circuits to scalar.
-//! - Streaming: O(n log n) per update (sorts filtered window each step), kept for correctness and
-//!   consistently better real-world performance vs generic partial selection for typical lengths.
+//! - Streaming: Amortized O(log L) per update via dual-heaps with lazy deletion (exact nearest-rank
+//!   percentile; NaNs ignored inside the window; all-NaN window yields NaN). Preserves warmup semantics.
 //! - Batch: Adds a light row-specific optimization that shares the sorted window across rows that
 //!   have the same `length` but different `percentage` values (enabled when `parallel == false`).
 //!   This preserves warmup semantics and reduces redundant work when multiple percentiles are
@@ -429,13 +429,59 @@ impl PercentileNearestRankBuilder {
 
 // ==================== STREAMING SUPPORT ====================
 
+use std::cmp::Reverse;
+use std::collections::HashMap;
+
+/// Decision: Streaming upgraded to dual-heaps (lazy deletion) for O(log L) updates; exact parity with batch.
+
+/// Wrapper that gives a total order for f64 as long as NaN isn't inserted (we filter NaNs earlier).
+#[derive(Copy, Clone, Debug)]
+struct FOrd(f64);
+impl PartialEq for FOrd { #[inline] fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl Eq for FOrd {}
+impl PartialOrd for FOrd { #[inline] fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) } }
+impl Ord for FOrd { #[inline] fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.0.partial_cmp(&other.0).unwrap() } }
+
+/// Hash key for lazy-deletion maps that treats -0.0 == +0.0.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct FKey(u64);
+impl From<f64> for FKey {
+    #[inline]
+    fn from(x: f64) -> Self {
+        let bits = if x == 0.0 { 0u64 } else { x.to_bits() };
+        FKey(bits)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PercentileNearestRankStream {
     length: usize,
     percentage: f64,
+    p_frac: f64,
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
+
+    // Dual-heap state for non-NaN values
+    left: std::collections::BinaryHeap<FOrd>,           // max-heap: t smallest values
+    right: std::collections::BinaryHeap<Reverse<FOrd>>, // min-heap: rest
+    delayed_left: HashMap<FKey, usize>,
+    delayed_right: HashMap<FKey, usize>,
+    size_left: usize,
+    size_right: usize,
+
+    // Precomputed target for full windows: t_full = k_full + 1
+    t_full: usize,
+}
+
+#[inline(always)]
+fn nearest_rank_index_fast(pf: f64, wl: usize) -> usize {
+    // For non-negative inputs, floor(x + 0.5) == round(x)
+    let mut k = (pf.mul_add(wl as f64, 0.5)) as usize;
+    if k == 0 { 0 } else {
+        k -= 1;
+        if k >= wl { wl - 1 } else { k }
+    }
 }
 
 impl PercentileNearestRankStream {
@@ -444,53 +490,166 @@ impl PercentileNearestRankStream {
     ) -> Result<Self, PercentileNearestRankError> {
         let length = params.length.unwrap_or(15);
         if length == 0 {
-            return Err(PercentileNearestRankError::InvalidPeriod {
-                period: length,
-                data_len: 0,
-            });
+            return Err(PercentileNearestRankError::InvalidPeriod { period: length, data_len: 0 });
         }
-
         let percentage = params.percentage.unwrap_or(50.0);
         if !(0.0..=100.0).contains(&percentage) || percentage.is_nan() || percentage.is_infinite() {
             return Err(PercentileNearestRankError::InvalidPercentage { percentage });
         }
 
+        let p_frac = percentage * 0.01;
+        let t_full = nearest_rank_index_fast(p_frac, length) + 1;
+
         Ok(Self {
             length,
             percentage,
+            p_frac,
             buffer: vec![f64::NAN; length],
             head: 0,
             filled: false,
+            left: std::collections::BinaryHeap::with_capacity(length),
+            right: std::collections::BinaryHeap::with_capacity(length),
+            delayed_left: HashMap::new(),
+            delayed_right: HashMap::new(),
+            size_left: 0,
+            size_right: 0,
+            t_full,
         })
     }
 
+    #[inline(always)]
+    fn prune_left(&mut self) {
+        while let Some(&FOrd(x)) = self.left.peek() {
+            let key = FKey::from(x);
+            if let Some(cnt) = self.delayed_left.get_mut(&key) {
+                if *cnt > 0 {
+                    self.left.pop();
+                    *cnt -= 1;
+                    if *cnt == 0 { self.delayed_left.remove(&key); }
+                } else { break; }
+            } else { break; }
+        }
+    }
+
+    #[inline(always)]
+    fn prune_right(&mut self) {
+        while let Some(&Reverse(FOrd(x))) = self.right.peek() {
+            let key = FKey::from(x);
+            if let Some(cnt) = self.delayed_right.get_mut(&key) {
+                if *cnt > 0 {
+                    self.right.pop();
+                    *cnt -= 1;
+                    if *cnt == 0 { self.delayed_right.remove(&key); }
+                } else { break; }
+            } else { break; }
+        }
+    }
+
+    #[inline(always)]
+    fn current_left_top(&mut self) -> Option<f64> {
+        self.prune_left();
+        self.left.peek().map(|v| v.0)
+    }
+
+    #[inline(always)]
+    fn push_value(&mut self, v: f64) {
+        if v.is_nan() { return; }
+        if self.size_left == 0 {
+            self.left.push(FOrd(v));
+            self.size_left += 1;
+        } else {
+            let left_top = self.current_left_top().unwrap();
+            if v <= left_top {
+                self.left.push(FOrd(v));
+                self.size_left += 1;
+            } else {
+                self.right.push(Reverse(FOrd(v)));
+                self.size_right += 1;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn erase_value(&mut self, v: f64) {
+        if v.is_nan() { return; }
+        let belongs_left = match self.current_left_top() {
+            Some(top) => v <= top,
+            None => false,
+        };
+        let key = FKey::from(v);
+        if belongs_left {
+            *self.delayed_left.entry(key).or_insert(0) += 1;
+            if self.size_left > 0 { self.size_left -= 1; }
+            self.prune_left();
+        } else {
+            *self.delayed_right.entry(key).or_insert(0) += 1;
+            if self.size_right > 0 { self.size_right -= 1; }
+            self.prune_right();
+        }
+    }
+
+    #[inline(always)]
+    fn target_left_for_valid(&self, valid: usize) -> usize {
+        if valid == 0 { return 0; }
+        if valid == self.length { return self.t_full; }
+        nearest_rank_index_fast(self.p_frac, valid) + 1
+    }
+
+    #[inline(always)]
+    fn rebalance(&mut self, target_left: usize) {
+        self.prune_left();
+        self.prune_right();
+
+        while self.size_left > target_left {
+            if let Some(FOrd(x)) = self.left.pop() {
+                self.size_left -= 1;
+                self.right.push(Reverse(FOrd(x)));
+                self.size_right += 1;
+            }
+            self.prune_left();
+        }
+        while self.size_left < target_left {
+            self.prune_right();
+            if let Some(Reverse(FOrd(x))) = self.right.pop() {
+                self.size_right -= 1;
+                self.left.push(FOrd(x));
+                self.size_left += 1;
+            } else {
+                break;
+            }
+        }
+        self.prune_left();
+    }
+
+    /// Amortized O(log L) update. Returns None until the first full window is seen,
+    /// then Some(value) each tick (NaN if all values in the window are NaN).
     pub fn update(&mut self, value: f64) -> Option<f64> {
+        let outgoing = self.buffer[self.head];
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.length;
 
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
+
+        // Insert incoming even during warmup so heaps are ready.
+        self.push_value(value);
+
         if !self.filled {
             return None;
         }
 
-        let mut window: Vec<f64> = self
-            .buffer
-            .iter()
-            .copied()
-            .filter(|x| !x.is_nan())
-            .collect();
-        if window.is_empty() {
+        // Erase outgoing once full window is established.
+        self.erase_value(outgoing);
+
+        let valid = self.size_left + self.size_right;
+        if valid == 0 {
             return Some(f64::NAN);
         }
-        window.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let target_left = self.target_left_for_valid(valid);
+        self.rebalance(target_left);
 
-        // changed: use window.len() like pnr_compute_into
-        let wl = window.len() as f64;
-        let raw = (self.percentage / 100.0 * wl).round() as isize - 1;
-        let idx = raw.max(0) as usize;
-        Some(window[idx.min(window.len() - 1)])
+        self.current_left_top().or(Some(f64::NAN))
     }
 }
 

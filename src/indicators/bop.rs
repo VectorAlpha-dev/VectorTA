@@ -28,11 +28,9 @@
 //! ```
 //!
 //! ## Developer Notes
-//! - **AVX2 kernel**: Implemented but disabled by default (underperforms scalar on typical CPUs)
-//! - **AVX512 kernel**: Implemented but disabled by default (underperforms scalar on typical CPUs)
-//! - **Streaming**: Not implemented
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
-//! - **Batch operations**: ✅ Implemented with parallel processing support
+//! - SIMD implemented but disabled by default for BOP; division-bound and underperforms scalar on common CPUs.
+//! - Streaming enabled (O(1)); cold fallback path for denom ≤ 0.0 to improve layout/prediction.
+//! - Memory optimization: ✅ Uses alloc_with_nan_prefix (zero-copy). Batch supported.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -486,17 +484,80 @@ pub struct BopStream {
 }
 
 impl BopStream {
+    #[inline]
     pub fn try_new() -> Result<Self, BopError> {
         Ok(Self { last: None })
     }
+
+    /// Safe O(1) update, identical semantics to the vector path:
+    /// if (high - low) <= 0.0 => returns 0.0.
+    ///
+    /// Micro-opts:
+    /// - puts the rare `(den <= 0)` branch on a #[cold] function to
+    ///   improve code layout and prediction on hot loops.
     #[inline(always)]
     pub fn update(&mut self, open: f64, high: f64, low: f64, close: f64) -> f64 {
-        let denom = high - low;
-        let val = if denom <= 0.0 {
-            0.0
-        } else {
-            (close - open) / denom
-        };
+        let den = high - low;
+        if den <= 0.0 {
+            return self.cold_zero();
+        }
+        // Only do the numerator work on the hot (valid) path.
+        let val = (close - open) / den;
+        self.last = Some(val);
+        val
+    }
+
+    /// Fast path when the data feed guarantees `high > low` and OHLC invariants hold.
+    /// Skips the branch and uses reciprocal multiply.
+    #[inline(always)]
+    pub fn update_unchecked(&mut self, open: f64, high: f64, low: f64, close: f64) -> f64 {
+        debug_assert!(high > low, "BOP update_unchecked requires high > low");
+        let inv = (high - low).recip();
+        let val = (close - open) * inv;
+        self.last = Some(val);
+        val
+    }
+
+    /// Accessor for the last computed value.
+    #[inline(always)]
+    pub fn last_value(&self) -> Option<f64> {
+        self.last
+    }
+
+    // ---- cold helper(s) ----
+    #[cold]
+    #[inline(never)]
+    fn cold_zero(&mut self) -> f64 {
+        self.last = Some(0.0);
+        0.0
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn recip14_nr2(x: f64) -> f64 {
+    use core::arch::x86_64::*;
+    // Initial ~14-bit reciprocal
+    let r0 = _mm_rcp14_sd(_mm_setzero_pd(), _mm_set_sd(x));
+    let mut r = _mm_cvtsd_f64(r0);
+    // Two Newton–Raphson steps: r = r * (2 - x*r)
+    r = r * (2.0 - x * r);
+    r = r * (2.0 - x * r);
+    r
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+impl BopStream {
+    /// Optional: same semantics as `update`, but uses AVX-512 rcp14 + 2×NR refinement
+    /// to reduce division cost on supporting CPUs. Returns 0.0 if `high - low <= 0.0`.
+    #[inline(always)]
+    pub fn update_fast(&mut self, open: f64, high: f64, low: f64, close: f64) -> f64 {
+        let den = high - low;
+        if den <= 0.0 {
+            return self.cold_zero();
+        }
+        let inv = unsafe { recip14_nr2(den) };
+        let val = (close - open) * inv;
         self.last = Some(val);
         val
     }
