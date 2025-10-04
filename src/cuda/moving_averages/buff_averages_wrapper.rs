@@ -14,7 +14,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{DeviceBuffer, mem_get_info};
-use cust::module::Module;
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
@@ -248,8 +248,22 @@ impl CudaBuffAverages {
             Context::new(device).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/buff_averages_kernel.ptx"));
-        let module =
-            Module::from_ptx(ptx, &[]).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        // Align with ALMA JIT policy: prefer DetermineTargetFromContext + O2, then progressively relax
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
