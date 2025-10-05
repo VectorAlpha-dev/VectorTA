@@ -1,9 +1,14 @@
 //! CUDA scaffolding for the Jurik Moving Average (JMA) kernels.
 //!
-//! The GPU implementation mirrors the scalar recurrence exactly: each parameter
-//! sweep (one price series × many parameter combinations) and the many-series
-//! variant execute sequentially per series/combo while the surrounding wrapper
-//! keeps data resident on device for zero-copy workflows.
+//! Parity goals (mirrors ALMA wrapper):
+//! - Policy enums for explicit kernel selection (record last selection)
+//! - NON_BLOCKING stream, PTX JIT with DetermineTargetFromContext + O2 fallback
+//! - VRAM estimation and early-fail guard; chunk batch grid to avoid limits
+//! - Public device entry points that accept host slices or DeviceBuffers
+//!
+//! Math: JMA is a recurrence (time-marching) — one thread per combo/series
+//! performs a sequential scan over time. There are no tiled/2x variants; the
+//! policy types exist for API symmetry and debugging.
 
 #![cfg(feature = "cuda")]
 
@@ -12,14 +17,14 @@ use crate::indicators::moving_averages::jma::{expand_grid_jma, JmaBatchRange, Jm
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaJmaError {
@@ -38,22 +43,76 @@ impl fmt::Display for CudaJmaError {
 
 impl std::error::Error for CudaJmaError {}
 
+// -------- Kernel policy + introspection (for parity with ALMA) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchThreadsPerOutput { One, Two }
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+    Tiled { tile: u32, per_thread: BatchThreadsPerOutput }, // not used by JMA
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 }, // not used by JMA
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaJmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+impl Default for CudaJmaPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+
 pub struct CudaJma {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaJmaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaJma {
     pub fn new(device_id: usize) -> Result<Self, CudaJmaError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
 
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/jma_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaJmaError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
 
@@ -61,7 +120,30 @@ impl CudaJma {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaJmaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    pub fn new_with_policy(device_id: usize, policy: CudaJmaPolicy) -> Result<Self, CudaJmaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaJmaPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaJmaPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    /// Expose synchronize for benches/tests
+    pub fn synchronize(&self) -> Result<(), CudaJmaError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaJmaError::Cuda(e.to_string()))
     }
 
     pub fn jma_batch_dev(
@@ -119,16 +201,14 @@ impl CudaJma {
             ));
         }
 
-        self.launch_batch_kernel(
-            d_prices,
-            d_alphas,
-            d_one_minus_betas,
-            d_phase_ratios,
-            series_len,
-            n_combos,
-            first_valid,
-            d_out,
-        )
+        self.launch_batch_kernel(d_prices,
+                                 d_alphas,
+                                 d_one_minus_betas,
+                                 d_phase_ratios,
+                                 series_len,
+                                 n_combos,
+                                 first_valid,
+                                 d_out)
     }
 
     pub fn jma_many_series_one_param_time_major_dev(
@@ -236,17 +316,27 @@ impl CudaJma {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
                 .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+        // Selection (only "Plain" with 1 thread for recurrence)
+        unsafe {
+            let this = self as *const _ as *mut CudaJma;
+            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x: 1 });
+        }
+        self.maybe_log_batch_debug();
 
-        self.launch_batch_kernel(
-            &d_prices,
-            &d_alphas,
-            &d_one_minus_betas,
-            &d_phase_ratios,
-            series_len,
-            n_combos,
-            inputs.first_valid,
-            &mut d_out,
-        )?;
+        // Chunk combos to avoid grid limits; kernel maps combos to grid.x
+        for (start, len) in Self::grid_chunks(n_combos) {
+            self.launch_batch_kernel_chunk(
+                &d_prices,
+                &d_alphas,
+                &d_one_minus_betas,
+                &d_phase_ratios,
+                series_len,
+                start,
+                len,
+                inputs.first_valid,
+                &mut d_out,
+            )?;
+        }
 
         self.stream
             .synchronize()
@@ -290,6 +380,13 @@ impl CudaJma {
             unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }
                 .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
 
+        // Selection/introspection (plain 1D mapping)
+        unsafe {
+            let this = self as *const _ as *mut CudaJma;
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x: 1 });
+        }
+        self.maybe_log_many_debug();
+
         self.launch_many_series_kernel(
             &d_prices_tm,
             consts.alpha,
@@ -324,23 +421,55 @@ impl CudaJma {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaJmaError> {
+        // Back-compat: single-shot launch for all combos (no chunking)
+        self.launch_batch_kernel_chunk(
+            d_prices,
+            d_alphas,
+            d_one_minus_betas,
+            d_phase_ratios,
+            series_len,
+            0,
+            n_combos,
+            first_valid,
+            d_out,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_batch_kernel_chunk(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_alphas: &DeviceBuffer<f32>,
+        d_one_minus_betas: &DeviceBuffer<f32>,
+        d_phase_ratios: &DeviceBuffer<f32>,
+        series_len: usize,
+        start_combo: usize,
+        len_combos: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaJmaError> {
         let func = self
             .module
             .get_function("jma_batch_f32")
             .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
 
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        let grid: GridSize = (len_combos as u32, 1, 1).into();
         let block: BlockSize = (1, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut alphas_ptr = d_alphas.as_device_ptr().as_raw();
-            let mut beta_ptr = d_one_minus_betas.as_device_ptr().as_raw();
-            let mut phase_ptr = d_phase_ratios.as_device_ptr().as_raw();
+            // Offset per-combo arrays by start_combo
+            let mut alphas_ptr = d_alphas.as_device_ptr().add(start_combo).as_raw();
+            let mut beta_ptr = d_one_minus_betas.as_device_ptr().add(start_combo).as_raw();
+            let mut phase_ptr = d_phase_ratios.as_device_ptr().add(start_combo).as_raw();
             let mut series_len_i = series_len as i32;
-            let mut combos_i = n_combos as i32;
+            let mut combos_i = len_combos as i32;
             let mut first_valid_i = first_valid as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            // Offset output by start_combo * series_len
+            let mut out_ptr = d_out
+                .as_device_ptr()
+                .add(start_combo * series_len)
+                .as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
                 &mut alphas_ptr as *mut _ as *mut c_void,
@@ -588,16 +717,7 @@ impl CudaJma {
 
     #[inline]
     fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
+        mem_get_info().ok()
     }
 
     #[inline]
@@ -609,6 +729,45 @@ impl CudaJma {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else {
             true
+        }
+    }
+
+    #[inline]
+    fn grid_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
+        const MAX: usize = 65_535; // conservative limit for a single grid dim
+        (0..n).step_by(MAX).map(move |start| {
+            let len = (n - start).min(MAX);
+            (start, len)
+        })
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] JMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaJma)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] JMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaJma)).debug_many_logged = true; }
+            }
         }
     }
 }

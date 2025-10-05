@@ -1,26 +1,30 @@
 //! CUDA scaffolding for the Reflex indicator.
 //!
-//! The GPU implementation mirrors the scalar Reflex algorithm: each parameter
-//! combination is evaluated sequentially while its smoothed history (the last
-//! `period` samples) lives in shared memory. This keeps the zero-copy contract
-//! of the CPU paths while exposing the same device/host helpers provided by the
-//! other CUDA-enabled moving averages (ALMA, SQWMA, etc.).
+//! The GPU implementation mirrors the scalar Reflex algorithm (recurrence/IIR):
+//! each parameter combination is evaluated sequentially while its smoothed
+//! history (the last `period` samples) lives in shared memory. This keeps the
+//! warmup/NaN semantics identical to the scalar path (first `period` outputs
+//! are 0.0; NaN written outside valid ranges), and matches the public API
+//! shape used by ALMA for CUDA wrappers (VRAM handle, policies, BENCH_DEBUG,
+//! and grid chunking).
 
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
+// Reuse common policy enums exported by CWMA to stay consistent with ALMA.
+use super::{BatchKernelPolicy, ManySeriesKernelPolicy};
 use crate::indicators::moving_averages::reflex::{ReflexBatchRange, ReflexParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaReflexError {
@@ -43,6 +47,13 @@ pub struct CudaReflex {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    // Policy/introspection (mirrors ALMA/CWMA wrappers)
+    policy: CudaReflexPolicy,
+    last_batch: Option<ReflexBatchKernelSelected>,
+    last_many: Option<ReflexManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaReflex {
@@ -54,8 +65,23 @@ impl CudaReflex {
         let context = Context::new(device).map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/reflex_kernel.ptx"));
-        let module =
-            Module::from_ptx(ptx, &[]).map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
+        // Match ALMA JIT options for broad driver compatibility and perf
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaReflexError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
 
@@ -63,7 +89,35 @@ impl CudaReflex {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaReflexPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    /// Create with explicit kernel selection policy (test/bench control).
+    pub fn new_with_policy(device_id: usize, policy: CudaReflexPolicy) -> Result<Self, CudaReflexError> {
+        let mut me = Self::new(device_id)?;
+        me.policy = policy;
+        Ok(me)
+    }
+
+    #[inline]
+    pub fn set_policy(&mut self, policy: CudaReflexPolicy) { self.policy = policy; }
+    #[inline]
+    pub fn policy(&self) -> &CudaReflexPolicy { &self.policy }
+    #[inline]
+    pub fn selected_batch_kernel(&self) -> Option<ReflexBatchKernelSelected> { self.last_batch }
+    #[inline]
+    pub fn selected_many_series_kernel(&self) -> Option<ReflexManySeriesKernelSelected> { self.last_many }
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaReflexError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaReflexError::Cuda(e.to_string()))
     }
 
     #[inline]
@@ -75,18 +129,7 @@ impl CudaReflex {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -249,7 +292,7 @@ impl CudaReflex {
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + periods_bytes + out_bytes;
-        let headroom = 32 * 1024 * 1024; // 32MB safety margin
+        let headroom = 64 * 1024 * 1024; // 64MB safety margin (match ALMA)
 
         if !Self::will_fit(required, headroom) {
             return Err(CudaReflexError::InvalidInput(
@@ -349,28 +392,46 @@ impl CudaReflex {
             .get_function("reflex_batch_f32")
             .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
 
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
-        let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
-
+        // Log selected kernel once per scenario when BENCH_DEBUG=1
         unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut combos_i = n_combos as i32;
-            let mut first_valid_i = first_valid as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut combos_i as *mut _ as *mut c_void,
-                &mut first_valid_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaReflexError::Cuda(e.to_string()))?
+            let this = self as *const _ as *mut CudaReflex;
+            (*this).last_batch = Some(ReflexBatchKernelSelected::Plain1D { block_x: 1 });
+        }
+        self.maybe_log_batch_debug();
+
+        // Chunk very large sweeps to avoid grid dimension pitfalls and reduce launch failures.
+        const MAX_CHUNK: usize = 65_535; // conservative (matches ALMA grid.y rule)
+        let block: BlockSize = (1, 1, 1).into();
+        // Ring buffer of size period+1 is used in kernels
+        let shared_bytes = ((max_period + 1) * std::mem::size_of::<f32>()) as u32;
+        let mut start = 0usize;
+        while start < n_combos {
+            let len = (n_combos - start).min(MAX_CHUNK);
+            let grid: GridSize = (len as u32, 1, 1).into();
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                // Offset parameter and output pointers for this slice
+                let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = len as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut out_ptr = d_out
+                    .as_device_ptr()
+                    .add(start * series_len)
+                    .as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes, args)
+                    .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
+            }
+            start += len;
         }
         Ok(())
     }
@@ -389,9 +450,17 @@ impl CudaReflex {
             .get_function("reflex_many_series_one_param_f32")
             .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
 
+        // For recurrence, 1D kernel is the canonical choice (one thread per series).
+        unsafe {
+            let this = self as *const _ as *mut CudaReflex;
+            (*this).last_many = Some(ReflexManySeriesKernelSelected::OneD { block_x: 1 });
+        }
+        self.maybe_log_many_debug();
+
         let grid: GridSize = (num_series as u32, 1, 1).into();
         let block: BlockSize = (1, 1, 1).into();
-        let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
+        // Ring buffer of size period+1 is used in kernels
+        let shared_bytes = ((period + 1) * std::mem::size_of::<f32>()) as u32;
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -564,4 +633,60 @@ struct BatchInputs {
 
 struct ManySeriesInputs {
     first_valids: Vec<i32>,
+}
+
+// ---------- Policy + introspection (simple for recurrence) ----------
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaReflexPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+impl Default for CudaReflexPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ReflexBatchKernelSelected {
+    /// Plain 1D: one block per combo, one thread per block (sequential in-thread scan)
+    Plain1D { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ReflexManySeriesKernelSelected {
+    /// OneD: one block per series, one thread per block (sequential scan)
+    OneD { block_x: u32 },
+}
+
+#[inline]
+fn maybe_log_once(flag: &mut bool, msg: String) {
+    static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+    if *flag { return; }
+    if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+        let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+        if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+            eprintln!("{}", msg);
+        }
+        *flag = true;
+    }
+}
+
+impl CudaReflex {
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        if let Some(sel) = self.last_batch {
+            let msg = format!("[DEBUG] Reflex batch selected kernel: {:?}", sel);
+            // Safety: only toggles a bool; avoid &mut self requirement
+            unsafe { maybe_log_once(&mut (*(self as *const _ as *mut CudaReflex)).debug_batch_logged, msg); }
+        }
+    }
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        if let Some(sel) = self.last_many {
+            let msg = format!("[DEBUG] Reflex many-series selected kernel: {:?}", sel);
+            unsafe { maybe_log_once(&mut (*(self as *const _ as *mut CudaReflex)).debug_many_logged, msg); }
+        }
+    }
 }

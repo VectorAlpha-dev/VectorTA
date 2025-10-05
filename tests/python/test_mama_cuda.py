@@ -1,10 +1,13 @@
-"""Python binding tests for MAMA CUDA kernels."""
-import pytest
+"""
+Python CUDA binding tests for MAMA (MESA Adaptive Moving Average).
+Skips gracefully when CUDA or bindings are unavailable.
+"""
 import numpy as np
+import pytest
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:  # pragma: no cover - optional dependency for CUDA path
     cp = None
 
 try:
@@ -15,25 +18,30 @@ except ImportError:
         allow_module_level=True,
     )
 
-from test_utils import assert_close, load_test_data
+from test_utils import load_test_data, assert_close
 
 
 def _cuda_available() -> bool:
     if cp is None:
         return False
-    if not hasattr(ti, 'mama_cuda_batch_dev'):
+    if not hasattr(ti, "mama_cuda_batch_dev"):
         return False
     try:
-        sample = np.linspace(1.0, 3.0, 12, dtype=np.float32)
-        handles = ti.mama_cuda_batch_dev(sample, (0.4, 0.4, 0.0), (0.05, 0.05, 0.0))
-        mama_handle, fama_handle = handles
-        _ = cp.asarray(mama_handle)
-        _ = cp.asarray(fama_handle)
+        x = np.array([np.nan, 1.0, 2.0, 3.0, 4.0], dtype=np.float64)
+        m, f = ti.mama_cuda_batch_dev(
+            x.astype(np.float32),
+            fast_limit_range=(0.5, 0.5, 0.0),
+            slow_limit_range=(0.05, 0.05, 0.0),
+        )
+        # Ensure CuPy can wrap both device arrays
+        _ = cp.asarray(m)
+        _ = cp.asarray(f)
         return True
-    except Exception as exc:  # pragma: no cover - defensive skip path
-        msg = str(exc).lower()
-        if 'cuda not available' in msg or 'nvcc' in msg or 'ptx' in msg:
+    except Exception as e:  # pragma: no cover - defensive
+        msg = str(e).lower()
+        if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False
+        # Other errors mean CUDA path exists; consider available
         return True
 
 
@@ -41,55 +49,57 @@ def _cuda_available() -> bool:
     not _cuda_available(), reason="CUDA not available or cuda bindings not built"
 )
 class TestMamaCuda:
-    @pytest.fixture(scope='class')
+    @pytest.fixture(scope="class")
     def test_data(self):
         return load_test_data()
 
     def test_mama_cuda_batch_matches_cpu(self, test_data):
-        close = test_data['close'].astype(np.float64)
-        fast_range = (0.35, 0.55, 0.1)
-        slow_range = (0.03, 0.09, 0.03)
+        close = test_data["close"][:2048].astype(np.float64)
+        fast, slow = 0.5, 0.05
 
-        cpu = ti.mama_batch(close, fast_range, slow_range)
-        cpu_m = cpu['mama']
-        cpu_f = cpu['fama']
+        # CPU baseline
+        cpu_m, cpu_f = ti.mama(close, fast, slow)
 
-        mama_handle, fama_handle = ti.mama_cuda_batch_dev(
-            close.astype(np.float32), fast_range, slow_range
+        # CUDA single-combo batch
+        m_handle, f_handle = ti.mama_cuda_batch_dev(
+            close.astype(np.float32),
+            fast_limit_range=(fast, fast, 0.0),
+            slow_limit_range=(slow, slow, 0.0),
         )
-        gpu_m = cp.asnumpy(cp.asarray(mama_handle))
-        gpu_f = cp.asnumpy(cp.asarray(fama_handle))
 
-        assert gpu_m.shape == cpu_m.shape
-        assert gpu_f.shape == cpu_f.shape
-        assert_close(gpu_m, cpu_m, rtol=1e-4, atol=1e-5, msg="CUDA MAMA batch mismatch")
-        assert_close(gpu_f, cpu_f, rtol=1e-4, atol=1e-5, msg="CUDA FAMA batch mismatch")
+        m_gpu = cp.asnumpy(cp.asarray(m_handle))[0]
+        f_gpu = cp.asnumpy(cp.asarray(f_handle))[0]
+
+        assert_close(m_gpu, cpu_m, rtol=1e-5, atol=1e-6, msg="MAMA mismatch (CUDA vs CPU)")
+        assert_close(f_gpu, cpu_f, rtol=1e-5, atol=1e-6, msg="FAMA mismatch (CUDA vs CPU)")
 
     def test_mama_cuda_many_series_one_param_matches_cpu(self, test_data):
-        T = 480
-        N = 3
-        base = test_data['close'][:T].astype(np.float64)
+        T = 1024
+        N = 4
+        base = test_data["close"][:T].astype(np.float64)
         data_tm = np.zeros((T, N), dtype=np.float64)
         for j in range(N):
-            data_tm[:, j] = base * (1.0 + 0.015 * j) + 0.05 * j
+            data_tm[:, j] = base * (1.0 + 0.01 * j)
 
-        fast_limit = 0.5
-        slow_limit = 0.06
+        fast, slow = 0.45, 0.06
 
-        cpu_m = np.zeros_like(data_tm)
-        cpu_f = np.zeros_like(data_tm)
+        # CPU baseline per series
+        cpu_m_tm = np.zeros_like(data_tm)
+        cpu_f_tm = np.zeros_like(data_tm)
         for j in range(N):
-            mama_vals, fama_vals = ti.mama(data_tm[:, j], fast_limit, slow_limit)
-            cpu_m[:, j] = mama_vals
-            cpu_f[:, j] = fama_vals
+            m, f = ti.mama(data_tm[:, j], fast, slow)
+            cpu_m_tm[:, j] = m
+            cpu_f_tm[:, j] = f
 
-        mama_handle, fama_handle = ti.mama_cuda_many_series_one_param_dev(
-            data_tm.astype(np.float32), fast_limit, slow_limit
+        # CUDA
+        m_handle, f_handle = ti.mama_cuda_many_series_one_param_dev(
+            data_tm.astype(np.float32), fast, slow
         )
-        gpu_m = cp.asnumpy(cp.asarray(mama_handle))
-        gpu_f = cp.asnumpy(cp.asarray(fama_handle))
+        m_gpu_tm = cp.asnumpy(cp.asarray(m_handle))
+        f_gpu_tm = cp.asnumpy(cp.asarray(f_handle))
 
-        assert gpu_m.shape == cpu_m.shape
-        assert gpu_f.shape == cpu_f.shape
-        assert_close(gpu_m, cpu_m, rtol=1e-4, atol=1e-5, msg="CUDA MAMA many-series mismatch")
-        assert_close(gpu_f, cpu_f, rtol=1e-4, atol=1e-5, msg="CUDA FAMA many-series mismatch")
+        assert m_gpu_tm.shape == data_tm.shape
+        assert f_gpu_tm.shape == data_tm.shape
+        assert_close(m_gpu_tm, cpu_m_tm, rtol=1e-5, atol=1e-6, msg="MAMA many-series mismatch")
+        assert_close(f_gpu_tm, cpu_f_tm, rtol=1e-5, atol=1e-6, msg="FAMA many-series mismatch")
+

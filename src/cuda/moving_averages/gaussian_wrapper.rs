@@ -1,10 +1,15 @@
 //! CUDA scaffolding for the Gaussian moving average kernels.
 //!
-//! This mirrors the scalar Gaussian filter by precomputing the cascaded single
-//! pole coefficients on the host, uploading them once, and executing the
-//! sequential recurrence per parameter combination (or per series) entirely on
-//! the GPU. The wrapper exposes zero-copy device handles plus host-copy helper
-//! methods to follow the conventions established by the other CUDA indicators.
+//! Parity goals with ALMA wrapper:
+//! - PTX JIT with DetermineTargetFromContext and O2 fallback
+//! - Non-blocking stream
+//! - VRAM estimation with optional mem-check toggle
+//! - Policy + selection introspection (Batch/ManySeries) with BENCH_DEBUG logging
+//! - Public device + host helpers returning `DeviceArrayF32`
+//!
+//! Math note: Gaussian here is implemented as a cascaded one‑pole recurrence
+//! (time-marching) for numerical parity with the scalar reference. Coefficients
+//! are precomputed on host per parameter set and uploaded once.
 
 #![cfg(feature = "cuda")]
 
@@ -14,13 +19,14 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const COEFF_STRIDE: usize = 5; // coefficient slots per combo (max poles = 4)
 
@@ -41,10 +47,48 @@ impl fmt::Display for CudaGaussianError {
 
 impl std::error::Error for CudaGaussianError {}
 
+// -------- Kernel selection policy (mirror ALMA style; single plain path used) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaGaussianPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for CudaGaussianPolicy {
+    fn default() -> Self { Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto } }
+}
+
+// -------- Introspection (selected kernel) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+
 pub struct CudaGaussian {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaGaussianPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaGaussian {
@@ -56,8 +100,20 @@ impl CudaGaussian {
         let context = Context::new(device).map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/gaussian_kernel.ptx"));
-        let module =
-            Module::from_ptx(ptx, &[]).map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaGaussianError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
 
@@ -65,7 +121,27 @@ impl CudaGaussian {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaGaussianPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    /// Create with explicit policy (tests/benches).
+    pub fn new_with_policy(device_id: usize, policy: CudaGaussianPolicy) -> Result<Self, CudaGaussianError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaGaussianPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaGaussianPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn synchronize(&self) -> Result<(), CudaGaussianError> {
+        self.stream.synchronize().map_err(|e| CudaGaussianError::Cuda(e.to_string()))
     }
 
     pub fn gaussian_batch_dev(
@@ -332,8 +408,21 @@ impl CudaGaussian {
             .get_function("gaussian_batch_f32")
             .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
 
+        // Only a single-thread path is implemented by the kernel; allow a
+        // configurable block-x for parity with ALMA policy, but clamp to 1.
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+            BatchKernelPolicy::Auto => 1,
+        };
         let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        let block: BlockSize = (block_x.min(1), 1, 1).into();
+
+        // Introspection
+        unsafe {
+            let this = self as *const _ as *mut CudaGaussian;
+            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x: 1 });
+        }
+        self.maybe_log_batch_debug();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -379,8 +468,19 @@ impl CudaGaussian {
             .get_function("gaussian_many_series_one_param_f32")
             .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
 
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
+            ManySeriesKernelPolicy::Auto => 1,
+        };
         let grid: GridSize = (num_series as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        let block: BlockSize = (block_x.min(1), 1, 1).into();
+
+        // Introspection
+        unsafe {
+            let this = self as *const _ as *mut CudaGaussian;
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x: 1 });
+        }
+        self.maybe_log_many_debug();
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -576,6 +676,36 @@ impl CudaGaussian {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else {
             true
+        }
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] Gaussian batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaGaussian)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] Gaussian many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaGaussian)).debug_many_logged = true; }
+            }
         }
     }
 }
