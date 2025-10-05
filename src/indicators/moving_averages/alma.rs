@@ -48,6 +48,9 @@ impl DeviceArrayF32Py {
         // Expose default stream to help consumers (e.g., CuPy) pick a valid device context
         // without guessing. Using 0 denotes the legacy default stream.
         d.set_item("stream", 0usize)?;
+        // Provide a stream hint for consumers like CuPy. Using legacy default stream (1)
+        // is broadly compatible and avoids some runtime setDevice quirks on certain setups.
+        d.set_item("stream", 1i64)?;
         d.set_item("version", 3)?;
         Ok(d)
     }

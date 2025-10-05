@@ -59,6 +59,7 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::moving_averages::maaq_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::srwma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::sqwma_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::moving_averages::frama_wrapper::benches::bench_profiles());
 
     // Non-MA wrappers
     v.extend(my_project::cuda::zscore_wrapper::benches::bench_profiles());

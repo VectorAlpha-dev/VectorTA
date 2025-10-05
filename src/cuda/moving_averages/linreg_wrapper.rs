@@ -1,9 +1,11 @@
 //! CUDA scaffolding for the Linear Regression (LINREG) indicator.
 //!
-//! Mirrors the zero-copy, VRAM-first design used by the other moving-average
-//! accelerators: host validation expands the parameter sweep, kernels execute
-//! entirely in FP32, and callers receive `DeviceArrayF32` handles with optional
-//! helpers that spill results back to host memory.
+//! ALMA-aligned wrapper with:
+//! - Policy enums for kernel selection (kept simple for LINREG: 1D kernels).
+//! - PTX JIT options with DetermineTargetFromContext and O2, with fallbacks.
+//! - VRAM estimation with 64MB headroom and early failure on OOM risk.
+//! - Warmup/NaN behavior identical to the scalar reference.
+//! - Public APIs for one-series×many-params and many-series×one-param.
 
 #![cfg(feature = "cuda")]
 
@@ -15,12 +17,47 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{CopyDestination, DeviceBuffer};
-use cust::module::Module;
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// ---------------- Kernel policy & selection (mirrors ALMA structure) ----------------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    /// 1D launch, `block_x` threads per block
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    /// 1D launch across series, `block_x` threads per block
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaLinregPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for CudaLinregPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
 
 #[derive(Debug)]
 pub enum CudaLinregError {
@@ -43,6 +80,11 @@ pub struct CudaLinreg {
     module: Module,
     stream: Stream,
     _context: Context,
+    policy: CudaLinregPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaLinreg {
@@ -53,8 +95,18 @@ impl CudaLinreg {
         let context = Context::new(device).map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/linreg_kernel.ptx"));
-        let module =
-            Module::from_ptx(ptx, &[]).map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
+        // Match ALMA-style JIT preference: O2 + DetermineTargetFromContext with fallbacks.
+        let module = match Module::from_ptx(
+            ptx,
+            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)],
+        ) {
+            Ok(m) => m,
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaLinregError::Cuda(e.to_string()))?,
+            },
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
 
@@ -62,7 +114,83 @@ impl CudaLinreg {
             module,
             stream,
             _context: context,
+            policy: CudaLinregPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    /// Create with explicit policy.
+    pub fn new_with_policy(device_id: usize, policy: CudaLinregPolicy) -> Result<Self, CudaLinregError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+
+    #[inline]
+    pub fn set_policy(&mut self, policy: CudaLinregPolicy) { self.policy = policy; }
+    #[inline]
+    pub fn policy(&self) -> &CudaLinregPolicy { &self.policy }
+    #[inline]
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    #[inline]
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    /// Optional synchronizer for benches/tests.
+    pub fn synchronize(&self) -> Result<(), CudaLinregError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaLinregError::Cuda(e.to_string()))
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] LINREG batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaLinreg)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] LINREG many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaLinreg)).debug_many_logged = true; }
+            }
+        }
+    }
+
+    // --------------- VRAM checks ---------------
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> { cust::memory::mem_get_info().ok() }
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else { true }
     }
 
     #[allow(clippy::type_complexity)]
@@ -164,11 +292,17 @@ impl CudaLinreg {
             .module
             .get_function("linreg_batch_f32")
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
-
-        let block_x: u32 = 128;
+        // Kernel policy selection (only Plain supported for LINREG currently)
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+        };
         let grid_x = ((combos_len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe { (*(self as *const _ as *mut CudaLinreg)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        self.maybe_log_batch_debug();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -212,6 +346,21 @@ impl CudaLinreg {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaLinregError> {
+        // VRAM estimate and early check
+        let prices_bytes = len * std::mem::size_of::<f32>();
+        let params_bytes = combos_len
+            * (std::mem::size_of::<i32>()
+                + std::mem::size_of::<f32>() * 3);
+        let out_bytes = combos_len * len * std::mem::size_of::<f32>();
+        let required = prices_bytes + params_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024; // 64MB safety margin
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaLinregError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
         let d_prices =
             DeviceBuffer::from_slice(data_f32).map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
         let d_periods = DeviceBuffer::from_slice(periods_i32)
@@ -238,6 +387,11 @@ impl CudaLinreg {
             first_valid,
             &mut d_out,
         )?;
+
+        // Ensure completion before returning VRAM handle
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -387,11 +541,16 @@ impl CudaLinreg {
             .module
             .get_function("linreg_many_series_one_param_f32")
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
-
-        let block_x: u32 = 128;
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 128,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
+        };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe { (*(self as *const _ as *mut CudaLinreg)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        self.maybe_log_many_debug();
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -435,17 +594,33 @@ impl CudaLinreg {
         denom_inv: f32,
         inv_period: f32,
     ) -> Result<DeviceArrayF32, CudaLinregError> {
+        // VRAM estimate and check
+        let elems = cols * rows;
+        let prices_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = cols * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        let required = prices_bytes + first_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaLinregError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(first_valids)
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
-        let elems = cols * rows;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
             &d_prices, &d_first, cols, rows, period, x_sum, denom_inv, inv_period, &mut d_out,
         )?;
+
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
