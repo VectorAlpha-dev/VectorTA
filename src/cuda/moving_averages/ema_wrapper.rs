@@ -1,8 +1,11 @@
 //! CUDA support for the Exponential Moving Average (EMA).
 //!
-//! Mirrors the ALMA CUDA API by providing zero-copy device entry points for
-//! both the one-series × many-parameter sweep and the time-major
-//! many-series × one-parameter scenario.
+//! Brought in line with the ALMA wrapper design: policy-driven launch choices,
+//! VRAM estimates with headroom checks, chunked launches to respect grid
+//! limits, NON_BLOCKING stream, and JIT target-from-context PTX loading with
+//! stable fallbacks. EMA is a recurrence/IIR pattern: one thread per combo
+//! (or per series) executes the sequential scan; optional block size knobs are
+//! provided for experimentation.
 
 #![cfg(feature = "cuda")]
 
@@ -11,12 +14,14 @@ use crate::indicators::moving_averages::ema::{EmaBatchRange, EmaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::launch;
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::env;
 
 #[derive(Debug)]
 pub enum CudaEmaError {
@@ -35,10 +40,51 @@ impl fmt::Display for CudaEmaError {
 
 impl std::error::Error for CudaEmaError {}
 
+// -------- Kernel selection policy (explicit for tests; Auto for production) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    /// Plain 1D grid, one block per combo; thread 0 performs the scan.
+    Plain { block_x: u32 },
+}
+
+impl Default for BatchKernelPolicy {
+    fn default() -> Self { Self::Auto }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    /// One-dimensional time-major mapping (grid.x = num_series).
+    OneD { block_x: u32 },
+}
+
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self { Self::Auto }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CudaEmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+
 pub struct CudaEma {
     module: Module,
     stream: Stream,
     _context: Context,
+    policy: CudaEmaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 struct PreparedEmaBatch {
@@ -65,7 +111,19 @@ impl CudaEma {
         let context = Context::new(device).map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/ema_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
+        // Match ALMA: prefer DetermineTargetFromContext + O2; fall back to simpler modes.
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaEmaError::Cuda(e.to_string()))?,
+            },
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
 
@@ -73,7 +131,26 @@ impl CudaEma {
             module,
             stream,
             _context: context,
+            policy: CudaEmaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    /// Optional: override policy (e.g., benches/tests).
+    pub fn new_with_policy(device_id: usize, policy: CudaEmaPolicy) -> Result<Self, CudaEmaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaEmaError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEmaError::Cuda(e.to_string()))
     }
 
     pub fn ema_batch_dev(
@@ -84,14 +161,30 @@ impl CudaEma {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
+        // VRAM estimate and async H2D copy
+        let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
+        let params_bytes = (prepared.periods_i32.len() + prepared.alphas_f32.len())
+            * std::mem::size_of::<i32>(); // conservatively treat alphas as i32 size (over-estimate)
+        let out_bytes = n_combos * prepared.series_len * std::mem::size_of::<f32>();
+        let required = prices_bytes + params_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024; // 64MB safety
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaEmaError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
+        let d_prices = unsafe {
+            DeviceBuffer::from_slice_async(data_f32, &self.stream)
+                .map_err(|e| CudaEmaError::Cuda(e.to_string()))?
+        };
         let d_periods = DeviceBuffer::from_slice(&prepared.periods_i32)
             .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
         let d_alphas = DeviceBuffer::from_slice(&prepared.alphas_f32)
             .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(prepared.series_len * n_combos)
+            DeviceBuffer::uninitialized_async(prepared.series_len * n_combos, &self.stream)
                 .map_err(|e| CudaEmaError::Cuda(e.to_string()))?
         };
 
@@ -104,6 +197,11 @@ impl CudaEma {
             n_combos,
             &mut d_out,
         )?;
+
+        // Ensure completion for VRAM handle consistency
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -195,12 +293,27 @@ impl CudaEma {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
+        // VRAM estimate and async H2D copy
+        let prices_bytes = num_series * series_len * std::mem::size_of::<f32>();
+        let params_bytes = prepared.first_valids.len() * std::mem::size_of::<i32>();
+        let out_bytes = num_series * series_len * std::mem::size_of::<f32>();
+        let required = prices_bytes + params_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024; // 64MB safety
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaEmaError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
+        let d_prices = unsafe {
+            DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
+                .map_err(|e| CudaEmaError::Cuda(e.to_string()))?
+        };
         let d_first = DeviceBuffer::from_slice(&prepared.first_valids)
             .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(num_series * series_len)
+            DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)
                 .map_err(|e| CudaEmaError::Cuda(e.to_string()))?
         };
 
@@ -213,6 +326,11 @@ impl CudaEma {
             series_len,
             &mut d_out,
         )?;
+
+        // Ensure completion for VRAM handle consistency.
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -298,43 +416,56 @@ impl CudaEma {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEmaError> {
-        if n_combos == 0 {
-            return Ok(());
-        }
+        if n_combos == 0 { return Ok(()); }
 
         let func = self
             .module
             .get_function("ema_batch_f32")
             .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
 
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (256, 1, 1).into();
+        // Policy/env block size selection
+        let mut block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            BatchKernelPolicy::Auto => env::var("EMA_BLOCK_X").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(256),
+        };
+        if block_x == 0 { block_x = 256; }
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut alphas_ptr = d_alphas.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut first_valid_i = first_valid as i32;
-            let mut n_combos_i = n_combos as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut alphas_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut first_valid_i as *mut _ as *mut c_void,
-                &mut n_combos_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
+        // Introspection (once per scenario when BENCH_DEBUG=1)
+        unsafe { (*(self as *const _ as *mut CudaEma)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        self.maybe_log_batch_debug();
+
+        // Grid limit guard: break large sweeps into chunks of <= 65_535 combos.
+        const MAX_GRID_X: usize = 65_535;
+        for (start, len) in Self::grid_chunks(n_combos, MAX_GRID_X) {
+            let grid: GridSize = (len as u32, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+
+            let out_ptr = unsafe { d_out.as_device_ptr().add(start * series_len) };
+            let periods_ptr = unsafe { d_periods.as_device_ptr().add(start) };
+            let alphas_ptr = unsafe { d_alphas.as_device_ptr().add(start) };
+
+            let series_len_i = series_len as i32;
+            let first_valid_i = first_valid as i32;
+            let n_combos_i = len as i32;
+
+            let stream = &self.stream;
+            unsafe {
+                launch!(
+                    func<<<grid, block, 0, stream>>>(
+                        d_prices.as_device_ptr(),
+                        periods_ptr,
+                        alphas_ptr,
+                        series_len_i,
+                        first_valid_i,
+                        n_combos_i,
+                        out_ptr
+                    )
+                )
                 .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
+            }
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEmaError::Cuda(e.to_string()))
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -357,8 +488,18 @@ impl CudaEma {
             .get_function("ema_many_series_one_param_f32")
             .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
 
+        let mut block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            ManySeriesKernelPolicy::Auto => env::var("EMA_MS_BLOCK_X").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(128),
+        };
+        if block_x == 0 { block_x = 128; }
+
+        // Introspection
+        unsafe { (*(self as *const _ as *mut CudaEma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        self.maybe_log_many_debug();
+
         let grid: GridSize = (num_series as u32, 1, 1).into();
-        let block: BlockSize = (128, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -382,9 +523,7 @@ impl CudaEma {
                 .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEmaError::Cuda(e.to_string()))
+        Ok(())
     }
 
     fn prepare_batch_inputs(
@@ -526,4 +665,52 @@ fn expand_grid(range: &EmaBatchRange) -> Vec<EmaParams> {
         .into_iter()
         .map(|p| EmaParams { period: Some(p) })
         .collect()
+}
+
+// ---------- Utilities (VRAM + debug) ----------
+
+impl CudaEma {
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Ok((free, _total)) = mem_get_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+    }
+
+    #[inline]
+    fn grid_chunks(n: usize, max_chunk: usize) -> impl Iterator<Item = (usize, usize)> {
+        (0..n).step_by(max_chunk).map(move |start| {
+            let len = (n - start).min(max_chunk);
+            (start, len)
+        })
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                eprintln!("[DEBUG] EMA batch selected kernel: {:?}", sel);
+                unsafe { (*(self as *const _ as *mut CudaEma)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                eprintln!("[DEBUG] EMA many-series selected kernel: {:?}", sel);
+                unsafe { (*(self as *const _ as *mut CudaEma)).debug_many_logged = true; }
+            }
+        }
+    }
 }

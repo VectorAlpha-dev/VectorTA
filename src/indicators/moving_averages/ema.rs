@@ -1666,17 +1666,25 @@ pub fn ema_py<'py>(
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
-    let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
 
     let params = EmaParams {
         period: Some(period),
     };
-    let ema_in = EmaInput::from_slice(slice_in, params);
-
-    let result_vec: Vec<f64> = py
-        .allow_threads(|| ema_with_kernel(&ema_in, kern).map(|o| o.values))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // Zero-copy for contiguous inputs; minimal copy for non-contiguous views (e.g., column slices)
+    let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
+        let ema_in = EmaInput::from_slice(slice_in, params);
+        py.allow_threads(|| ema_with_kernel(&ema_in, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+    } else {
+        let owned = data.as_array().to_owned();
+        let slice_in = owned
+            .as_slice()
+            .expect("owned numpy array should be contiguous");
+        let ema_in = EmaInput::from_slice(slice_in, params);
+        py.allow_threads(|| ema_with_kernel(&ema_in, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+    };
 
     Ok(result_vec.into_pyarray(py))
 }

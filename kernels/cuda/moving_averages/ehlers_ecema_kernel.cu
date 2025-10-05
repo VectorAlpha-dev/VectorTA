@@ -257,16 +257,16 @@ void ehlers_ecema_batch_thread_per_combo_f32(const float* __restrict__ prices,
         float prev = has_prev ? ec.y : clamp_prev_ec_f(pine_mode, ema_value);
         if (!has_prev) { ec.y = prev; ec.c = 0.0f; has_prev = true; }
 
-        float least_error = INFINITY;
+        double least_error = INFINITY;
         float best_gain = 0.0f;
         const double alpha_d = static_cast<double>(alpha);
         const double beta_d  = static_cast<double>(beta);
         for (int g = -gain_limit; g <= gain_limit; ++g) {
-            const float gain = 0.1f * static_cast<float>(g);
-            const float t = fmaf(gain, (src - prev), ema_value);
-            const double candidate_d = alpha_d * static_cast<double>(t) + beta_d * static_cast<double>(prev);
-            const float err = fabsf(src - static_cast<float>(candidate_d));
-            if (err < least_error) { least_error = err; best_gain = gain; }
+            const double gain_d = 0.1 * static_cast<double>(g);
+            const double t_d = static_cast<double>(ema_value) + gain_d * (static_cast<double>(src) - static_cast<double>(prev));
+            const double candidate_d = alpha_d * t_d + beta_d * static_cast<double>(prev);
+            const double err_d = fabs(static_cast<double>(src) - candidate_d);
+            if (err_d < least_error) { least_error = err_d; best_gain = static_cast<float>(gain_d); }
         }
 
         float ec_val = ec_step(ec, alpha, ema_value, src, best_gain);
@@ -444,15 +444,15 @@ void ehlers_ecema_many_series_one_param_1d_f32(
         float prev = has_prev ? ec.y : clamp_prev_ec_f(pine_mode, ema_value);
         if (!has_prev) { ec.y = prev; ec.c = 0.0f; has_prev = true; }
 
-        float least_error = INFINITY; float best_gain = 0.0f;
+        double least_error = INFINITY; float best_gain = 0.0f;
         const double alpha_d = static_cast<double>(alpha);
         const double beta_d  = static_cast<double>(beta);
         for (int g = -gain_limit; g <= gain_limit; ++g) {
-            const float gain = 0.1f * static_cast<float>(g);
-            const float t = fmaf(gain, (src - prev), ema_value);
-            const double candidate_d = alpha_d * static_cast<double>(t) + beta_d * static_cast<double>(prev);
-            const float err = fabsf(src - static_cast<float>(candidate_d));
-            if (err < least_error) { least_error = err; best_gain = gain; }
+            const double gain_d = 0.1 * static_cast<double>(g);
+            const double t_d = static_cast<double>(ema_value) + gain_d * (static_cast<double>(src) - static_cast<double>(prev));
+            const double candidate_d = alpha_d * t_d + beta_d * static_cast<double>(prev);
+            const double err_d = fabs(static_cast<double>(src) - candidate_d);
+            if (err_d < least_error) { least_error = err_d; best_gain = static_cast<float>(gain_d); }
         }
 
         float ec_val = ec_step(ec, alpha, ema_value, src, best_gain);
@@ -527,13 +527,15 @@ void ehlers_ecema_many_series_one_param_2d_f32(
         float prev = has_prev ? ec.y : clamp_prev_ec_f(pine_mode, ema_value);
         if (!has_prev) { ec.y = prev; ec.c = 0.0f; has_prev = true; }
 
-        float least_error = INFINITY; float best_gain = 0.0f;
+        double least_error = INFINITY; float best_gain = 0.0f;
+        const double alpha_d = static_cast<double>(alpha);
+        const double beta_d  = static_cast<double>(beta);
         for (int g = -gain_limit; g <= gain_limit; ++g) {
-            const float gain = 0.1f * static_cast<float>(g);
-            const float t = fmaf(gain, (src - prev), ema_value);
-            const float candidate = fmaf(alpha, t, beta * prev);
-            const float err = fabsf(src - candidate);
-            if (err < least_error) { least_error = err; best_gain = gain; }
+            const double gain_d = 0.1 * static_cast<double>(g);
+            const double t_d = static_cast<double>(ema_value) + gain_d * (static_cast<double>(src) - static_cast<double>(prev));
+            const double candidate_d = alpha_d * t_d + beta_d * static_cast<double>(prev);
+            const double err_d = fabs(static_cast<double>(src) - candidate_d);
+            if (err_d < least_error) { least_error = err_d; best_gain = static_cast<float>(gain_d); }
         }
 
         float ec_val = ec_step(ec, alpha, ema_value, src, best_gain);

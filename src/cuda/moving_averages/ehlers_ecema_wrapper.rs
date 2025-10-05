@@ -16,7 +16,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{CopyDestination, DeviceBuffer};
-use cust::module::Module;
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
@@ -104,8 +104,23 @@ impl CudaEhlersEcema {
             Context::new(device).map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_ecema_kernel.ptx"));
-        let module =
-            Module::from_ptx(ptx, &[]).map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        // Align JIT options with ALMA: prefer context-targeted O2, with graceful fallback.
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                // Retry with progressively simpler JIT options to improve robustness across drivers.
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
 
@@ -423,7 +438,7 @@ impl CudaEhlersEcema {
         let flags_bytes = n_combos * std::mem::size_of::<u8>() * 2;
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + lengths_bytes + gains_bytes + flags_bytes + out_bytes;
-        let headroom = 32 * 1024 * 1024; // 32MB cushion
+        let headroom = 64 * 1024 * 1024; // 64MB safety margin (align with ALMA)
         if !Self::will_fit(required, headroom) {
             return Err(CudaEhlersEcemaError::InvalidInput(format!(
                 "estimated device memory {:.2} MB exceeds free VRAM",
@@ -856,7 +871,7 @@ impl CudaEhlersEcema {
         let first_valid_bytes = cols * std::mem::size_of::<i32>();
         let out_bytes = cols * rows * std::mem::size_of::<f32>();
         let required = prices_bytes + first_valid_bytes + out_bytes;
-        let headroom = 16 * 1024 * 1024; // 16MB cushion
+        let headroom = 64 * 1024 * 1024; // 64MB safety margin (align with ALMA)
         if !Self::will_fit(required, headroom) {
             return Err(CudaEhlersEcemaError::InvalidInput(format!(
                 "estimated device memory {:.2} MB exceeds free VRAM",

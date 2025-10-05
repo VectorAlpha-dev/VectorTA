@@ -989,23 +989,30 @@ pub fn jsa_py<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     use numpy::PyArrayMethods;
 
-    let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?; // Validate before allow_threads
 
-    // Pre-allocate NumPy output buffer (this is OK for JSA since it can write directly)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
-    let slice_out = unsafe { out_arr.as_slice_mut()? };
-
-    let params = JsaParams {
-        period: Some(period),
-    };
-    let input = JsaInput::from_slice(slice_in, params);
-
-    // Write directly to output buffer without intermediate allocation
-    py.allow_threads(|| -> Result<(), JsaError> { jsa_with_kernel_into(&input, kern, slice_out) })
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    Ok(out_arr)
+    // Accept non-contiguous inputs by copying once (match ALMA behavior).
+    if data.is_c_contiguous() {
+        let slice_in = data.as_slice()?;
+        // Contiguous fast path: write directly into a new NumPy array
+        let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
+        let slice_out = unsafe { out_arr.as_slice_mut()? };
+        let params = JsaParams { period: Some(period) };
+        let input = JsaInput::from_slice(slice_in, params);
+        py.allow_threads(|| jsa_with_kernel_into(&input, kern, slice_out))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(out_arr)
+    } else {
+        // Non‑contiguous (e.g., column view) — copy then compute
+        let owned = data.as_array().to_owned();
+        let slice_in = owned.as_slice().expect("owned array should be contiguous");
+        let params = JsaParams { period: Some(period) };
+        let input = JsaInput::from_slice(slice_in, params);
+        let mut buf = vec![f64::NAN; slice_in.len()];
+        py.allow_threads(|| jsa_with_kernel_into(&input, kern, &mut buf))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(PyArray1::from_vec(py, buf))
+    }
 }
 
 #[cfg(feature = "python")]

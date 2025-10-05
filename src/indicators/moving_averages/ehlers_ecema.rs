@@ -1239,7 +1239,15 @@ pub fn ehlers_ecema_py<'py>(
     confirmed_only: bool,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let slice_in = data.as_slice()?;
+    // Accept non-contiguous inputs by copying to a Vec when needed (ALMA-compatible ergonomics)
+    let owned_if_needed: Option<Vec<f64>> = match data.as_slice() {
+        Ok(_) => None,
+        Err(_) => Some(data.as_array().to_owned().into_raw_vec()),
+    };
+    let slice_in: &[f64] = match &owned_if_needed {
+        Some(v) => v.as_slice(),
+        None => data.as_slice()?,
+    };
     let kern = validate_kernel(kernel, false)?;
     let params = EhlersEcemaParams {
         length: Some(length),
