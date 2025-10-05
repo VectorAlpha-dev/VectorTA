@@ -19,10 +19,18 @@ constexpr double PI_D = 3.14159265358979323846264338327950288;
 constexpr double RAD2DEG_D = 180.0 / PI_D;
 
 static __device__ __forceinline__ double hilbert(double x0, double x2, double x4, double x6) {
-    return 0.0962 * x0 + 0.5769 * x2 - 0.5769 * x4 - 0.0962 * x6;
+    // Match Rust FMA cascade: H0.mul_add(x0, H1.mul_add(x2, H2.mul_add(x4, H3 * x6)))
+    const double H0 = 0.0962;
+    const double H1 = 0.5769;
+    const double H2 = -0.5769;
+    const double H3 = -0.0962;
+    double t = fma(H2, x4, H3 * x6);
+    t = fma(H1, x2, t);
+    return fma(H0, x0, t);
 }
 
 static __device__ __forceinline__ double atan_fast_f64(double z) {
+    // Match Rust atan_fast implementation exactly.
     const double C0 = 0.2447;
     const double C1 = 0.0663;
     const double PIO4 = PI_D * 0.25;
@@ -30,12 +38,15 @@ static __device__ __forceinline__ double atan_fast_f64(double z) {
 
     double a = fabs(z);
     if (a <= 1.0) {
-        double t = fma(C1, a, C0); // C0 + C1 * a
-        return fma(PIO4, z, fma(z, a - 1.0, t) * z);
+        double t = C1 * a + C0;               // C0 + C1·|z|
+        double term = (a - 1.0) * t;          // (|z|-1)*(C0 + C1·|z|)
+        return fma(PIO4, z, z * term);        // z*π/4 + z*term
     } else {
         double inv = 1.0 / z;
-        double t = fma(C1, fabs(inv), C0);
-        double base = fma(PIO4, inv, fma(inv, fabs(inv) - 1.0, t) * inv);
+        double ai = fabs(inv);
+        double t = C1 * ai + C0;              // C0 + C1·|1/z|
+        double term = (ai - 1.0) * t;         // (|1/z|-1)*t
+        double base = fma(PIO4, inv, inv * term);
         return (z > 0.0) ? (PIO2 - base) : (-PIO2 - base);
     }
 }
@@ -91,13 +102,16 @@ void mama_batch_f32(const float* __restrict__ prices,
 
     const int warm = first_valid + 10;
 
-    double smooth_buf[7];
-    double detrender_buf[7];
-    double i1_buf[7];
-    double q1_buf[7];
+    // Power-of-two ring buffer (length=8) to match scalar reference exactly.
+    constexpr int RING = 8;
+    constexpr int MASK = RING - 1;
+    double smooth_buf[RING];
+    double detrender_buf[RING];
+    double i1_buf[RING];
+    double q1_buf[RING];
 
     double seed_price = static_cast<double>(prices[first_valid]);
-    for (int k = 0; k < 7; ++k) {
+    for (int k = 0; k < RING; ++k) {
         smooth_buf[k] = seed_price;
         detrender_buf[k] = seed_price;
         i1_buf[k] = seed_price;
@@ -120,36 +134,38 @@ void mama_batch_f32(const float* __restrict__ prices,
         double s3 = (i >= first_valid + 3) ? static_cast<double>(prices[i - 3]) : price;
         double smooth_val = (4.0 * price + 3.0 * s1 + 2.0 * s2 + s3) / 10.0;
 
-        int idx = (i - first_valid) % 7;
+        int idx = (i - first_valid) & MASK;
         smooth_buf[idx] = smooth_val;
 
         double x0 = smooth_buf[idx];
-        double x2 = smooth_buf[(idx + 5) % 7];
-        double x4 = smooth_buf[(idx + 3) % 7];
-        double x6 = smooth_buf[(idx + 1) % 7];
+        double x2 = smooth_buf[(idx - 2) & MASK];
+        double x4 = smooth_buf[(idx - 4) & MASK];
+        double x6 = smooth_buf[(idx - 6) & MASK];
 
         double mesa_mult = 0.075 * prev_mesa_period + 0.54;
         double dt_val = hilbert(x0, x2, x4, x6) * mesa_mult;
         detrender_buf[idx] = dt_val;
 
-        double i1_val = (i >= first_valid + 3) ? detrender_buf[(idx + 4) % 7] : dt_val;
+        // Always take 3-bar lag from the ring; early samples read from the
+        // pre-seeded ring (scalar parity).
+        double i1_val = detrender_buf[(idx - 3) & MASK];
         i1_buf[idx] = i1_val;
 
         double d0 = detrender_buf[idx];
-        double d2 = detrender_buf[(idx + 5) % 7];
-        double d4 = detrender_buf[(idx + 3) % 7];
-        double d6 = detrender_buf[(idx + 1) % 7];
+        double d2 = detrender_buf[(idx - 2) & MASK];
+        double d4 = detrender_buf[(idx - 4) & MASK];
+        double d6 = detrender_buf[(idx - 6) & MASK];
         double q1_val = hilbert(d0, d2, d4, d6) * mesa_mult;
         q1_buf[idx] = q1_val;
 
         double j_i = hilbert(i1_buf[idx],
-                             i1_buf[(idx + 5) % 7],
-                             i1_buf[(idx + 3) % 7],
-                             i1_buf[(idx + 1) % 7]) * mesa_mult;
+                             i1_buf[(idx - 2) & MASK],
+                             i1_buf[(idx - 4) & MASK],
+                             i1_buf[(idx - 6) & MASK]) * mesa_mult;
         double j_q = hilbert(q1_buf[idx],
-                             q1_buf[(idx + 5) % 7],
-                             q1_buf[(idx + 3) % 7],
-                             q1_buf[(idx + 1) % 7]) * mesa_mult;
+                             q1_buf[(idx - 2) & MASK],
+                             q1_buf[(idx - 4) & MASK],
+                             q1_buf[(idx - 6) & MASK]) * mesa_mult;
 
         double i2 = i1_val - j_q;
         double q2 = q1_val + j_i;
@@ -166,12 +182,8 @@ void mama_batch_f32(const float* __restrict__ prices,
         if (re != 0.0 && im != 0.0) {
             double ratio = im / re;
             double ang = atan_fast_f64(ratio);
-            if (ang != 0.0 && isfinite(ang)) {
-                double candidate = (2.0 * PI_D) / ang;
-                if (isfinite(candidate)) {
-                    mesa_period = candidate;
-                }
-            }
+            double candidate = (2.0 * PI_D) / ang;
+            mesa_period = candidate;
         }
 
         double upper = 1.5 * prev_mesa_period;
@@ -184,10 +196,8 @@ void mama_batch_f32(const float* __restrict__ prices,
         double phase = prev_phase;
         if (i1_val != 0.0) {
             double ratio = q1_val / i1_val;
-            double ang = atan(ratio);
-            if (isfinite(ang)) {
-                phase = ang * RAD2DEG_D;
-            }
+            double ang = atan_fast_f64(ratio);
+            phase = ang * RAD2DEG_D;
         }
         double dp = prev_phase - phase;
         if (dp < 1.0) {
@@ -256,13 +266,16 @@ void mama_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     const int warm = first_valid + 10;
 
-    double smooth_buf[7];
-    double detrender_buf[7];
-    double i1_buf[7];
-    double q1_buf[7];
+    // Power-of-two ring buffer (length=8) to match scalar reference exactly.
+    constexpr int RING = 8;
+    constexpr int MASK = RING - 1;
+    double smooth_buf[RING];
+    double detrender_buf[RING];
+    double i1_buf[RING];
+    double q1_buf[RING];
 
     double seed_price = static_cast<double>(prices_tm[first_valid * num_series + series_idx]);
-    for (int k = 0; k < 7; ++k) {
+    for (int k = 0; k < RING; ++k) {
         smooth_buf[k] = seed_price;
         detrender_buf[k] = seed_price;
         i1_buf[k] = seed_price;
@@ -292,36 +305,38 @@ void mama_many_series_one_param_f32(const float* __restrict__ prices_tm,
             : price;
         double smooth_val = (4.0 * price + 3.0 * s1 + 2.0 * s2 + s3) / 10.0;
 
-        int idx = (t - first_valid) % 7;
+        int idx = (t - first_valid) & MASK;
         smooth_buf[idx] = smooth_val;
 
         double x0 = smooth_buf[idx];
-        double x2 = smooth_buf[(idx + 5) % 7];
-        double x4 = smooth_buf[(idx + 3) % 7];
-        double x6 = smooth_buf[(idx + 1) % 7];
+        double x2 = smooth_buf[(idx - 2) & MASK];
+        double x4 = smooth_buf[(idx - 4) & MASK];
+        double x6 = smooth_buf[(idx - 6) & MASK];
 
         double mesa_mult = 0.075 * prev_mesa_period + 0.54;
         double dt_val = hilbert(x0, x2, x4, x6) * mesa_mult;
         detrender_buf[idx] = dt_val;
 
-        double i1_val = (t >= first_valid + 3) ? detrender_buf[(idx + 4) % 7] : dt_val;
+        // Always take 3-bar lag from the ring; early samples read from the
+        // pre-seeded ring (scalar parity).
+        double i1_val = detrender_buf[(idx - 3) & MASK];
         i1_buf[idx] = i1_val;
 
         double d0 = detrender_buf[idx];
-        double d2 = detrender_buf[(idx + 5) % 7];
-        double d4 = detrender_buf[(idx + 3) % 7];
-        double d6 = detrender_buf[(idx + 1) % 7];
+        double d2 = detrender_buf[(idx - 2) & MASK];
+        double d4 = detrender_buf[(idx - 4) & MASK];
+        double d6 = detrender_buf[(idx - 6) & MASK];
         double q1_val = hilbert(d0, d2, d4, d6) * mesa_mult;
         q1_buf[idx] = q1_val;
 
         double j_i = hilbert(i1_buf[idx],
-                             i1_buf[(idx + 5) % 7],
-                             i1_buf[(idx + 3) % 7],
-                             i1_buf[(idx + 1) % 7]) * mesa_mult;
+                             i1_buf[(idx - 2) & MASK],
+                             i1_buf[(idx - 4) & MASK],
+                             i1_buf[(idx - 6) & MASK]) * mesa_mult;
         double j_q = hilbert(q1_buf[idx],
-                             q1_buf[(idx + 5) % 7],
-                             q1_buf[(idx + 3) % 7],
-                             q1_buf[(idx + 1) % 7]) * mesa_mult;
+                             q1_buf[(idx - 2) & MASK],
+                             q1_buf[(idx - 4) & MASK],
+                             q1_buf[(idx - 6) & MASK]) * mesa_mult;
 
         double i2 = i1_val - j_q;
         double q2 = q1_val + j_i;
@@ -338,12 +353,8 @@ void mama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         if (re != 0.0 && im != 0.0) {
             double ratio = im / re;
             double ang = atan_fast_f64(ratio);
-            if (ang != 0.0 && isfinite(ang)) {
-                double candidate = (2.0 * PI_D) / ang;
-                if (isfinite(candidate)) {
-                    mesa_period = candidate;
-                }
-            }
+            double candidate = (2.0 * PI_D) / ang;
+            mesa_period = candidate;
         }
 
         double upper = 1.5 * prev_mesa_period;
@@ -356,10 +367,8 @@ void mama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         double phase = prev_phase;
         if (i1_val != 0.0) {
             double ratio = q1_val / i1_val;
-            double ang = atan(ratio);
-            if (isfinite(ang)) {
-                phase = ang * RAD2DEG_D;
-            }
+            double ang = atan_fast_f64(ratio);
+            phase = ang * RAD2DEG_D;
         }
         double dp = prev_phase - phase;
         if (dp < 1.0) {

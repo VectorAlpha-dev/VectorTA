@@ -40,159 +40,80 @@ void reflex_batch_f32(const float* __restrict__ prices,
                       const int* __restrict__ periods,
                       int series_len,
                       int n_combos,
-                      int first_valid,
+                      int /*first_valid (unused, kept for ABI)*/,
                       float* __restrict__ out) {
     int combo = blockIdx.x;
-    if (combo >= n_combos) {
-        return;
-    }
-    if (threadIdx.x != 0) {
-        return;
-    }
+    if (combo >= n_combos || threadIdx.x != 0) { return; }
 
-    int period = periods[combo];
-    if (period < 2 || series_len <= 0) {
-        return;
-    }
+    const int period = periods[combo];
+    if (period < 2 || series_len <= 0) { return; }
 
     float* out_row = out + combo * series_len;
     const float nan = nanf("");
-    for (int i = 0; i < series_len; ++i) {
-        out_row[i] = nan;
-    }
-    int warm = period < series_len ? period : series_len;
-    for (int i = 0; i < warm; ++i) {
-        out_row[i] = 0.0f;
-    }
+    for (int i = 0; i < series_len; ++i) { out_row[i] = nan; }
+    const int warm = period < series_len ? period : series_len;
+    for (int i = 0; i < warm; ++i) { out_row[i] = 0.0f; }
 
-    int half_period_i = period / 2;
-    if (half_period_i < 1) {
-        half_period_i = 1;
+    // Coefficients in double to reduce FP error vs CPU f64
+    int half_period_i = period / 2; if (half_period_i < 1) half_period_i = 1;
+    const double half_p = static_cast<double>(half_period_i);
+    const double a = exp(-static_cast<double>(REFLEX_SQRT2_F) * static_cast<double>(REFLEX_PI_F) / half_p);
+    const double a2 = a * a;
+    const double b = 2.0 * a * cos(static_cast<double>(REFLEX_SQRT2_F) * static_cast<double>(REFLEX_PI_F) / half_p);
+    const double c = 0.5 * (1.0 + a2 - b);
+
+    // Ring buffer (period+1) in dynamic shared memory
+    extern __shared__ float sdata[];
+    float* ring = sdata; // size >= period+1 per wrapper
+    const int ring_len = period + 1;
+    if (series_len > 0) ring[0] = prices[0];
+    if (series_len > 1) ring[1] = prices[1];
+
+    // Rolling sum of last `period` ssf values before including ssf[i]
+    double ssf_sum = 0.0;
+    if (period == 1) {
+        ssf_sum = (series_len > 0) ? static_cast<double>(ring[0]) : 0.0;
+    } else {
+        ssf_sum = ((series_len > 0) ? static_cast<double>(ring[0]) : 0.0)
+                + ((series_len > 1) ? static_cast<double>(ring[1]) : 0.0);
     }
-    const float half_period = static_cast<float>(half_period_i);
-    const float a = __expf(-REFLEX_SQRT2_F * REFLEX_PI_F / half_period);
-    const float a_sq = a * a;
-    const float b = 2.0f * a * __cosf(REFLEX_SQRT2_F * REFLEX_PI_F / half_period);
-    const float c = 0.5f * (1.0f + a_sq - b);
-    int start = first_valid;
-    if (start < 0) {
-        start = 0;
-    }
-    if (start >= series_len) {
-        return;
-    }
+    const double inv_p = 1.0 / static_cast<double>(period);
+    const double alpha = 0.5 * (1.0 + inv_p);
+    const double beta  = 1.0 - alpha;
+    double ms = 0.0;
 
-    extern __shared__ float history[];
-    for (int i = 0; i < period; ++i) {
-        history[i] = nanf("");
-    }
+    for (int i = 2; i < series_len; ++i) {
+        const int idx      = i % ring_len;
+        const int idx_im1  = (i - 1) % ring_len;
+        const int idx_im2  = (i - 2) % ring_len;
 
-    if (start > period) {
-        for (int i = period; i < start && i < series_len; ++i) {
-            out_row[i] = 0.0f;
-        }
-    }
+        const double di   = static_cast<double>(prices[i]);
+        const double dim1 = static_cast<double>(prices[i - 1]);
+        const double ssf_im1 = static_cast<double>(ring[idx_im1]);
+        const double ssf_im2 = static_cast<double>(ring[idx_im2]);
 
-    double ms_prev = 0.0;
-    float prev_ssf1 = 0.0f;
-    float prev_ssf2 = 0.0f;
-    int finite_ssf_count = 0; // saturates at 2; tracks usable history for recurrence
+        const double t0 = c * (di + dim1);
+        const double t1 = fma(-a2, ssf_im2, t0); // t0 - a2*ssf[i-2]
+        const double ssf_i = fma(b, ssf_im1, t1); // + b*ssf[i-1]
 
-    int window_head = 0; // points to oldest element in `history`
-    int window_count = 0; // number of elements stored (<= period)
-    const double inv_period_d = 1.0 / static_cast<double>(period);
+        ring[idx] = static_cast<float>(ssf_i);
 
-    for (int i = start; i < series_len; ++i) {
-        const float price = prices[i];
-
-        if (!reflex_isfinite(price)) {
-            if (period > 0) {
-                if (window_count < period) {
-                    int tail = (window_head + window_count) % period;
-                    history[tail] = nanf("");
-                    window_count += 1;
-                } else {
-                    history[window_head] = nanf("");
-                    window_head = (window_head + 1) % period;
-                }
-            }
-            ms_prev = 0.0;
+        if (i < period) {
+            ssf_sum += ssf_i;
             continue;
         }
 
-        float prev_price = (i == 0) ? price : prices[i - 1];
+        const int idx_ip = (i - period) % ring_len;
+        const double ssf_ip = static_cast<double>(ring[idx_ip]);
+        const double mean_lp = ssf_sum * inv_p;
+        const double my_sum = fma(beta, ssf_i, alpha * ssf_ip) - mean_lp;
 
-        float prev1 = (finite_ssf_count >= 1 && reflex_isfinite(prev_ssf1)) ? prev_ssf1 : price;
-        float prev2 = (finite_ssf_count >= 2 && reflex_isfinite(prev_ssf2)) ? prev_ssf2 : prev1;
-
-        float ssf_i = (finite_ssf_count < 2)
-            ? price
-            : reflex_compute_ssf(price, prev_price, c, b, a_sq, prev1, prev2);
-
-        bool ssf_ok = reflex_isfinite(ssf_i);
-        bool updated_ms = false;
-
-        if (period > 0 && window_count == period && ssf_ok) {
-            const float ssf_period = history[window_head];
-            if (reflex_isfinite(ssf_period)) {
-                double slope = (static_cast<double>(ssf_period) - static_cast<double>(ssf_i)) * inv_period_d;
-                double my_sum = 0.0;
-                bool valid = true;
-                for (int t = 1; t <= period; ++t) {
-                    int idx = window_head + period - t;
-                    if (idx >= period) {
-                        idx -= period;
-                    }
-                    const float past = history[idx];
-                    if (!reflex_isfinite(past)) {
-                        valid = false;
-                        break;
-                    }
-                    const double pred = static_cast<double>(ssf_i) + slope * static_cast<double>(t);
-                    my_sum += pred - static_cast<double>(past);
-                }
-
-                if (valid) {
-                    my_sum *= inv_period_d;
-                    double ms = 0.04 * my_sum * my_sum + 0.96 * ms_prev;
-                    if (ms > 0.0 && isfinite(ms)) {
-                        out_row[i] = static_cast<float>(my_sum / sqrt(ms));
-                        ms_prev = ms;
-                    } else {
-                        ms_prev = 0.0;
-                    }
-                    updated_ms = true;
-                }
-            }
+        ms = fma(0.96, ms, 0.04 * my_sum * my_sum);
+        if (ms > 0.0 && isfinite(ms)) {
+            out_row[i] = static_cast<float>(my_sum / sqrt(ms));
         }
 
-        if (!updated_ms) {
-            if (window_count < period || !ssf_ok) {
-                ms_prev = 0.0;
-            }
-        }
-
-        const float stored_value = ssf_ok ? ssf_i : nanf("");
-        if (period > 0) {
-            if (window_count < period) {
-                int tail = (window_head + window_count) % period;
-                history[tail] = stored_value;
-                window_count += 1;
-            } else {
-                history[window_head] = stored_value;
-                window_head = (window_head + 1) % period;
-            }
-        }
-
-        if (ssf_ok) {
-            if (finite_ssf_count >= 1) {
-                prev_ssf2 = prev_ssf1;
-            }
-            prev_ssf1 = ssf_i;
-            if (finite_ssf_count < 2) {
-                finite_ssf_count += 1;
-            }
-        }
+        ssf_sum += ssf_i - ssf_ip;
     }
 }
 
@@ -201,156 +122,69 @@ void reflex_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                       int period,
                                       int num_series,
                                       int series_len,
-                                      const int* __restrict__ first_valids,
+                                      const int* __restrict__ /*first_valids (unused)*/,
                                       float* __restrict__ out_tm) {
-    int series = blockIdx.x;
-    if (series >= num_series) {
-        return;
-    }
-    if (threadIdx.x != 0) {
-        return;
-    }
-
-    if (period < 2 || series_len <= 0) {
-        return;
-    }
+    const int series = blockIdx.x;
+    if (series >= num_series || threadIdx.x != 0) { return; }
+    if (period < 2 || series_len <= 0) { return; }
 
     const float nan = nanf("");
-    for (int t = 0; t < series_len; ++t) {
-        out_tm[t * num_series + series] = nan;
-    }
-    int warm = period < series_len ? period : series_len;
-    for (int t = 0; t < warm; ++t) {
-        out_tm[t * num_series + series] = 0.0f;
-    }
+    for (int t = 0; t < series_len; ++t) { out_tm[t * num_series + series] = nan; }
+    const int warm = period < series_len ? period : series_len;
+    for (int t = 0; t < warm; ++t) { out_tm[t * num_series + series] = 0.0f; }
 
-    int half_period_i = period / 2;
-    if (half_period_i < 1) {
-        half_period_i = 1;
-    }
-    const float half_period = static_cast<float>(half_period_i);
-    const float a = __expf(-REFLEX_SQRT2_F * REFLEX_PI_F / half_period);
-    const float a_sq = a * a;
-    const float b = 2.0f * a * __cosf(REFLEX_SQRT2_F * REFLEX_PI_F / half_period);
-    const float c = 0.5f * (1.0f + a_sq - b);
-    int start = first_valids[series];
-    if (start < 0) {
-        start = 0;
-    }
-    if (start >= series_len) {
-        return;
-    }
+    int half_period_i = period / 2; if (half_period_i < 1) half_period_i = 1;
+    const double half_p = static_cast<double>(half_period_i);
+    const double a = exp(-static_cast<double>(REFLEX_SQRT2_F) * static_cast<double>(REFLEX_PI_F) / half_p);
+    const double a2 = a * a;
+    const double b = 2.0 * a * cos(static_cast<double>(REFLEX_SQRT2_F) * static_cast<double>(REFLEX_PI_F) / half_p);
+    const double c = 0.5 * (1.0 + a2 - b);
 
-    extern __shared__ float history[];
-    for (int i = 0; i < period; ++i) {
-        history[i] = nanf("");
+    extern __shared__ float sdata[];
+    float* ring = sdata; // period+1
+    const int ring_len = period + 1;
+    if (series_len > 0) ring[0] = prices_tm[0 * num_series + series];
+    if (series_len > 1) ring[1] = prices_tm[1 * num_series + series];
+
+    double ssf_sum = 0.0;
+    if (period == 1) {
+        ssf_sum = (series_len > 0) ? static_cast<double>(ring[0]) : 0.0;
+    } else {
+        ssf_sum = ((series_len > 0) ? static_cast<double>(ring[0]) : 0.0)
+                + ((series_len > 1) ? static_cast<double>(ring[1]) : 0.0);
     }
+    const double inv_p = 1.0 / static_cast<double>(period);
+    const double alpha = 0.5 * (1.0 + inv_p);
+    const double beta  = 1.0 - alpha;
+    double ms = 0.0;
 
-    if (start > period) {
-        for (int t = period; t < start && t < series_len; ++t) {
-            out_tm[t * num_series + series] = 0.0f;
-        }
-    }
+    for (int t = 2; t < series_len; ++t) {
+        const int idx     = t % ring_len;
+        const int idx_im1 = (t - 1) % ring_len;
+        const int idx_im2 = (t - 2) % ring_len;
 
-    double ms_prev = 0.0;
-    float prev_ssf1 = 0.0f;
-    float prev_ssf2 = 0.0f;
-    int finite_ssf_count = 0;
-    int window_head = 0;
-    int window_count = 0;
-    const double inv_period_d = 1.0 / static_cast<double>(period);
+        const double di   = static_cast<double>(prices_tm[t * num_series + series]);
+        const double dim1 = static_cast<double>(prices_tm[(t - 1) * num_series + series]);
+        const double ssf_im1 = static_cast<double>(ring[idx_im1]);
+        const double ssf_im2 = static_cast<double>(ring[idx_im2]);
 
-    for (int t = start; t < series_len; ++t) {
-        const int idx = t * num_series + series;
-        const float price = prices_tm[idx];
+        const double t0 = c * (di + dim1);
+        const double t1 = fma(-a2, ssf_im2, t0);
+        const double ssf_t = fma(b, ssf_im1, t1);
+        ring[idx] = static_cast<float>(ssf_t);
 
-        if (!reflex_isfinite(price)) {
-            if (period > 0) {
-                if (window_count < period) {
-                    int tail = (window_head + window_count) % period;
-                    history[tail] = nanf("");
-                    window_count += 1;
-                } else {
-                    history[window_head] = nanf("");
-                    window_head = (window_head + 1) % period;
-                }
-            }
-            ms_prev = 0.0;
-            continue;
+        if (t < period) { ssf_sum += ssf_t; continue; }
+
+        const int idx_ip = (t - period) % ring_len;
+        const double ssf_ip = static_cast<double>(ring[idx_ip]);
+        const double mean_lp = ssf_sum * inv_p;
+        const double my_sum = fma(beta, ssf_t, alpha * ssf_ip) - mean_lp;
+
+        ms = fma(0.96, ms, 0.04 * my_sum * my_sum);
+        if (ms > 0.0 && isfinite(ms)) {
+            out_tm[t * num_series + series] = static_cast<float>(my_sum / sqrt(ms));
         }
 
-        float prev_price = (t == 0) ? price : prices_tm[(t - 1) * num_series + series];
-
-        float prev1 = (finite_ssf_count >= 1 && reflex_isfinite(prev_ssf1)) ? prev_ssf1 : price;
-        float prev2 = (finite_ssf_count >= 2 && reflex_isfinite(prev_ssf2)) ? prev_ssf2 : prev1;
-
-        float ssf_t = (finite_ssf_count < 2)
-            ? price
-            : reflex_compute_ssf(price, prev_price, c, b, a_sq, prev1, prev2);
-
-        bool ssf_ok = reflex_isfinite(ssf_t);
-        bool updated_ms = false;
-
-        if (period > 0 && window_count == period && ssf_ok) {
-            const float ssf_period = history[window_head];
-            if (reflex_isfinite(ssf_period)) {
-                double slope = (static_cast<double>(ssf_period) - static_cast<double>(ssf_t)) * inv_period_d;
-                double my_sum = 0.0;
-                bool valid = true;
-                for (int k = 1; k <= period; ++k) {
-                    int idx_hist = window_head + period - k;
-                    if (idx_hist >= period) {
-                        idx_hist -= period;
-                    }
-                    const float past = history[idx_hist];
-                    if (!reflex_isfinite(past)) {
-                        valid = false;
-                        break;
-                    }
-                    const double pred = static_cast<double>(ssf_t) + slope * static_cast<double>(k);
-                    my_sum += pred - static_cast<double>(past);
-                }
-
-                if (valid) {
-                    my_sum *= inv_period_d;
-                    double ms = 0.04 * my_sum * my_sum + 0.96 * ms_prev;
-                    if (ms > 0.0 && isfinite(ms)) {
-                        out_tm[idx] = static_cast<float>(my_sum / sqrt(ms));
-                        ms_prev = ms;
-                    } else {
-                        ms_prev = 0.0;
-                    }
-                    updated_ms = true;
-                }
-            }
-        }
-
-        if (!updated_ms) {
-            if (window_count < period || !ssf_ok) {
-                ms_prev = 0.0;
-            }
-        }
-
-        const float stored_value = ssf_ok ? ssf_t : nanf("");
-        if (period > 0) {
-            if (window_count < period) {
-                int tail = (window_head + window_count) % period;
-                history[tail] = stored_value;
-                window_count += 1;
-            } else {
-                history[window_head] = stored_value;
-                window_head = (window_head + 1) % period;
-            }
-        }
-
-        if (ssf_ok) {
-            if (finite_ssf_count >= 1) {
-                prev_ssf2 = prev_ssf1;
-            }
-            prev_ssf1 = ssf_t;
-            if (finite_ssf_count < 2) {
-                finite_ssf_count += 1;
-            }
-        }
+        ssf_sum += ssf_t - ssf_ip;
     }
 }

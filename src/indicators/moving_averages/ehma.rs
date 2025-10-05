@@ -1147,16 +1147,27 @@ pub fn ehma_py<'py>(
     period: usize,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, false)?;
-    let params = EhmaParams {
-        period: Some(period),
-    };
-    let input = EhmaInput::from_slice(slice_in, params);
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
-    let result_vec: Vec<f64> = py
-        .allow_threads(|| ehma_with_kernel(&input, kern).map(|o| o.values))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let kern = validate_kernel(kernel, false)?;
+    let params = EhmaParams { period: Some(period) };
+
+    // Match ALMA behavior: accept non-contiguous views by doing a minimal copy.
+    let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
+        let input = EhmaInput::from_slice(slice_in, params);
+        py
+            .allow_threads(|| ehma_with_kernel(&input, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+    } else {
+        let owned = data.as_array().to_owned();
+        let slice_in = owned
+            .as_slice()
+            .expect("owned numpy array should be contiguous");
+        let input = EhmaInput::from_slice(slice_in, params);
+        py
+            .allow_threads(|| ehma_with_kernel(&input, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+    };
 
     Ok(result_vec.into_pyarray(py))
 }
@@ -1171,14 +1182,27 @@ pub fn ehma_batch_py<'py>(
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-    let slice_in = data.as_slice()?;
     let sweep = EhmaBatchRange {
         period: period_range,
     };
 
     let combos = expand_grid(&sweep);
     let rows = combos.len();
-    let cols = slice_in.len();
+    // Handle non-contiguous input by copying when necessary.
+    let (slice_in, owned_opt);
+    let cols: usize;
+    if let Ok(s) = data.as_slice() {
+        slice_in = s;
+        owned_opt = None::<Vec<f64>>;
+        cols = slice_in.len();
+    } else {
+        let owned = data.as_array().to_owned();
+        cols = owned.len();
+        // Keep owned alive for the duration of this scope
+        owned_opt = Some(owned.into_raw_vec());
+        // Safety: just created contiguous Vec; borrow its slice
+        slice_in = owned_opt.as_ref().unwrap().as_slice();
+    }
 
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
