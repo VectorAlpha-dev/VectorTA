@@ -2046,21 +2046,26 @@ pub fn maaq_py<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     use numpy::{IntoPyArray, PyArrayMethods};
 
-    let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
     let params = MaaqParams {
         period: Some(period),
         fast_period: Some(fast_period),
         slow_period: Some(slow_period),
     };
-    let input = MaaqInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function
-    let result_vec: Vec<f64> = py
-        .allow_threads(|| maaq_with_kernel(&input, kern).map(|o| o.values))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // Prefer zero-copy for contiguous input; fallback to a single copy for non-contiguous views
+    let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
+        let input = MaaqInput::from_slice(slice_in, params);
+        py.allow_threads(|| maaq_with_kernel(&input, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+    } else {
+        let owned = data.as_array().to_owned();
+        let slice_in = owned.as_slice().expect("owned array should be contiguous");
+        let input = MaaqInput::from_slice(slice_in, params);
+        py.allow_threads(|| maaq_with_kernel(&input, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+    };
 
-    // Zero-copy transfer to NumPy
     Ok(result_vec.into_pyarray(py))
 }
 

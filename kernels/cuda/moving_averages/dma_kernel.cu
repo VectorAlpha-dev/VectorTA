@@ -175,8 +175,8 @@ void dma_batch_f32(const float* __restrict__ prices,
                     const float a_prev = a_half;
                     const float old = prices[i - half];
                     kahan_add(x - old, a_half, a_half_c);
+                    // Rolling WMA weighted-sum update: s_new = s_prev + half * x - a_prev
                     kahan_add(fmaf(static_cast<float>(half), x, -a_prev), s_half, s_half_c);
-                    kahan_add(-a_prev, s_half, s_half_c);
                 }
             }
 
@@ -205,8 +205,8 @@ void dma_batch_f32(const float* __restrict__ prices,
                     const float a_prev = a_full;
                     const float old = prices[i - hull_length];
                     kahan_add(x - old, a_full, a_full_c);
+                    // Rolling WMA weighted-sum update: s_new = s_prev + hull_length * x - a_prev
                     kahan_add(fmaf(static_cast<float>(hull_length), x, -a_prev), s_full, s_full_c);
-                    kahan_add(-a_prev, s_full, s_full_c);
                 }
             }
 
@@ -295,8 +295,8 @@ void dma_batch_f32(const float* __restrict__ prices,
                     }
                     const float a_prev = a_diff;
                     kahan_add(diff_now - old, a_diff, a_diff_c);
+                    // Rolling WMA(diff) weighted-sum update: s_new = s_prev + sqrt_len * diff_now - a_prev
                     kahan_add(fmaf(static_cast<float>(sqrt_len), diff_now, -a_prev), s_diff, s_diff_c);
-                    kahan_add(-a_prev, s_diff, s_diff_c);
                     const float denom = fmaxf(wsum_norm_i32(sqrt_len), 1.0f);
                     hull_val = sum_read(s_diff, s_diff_c) / denom;
                 } else {
@@ -723,8 +723,8 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     const float a_prev = a_half;
                     const float old = prices_tm[(i - half) * stride + series_idx];
                     kahan_add(x - old, a_half, a_half_c);
+                    // Rolling WMA weighted-sum update: s_new = s_prev + half * x - a_prev
                     kahan_add(fmaf(static_cast<float>(half), x, -a_prev), s_half, s_half_c);
-                    kahan_add(-a_prev, s_half, s_half_c);
                 }
             }
 
@@ -753,8 +753,8 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     const float a_prev = a_full;
                     const float old = prices_tm[(i - hull_length) * stride + series_idx];
                     kahan_add(x - old, a_full, a_full_c);
+                    // Rolling WMA weighted-sum update: s_new = s_prev + hull_length * x - a_prev
                     kahan_add(fmaf(static_cast<float>(hull_length), x, -a_prev), s_full, s_full_c);
-                    kahan_add(-a_prev, s_full, s_full_c);
                 }
             }
 
@@ -843,8 +843,8 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     }
                     const float a_prev = a_diff;
                     kahan_add(diff_now - old, a_diff, a_diff_c);
+                    // Rolling WMA(diff) weighted-sum update: s_new = s_prev + sqrt_len * diff_now - a_prev
                     kahan_add(fmaf(static_cast<float>(sqrt_len_clamped), diff_now, -a_prev), s_diff, s_diff_c);
-                    kahan_add(-a_prev, s_diff, s_diff_c);
                     const float denom = fmaxf(wsum_norm_i32(sqrt_len_clamped), 1.0f);
                     hull_val = sum_read(s_diff, s_diff_c) / denom;
                 } else {

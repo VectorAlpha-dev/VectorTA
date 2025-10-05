@@ -8,16 +8,18 @@
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
+use super::cwma_wrapper::{BatchKernelPolicy, BatchThreadsPerOutput, ManySeriesKernelPolicy};
 use crate::indicators::moving_averages::pwma::{expand_grid, PwmaBatchRange, PwmaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaPwmaError {
@@ -40,6 +42,12 @@ pub struct CudaPwma {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaPwmaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaPwma {
@@ -50,7 +58,20 @@ impl CudaPwma {
         let context = Context::new(device).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/pwma_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
 
@@ -58,6 +79,12 @@ impl CudaPwma {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaPwmaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
     }
 
@@ -176,34 +203,47 @@ impl CudaPwma {
             .get_function("pwma_batch_f32")
             .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = 256;
-        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        // Introspection
+        unsafe {
+            let this = self as *const _ as *mut CudaPwma;
+            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x: 256 });
+        }
+        self.maybe_log_batch_debug();
+
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            _ => 256,
+        };
         let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut weights_ptr = d_weights.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut warms_ptr = d_warms.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut n_combos_i = n_combos as i32;
-            let mut max_period_i = max_period as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut weights_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut warms_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut n_combos_i as *mut _ as *mut c_void,
-                &mut max_period_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        for (start, len) in Self::grid_y_chunks(n_combos) {
+            let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+            let grid: GridSize = (grid_x.max(1), len as u32, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut weights_ptr = d_weights.as_device_ptr().add(start * max_period).as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
+                let mut warms_ptr = d_warms.as_device_ptr().add(start).as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut n_combos_i = len as i32;
+                let mut max_period_i = max_period as i32;
+                let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut weights_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut warms_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut n_combos_i as *mut _ as *mut c_void,
+                    &mut max_period_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes, args)
+                    .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+            }
         }
 
         Ok(())
@@ -239,6 +279,20 @@ impl CudaPwma {
             .iter()
             .map(|p| (first_valid + p.period.unwrap() - 1) as i32)
             .collect();
+
+        // VRAM estimate and guard (prices + weights + periods + warms + out)
+        let prices_bytes = series_len * std::mem::size_of::<f32>();
+        let weights_bytes = n_combos * max_period * std::mem::size_of::<f32>();
+        let periods_bytes = n_combos * std::mem::size_of::<i32>();
+        let warms_bytes = n_combos * std::mem::size_of::<i32>();
+        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
+        let required = prices_bytes + weights_bytes + periods_bytes + warms_bytes + out_bytes;
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
+            return Err(CudaPwmaError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
 
         let d_prices =
             DeviceBuffer::from_slice(data_f32).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
@@ -354,21 +408,89 @@ impl CudaPwma {
             ));
         }
 
+        // Try 2D tiled variants first
+        let try_2d = |tx: u32, ty: u32| -> Option<()> {
+            let fname = match (tx, ty) {
+                (128, 4) => "pwma_ms1p_tiled_f32_tx128_ty4",
+                (128, 2) => "pwma_ms1p_tiled_f32_tx128_ty2",
+                _ => return None,
+            };
+            let func = match self.module.get_function(fname) { Ok(f) => f, Err(_) => return None };
+            let wlen = period; // full-period weights
+            let align16 = |x: usize| (x + 15) & !15usize;
+            let total = tx as usize + wlen - 1;
+            let shared_bytes = (align16(wlen * std::mem::size_of::<f32>())
+                + total * ty as usize * std::mem::size_of::<f32>()) as u32;
+            let grid_x = ((series_len as u32) + tx - 1) / tx;
+            let grid_y = ((num_series as u32) + ty - 1) / ty;
+            let grid: GridSize = (grid_x, grid_y, 1).into();
+            let block: BlockSize = (tx, ty, 1).into();
+
+            unsafe {
+                let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
+                let mut weights_ptr = d_weights.as_device_ptr().as_raw();
+                let mut period_i = period as i32;
+                let mut inv_norm = 1.0f32;
+                let mut num_series_i = num_series as i32;
+                let mut series_len_i = series_len as i32;
+                let mut first_valids_ptr = d_first_valids.as_device_ptr().as_raw();
+                let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut weights_ptr as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut inv_norm as *mut _ as *mut c_void,
+                    &mut num_series_i as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut first_valids_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes, args)
+                    .map_err(|e| CudaPwmaError::Cuda(e.to_string()))
+                    .ok()?;
+            }
+            unsafe {
+                let this = self as *const _ as *mut CudaPwma;
+                (*this).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
+            }
+            self.maybe_log_many_debug();
+            Some(())
+        };
+
+        match self.policy.many_series {
+            ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
+                if try_2d(tx as u32, ty as u32).is_some() { return Ok(()); }
+            }
+            ManySeriesKernelPolicy::OneD { .. } => {}
+            ManySeriesKernelPolicy::Auto => {
+                if num_series >= 128 {
+                    if try_2d(128, 4).is_some() { return Ok(()); }
+                    if try_2d(128, 2).is_some() { return Ok(()); }
+                } else {
+                    if try_2d(128, 2).is_some() { return Ok(()); }
+                    if try_2d(128, 4).is_some() { return Ok(()); }
+                }
+            }
+        }
+
+        // Fallback 1D
         let func = self
             .module
             .get_function("pwma_multi_series_one_param_f32")
             .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
 
-        const BLOCK_X: u32 = 128;
-        let grid_x = ((series_len as u32) + BLOCK_X - 1) / BLOCK_X;
+        let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), num_series as u32, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
         let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
             let mut weights_ptr = d_weights.as_device_ptr().as_raw();
             let mut period_i = period as i32;
+            let mut inv_norm = 1.0f32;
             let mut num_series_i = num_series as i32;
             let mut series_len_i = series_len as i32;
             let mut first_valids_ptr = d_first_valids.as_device_ptr().as_raw();
@@ -377,6 +499,7 @@ impl CudaPwma {
                 &mut prices_ptr as *mut _ as *mut c_void,
                 &mut weights_ptr as *mut _ as *mut c_void,
                 &mut period_i as *mut _ as *mut c_void,
+                &mut inv_norm as *mut _ as *mut c_void,
                 &mut num_series_i as *mut _ as *mut c_void,
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut first_valids_ptr as *mut _ as *mut c_void,
@@ -386,7 +509,11 @@ impl CudaPwma {
                 .launch(&func, grid, block, shared_bytes, args)
                 .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
         }
-
+        unsafe {
+            let this = self as *const _ as *mut CudaPwma;
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+        }
+        self.maybe_log_many_debug();
         Ok(())
     }
 
@@ -425,6 +552,19 @@ impl CudaPwma {
     ) -> Result<DeviceArrayF32, CudaPwmaError> {
         let (first_valids, weights, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
+
+        // VRAM estimate: prices + weights + first_valids + out
+        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
+        let weights_bytes = period * std::mem::size_of::<f32>();
+        let fv_bytes = cols * std::mem::size_of::<i32>();
+        let out_bytes = cols * rows * std::mem::size_of::<f32>();
+        let required = prices_bytes + weights_bytes + fv_bytes + out_bytes;
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
+            return Err(CudaPwmaError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
 
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
@@ -521,4 +661,92 @@ pub mod benches {
         "pwma"
     );
     pub use pwma_benches::bench_profiles;
+}
+
+// -------- Policies, introspection and helpers (mirrors ALMA/CWMA) --------
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaPwmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for CudaPwmaPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
+
+impl CudaPwma {
+    pub fn policy(&self) -> &CudaPwmaPolicy { &self.policy }
+    pub fn set_policy(&mut self, policy: CudaPwmaPolicy) { self.policy = policy; }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] PWMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaPwma)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] PWMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaPwma)).debug_many_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else { true }
+    }
+
+    #[inline]
+    fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
+        const MAX: usize = 65_535;
+        (0..n).step_by(MAX).map(move |start| {
+            let len = (n - start).min(MAX);
+            (start, len)
+        })
+    }
 }

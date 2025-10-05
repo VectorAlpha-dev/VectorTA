@@ -103,3 +103,49 @@ void fwma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
         t += stride;
     }
 }
+
+// Optional alias with "many_series" naming for consistency with other wrappers.
+// Identical implementation; preserved to ease future wrapper harmonization.
+extern "C" __global__
+void fwma_many_series_one_param_f32(const float* __restrict__ prices_tm,
+                                    const float* __restrict__ weights,
+                                    int period,
+                                    int num_series,
+                                    int series_len,
+                                    const int* __restrict__ first_valids,
+                                    float* __restrict__ out_tm) {
+    // Reuse the exact body
+    extern __shared__ float shared_weights[];
+    for (int idx = threadIdx.x; idx < period; idx += blockDim.x) {
+        shared_weights[idx] = weights[idx];
+    }
+    __syncthreads();
+
+    const int series_idx = blockIdx.y;
+    if (series_idx >= num_series) {
+        return;
+    }
+
+    const int warm = first_valids[series_idx] + period - 1;
+    const float nan_f = __int_as_float(0x7fffffff);
+
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = gridDim.x * blockDim.x;
+
+    while (t < series_len) {
+        const int out_idx = t * num_series + series_idx;
+        if (t < warm) {
+            out_tm[out_idx] = nan_f;
+        } else {
+            const int start = t - period + 1;
+            float acc = 0.0f;
+#pragma unroll 4
+            for (int k = 0; k < period; ++k) {
+                const int in_idx = (start + k) * num_series + series_idx;
+                acc = fmaf(prices_tm[in_idx], shared_weights[k], acc);
+            }
+            out_tm[out_idx] = acc;
+        }
+        t += stride;
+    }
+}

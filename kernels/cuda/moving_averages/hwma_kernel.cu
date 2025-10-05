@@ -52,17 +52,23 @@ void hwma_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    float f = prices[first];
-    float v = 0.0f;
-    float a = 0.0f;
+    // Compute in FP64 to reduce accumulation error; store as FP32.
+    double f = static_cast<double>(prices[first]);
+    double v = 0.0;
+    double a = 0.0;
+    const double dna = static_cast<double>(na);
+    const double dnb = static_cast<double>(nb);
+    const double dnc = static_cast<double>(nc);
+    const double dh = 0.5;
 
     for (int t = first; t < series_len; ++t) {
-        const float price = prices[t];
-        const float fv_sum = f + v + half * a;
-        const float f_new = na * price + one_m_na * fv_sum;
-        const float v_new = nb * (f_new - f) + one_m_nb * (v + a);
-        const float a_new = nc * (v_new - v) + one_m_nc * a;
-        out[base + t] = f_new + v_new + half * a_new;
+        const double price = static_cast<double>(prices[t]);
+        const double s_prev = dh * a + (f + v);
+        const double f_new = dna * price + (1.0 - dna) * s_prev;
+        const double v_new = dnb * (f_new - f) + (1.0 - dnb) * (v + a);
+        const double a_new = dnc * (v_new - v) + (1.0 - dnc) * a;
+        const double s_new = dh * a_new + (f_new + v_new);
+        out[base + t] = static_cast<float>(s_new);
         f = f_new;
         v = v_new;
         a = a_new;
@@ -107,18 +113,23 @@ void hwma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
     const float one_m_nc = 1.0f - nc;
 
     const int first_idx = first * stride + series_idx;
-    float f = prices_tm[first_idx];
-    float v = 0.0f;
-    float a = 0.0f;
+    double f = static_cast<double>(prices_tm[first_idx]);
+    double v = 0.0;
+    double a = 0.0;
+    const double dna = static_cast<double>(na);
+    const double dnb = static_cast<double>(nb);
+    const double dnc = static_cast<double>(nc);
+    const double dh = 0.5;
 
     for (int t = first; t < series_len; ++t) {
         const int idx = t * stride + series_idx;
-        const float price = prices_tm[idx];
-        const float fv_sum = f + v + half * a;
-        const float f_new = na * price + one_m_na * fv_sum;
-        const float v_new = nb * (f_new - f) + one_m_nb * (v + a);
-        const float a_new = nc * (v_new - v) + one_m_nc * a;
-        out_tm[idx] = f_new + v_new + half * a_new;
+        const double price = static_cast<double>(prices_tm[idx]);
+        const double s_prev = dh * a + (f + v);
+        const double f_new = dna * price + (1.0 - dna) * s_prev;
+        const double v_new = dnb * (f_new - f) + (1.0 - dnb) * (v + a);
+        const double a_new = dnc * (v_new - v) + (1.0 - dnc) * a;
+        const double s_new = dh * a_new + (f_new + v_new);
+        out_tm[idx] = static_cast<float>(s_new);
         f = f_new;
         v = v_new;
         a = a_new;

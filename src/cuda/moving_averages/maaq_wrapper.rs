@@ -1,9 +1,20 @@
 //! CUDA wrapper for MAAQ (Moving Average Adaptive Q) kernels.
 //!
-//! Mirrors the ALMA/SWMA/PWMA scaffolding: validate host inputs, upload FP32
-//! data once, then launch kernels that keep the adaptive smoothing recursion on
-//! the device. Supports both the single-series × many-parameter sweep and the
-//! many-series × one-parameter path using time-major inputs.
+//! Aligned with the ALMA wrapper design/policy:
+//! - Robust PTX loading with context-targeted JIT and opt-level fallbacks
+//! - Policy enums for explicit kernel selection (batch/many-series)
+//! - VRAM estimation with headroom; fail early when insufficient
+//! - Chunking over parameter combinations (<= 65_535 per launch)
+//! - NON_BLOCKING stream; async copies and pinned buffers where helpful
+//!
+//! Kernels expected:
+//! - "maaq_batch_f32"                          // one-series × many-params (recurrence)
+//! - "maaq_multi_series_one_param_f32"         // many-series × one-param (time-major)
+//!
+//! Notes:
+//! - MAAQ is a recurrence/IIR style indicator. Each thread/block scans time
+//!   sequentially per parameter-combo or per series. Tiling only affects launch
+//!   geometry; math remains per-thread sequential.
 
 #![cfg(feature = "cuda")]
 
@@ -12,12 +23,43 @@ use crate::indicators::moving_averages::maaq::{expand_grid, MaaqBatchRange, Maaq
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// -------- Kernel selection policy (kept minimal for a recurrence kernel) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    // One thread per combo, sequential over time
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    // One thread per series (1D). 2D variants not provided for MAAQ currently.
+    OneD { block_x: u32 },
+}
+
+impl Default for BatchKernelPolicy {
+    fn default() -> Self { BatchKernelPolicy::Auto }
+}
+
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CudaMaaqPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
 
 #[derive(Debug)]
 pub enum CudaMaaqError {
@@ -36,10 +78,22 @@ impl fmt::Display for CudaMaaqError {
 
 impl std::error::Error for CudaMaaqError {}
 
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+
 pub struct CudaMaaq {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Context, // keep context alive
+    device_id: u32,
+    policy: CudaMaaqPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaMaaq {
@@ -50,7 +104,21 @@ impl CudaMaaq {
         let context = Context::new(device).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/maaq_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        // Prefer context-targeted JIT with moderate opt-level; fallback progressively
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
@@ -58,6 +126,81 @@ impl CudaMaaq {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaMaaqPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
+        })
+    }
+
+    pub fn new_with_policy(device_id: usize, policy: CudaMaaqPolicy) -> Result<Self, CudaMaaqError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaMaaqPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaMaaqPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] MAAQ batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaMaaq)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] MAAQ many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaMaaq)).debug_many_logged = true; }
+            }
+        }
+    }
+
+    // ---------- Utilities ----------
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else { true }
+    }
+
+    #[inline]
+    fn chunk_pairs(total: usize, chunk_max: usize) -> impl Iterator<Item = (usize, usize)> {
+        (0..total).step_by(chunk_max).map(move |start| {
+            let len = (total - start).min(chunk_max);
+            (start, len)
         })
     }
 
@@ -117,7 +260,7 @@ impl CudaMaaq {
         Ok((combos, first_valid, len, max_period))
     }
 
-    fn launch_batch_kernel(
+    fn launch_batch_kernel_plain(
         &self,
         d_prices: &DeviceBuffer<f32>,
         d_periods: &DeviceBuffer<i32>,
@@ -153,34 +296,50 @@ impl CudaMaaq {
             .get_function("maaq_batch_f32")
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
-        let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
+        // Selection + record
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => 1u32,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+        };
+        unsafe { (*(self as *const _ as *mut CudaMaaq)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        self.maybe_log_batch_debug();
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut fast_ptr = d_fast_scs.as_device_ptr().as_raw();
-            let mut slow_ptr = d_slow_scs.as_device_ptr().as_raw();
-            let mut first_valid_i = first_valid as i32;
-            let mut series_len_i = series_len as i32;
-            let mut n_combos_i = n_combos as i32;
-            let mut max_period_i = max_period as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut fast_ptr as *mut _ as *mut c_void,
-                &mut slow_ptr as *mut _ as *mut c_void,
-                &mut first_valid_i as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut n_combos_i as *mut _ as *mut c_void,
-                &mut max_period_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        // Launch in chunks of <= 65_535 combos
+        const MAX_CHUNK: usize = 65_535;
+        for (start, len) in Self::chunk_pairs(n_combos, MAX_CHUNK) {
+            let grid: GridSize = (len as u32, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
+
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
+                let mut fast_ptr = d_fast_scs.as_device_ptr().add(start).as_raw();
+                let mut slow_ptr = d_slow_scs.as_device_ptr().add(start).as_raw();
+                let mut first_valid_i = first_valid as i32;
+                let mut series_len_i = series_len as i32;
+                let mut n_combos_i = len as i32;
+                let mut max_period_i = max_period as i32;
+                // slice output per chunk (row-major: combos × series_len)
+                let mut out_ptr = d_out
+                    .as_device_ptr()
+                    .add(start * series_len)
+                    .as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut fast_ptr as *mut _ as *mut c_void,
+                    &mut slow_ptr as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut n_combos_i as *mut _ as *mut c_void,
+                    &mut max_period_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes, args)
+                    .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+            }
         }
 
         Ok(())
@@ -198,7 +357,7 @@ impl CudaMaaq {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMaaqError> {
-        self.launch_batch_kernel(
+        self.launch_batch_kernel_plain(
             d_prices,
             d_periods,
             d_fast_scs,
@@ -219,6 +378,19 @@ impl CudaMaaq {
         let (combos, first_valid, len, max_period) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
+        // VRAM estimate: inputs + params + outputs
+        let bytes =
+            len * std::mem::size_of::<f32>() + // prices
+            n_combos * (std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>()) + // period/fast/slow
+            (n_combos * len) * std::mem::size_of::<f32>(); // out
+        let headroom = 64 * 1024 * 1024; // ~64MB
+        if !Self::will_fit(bytes, headroom) {
+            return Err(CudaMaaqError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (bytes as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
         let mut periods_i32 = Vec::with_capacity(n_combos);
         let mut fast_scs = Vec::with_capacity(n_combos);
         let mut slow_scs = Vec::with_capacity(n_combos);
@@ -231,18 +403,22 @@ impl CudaMaaq {
             slow_scs.push(2.0f32 / (slow as f32 + 1.0f32));
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        let d_prices = unsafe {
+            DeviceBuffer::from_slice_async(data_f32, &self.stream)
+                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?
+        };
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
-        let d_fast =
-            DeviceBuffer::from_slice(&fast_scs).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
-        let d_slow =
-            DeviceBuffer::from_slice(&slow_scs).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }
+        let d_fast = DeviceBuffer::from_slice(&fast_scs)
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        let d_slow = DeviceBuffer::from_slice(&slow_scs)
+            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(n_combos * len, &self.stream)
+        }
+        .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
-        self.launch_batch_kernel(
+        self.launch_batch_kernel_plain(
             &d_prices,
             &d_periods,
             &d_fast,
@@ -369,32 +545,44 @@ impl CudaMaaq {
             .get_function("maaq_multi_series_one_param_f32")
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
-        let grid: GridSize = (num_series as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
-        let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 1u32,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
+        };
+        unsafe { (*(self as *const _ as *mut CudaMaaq)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        self.maybe_log_many_debug();
 
-        unsafe {
-            let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
-            let mut period_i = period as i32;
-            let mut fast = fast_sc;
-            let mut slow = slow_sc;
-            let mut num_series_i = num_series as i32;
-            let mut series_len_i = series_len as i32;
-            let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
-            let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut period_i as *mut _ as *mut c_void,
-                &mut fast as *mut _ as *mut c_void,
-                &mut slow as *mut _ as *mut c_void,
-                &mut num_series_i as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut first_ptr as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        // Launch in chunks over series to respect grid.x practical limits
+        const MAX_CHUNK: usize = 65_535; // conservative
+        for (start, len) in Self::chunk_pairs(num_series, MAX_CHUNK) {
+            let grid: GridSize = (len as u32, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
+
+            unsafe {
+                let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
+                let mut period_i = period as i32;
+                let mut fast = fast_sc;
+                let mut slow = slow_sc;
+                let mut num_series_i = len as i32;
+                let mut series_len_i = series_len as i32;
+                let mut first_ptr = d_first_valids.as_device_ptr().add(start).as_raw();
+                // time-major output; offset by start series
+                let mut out_ptr = d_out_tm.as_device_ptr().add(start).as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut fast as *mut _ as *mut c_void,
+                    &mut slow as *mut _ as *mut c_void,
+                    &mut num_series_i as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut first_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes, args)
+                    .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+            }
         }
 
         Ok(())
@@ -438,11 +626,13 @@ impl CudaMaaq {
         let (first_valids, period, fast_sc, slow_sc) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        let d_prices_tm = unsafe {
+            DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
+                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?
+        };
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
@@ -455,9 +645,7 @@ impl CudaMaaq {
             &d_first_valids,
             &mut d_out_tm,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
@@ -484,11 +672,13 @@ impl CudaMaaq {
         let (first_valids, period, fast_sc, slow_sc) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        let d_prices_tm = unsafe {
+            DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
+                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?
+        };
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
@@ -501,13 +691,18 @@ impl CudaMaaq {
             &d_first_valids,
             &mut d_out_tm,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
-
-        d_out_tm
-            .copy_to(out_tm)
-            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        // Use pinned host buffer for faster D2H
+        self.stream.synchronize().map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        let mut pinned: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(cols * rows).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?
+        };
+        unsafe {
+            d_out_tm
+                .async_copy_to(pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        }
+        self.stream.synchronize().map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        out_tm.copy_from_slice(pinned.as_slice());
         Ok(())
     }
 }
