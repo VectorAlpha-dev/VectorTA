@@ -1448,17 +1448,22 @@ pub fn ehlers_itrend_py<'py>(
     max_dc_period: usize,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
-    let slice_in = data.as_slice()?;
+    use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     let kern = validate_kernel(kernel, false)?;
-    let params = EhlersITrendParams {
-        warmup_bars: Some(warmup_bars),
-        max_dc_period: Some(max_dc_period),
+    let params = EhlersITrendParams { warmup_bars: Some(warmup_bars), max_dc_period: Some(max_dc_period) };
+    // Prefer zero-copy for contiguous input; fallback to a minimal copy for non-contiguous views.
+    let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
+        let input = EhlersITrendInput::from_slice(slice_in, params);
+        py.allow_threads(|| ehlers_itrend_with_kernel(&input, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+    } else {
+        let owned = data.as_array().to_owned();
+        let slice_in = owned.as_slice().expect("owned array should be contiguous");
+        let input = EhlersITrendInput::from_slice(slice_in, params);
+        py.allow_threads(|| ehlers_itrend_with_kernel(&input, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
     };
-    let input = EhlersITrendInput::from_slice(slice_in, params);
-    let vec_out: Vec<f64> = py
-        .allow_threads(|| ehlers_itrend_with_kernel(&input, kern).map(|o| o.values))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(vec_out.into_pyarray(py))
+    Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]

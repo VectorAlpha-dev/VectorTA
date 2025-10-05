@@ -1,8 +1,11 @@
 //! CUDA wrapper for the single-pole High-Pass filter kernels.
 //!
-//! Mirrors the VRAM-first approach used by other moving averages: callers pass
-//! FP32 slices, kernels operate entirely on the device, and results are exposed
-//! via `DeviceArrayF32` handles to avoid implicit host transfers.
+//! Aligned with the ALMA wrapper surface:
+//! - VRAM-first API returning `DeviceArrayF32` handles
+//! - Non-blocking stream
+//! - JIT with DetermineTargetFromContext and O2 fallback
+//! - Light-weight policy enums + introspection; BENCH_DEBUG log of selection
+//! - VRAM estimation and batch grid chunking (<= 65_535 rows per launch)
 
 #![cfg(feature = "cuda")]
 
@@ -11,14 +14,14 @@ use crate::indicators::moving_averages::highpass::{HighPassBatchRange, HighPassP
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
-use cust::module::Module;
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaHighpassError {
@@ -37,10 +40,50 @@ impl fmt::Display for CudaHighpassError {
 
 impl std::error::Error for CudaHighpassError {}
 
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+impl Default for BatchKernelPolicy {
+    fn default() -> Self { BatchKernelPolicy::Auto }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CudaHighpassPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
+
 pub struct CudaHighpass {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaHighpassPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaHighpass {
@@ -51,8 +94,19 @@ impl CudaHighpass {
         let context = Context::new(device).map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/highpass_kernel.ptx"));
-        let module =
-            Module::from_ptx(ptx, &[]).map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        // Prefer DetermineTargetFromContext + O2, then relax if necessary
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?,
+            },
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
 
@@ -60,8 +114,26 @@ impl CudaHighpass {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaHighpassPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
     }
+
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaHighpassError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))
+    }
+
+    pub fn set_policy(&mut self, policy: CudaHighpassPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaHighpassPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
 
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -71,16 +143,7 @@ impl CudaHighpass {
     }
 
     fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
+        mem_get_info().ok()
     }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -105,6 +168,36 @@ impl CudaHighpass {
             .into_iter()
             .map(|p| HighPassParams { period: Some(p) })
             .collect()
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] highpass batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaHighpass)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] highpass many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaHighpass)).debug_many_logged = true; }
+            }
+        }
     }
 
     fn prepare_batch_inputs(
@@ -183,27 +276,61 @@ impl CudaHighpass {
             .module
             .get_function("highpass_batch_f32")
             .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        // Policy: for recurrence we keep 1 thread per row (combo)
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => 1u32,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+        };
+        unsafe { (*(self as *const _ as *mut CudaHighpass)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
 
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        const MAX_ROWS_PER_LAUNCH: usize = 65_535; // grid.x chunking (matching ALMA grid.y policy)
+        let mut launched = 0usize;
+        while launched < n_combos {
+            let rows = (n_combos - launched).min(MAX_ROWS_PER_LAUNCH);
+            let grid: GridSize = (rows as u32, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut combos_i = n_combos as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut combos_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+            // Offset pointers for this chunk
+            let d_periods_chunk = unsafe {
+                DeviceBuffer::from_raw_parts(
+                    d_periods
+                        .as_device_ptr()
+                        .offset((launched as isize).try_into().unwrap()),
+                    rows,
+                )
+            };
+            let mut d_out_chunk = unsafe {
+                DeviceBuffer::from_raw_parts(
+                    d_out
+                        .as_device_ptr()
+                        .offset(((launched * series_len) as isize).try_into().unwrap()),
+                    rows * series_len,
+                )
+            };
+
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods_chunk.as_device_ptr().as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = rows as i32;
+                let mut out_ptr = d_out_chunk.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+            }
+            // Prevent dropping sub-slices early by forgetting the temporaries
+            std::mem::forget(d_periods_chunk);
+            std::mem::forget(d_out_chunk);
+            launched += rows;
         }
+        self.maybe_log_batch_debug();
         Ok(())
     }
 
@@ -389,9 +516,14 @@ impl CudaHighpass {
             .module
             .get_function("highpass_many_series_one_param_time_major_f32")
             .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 1u32,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
+        };
+        unsafe { (*(self as *const _ as *mut CudaHighpass)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
 
         let grid: GridSize = (cols as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -410,6 +542,7 @@ impl CudaHighpass {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
         }
+        self.maybe_log_many_debug();
         Ok(())
     }
 

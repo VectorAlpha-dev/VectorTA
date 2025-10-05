@@ -15,7 +15,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{CopyDestination, DeviceBuffer};
-use cust::module::Module;
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
@@ -54,7 +54,22 @@ impl CudaEpma {
         let context = Context::new(device).map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/epma_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        // Prefer context-derived target and a moderately high JIT opt level for stability.
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
 
@@ -94,6 +109,17 @@ impl CudaEpma {
         } else {
             true
         }
+    }
+
+    #[inline]
+    fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
+        const MAX_GRID_Y: usize = 65_535;
+        (0..n)
+            .step_by(MAX_GRID_Y)
+            .map(move |start| {
+                let len = (n - start).min(MAX_GRID_Y);
+                (start, len)
+            })
     }
 
     fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
@@ -206,35 +232,49 @@ impl CudaEpma {
         }
 
         const BLOCK_X: u32 = 256;
-        let grid_x = ((series_len as u32) + BLOCK_X - 1) / BLOCK_X;
-        let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
-
         let func = self
             .module
             .get_function("epma_batch_f32")
             .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut offsets_ptr = d_offsets.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut combos_i = n_combos as i32;
-            let mut first_valid_i = first_valid as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut offsets_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut combos_i as *mut _ as *mut c_void,
-                &mut first_valid_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes as u32, args)
-                .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        // Chunk over grid.y to respect device limit and offset params/output pointers per chunk.
+        for (start_combo, len_combo) in Self::grid_y_chunks(n_combos) {
+            let grid_x = ((series_len as u32) + BLOCK_X - 1) / BLOCK_X;
+            let grid: GridSize = (grid_x.max(1), len_combo as u32, 1).into();
+            let block: BlockSize = (BLOCK_X, 1, 1).into();
+
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                // Advance param pointers by start_combo
+                let mut periods_ptr = d_periods
+                    .as_device_ptr()
+                    .add(start_combo)
+                    .as_raw();
+                let mut offsets_ptr = d_offsets
+                    .as_device_ptr()
+                    .add(start_combo)
+                    .as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = len_combo as i32;
+                let mut first_valid_i = first_valid as i32;
+                // Advance output pointer by whole rows already skipped
+                let mut out_ptr = d_out
+                    .as_device_ptr()
+                    .add(start_combo * series_len)
+                    .as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut offsets_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes as u32, args)
+                    .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+            }
         }
         Ok(())
     }

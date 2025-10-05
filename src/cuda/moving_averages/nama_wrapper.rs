@@ -1,8 +1,16 @@
 //! CUDA wrapper for the New Adaptive Moving Average (NAMA) kernels.
 //!
-//! Mirrors the VRAM-first design of the other moving-average wrappers: inputs
-//! are accepted as FP32 host slices, staged to device memory, and the public
-//! API returns `DeviceArrayF32` handles so callers control any host copies.
+//! Aligned with the ALMA wrapper patterns:
+//! - PTX JIT with DetermineTargetFromContext and O2 fallback.
+//! - NON_BLOCKING stream.
+//! - Policy enums for kernel selection with last-selected introspection and
+//!   optional BENCH_DEBUG output.
+//! - VRAM estimation with mem_get_info and 64MiB headroom.
+//! - Batch grid chunking over parameter rows (combos) to respect grid limits.
+//!
+//! Kernels are recurrence/IIR style (one thread per series/row does the time
+//! scan). Block size mainly impacts warmup NaN writes; default is 128 threads.
+//! We expose the same policy surface as ALMA for a consistent user experience.
 
 #![cfg(feature = "cuda")]
 
@@ -11,14 +19,61 @@ use crate::indicators::moving_averages::nama::{NamaBatchRange, NamaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
-use cust::module::Module;
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+
+// -------- Kernel selection policy (mirror ALMA surface) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchThreadsPerOutput { One, Two }
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    /// Recurrence kernels are 1D (combo-per-block). Only block_x matters.
+    Plain { block_x: u32 },
+    /// Tiled hint accepted for API symmetry; mapped to `Plain { block_x: tile }`.
+    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    /// 1D series-per-block mapping; block_x controls warmup fill speed.
+    OneD { block_x: u32 },
+    /// 2D hint accepted for API symmetry; mapped to `OneD { block_x: tx }`.
+    Tiled2D { tx: u32, ty: u32 },
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CudaNamaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for BatchKernelPolicy {
+    fn default() -> Self { BatchKernelPolicy::Auto }
+}
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+}
+
+// -------- Introspection (selected kernel) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaNamaError {
@@ -41,6 +96,12 @@ pub struct CudaNama {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaNamaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaNama {
@@ -51,7 +112,13 @@ impl CudaNama {
         let context = Context::new(device).map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/nama_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        let module = match Module::from_ptx(
+            ptx,
+            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)],
+        ) {
+            Ok(m) => m,
+            Err(_) => Module::from_ptx(ptx, &[]).map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
 
@@ -59,7 +126,56 @@ impl CudaNama {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaNamaPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto },
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    /// Create with explicit policy.
+    pub fn new_with_policy(device_id: usize, policy: CudaNamaPolicy) -> Result<Self, CudaNamaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaNamaPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaNamaPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] NAMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaNama)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] NAMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaNama)).debug_many_logged = true; }
+            }
+        }
     }
 
     fn mem_check_enabled() -> bool {
@@ -69,18 +185,7 @@ impl CudaNama {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
@@ -172,7 +277,7 @@ impl CudaNama {
         Ok((combos, first_valid, series_len, max_period, has_ohlc))
     }
 
-    fn launch_batch_kernel(
+    fn launch_batch_kernel_chunk(
         &self,
         d_prices: &DeviceBuffer<f32>,
         d_high: Option<&DeviceBuffer<f32>>,
@@ -180,10 +285,11 @@ impl CudaNama {
         d_close: Option<&DeviceBuffer<f32>>,
         d_periods: &DeviceBuffer<i32>,
         series_len: usize,
-        n_combos: usize,
+        n_chunk: usize,
         first_valid: usize,
         max_period: usize,
         has_ohlc: bool,
+        start_combo: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaNamaError> {
         if max_period == 0 {
@@ -202,9 +308,15 @@ impl CudaNama {
             )));
         }
 
-        const BLOCK_X: u32 = 128;
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
+        // Determine block size from policy (default 128)
+        let mut block_x: u32 = 128;
+        match self.policy.batch {
+            BatchKernelPolicy::Auto => {}
+            BatchKernelPolicy::Plain { block_x: bx } => { block_x = bx.max(32); }
+            BatchKernelPolicy::Tiled { tile, .. } => { block_x = tile.max(32); }
+        }
+        let grid: GridSize = (n_chunk as u32, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         let func = self
             .module
@@ -217,11 +329,12 @@ impl CudaNama {
             let mut low_ptr = d_low.map(|buf| buf.as_device_ptr().as_raw()).unwrap_or(0);
             let mut close_ptr = d_close.map(|buf| buf.as_device_ptr().as_raw()).unwrap_or(0);
             let mut has_ohlc_i = if has_ohlc { 1i32 } else { 0i32 };
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            // Offset periods and output by start_combo
+            let mut periods_ptr = d_periods.as_device_ptr().add(start_combo).as_raw();
             let mut series_len_i = series_len as i32;
-            let mut combos_i = n_combos as i32;
+            let mut combos_i = n_chunk as i32;
             let mut first_valid_i = first_valid as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut out_ptr = d_out.as_device_ptr().add(start_combo * series_len).as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
                 &mut high_ptr as *mut _ as *mut c_void,
@@ -314,19 +427,37 @@ impl CudaNama {
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
                 .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
 
-        self.launch_batch_kernel(
-            &d_prices,
-            d_high.as_ref(),
-            d_low.as_ref(),
-            d_close.as_ref(),
-            &d_periods,
-            series_len,
-            n_combos,
-            first_valid,
-            max_period,
-            has_ohlc,
-            &mut d_out,
-        )?;
+        // Launch in chunks to respect grid size limits (mirror ALMA approach)
+        const MAX_GRID_X: usize = 65_535; // conservative chunking
+        let mut launched_any = false;
+        let mut start = 0usize;
+        while start < n_combos {
+            let len = (n_combos - start).min(MAX_GRID_X);
+            self.launch_batch_kernel_chunk(
+                &d_prices,
+                d_high.as_ref(),
+                d_low.as_ref(),
+                d_close.as_ref(),
+                &d_periods,
+                series_len,
+                len,
+                first_valid,
+                max_period,
+                has_ohlc,
+                start,
+                &mut d_out,
+            )?;
+            launched_any = true;
+            start += len;
+        }
+        if launched_any {
+            unsafe {
+                let this = self as *const _ as *mut CudaNama;
+                let bx = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 128 };
+                (*this).last_batch = Some(BatchKernelSelected::Plain { block_x: bx });
+            }
+            self.maybe_log_batch_debug();
+        }
 
         self.stream
             .synchronize()
@@ -435,7 +566,7 @@ impl CudaNama {
                 "series_len, n_combos, and max_period must be positive".into(),
             ));
         }
-        self.launch_batch_kernel(
+        self.launch_batch_kernel_chunk(
             d_prices,
             d_high,
             d_low,
@@ -446,6 +577,7 @@ impl CudaNama {
             first_valid.max(0) as usize,
             max_period as usize,
             has_ohlc,
+            0,
             d_out,
         )
     }
@@ -723,6 +855,13 @@ impl CudaNama {
             .get_function("nama_many_series_one_param_time_major_f32")
             .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
 
+        // Determine block size from policy (default 128)
+        let mut block_x: u32 = 128;
+        match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => {}
+            ManySeriesKernelPolicy::OneD { block_x: bx } => block_x = bx.max(32),
+            ManySeriesKernelPolicy::Tiled2D { tx, .. } => block_x = tx.max(32),
+        }
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
             let mut high_ptr = d_high.map(|buf| buf.as_device_ptr().as_raw()).unwrap_or(0);
@@ -746,10 +885,18 @@ impl CudaNama {
                 &mut first_valids_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
+            let grid: GridSize = (num_series as u32, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
             self.stream
                 .launch(&func, grid, block, shared_bytes as u32, args)
                 .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
         }
+
+        unsafe {
+            let this = self as *const _ as *mut CudaNama;
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+        }
+        self.maybe_log_many_debug();
 
         Ok(())
     }
