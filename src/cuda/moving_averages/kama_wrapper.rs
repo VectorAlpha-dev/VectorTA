@@ -1,9 +1,11 @@
 //! CUDA wrapper for the Kaufman Adaptive Moving Average (KAMA) kernels.
 //!
-//! Mirrors the VRAM-first design used by the other moving-average wrappers:
-//! callers interact with `DeviceArrayF32` handles while the kernels operate in
-//! FP32 buffers and keep the recurrence aligned with the CPU reference by
-//! performing intermediate arithmetic in FP64.
+//! Aligns with the ALMA wrapper conventions: PTX JIT options (determine target
+//! from context, O2 with fallback), NON_BLOCKING stream, lightweight kernel
+//! policy/introspection, VRAM estimation with headroom and grid chunking for
+//! large combo counts. Behavior mirrors scalar KAMA exactly (NaN warmup and
+//! recurrence/state) while keeping intermediate arithmetic in FP64 inside
+//! kernels for numerical parity.
 
 #![cfg(feature = "cuda")]
 
@@ -12,14 +14,14 @@ use crate::indicators::moving_averages::kama::{KamaBatchRange, KamaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
-use cust::module::Module;
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaKamaError {
@@ -42,6 +44,12 @@ pub struct CudaKama {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaKamaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaKama {
@@ -52,7 +60,22 @@ impl CudaKama {
         let context = Context::new(device).map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kama_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+        // Match ALMA loader behavior: prefer DetermineTargetFromContext + O2, fallback progressively.
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaKamaError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
 
@@ -60,7 +83,20 @@ impl CudaKama {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaKamaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    /// Expose synchronize for benches/tests that manage device buffers.
+    pub fn synchronize(&self) -> Result<(), CudaKamaError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaKamaError::Cuda(e.to_string()))
     }
 
     fn mem_check_enabled() -> bool {
@@ -70,27 +106,58 @@ impl CudaKama {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
-    }
-
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
             return true;
         }
-        if let Some((free, _total)) = Self::device_mem_info() {
+        if let Ok((free, _total)) = mem_get_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else {
             true
+        }
+    }
+
+    #[inline]
+    fn has_function(&self, name: &str) -> bool { self.module.get_function(name).is_ok() }
+
+    #[inline]
+    fn grid_chunks(total: usize) -> impl Iterator<Item = (usize, usize)> {
+        const MAX: usize = 65_535; // launch limit per grid dimension
+        (0..total)
+            .step_by(MAX)
+            .map(move |start| {
+                let len = (total - start).min(MAX);
+                (start, len)
+            })
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] KAMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaKama)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] KAMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaKama)).debug_many_logged = true; }
+            }
         }
     }
 
@@ -161,33 +228,46 @@ impl CudaKama {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaKamaError> {
-        const BLOCK_X: u32 = 128;
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
-
         let func = self
             .module
             .get_function("kama_batch_f32")
             .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
 
+        // Record selection for introspection/debug
         unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut combos_i = n_combos as i32;
-            let mut first_valid_i = first_valid as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut combos_i as *mut _ as *mut c_void,
-                &mut first_valid_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+            let this = self as *const _ as *mut CudaKama;
+            (*this).last_batch = Some(BatchKernelSelected::OneD { block_x: 128 });
+        }
+        self.maybe_log_batch_debug();
+
+        // Limit grid dimension; launch in chunks of <= 65_535 combos.
+        const BLOCK_X: u32 = 128;
+        for (start, len) in Self::grid_chunks(n_combos) {
+            let grid: GridSize = (len as u32, 1, 1).into();
+            let block: BlockSize = (BLOCK_X, 1, 1).into();
+
+            let d_periods_off = unsafe { d_periods.as_device_ptr().add(start) };
+            let d_out_off = unsafe { d_out.as_device_ptr().add(start * series_len) };
+
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods_off.as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = len as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut out_ptr = d_out_off.as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+            }
         }
         Ok(())
     }
@@ -204,7 +284,7 @@ impl CudaKama {
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + periods_bytes + out_bytes;
-        let headroom = 32 * 1024 * 1024; // 32MB cushion
+        let headroom = 64 * 1024 * 1024; // 64MB cushion (match ALMA default)
         if !Self::will_fit(required, headroom) {
             return Err(CudaKamaError::InvalidInput(format!(
                 "estimated device memory {:.2} MB exceeds free VRAM",
@@ -357,14 +437,27 @@ impl CudaKama {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaKamaError> {
-        const BLOCK_X: u32 = 128;
+        // Only a 1D time-major kernel is implemented for KAMA (recurrence).
+        // Keep geometry simple; allow block override via env if desired.
+        let block_x = std::env::var("KAMA_BLOCK_X")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v == 64 || v == 128 || v == 256 || v == 512)
+            .unwrap_or(128);
         let grid: GridSize = (cols as u32, 1, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         let func = self
             .module
             .get_function("kama_many_series_one_param_time_major_f32")
             .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+
+        // Introspection
+        unsafe {
+            let this = self as *const _ as *mut CudaKama;
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+        }
+        self.maybe_log_many_debug();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -506,4 +599,55 @@ pub mod benches {
         "kama"
     );
     pub use kama_benches::bench_profiles;
+}
+
+// ---------- Minimal policy + introspection to mirror ALMA API ----------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected {
+    /// One thread-block per combo; recurrence computed by thread 0
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    /// For completeness; the KAMA batch kernel is always 1D
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CudaKamaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for BatchKernelPolicy {
+    fn default() -> Self { BatchKernelPolicy::Auto }
+}
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+}
+
+impl CudaKama {
+    pub fn new_with_policy(device_id: usize, policy: CudaKamaPolicy) -> Result<Self, CudaKamaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaKamaPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaKamaPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
 }
