@@ -11,7 +11,8 @@ use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::cwma::{CwmaBatchRange, CwmaParams};
 use cust::context::Context;
 use cust::device::Device;
-use cust::function::{BlockSize, GridSize, CacheConfig, SharedMemoryConfig, Function};
+use cust::function::{BlockSize, GridSize, Function};
+use cust::context::{CacheConfig, SharedMemoryConfig};
 use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
@@ -188,7 +189,7 @@ impl CudaCwma {
     }
 
     #[inline]
-    fn prefer_shared_and_optin_smem(&self, func: &Function, requested_dynamic_smem: usize) {
+    fn prefer_shared_and_optin_smem(&self, func: &mut Function, requested_dynamic_smem: usize) {
         // Prefer shared L1 partitioning for shared-heavy kernels
         let _ = func.set_cache_config(CacheConfig::PreferShared);
         let _ = func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize);
@@ -494,7 +495,7 @@ impl CudaCwma {
             } else {
                 match tile_x { 128 => "cwma_batch_tiled_f32_tile128",  _ => "cwma_batch_tiled_f32_tile256" }
             };
-            let func = self
+            let mut func = self
                 .module
                 .get_function(func_name)
                 .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
@@ -517,7 +518,7 @@ impl CudaCwma {
                 .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock).ok())
                 .unwrap_or(48 * 1024) as usize;
             let max_smem_optin: usize = dev
-                .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlockOptin).ok())
+                .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock).ok())
                 .unwrap_or(max_smem_default as i32) as usize;
             let avail = max_smem_optin.max(max_smem_default);
             while (shared_bytes as usize) > avail && tile_x_used > 64 {
@@ -526,7 +527,7 @@ impl CudaCwma {
                     + (tile_x_used as usize + wlen) * std::mem::size_of::<f32>()) as u32;
             }
             // Hint kernel for larger dynamic shared memory when available
-            self.prefer_shared_and_optin_smem(&func, shared_bytes as usize);
+            self.prefer_shared_and_optin_smem(&mut func, shared_bytes as usize);
             let block_x = if use_two { (tile_x_used / 2).max(1) } else { tile_x_used };
             let grid_x = ((series_len as u32) + tile_x_used - 1) / tile_x_used;
             let block: BlockSize = (block_x, 1, 1).into();
@@ -886,7 +887,7 @@ impl CudaCwma {
             ManySeriesKernelPolicy::Tiled2D { tx: txx, ty: tyy } => { use_tiled2d = true; tx = txx; ty = tyy; }
         }
 
-        let func = if use_tiled2d {
+        let mut func = if use_tiled2d {
             // Pick among a small set of tiled 2D kernels
             let name = match (tx, ty) {
                 (128, 4) => "cwma_ms1p_tiled_f32_tx128_ty4",
@@ -934,26 +935,26 @@ impl CudaCwma {
                 let shared_bytes = (align16(wlen * std::mem::size_of::<f32>())
                     + total * ty_pad * std::mem::size_of::<f32>()) as u32;
                 // Prefer shared and request opt-in dynamic smem
-                self.prefer_shared_and_optin_smem(&func, shared_bytes as usize);
+                self.prefer_shared_and_optin_smem(&mut func, shared_bytes as usize);
                 // If dynamic shared memory exceeds capacity, fall back to 1D kernel
                 let dev = Device::get_device(self.device_id).ok();
                 let max_smem_default: usize = dev
                     .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock).ok())
                     .unwrap_or(48 * 1024) as usize;
                 let max_smem_optin: usize = dev
-                    .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlockOptin).ok())
+                    .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock).ok())
                     .unwrap_or(max_smem_default as i32) as usize;
                 let avail = max_smem_optin.max(max_smem_default);
                 if (shared_bytes as usize) > avail {
                     // Try smaller TY variant if we started with TY=4
                     if ty == 4 {
-                        if let Ok(func2) = self.module.get_function("cwma_ms1p_tiled_f32_tx128_ty2") {
+                        if let Ok(mut func2) = self.module.get_function("cwma_ms1p_tiled_f32_tx128_ty2") {
                             let ty2: u32 = 2;
                             let ty2_pad = if (32 % (ty2 as usize)) == 0 { (ty2 + 1) as usize } else { ty2 as usize };
                             let shared_bytes2 = (align16(wlen * std::mem::size_of::<f32>())
                                 + total * ty2_pad * std::mem::size_of::<f32>()) as u32;
                             if (shared_bytes2 as usize) <= avail {
-                                self.prefer_shared_and_optin_smem(&func2, shared_bytes2 as usize);
+                                self.prefer_shared_and_optin_smem(&mut func2, shared_bytes2 as usize);
                                 let grid_x = ((rows as u32) + tx - 1) / tx;
                                 let grid_y = ((cols as u32) + ty2 - 1) / ty2;
                                 let grid: GridSize = (grid_x, grid_y, 1).into();

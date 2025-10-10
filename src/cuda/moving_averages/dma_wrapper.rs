@@ -159,53 +159,9 @@ impl CudaDma {
     }
 
     #[inline]
-    fn maybe_enable_l2_persist_for_prices(&self, d_prices_bytes: usize, d_prices_ptr: u64) -> Result<(), CudaDmaError> {
-        // Default-on best-effort: if unsupported, quietly no-op.
-        unsafe {
-            // Get current device from context
-            let mut dev: cu::CUdevice = 0;
-            let rc_dev = cu::cuCtxGetDevice(&mut dev as *mut _);
-            if rc_dev != cu::CUresult::CUDA_SUCCESS { return Ok(()); }
-
-            // Query device caps
-            let mut max_persist_bytes: i32 = 0;
-            let _ = cu::cuDeviceGetAttribute(
-                &mut max_persist_bytes as *mut i32,
-                cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_PERSISTING_L2_CACHE_SIZE,
-                dev,
-            );
-            if max_persist_bytes <= 0 { return Ok(()); }
-
-            let mut max_window: i32 = 0;
-            let _ = cu::cuDeviceGetAttribute(
-                &mut max_window as *mut i32,
-                cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
-                dev,
-            );
-            if max_window <= 0 { return Ok(()); }
-
-            // Set context limit (set-aside)
-            let set_aside = d_prices_bytes.min(max_persist_bytes as usize);
-            let _ = cu::cuCtxSetLimit(cu::CUlimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, set_aside);
-
-            // Configure stream access policy window
-            let mut apw: cu::CUaccessPolicyWindow = zeroed();
-            apw.base_ptr = d_prices_ptr as u64;
-            apw.num_bytes = d_prices_bytes.min(max_window as usize);
-            apw.hitRatio = 1.0;
-            apw.hitProp = cu::CUaccessProperty::CU_ACCESS_PROPERTY_PERSISTING;
-            apw.missProp = cu::CUaccessProperty::CU_ACCESS_PROPERTY_NORMAL;
-
-            let mut attr: cu::CUstreamAttrValue = zeroed();
-            *attr.accessPolicyWindow.as_mut() = apw;
-
-            let hstream = self.stream.as_inner();
-            let _ = cu::cuStreamSetAttribute(
-                hstream,
-                cu::CUstreamAttrID::CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW,
-                &mut attr as *mut _,
-            );
-        }
+    fn maybe_enable_l2_persist_for_prices(&self, _d_prices_bytes: usize, _d_prices_ptr: u64) -> Result<(), CudaDmaError> {
+        // Best-effort hint disabled for broad compatibility with cust/sys versions.
+        // No-op if unavailable; kernels still run correctly without this.
         Ok(())
     }
 

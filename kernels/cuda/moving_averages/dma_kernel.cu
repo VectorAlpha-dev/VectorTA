@@ -639,6 +639,15 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int half = hull_length / 2;
     const int sqrt_len_clamped = (sqrt_len > 0) ? sqrt_len : 1;
 
+    // Weighted moving average normalizers for half/full/sqrt windows.
+    // Use exact integer normalization converted to fp32.
+    const float denom_half_f = (half        > 0 ? wsum_norm_i32(half)        : 1.0f);
+    const float denom_full_f = (hull_length > 0 ? wsum_norm_i32(hull_length) : 1.0f);
+    const float denom_sqrt_f = (sqrt_len_clamped > 0 ? wsum_norm_i32(sqrt_len_clamped) : 1.0f);
+    const float inv_w_half   = 1.0f / denom_half_f;
+    const float inv_w_full   = 1.0f / denom_full_f;
+    const float inv_w_sqrt   = 1.0f / denom_sqrt_f;
+
     const float alpha_e = 2.0f / (static_cast<float>(ema_length) + 1.0f);
     const int i0_e = first_valid + (ema_length > 0 ? ema_length - 1 : 0);
 

@@ -504,7 +504,9 @@ use crate::indicators::moving_averages::vpwma::{
     vpwma_cuda_batch_dev_py, vpwma_cuda_many_series_one_param_dev_py,
 };
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::vwap::vwap_cuda_batch_dev_py;
+use crate::indicators::moving_averages::vwap::{
+    vwap_cuda_batch_dev_py, vwap_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::vwap::{vwap_batch_py, vwap_py, VwapStreamPy};
 #[cfg(feature = "python")]

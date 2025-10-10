@@ -9,6 +9,7 @@
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
+use cust::memory::CopyDestination;
 use crate::cuda::moving_averages::*;
 use crate::utilities::data_loader::{source_type, Candles};
 
@@ -95,7 +96,10 @@ impl CudaMaSelector {
                     period: (period, period, 0),
                 };
                 let cuda = CudaSma::new(self.device_id).map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.sma_batch_dev(&prices_f32, &sweep).map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
+                let (dev, _combos) = cuda
+                    .sma_batch_dev(&prices_f32, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
+                Ok(dev)
             }
             "ema" => {
                 let sweep = crate::indicators::moving_averages::ema::EmaBatchRange {
@@ -152,6 +156,7 @@ impl CudaMaSelector {
             "tilson" => {
                 let sweep = crate::indicators::moving_averages::tilson::TilsonBatchRange {
                     period: (period, period, 0),
+                    volume_factor: (0.0, 0.0, 0.0),
                 };
                 let cuda = CudaTilson::new(self.device_id).map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
                 cuda.tilson_batch_dev(&prices_f32, &sweep).map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
@@ -189,7 +194,10 @@ impl CudaMaSelector {
                     period: (period, period, 0),
                 };
                 let cuda = CudaHma::new(self.device_id).map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.hma_batch_dev(&prices_f32, &sweep).map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
+                let (dev, _combos) = cuda
+                    .hma_batch_dev(&prices_f32, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
+                Ok(dev)
             }
             "srwma" => {
                 let sweep = crate::indicators::moving_averages::srwma::SrwmaBatchRange {
@@ -244,7 +252,10 @@ impl CudaMaSelector {
             }
             "dma" => {
                 let sweep = crate::indicators::moving_averages::dma::DmaBatchRange {
-                    period: (period, period, 0),
+                    hull_length: (7, 7, 0),
+                    ema_length: (period, period, 0),
+                    ema_gain_limit: (50, 50, 0),
+                    hull_ma_type: "WMA".to_string(),
                 };
                 let cuda = CudaDma::new(self.device_id).map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
                 cuda.dma_batch_dev(&prices_f32, &sweep).map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
@@ -321,8 +332,10 @@ impl CudaMaSelector {
                 };
                 let cuda = CudaSuperSmoother::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.supersmoother_batch_dev(&prices_f32, &sweep)
-                    .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
+                let (dev, _combos) = cuda
+                    .supersmoother_batch_dev(&prices_f32, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
+                Ok(dev)
             }
             "supersmoother_3_pole" => {
                 let sweep = crate::indicators::moving_averages::supersmoother_3_pole::SuperSmoother3PoleBatchRange {
