@@ -11,6 +11,10 @@ criterion = { version = "0.5.1", features = ["html_reports"] }
 name = "indicator_benchmark"
 harness = false
 
+[[bench]]
+name = "cuda_bench"
+harness = false
+
 
 
 [dependencies]

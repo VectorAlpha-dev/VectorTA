@@ -514,7 +514,9 @@ use crate::indicators::moving_averages::vwma::{
     vwma_cuda_batch_dev_py, vwma_cuda_many_series_one_param_dev_py,
 };
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::wilders::wilders_cuda_batch_dev_py;
+use crate::indicators::moving_averages::wilders::{
+    wilders_cuda_batch_dev_py, wilders_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::wilders::{wilders_batch_py, wilders_py, WildersStreamPy};
 #[cfg(feature = "python")]
@@ -1218,6 +1220,10 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(wilders_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            wilders_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
     }
 
     // Register VWMA functions with their user-facing names

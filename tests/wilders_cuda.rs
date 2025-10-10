@@ -76,3 +76,57 @@ fn wilders_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(feature = "cuda")]
+#[test]
+fn wilders_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[wilders_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let cols = 8usize; // number of series (columns)
+    let rows = 1024usize; // series length (rows/time)
+    let mut data_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        // Stagger start to introduce NaN prefixes
+        for t in s..rows {
+            let x = (t as f64) + (s as f64) * 0.25;
+            data_tm[t * cols + s] = (x * 0.0027).sin() + 0.00019 * x;
+        }
+    }
+
+    let period = 14usize;
+
+    // CPU baseline per series
+    let mut cpu_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        let mut series = vec![f64::NAN; rows];
+        for t in 0..rows { series[t] = data_tm[t * cols + s]; }
+        let params = my_project::indicators::moving_averages::wilders::WildersParams { period: Some(period) };
+        let input = my_project::indicators::moving_averages::wilders::WildersInput::from_slice(&series, params);
+        let out = my_project::indicators::moving_averages::wilders::wilders_with_kernel(&input, Kernel::Scalar)?;
+        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+    }
+
+    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
+    let cuda = CudaWilders::new(0).expect("CudaWilders::new");
+    let params = my_project::indicators::moving_averages::wilders::WildersParams { period: Some(period) };
+    let dev = cuda
+        .wilders_many_series_one_param_time_major_dev(&data_tm_f32, cols, rows, &params)
+        .expect("wilders many-series dev");
+    assert_eq!(dev.rows, rows);
+    assert_eq!(dev.cols, cols);
+
+    let mut gpu_tm = vec![0f32; dev.len()];
+    dev.buf.copy_to(&mut gpu_tm)?;
+
+    let tol = 1e-5;
+    for idx in 0..(cols * rows) {
+        let c = cpu_tm[idx];
+        let g = gpu_tm[idx] as f64;
+        assert!(approx_eq(c, g, tol), "many-series mismatch at {}: cpu={} gpu={}", idx, c, g);
+    }
+
+    Ok(())
+}

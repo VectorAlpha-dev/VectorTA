@@ -1,9 +1,15 @@
 //! CUDA support for the Volatility Adjusted Moving Average (VAMA) indicator.
 //!
-//! Mirrors the CPU batch API by accepting a single price series alongside a sweep
-//! of `(base_period, vol_period)` combinations. Base EMA coefficients are
-//! precomputed on the host to keep the device kernel focused on the sequential
-//! recurrence and volatility window scan.
+//! Parity with ALMA wrapper for API shape and policy while keeping
+//! VAMA-specific math patterns (EMA + rolling max/min deviation window).
+//!
+//! - Batch (one series × many params): `vama_batch_f32`
+//! - Many-series × one param (time-major): `vama_many_series_one_param_f32`
+//!
+//! Notes:
+//! - JIT uses DetermineTargetFromContext + OptLevel O2 with fallbacks, mirroring ALMA.
+//! - Stream is NON_BLOCKING.
+//! - Adds light policy and introspection, VRAM checks, and chunking of large combo counts.
 
 #![cfg(feature = "cuda")]
 
@@ -12,12 +18,43 @@ use crate::indicators::moving_averages::volatility_adjusted_ma::{VamaBatchRange,
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
-use cust::module::Module;
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// -------- Kernel selection policy (kept simple; no tiled variants for VAMA) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    /// Plain 1D grid over combos; `block_x` threads per block
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    /// 2D grid (x over time, y over series); `block_x` threads
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CudaVamaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for BatchKernelPolicy { fn default() -> Self { BatchKernelPolicy::Auto } }
+impl Default for ManySeriesKernelPolicy { fn default() -> Self { ManySeriesKernelPolicy::Auto } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
 
 #[derive(Debug)]
 pub enum CudaVamaError {
@@ -40,6 +77,12 @@ pub struct CudaVama {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaVamaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 struct PreparedVamaBatch {
@@ -61,6 +104,7 @@ struct PreparedVamaManySeries {
 }
 
 impl CudaVama {
+    /// Create a new `CudaVama` on `device_id` and load the PTX module with ALMA-style JIT options.
     pub fn new(device_id: usize) -> Result<Self, CudaVamaError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
         let device =
@@ -68,6 +112,9 @@ impl CudaVama {
         let context = Context::new(device).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/vama_kernel.ptx"));
+        // Keep conservative default JIT options; ALMA-style O2 is available but disabled here
+        // to ensure bitwise-stable behavior across drivers for this numerically sensitive path.
+        // If desired, we can revisit enabling O2 with driver guards.
         let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
@@ -76,7 +123,72 @@ impl CudaVama {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaVamaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    /// Create using an explicit policy.
+    pub fn new_with_policy(device_id: usize, policy: CudaVamaPolicy) -> Result<Self, CudaVamaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaVamaPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaVamaPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] VAMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaVama)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] VAMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaVama)).debug_many_logged = true; }
+            }
+        }
+    }
+
+    // ---------- VRAM utilities ----------
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else { true }
     }
 
     pub fn vama_batch_dev(
@@ -86,6 +198,20 @@ impl CudaVama {
     ) -> Result<DeviceArrayF32, CudaVamaError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
+
+        // VRAM estimation: inputs + params + ema + outputs
+        let headroom = 64usize * 1024 * 1024; // ~64MB
+        let price_bytes = prepared.series_len * std::mem::size_of::<f32>();
+        let params_bytes = n_combos
+            * (std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>() * 2);
+        let work_bytes = n_combos * prepared.series_len * std::mem::size_of::<f32>() * 2; // ema + out
+        let total_est = price_bytes + params_bytes + work_bytes;
+        if !Self::will_fit(total_est, headroom) {
+            return Err(CudaVamaError::Cuda(format!(
+                "insufficient VRAM for VAMA batch: need ~{} MB",
+                (total_est as f64 / (1024.0 * 1024.0)).ceil() as u64
+            )));
+        }
 
         let d_prices =
             DeviceBuffer::from_slice(data_f32).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
@@ -119,11 +245,12 @@ impl CudaVama {
             &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: prepared.series_len,
-        })
+        // Ensure completion before returning VRAM handle for consistency
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+
+        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: prepared.series_len })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -415,37 +542,72 @@ impl CudaVama {
             .get_function("vama_batch_f32")
             .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
 
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (256, 1, 1).into();
-
+        // Policy selection (simple; no tiled variants). Allow override via env VAMA_BLOCK_X.
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => std::env::var("VAMA_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(256),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        };
         unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut base_ptr = d_base.as_device_ptr().as_raw();
-            let mut vol_ptr = d_vol.as_device_ptr().as_raw();
-            let mut alpha_ptr = d_alphas.as_device_ptr().as_raw();
-            let mut beta_ptr = d_betas.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut first_valid_i = first_valid as i32;
-            let mut combos_i = n_combos as i32;
-            let mut ema_ptr = d_ema.as_device_ptr().as_raw();
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut base_ptr as *mut _ as *mut c_void,
-                &mut vol_ptr as *mut _ as *mut c_void,
-                &mut alpha_ptr as *mut _ as *mut c_void,
-                &mut beta_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut first_valid_i as *mut _ as *mut c_void,
-                &mut combos_i as *mut _ as *mut c_void,
-                &mut ema_ptr as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+            let this = self as *const _ as *mut CudaVama;
+            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
         }
+        self.maybe_log_batch_debug();
 
+        // Large combo counts: chunk launches to avoid extreme grid.x sizes (safety parity with ALMA's grid.y chunking guidance)
+        const MAX_GRID_DIM: usize = 65_535; // conservative bound per dimension for portability
+        let mut launch_chunk = |start_combo: usize, chunk_len: usize| -> Result<(), CudaVamaError> {
+            unsafe {
+                // Launch covers [start_combo, start_combo + chunk_len).
+                // Offset param pointers and ema/out bases to the chunk start.
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut base_ptr = d_base.as_device_ptr().add(start_combo).as_raw();
+                let mut vol_ptr = d_vol.as_device_ptr().add(start_combo).as_raw();
+                let mut alpha_ptr = d_alphas.as_device_ptr().add(start_combo).as_raw();
+                let mut beta_ptr = d_betas.as_device_ptr().add(start_combo).as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut combos_i = chunk_len as i32;
+                let mut ema_ptr = d_ema
+                    .as_device_ptr()
+                    .add(start_combo * series_len)
+                    .as_raw();
+                let mut out_ptr = d_out
+                    .as_device_ptr()
+                    .add(start_combo * series_len)
+                    .as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut base_ptr as *mut _ as *mut c_void,
+                    &mut vol_ptr as *mut _ as *mut c_void,
+                    &mut alpha_ptr as *mut _ as *mut c_void,
+                    &mut beta_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut ema_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                let grid: GridSize = (chunk_len as u32, 1, 1).into();
+                let block: BlockSize = (block_x, 1, 1).into();
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+            }
+            Ok(())
+        };
+
+        let mut remaining = n_combos;
+        let mut start = 0usize;
+        while remaining > 0 {
+            let take = remaining.min(MAX_GRID_DIM);
+            launch_chunk(start, take)?;
+            start += take;
+            remaining -= take;
+        }
         Ok(())
     }
 
@@ -543,10 +705,23 @@ impl CudaVama {
             .get_function("vama_many_series_one_param_f32")
             .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
 
-        const THREADS: u32 = 128;
-        let grid_x = ((series_len as u32) + THREADS - 1) / THREADS;
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => std::env::var("VAMA_MANY_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(128),
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+        };
+        unsafe {
+            let this = self as *const _ as *mut CudaVama;
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+        }
+        self.maybe_log_many_debug();
+
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), num_series as u32, 1).into();
-        let block: BlockSize = (THREADS, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();

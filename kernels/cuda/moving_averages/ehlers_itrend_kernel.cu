@@ -13,6 +13,12 @@
 #include <math.h>
 #include <math_constants.h>
 
+// Provide a portable definition of M_PI when building with toolchains
+// (e.g., MSVC via nvcc) that do not define it by default.
+#ifndef M_PI
+#define M_PI 3.14159265358979323846264338327950288
+#endif
+
 // Use templated ring accessor to support both float and double local rings
 template <typename T>
 __device__ __forceinline__ T ring_get_t(const T buf[7], int center, int offset) {

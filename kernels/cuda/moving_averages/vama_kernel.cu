@@ -49,10 +49,10 @@ void vama_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    const float first_price = prices[first_valid];
-    float mean = first_price;
+    const float first_price_f = prices[first_valid];
+    double mean = static_cast<double>(first_price_f);
     int valid_count = 1;
-    ema_buf[base_offset + first_valid] = mean;
+    ema_buf[base_offset + first_valid] = static_cast<float>(mean);
 
     int warm_base_end = first_valid + base_period;
     if (warm_base_end > series_len) {
@@ -60,22 +60,22 @@ void vama_batch_f32(const float* __restrict__ prices,
     }
 
     for (int i = first_valid + 1; i < warm_base_end; ++i) {
-        const float price = prices[i];
-        if (isfinite(price)) {
-            const float prev_total = mean * static_cast<float>(valid_count);
+        const float price_f = prices[i];
+        if (isfinite(price_f)) {
+            const double prev_total = mean * static_cast<double>(valid_count);
             ++valid_count;
-            mean = (prev_total + price) / static_cast<float>(valid_count);
+            mean = (prev_total + static_cast<double>(price_f)) / static_cast<double>(valid_count);
         }
-        ema_buf[base_offset + i] = mean;
+        ema_buf[base_offset + i] = static_cast<float>(mean);
     }
 
-    float prev = mean;
+    double prev = mean;
     for (int i = warm_base_end; i < series_len; ++i) {
-        const float price = prices[i];
-        if (isfinite(price)) {
-            prev = beta * prev + alpha * price;
+        const float price_f = prices[i];
+        if (isfinite(price_f)) {
+            prev = static_cast<double>(beta) * prev + static_cast<double>(alpha) * static_cast<double>(price_f);
         }
-        ema_buf[base_offset + i] = prev;
+        ema_buf[base_offset + i] = static_cast<float>(prev);
     }
 
     const int max_period = (base_period > vol_period) ? base_period : vol_period;
@@ -102,8 +102,8 @@ void vama_batch_f32(const float* __restrict__ prices,
         }
         const int start = i + 1 - window_len;
 
-        float vol_up = -CUDART_INF_F;
-        float vol_down = CUDART_INF_F;
+        double vol_up = -CUDART_INF;
+        double vol_down = CUDART_INF;
         for (int j = start; j <= i; ++j) {
             const float ema_j = ema_buf[base_offset + j];
             if (!isfinite(ema_j)) {
@@ -113,7 +113,7 @@ void vama_batch_f32(const float* __restrict__ prices,
             if (!isfinite(price_j)) {
                 continue;
             }
-            const float dev = price_j - ema_j;
+            const double dev = static_cast<double>(price_j) - static_cast<double>(ema_j);
             if (dev > vol_up) {
                 vol_up = dev;
             }
@@ -125,7 +125,7 @@ void vama_batch_f32(const float* __restrict__ prices,
         if (!isfinite(vol_up) || !isfinite(vol_down)) {
             out[base_offset + i] = mid;
         } else {
-            out[base_offset + i] = mid + 0.5f * (vol_up + vol_down);
+            out[base_offset + i] = mid + static_cast<float>(0.5) * static_cast<float>(vol_up + vol_down);
         }
     }
 }
@@ -182,9 +182,9 @@ void vama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         return;
     }
 
-    float mean = first_price;
+    double mean = static_cast<double>(first_price);
     int valid_count = 1;
-    ema_tm[first_idx] = mean;
+    ema_tm[first_idx] = static_cast<float>(mean);
 
     int warm_base_end = first_valid + base_period;
     if (warm_base_end > series_len) {
@@ -192,22 +192,22 @@ void vama_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
 
     for (int t = first_valid + 1; t < warm_base_end; ++t) {
-        const float price = prices_tm[t * stride + series_idx];
-        if (isfinite(price)) {
-            const float prev_total = mean * static_cast<float>(valid_count);
+        const float price_f = prices_tm[t * stride + series_idx];
+        if (isfinite(price_f)) {
+            const double prev_total = mean * static_cast<double>(valid_count);
             ++valid_count;
-            mean = (prev_total + price) / static_cast<float>(valid_count);
+            mean = (prev_total + static_cast<double>(price_f)) / static_cast<double>(valid_count);
         }
-        ema_tm[t * stride + series_idx] = mean;
+        ema_tm[t * stride + series_idx] = static_cast<float>(mean);
     }
 
-    float prev = mean;
+    double prev = mean;
     for (int t = warm_base_end; t < series_len; ++t) {
-        const float price = prices_tm[t * stride + series_idx];
-        if (isfinite(price)) {
-            prev = beta * prev + alpha * price;
+        const float price_f = prices_tm[t * stride + series_idx];
+        if (isfinite(price_f)) {
+            prev = static_cast<double>(beta) * prev + static_cast<double>(alpha) * static_cast<double>(price_f);
         }
-        ema_tm[t * stride + series_idx] = prev;
+        ema_tm[t * stride + series_idx] = static_cast<float>(prev);
     }
 
     const int max_period = (base_period > vol_period) ? base_period : vol_period;
@@ -232,8 +232,8 @@ void vama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
 
         const int start = t + 1 - window_len;
-        float vol_up = -CUDART_INF_F;
-        float vol_down = CUDART_INF_F;
+        double vol_up = -CUDART_INF;
+        double vol_down = CUDART_INF;
         for (int k = start; k <= t; ++k) {
             const float ema_val = ema_tm[k * stride + series_idx];
             if (!isfinite(ema_val)) {
@@ -243,7 +243,7 @@ void vama_many_series_one_param_f32(const float* __restrict__ prices_tm,
             if (!isfinite(price)) {
                 continue;
             }
-            const float dev = price - ema_val;
+            const double dev = static_cast<double>(price) - static_cast<double>(ema_val);
             if (dev > vol_up) {
                 vol_up = dev;
             }
@@ -256,7 +256,7 @@ void vama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         if (!isfinite(vol_up) || !isfinite(vol_down)) {
             out_tm[out_idx] = mid;
         } else {
-            out_tm[out_idx] = mid + 0.5f * (vol_up + vol_down);
+            out_tm[out_idx] = mid + static_cast<float>(0.5) * static_cast<float>(vol_up + vol_down);
         }
     }
 }

@@ -156,7 +156,13 @@ pub use trendflex_wrapper::{CudaTrendflex, CudaTrendflexError};
 pub use trima_wrapper::CudaTrima;
 pub use uma_wrapper::CudaUma;
 #[cfg(feature = "cuda")]
-pub use vama_wrapper::{CudaVama, CudaVamaError};
+pub use vama_wrapper::{
+    BatchKernelPolicy as VamaBatchKernelPolicy,
+    CudaVama,
+    CudaVamaError,
+    CudaVamaPolicy,
+    ManySeriesKernelPolicy as VamaManySeriesKernelPolicy,
+};
 #[cfg(feature = "cuda")]
 pub use volume_adjusted_ma_wrapper::{
     CudaVama as CudaVolumeAdjustedMa, CudaVamaError as CudaVolumeAdjustedMaError,

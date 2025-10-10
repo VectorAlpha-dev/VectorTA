@@ -11,12 +11,13 @@ use crate::indicators::moving_averages::wilders::{WildersBatchRange, WildersPara
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaWildersError {
@@ -39,6 +40,11 @@ pub struct CudaWilders {
     module: Module,
     stream: Stream,
     _context: Context,
+    policy: CudaWildersPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 struct PreparedWildersBatch {
@@ -58,8 +64,18 @@ impl CudaWilders {
         let context = Context::new(device).map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/wilders_kernel.ptx"));
-        let module =
-            Module::from_ptx(ptx, &[]).map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaWildersError::Cuda(e.to_string()))?,
+            },
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
 
@@ -67,6 +83,11 @@ impl CudaWilders {
             module,
             stream,
             _context: context,
+            policy: CudaWildersPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
     }
 
@@ -77,6 +98,21 @@ impl CudaWilders {
     ) -> Result<DeviceArrayF32, CudaWildersError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
+
+        // VRAM estimate (input + params + output) with headroom
+        let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
+        let params_bytes = (prepared.periods_i32.len() * std::mem::size_of::<i32>())
+            + (prepared.alphas_f32.len() * std::mem::size_of::<f32>())
+            + (prepared.warm_indices.len() * std::mem::size_of::<i32>());
+        let out_bytes = prepared.series_len * n_combos * std::mem::size_of::<f32>();
+        let required = prices_bytes + params_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024; // 64MB safety
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaWildersError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
 
         let d_prices = DeviceBuffer::from_slice(data_f32)
             .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
@@ -154,6 +190,62 @@ impl CudaWilders {
             expected,
             d_out,
         )
+    }
+
+    fn prepare_many_series_inputs(
+        data_tm_f32: &[f32],
+        cols: usize,
+        rows: usize,
+        params: &WildersParams,
+    ) -> Result<(Vec<i32>, i32, f32), CudaWildersError> {
+        if cols == 0 || rows == 0 {
+            return Err(CudaWildersError::InvalidInput(
+                "num_series and series_len must be positive".into(),
+            ));
+        }
+        if data_tm_f32.len() != cols * rows {
+            return Err(CudaWildersError::InvalidInput(format!(
+                "time-major slice length {} != cols*rows {}",
+                data_tm_f32.len(),
+                cols * rows
+            )));
+        }
+        let period = params.period.unwrap_or(0) as i32;
+        if period <= 0 {
+            return Err(CudaWildersError::InvalidInput("period must be positive".into()));
+        }
+        if period as usize > rows {
+            return Err(CudaWildersError::InvalidInput(format!(
+                "period {} exceeds series length {}",
+                period, rows
+            )));
+        }
+
+        let mut first_valids = vec![0i32; cols];
+        for s in 0..cols {
+            let mut fv = None;
+            for t in 0..rows {
+                let v = data_tm_f32[t * cols + s];
+                if v.is_finite() {
+                    fv = Some(t as i32);
+                    break;
+                }
+            }
+            let fv = fv.ok_or_else(|| {
+                CudaWildersError::InvalidInput(format!("series {} contains only NaNs", s))
+            })?;
+            let remain = rows - fv as usize;
+            if remain < period as usize {
+                return Err(CudaWildersError::InvalidInput(format!(
+                    "series {} lacks enough valid data: need {}, have {}",
+                    s, period, remain
+                )));
+            }
+            first_valids[s] = fv;
+        }
+
+        let alpha = 1.0f32 / (period as f32);
+        Ok((first_valids, period, alpha))
     }
 
     fn prepare_batch_inputs(
@@ -239,8 +331,16 @@ impl CudaWilders {
             .get_function("wilders_batch_f32")
             .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
 
+        // Kernel policy selection (simple)
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+            BatchKernelPolicy::Auto => 256,
+        };
+        unsafe { (*(self as *const _ as *mut CudaWilders)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        self.maybe_log_batch_debug();
+
         let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (256, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -268,20 +368,195 @@ impl CudaWilders {
 
         Ok(())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_many_series_kernel(
+        &self,
+        d_prices_tm: &DeviceBuffer<f32>,
+        d_first_valids: &DeviceBuffer<i32>,
+        period: i32,
+        alpha: f32,
+        num_series: usize,
+        series_len: usize,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaWildersError> {
+        let func = self
+            .module
+            .get_function("wilders_many_series_one_param_f32")
+            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+            ManySeriesKernelPolicy::Auto => 128,
+        };
+        unsafe { (*(self as *const _ as *mut CudaWilders)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        self.maybe_log_many_debug();
+
+        let block: BlockSize = (block_x, 1, 1).into();
+        let grid: GridSize = (num_series as u32, 1, 1).into();
+
+        unsafe {
+            let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
+            let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
+            let mut period_i = period as i32;
+            let mut alpha_f = alpha as f32;
+            let mut cols_i = num_series as i32;
+            let mut rows_i = series_len as i32;
+            let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut first_ptr as *mut _ as *mut c_void,
+                &mut period_i as *mut _ as *mut c_void,
+                &mut alpha_f as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    pub fn wilders_many_series_one_param_time_major_dev(
+        &self,
+        data_tm_f32: &[f32],
+        cols: usize,
+        rows: usize,
+        params: &WildersParams,
+    ) -> Result<DeviceArrayF32, CudaWildersError> {
+        let (first_valids, period, alpha) =
+            Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
+
+        // VRAM estimate
+        let elems = cols * rows;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = cols * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        let required = in_bytes + first_bytes + out_bytes + (16 * 1024 * 1024);
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
+            return Err(CudaWildersError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
+        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
+            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+
+        self.launch_many_series_kernel(
+            &d_prices_tm,
+            &d_first,
+            period,
+            alpha,
+            cols,
+            rows,
+            &mut d_out_tm,
+        )?;
+
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+
+        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn wilders_many_series_one_param_device(
+        &self,
+        d_prices_tm: &DeviceBuffer<f32>,
+        d_first_valids: &DeviceBuffer<i32>,
+        period: i32,
+        alpha: f32,
+        num_series: usize,
+        series_len: usize,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaWildersError> {
+        if num_series == 0 || series_len == 0 {
+            return Err(CudaWildersError::InvalidInput(
+                "num_series and series_len must be positive".into(),
+            ));
+        }
+        if d_prices_tm.len() != num_series * series_len || d_out_tm.len() != num_series * series_len {
+            return Err(CudaWildersError::InvalidInput(
+                "time-major buffer length mismatch".into(),
+            ));
+        }
+        if d_first_valids.len() != num_series {
+            return Err(CudaWildersError::InvalidInput(
+                "first_valids length mismatch".into(),
+            ));
+        }
+        self.launch_many_series_kernel(
+            d_prices_tm,
+            d_first_valids,
+            period,
+            alpha,
+            num_series,
+            series_len,
+            d_out_tm,
+        )
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if let Ok((free, _total)) = mem_get_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                static ONCE: AtomicBool = AtomicBool::new(false);
+                if !ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] WILDERS batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaWilders)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                static ONCE: AtomicBool = AtomicBool::new(false);
+                if !ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] WILDERS many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaWilders)).debug_many_logged = true; }
+            }
+        }
+    }
 }
 
 // ---------- Bench profiles ----------
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches_batch_only;
+    use crate::define_ma_period_benches;
 
-    define_ma_period_benches_batch_only!(
+    define_ma_period_benches!(
         wilders_benches,
         CudaWilders,
         crate::indicators::moving_averages::wilders::WildersBatchRange,
+        crate::indicators::moving_averages::wilders::WildersParams,
         wilders_batch_dev,
+        wilders_many_series_one_param_time_major_dev,
         crate::indicators::moving_averages::wilders::WildersBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::wilders::WildersParams { period: Some(64) },
         "wilders",
         "wilders"
     );
@@ -306,3 +581,22 @@ fn expand_periods(range: &WildersBatchRange) -> Vec<WildersParams> {
     }
     out
 }
+
+// --- Simple policy types (parity with ALMA/CWMA style) ---
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy { Auto, Plain { block_x: u32 } }
+impl Default for BatchKernelPolicy { fn default() -> Self { Self::Auto } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy { Auto, OneD { block_x: u32 } }
+impl Default for ManySeriesKernelPolicy { fn default() -> Self { Self::Auto } }
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CudaWildersPolicy { pub batch: BatchKernelPolicy, pub many_series: ManySeriesKernelPolicy }
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }

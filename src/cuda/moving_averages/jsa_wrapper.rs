@@ -354,6 +354,25 @@ impl CudaJsa {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
+        // VRAM estimate with ~64MB headroom (mirror ALMA approach)
+        let input_bytes = num_series
+            .saturating_mul(series_len)
+            .saturating_mul(std::mem::size_of::<f32>());
+        let out_bytes = input_bytes;
+        let idx_bytes = num_series
+            .saturating_mul(std::mem::size_of::<i32>())
+            .saturating_mul(2); // first_valids + warm_indices
+        let required = input_bytes
+            .saturating_add(out_bytes)
+            .saturating_add(idx_bytes);
+        let headroom = 64 * 1024 * 1024; // 64MB
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaJsaError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
         let d_prices_tm =
             DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&prepared.first_valids)

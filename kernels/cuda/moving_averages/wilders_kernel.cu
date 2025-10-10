@@ -79,3 +79,64 @@ void wilders_batch_f32(const float* __restrict__ prices,
         out[base + t] = value;
     }
 }
+
+// Many-series × one-param (time-major) kernel for Wilder's MA.
+//
+// - prices are time-major: prices_tm[t * num_series + series]
+// - first_valids[series] marks the first finite sample per series
+// - warmup is the simple average over the first full `period` window
+// - recurrence uses FMA and propagates non-finite per IEEE-754 semantics
+extern "C" __global__
+void wilders_many_series_one_param_f32(const float* __restrict__ prices_tm,
+                                       const int* __restrict__ first_valids,
+                                       int period,
+                                       float alpha,
+                                       int num_series,
+                                       int series_len,
+                                       float* __restrict__ out_tm) {
+    const int series_idx = blockIdx.x;
+    if (series_idx >= num_series) {
+        return;
+    }
+    if (period <= 0 || num_series <= 0 || series_len <= 0) {
+        return;
+    }
+
+    const int stride = num_series;
+    const int first_valid = first_valids[series_idx];
+    if (first_valid < 0 || first_valid >= series_len) {
+        return;
+    }
+
+    // Initialize output with NaNs cooperatively
+    for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
+        out_tm[t * stride + series_idx] = NAN;
+    }
+    __syncthreads();
+
+    if (threadIdx.x != 0) {
+        return;
+    }
+
+    const int warm_end = first_valid + period;
+    if (warm_end > series_len) {
+        return;
+    }
+
+    // Initial mean over the first full window [first_valid, warm_end)
+    float sum = 0.0f;
+    for (int k = 0; k < period; ++k) {
+        const int idx = (first_valid + k) * stride + series_idx;
+        sum += prices_tm[idx];
+    }
+    float y = sum / static_cast<float>(period);
+    const int warm = warm_end - 1;
+    out_tm[warm * stride + series_idx] = y;
+
+    // Recurrence
+    for (int t = warm + 1; t < series_len; ++t) {
+        const float x = prices_tm[t * stride + series_idx];
+        y = __fmaf_rn(x - y, alpha, y);
+        out_tm[t * stride + series_idx] = y;
+    }
+}
