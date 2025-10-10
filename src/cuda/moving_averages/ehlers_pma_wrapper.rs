@@ -274,7 +274,8 @@ impl CudaEhlersPma {
         let prices_bytes = series_len * std::mem::size_of::<f32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + 2 * out_bytes;
-        let headroom = 32 * 1024 * 1024; // 32 MB safety margin
+        // Keep a conservative headroom similar to ALMA (~64MB)
+        let headroom = 64 * 1024 * 1024; // 64 MB safety margin
         if !Self::will_fit(required, headroom) {
             return Err(CudaEhlersPmaError::InvalidInput(format!(
                 "estimated device memory {:.2} MB exceeds free VRAM",
@@ -443,7 +444,8 @@ impl CudaEhlersPma {
         let first_valid_bytes = cols * std::mem::size_of::<i32>();
         let out_bytes = cols * rows * std::mem::size_of::<f32>();
         let required = prices_bytes + first_valid_bytes + 2 * out_bytes;
-        let headroom = 32 * 1024 * 1024;
+        // Keep a conservative headroom similar to ALMA (~64MB)
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             return Err(CudaEhlersPmaError::InvalidInput(format!(
                 "estimated device memory {:.2} MB exceeds free VRAM",
@@ -767,13 +769,13 @@ pub mod benches {
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = 2 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 32 * 1024 * 1024
+        in_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
         let in_bytes = elems * std::mem::size_of::<f32>();
         let out_bytes = 2 * elems * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 32 * 1024 * 1024
+        in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
     struct PmaBatchState {

@@ -2,6 +2,7 @@
 
 use my_project::indicators::moving_averages::vwap::{vwap_batch_with_kernel, VwapBatchRange};
 use my_project::utilities::enums::Kernel;
+use my_project::indicators::moving_averages::vwap::{VwapInput, VwapParams, vwap_with_kernel};
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
@@ -81,6 +82,73 @@ fn vwap_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             a,
             b
         );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn vwap_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[vwap_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let cols = 16usize;
+    let rows = 2048usize;
+    let mut timestamps = vec![0i64; rows];
+    for t in 0..rows { timestamps[t] = 1_600_000_000_000i64 + (t as i64) * 60_000; }
+
+    let mut price_tm = vec![f64::NAN; rows * cols];
+    let mut volume_tm = vec![f64::NAN; rows * cols];
+    for s in 0..cols {
+        for t in (s % 5)..rows {
+            let x = (t as f64) + (s as f64) * 0.25;
+            price_tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+            volume_tm[t * cols + s] = (x * 0.001).cos().abs() + 0.6;
+        }
+    }
+
+    let anchor = "1m".to_string();
+
+    // CPU baseline per series
+    let mut cpu_tm = vec![f64::NAN; rows * cols];
+    for s in 0..cols {
+        let mut p = vec![f64::NAN; rows];
+        let mut v = vec![f64::NAN; rows];
+        for t in 0..rows {
+            p[t] = price_tm[t * cols + s];
+            v[t] = volume_tm[t * cols + s];
+        }
+        let params = VwapParams { anchor: Some(anchor.clone()) };
+        let input = VwapInput::from_slice(&timestamps, &v, &p, params);
+        let out = vwap_with_kernel(&input, Kernel::Scalar)?;
+        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+    }
+
+    let cuda = CudaVwap::new(0).expect("CudaVwap::new");
+    let dev = cuda
+        .vwap_many_series_one_param_time_major_dev(
+            &timestamps,
+            &volume_tm,
+            &price_tm,
+            cols,
+            rows,
+            &anchor,
+        )
+        .expect("vwap many-series");
+    assert_eq!(dev.rows, rows);
+    assert_eq!(dev.cols, cols);
+
+    let mut gpu_tm = vec![0f32; dev.len()];
+    dev.buf.copy_to(&mut gpu_tm)?;
+
+    let tol = 1e-4;
+    for idx in 0..gpu_tm.len() {
+        let a = cpu_tm[idx];
+        let b = gpu_tm[idx] as f64;
+        assert!(approx_eq(a, b, tol), "mismatch at {}", idx);
     }
 
     Ok(())

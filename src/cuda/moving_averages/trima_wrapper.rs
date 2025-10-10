@@ -1,8 +1,9 @@
 //! CUDA wrapper for TRIMA (Triangular Moving Average) batch kernels.
 //!
-//! Mirrors the ALMA CUDA scaffolding: validate inputs, upload FP32 copies to
-//! device memory, and launch a per-period kernel that precomputes triangular
-//! weights in shared memory.
+//! Aligns with the ALMA wrapper conventions for API surface, policy selection,
+//! PTX JIT options, VRAM checks, grid chunking, and debug logging. Kernels use
+//! triangular weights (fixed per period), precomputed on-device in shared
+//! memory for the batch path and passed as a vector for the many-series path.
 
 #![cfg(feature = "cuda")]
 
@@ -11,12 +12,13 @@ use crate::indicators::moving_averages::trima::{TrimaBatchRange, TrimaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaTrimaError {
@@ -35,10 +37,55 @@ impl fmt::Display for CudaTrimaError {
 
 impl std::error::Error for CudaTrimaError {}
 
+// -------- Kernel selection policy (ALMA/CWMA-style minimal surface) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaTrimaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+impl Default for CudaTrimaPolicy {
+    fn default() -> Self {
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
+    }
+}
+
+// -------- Introspection (selected kernel) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected {
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
+
 pub struct CudaTrima {
     module: Module,
     stream: Stream,
     _context: Context,
+    policy: CudaTrimaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaTrima {
@@ -50,7 +97,21 @@ impl CudaTrima {
         let context = Context::new(device).map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/trima_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+        // Prefer context-targeted JIT with moderate optimization; then fall back
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaTrimaError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
 
@@ -58,8 +119,62 @@ impl CudaTrima {
             module,
             stream,
             _context: context,
+            policy: CudaTrimaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
     }
+
+    /// Expose a simple synchronize for callers (e.g., benches) that want deterministic timing.
+    pub fn synchronize(&self) -> Result<(), CudaTrimaError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaTrimaError::Cuda(e.to_string()))
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged {
+            return;
+        }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] TRIMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaTrima)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged {
+            return;
+        }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] TRIMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaTrima)).debug_many_logged = true; }
+            }
+        }
+    }
+
+    // Policy controls/inspection
+    pub fn set_policy(&mut self, policy: CudaTrimaPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaTrimaPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
 
     fn expand_periods(range: &TrimaBatchRange) -> Vec<usize> {
         let (start, end, step) = range.period;
@@ -222,32 +337,52 @@ impl CudaTrima {
             .get_function("trima_batch_f32")
             .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = 256;
-        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
+        // Policy-selected block size; default to 256 like the original
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
+            _ => 256,
+        };
+        unsafe { (*(self as *const _ as *mut CudaTrima)).last_batch = Some(BatchKernelSelected::OneD { block_x }); }
+        self.maybe_log_batch_debug();
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut warms_ptr = d_warms.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut n_combos_i = n_combos as i32;
-            let mut max_period_i = max_period as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut warms_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut n_combos_i as *mut _ as *mut c_void,
-                &mut max_period_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?
+        // Chunk grid.y to <= 65_535
+        const MAX_GRID_Y: usize = 65_535;
+        let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        let mut launched = 0usize;
+        while launched < n_combos {
+            let len = (n_combos - launched).min(MAX_GRID_Y);
+            let grid: GridSize = (grid_x.max(1), len as u32, 1).into();
+
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                // Offset periods/warms/out by launched
+                let periods_ptr = d_periods.as_device_ptr().add(launched);
+                let mut periods_ptr = periods_ptr.as_raw();
+                let warms_ptr = d_warms.as_device_ptr().add(launched);
+                let mut warms_ptr = warms_ptr.as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut n_combos_i = len as i32;
+                let mut max_period_i = max_period as i32;
+                let out_ptr = d_out.as_device_ptr().add(launched * series_len);
+                let mut out_ptr = out_ptr.as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut warms_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut n_combos_i as *mut _ as *mut c_void,
+                    &mut max_period_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes, args)
+                    .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+            }
+
+            launched += len;
         }
 
         Ok(())
@@ -279,10 +414,16 @@ impl CudaTrima {
             .get_function("trima_multi_series_one_param_f32")
             .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
 
-        const BLOCK_X: u32 = 128;
-        let grid_x = ((rows as u32) + BLOCK_X - 1) / BLOCK_X;
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
+            _ => 128,
+        };
+        unsafe { (*(self as *const _ as *mut CudaTrima)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        self.maybe_log_many_debug();
+
+        let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
         let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
 
         unsafe {
@@ -335,6 +476,22 @@ impl CudaTrima {
         let n_combos = periods.len();
         let max_period = periods.iter().copied().max().unwrap_or(0);
 
+        // VRAM check: prices + periods + warms + out with ~64MB headroom
+        let prices_bytes = series_len * std::mem::size_of::<f32>();
+        let periods_bytes = n_combos * std::mem::size_of::<i32>();
+        let warms_bytes = n_combos * std::mem::size_of::<i32>();
+        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
+        let required = prices_bytes + periods_bytes + warms_bytes + out_bytes;
+        if let Ok((free, _total)) = mem_get_info() {
+            let headroom = 64usize * 1024 * 1024;
+            if required.saturating_add(headroom) > free {
+                return Err(CudaTrimaError::InvalidInput(format!(
+                    "estimated device memory {:.2} MB exceeds free VRAM",
+                    (required as f64) / (1024.0 * 1024.0)
+                )));
+            }
+        }
+
         let periods_i32: Vec<i32> = periods.iter().map(|&p| p as i32).collect();
         let warms_i32: Vec<i32> = periods
             .iter()
@@ -374,6 +531,22 @@ impl CudaTrima {
         first_valids: &[i32],
         period: usize,
     ) -> Result<DeviceArrayF32, CudaTrimaError> {
+        // VRAM check: prices + weights + first_valids + out with ~64MB headroom
+        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
+        let weights_bytes = period * std::mem::size_of::<f32>();
+        let first_valids_bytes = cols * std::mem::size_of::<i32>();
+        let out_bytes = cols * rows * std::mem::size_of::<f32>();
+        let required = prices_bytes + weights_bytes + first_valids_bytes + out_bytes;
+        if let Ok((free, _total)) = mem_get_info() {
+            let headroom = 64usize * 1024 * 1024;
+            if required.saturating_add(headroom) > free {
+                return Err(CudaTrimaError::InvalidInput(format!(
+                    "estimated device memory {:.2} MB exceeds free VRAM",
+                    (required as f64) / (1024.0 * 1024.0)
+                )));
+            }
+        }
+
         let weights = Self::compute_weights(period);
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;

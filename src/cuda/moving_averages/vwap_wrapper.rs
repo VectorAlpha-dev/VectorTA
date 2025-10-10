@@ -7,13 +7,15 @@ use crate::indicators::moving_averages::vwap::{
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::convert::TryFrom;
+use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaVwapError {
@@ -32,10 +34,50 @@ impl fmt::Display for CudaVwapError {
 
 impl std::error::Error for CudaVwapError {}
 
+// -------- Kernel selection policy (parity with ALMA/CWMA, simplified for VWAP) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchThreadsPerOutput { One, Two }
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaVwapPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+impl Default for CudaVwapPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+
 pub struct CudaVwap {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaVwapPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 struct PreparedBatch {
@@ -57,7 +99,20 @@ impl CudaVwap {
         let context = Context::new(device).map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vwap_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaVwapError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
 
@@ -65,7 +120,71 @@ impl CudaVwap {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaVwapPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    pub fn synchronize(&self) -> Result<(), CudaVwapError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaVwapError::Cuda(e.to_string()))
+    }
+
+    pub fn set_policy(&mut self, policy: CudaVwapPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaVwapPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] VWAP batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaVwap)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] VWAP many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaVwap)).debug_many_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else { true }
     }
 
     fn prepare_batch_inputs(
@@ -203,7 +322,10 @@ impl CudaVwap {
             .get_function("vwap_batch_f32")
             .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
 
-        let block_x = 128u32;
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+            BatchKernelPolicy::Auto => 128,
+        };
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -240,6 +362,12 @@ impl CudaVwap {
                 .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
         }
 
+        // Introspection
+        unsafe {
+            let this = self as *const _ as *mut CudaVwap;
+            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
+        }
+        self.maybe_log_batch_debug();
         Ok(())
     }
 
@@ -263,6 +391,21 @@ impl CudaVwap {
 
         let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
         let volumes_f32: Vec<f32> = volumes.iter().map(|&v| v as f32).collect();
+
+        // VRAM estimate w/ 64MB headroom
+        let in_bytes = series_len * (std::mem::size_of::<i64>() + 2 * std::mem::size_of::<f32>());
+        let param_bytes = n_combos
+            * (2 * std::mem::size_of::<i32>() + std::mem::size_of::<i64>() + std::mem::size_of::<i32>());
+        let month_bytes = month_ids.as_ref().map(|v| v.len() * 4).unwrap_or(0);
+        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
+        let required = in_bytes + param_bytes + month_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaVwapError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
 
         let d_timestamps =
             DeviceBuffer::from_slice(timestamps).map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
@@ -487,6 +630,215 @@ impl CudaVwap {
             .synchronize()
             .map_err(|e| CudaVwapError::Cuda(e.to_string()))
     }
+
+    // ---------------- Many-series × one-param (time-major) ----------------
+
+    fn compute_first_valids_many_series(
+        timestamps: &[i64],
+        volumes_tm: &[f64],
+        cols: usize,
+        rows: usize,
+        count: u32,
+        unit_char: char,
+    ) -> Result<Vec<i32>, CudaVwapError> {
+        if timestamps.len() != rows {
+            return Err(CudaVwapError::InvalidInput("timestamps len must equal rows".into()));
+        }
+        if volumes_tm.len() != rows * cols {
+            return Err(CudaVwapError::InvalidInput("volumes_tm wrong length".into()));
+        }
+        let mut out = vec![0i32; cols];
+        let bucket_ms: i64 = match unit_char {
+            'm' => (count as i64) * 60_000,
+            'h' => (count as i64) * 3_600_000,
+            'd' => (count as i64) * 86_400_000,
+            'M' => 0, // handled separately via months
+            _ => 0,
+        };
+        if unit_char == 'M' {
+            let months: Vec<i32> = Self::compute_month_ids(timestamps)?;
+            for s in 0..cols {
+                let mut cur_gid = i64::MIN;
+                let mut vsum = 0.0f64;
+                for t in 0..rows {
+                    let gid = (months[t] as i64) / (count as i64);
+                    if gid != cur_gid { cur_gid = gid; vsum = 0.0; }
+                    let v = volumes_tm[t * cols + s];
+                    vsum += v;
+                    if vsum > 0.0 { out[s] = t as i32; break; }
+                }
+            }
+        } else {
+            for s in 0..cols {
+                let mut cur_gid = i64::MIN;
+                let mut vsum = 0.0f64;
+                for t in 0..rows {
+                    let ts = timestamps[t];
+                    let gid = ts / bucket_ms.max(1);
+                    if gid != cur_gid { cur_gid = gid; vsum = 0.0; }
+                    let v = volumes_tm[t * cols + s];
+                    vsum += v;
+                    if vsum > 0.0 { out[s] = t as i32; break; }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn vwap_many_series_one_param_time_major_dev(
+        &self,
+        timestamps: &[i64],
+        volumes_tm_f64: &[f64],
+        prices_tm_f64: &[f64],
+        cols: usize,
+        rows: usize,
+        anchor: &str,
+    ) -> Result<DeviceArrayF32, CudaVwapError> {
+        if cols == 0 || rows == 0 { return Err(CudaVwapError::InvalidInput("empty matrix".into())); }
+        if timestamps.len() != rows { return Err(CudaVwapError::InvalidInput("timestamps len != rows".into())); }
+        if volumes_tm_f64.len() != rows * cols || prices_tm_f64.len() != rows * cols {
+            return Err(CudaVwapError::InvalidInput("prices/volumes len != rows*cols".into()));
+        }
+
+        let (count, unit_char) = parse_anchor(anchor)
+            .map_err(|e| CudaVwapError::InvalidInput(e.to_string()))?;
+
+        // Precompute first_valids per series
+        let first_valids = Self::compute_first_valids_many_series(
+            timestamps,
+            volumes_tm_f64,
+            cols,
+            rows,
+            count,
+            unit_char,
+        )?;
+
+        let prices_tm_f32: Vec<f32> = prices_tm_f64.iter().map(|&v| v as f32).collect();
+        let volumes_tm_f32: Vec<f32> = volumes_tm_f64.iter().map(|&v| v as f32).collect();
+
+        // VRAM estimate
+        let in_bytes = rows * std::mem::size_of::<i64>()
+            + 2 * rows * cols * std::mem::size_of::<f32>()
+            + cols * std::mem::size_of::<i32>();
+        let month_bytes = if unit_char == 'M' { rows * std::mem::size_of::<i32>() } else { 0 };
+        let out_bytes = rows * cols * std::mem::size_of::<f32>();
+        let required = in_bytes + month_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaVwapError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
+        // Upload
+        let d_timestamps = DeviceBuffer::from_slice(timestamps).map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let d_volumes_tm = DeviceBuffer::from_slice(&volumes_tm_f32).map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(&prices_tm_f32).map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let mut d_month_ids = if unit_char == 'M' {
+            let ids = Self::compute_month_ids(timestamps)?;
+            Some(DeviceBuffer::from_slice(&ids).map_err(|e| CudaVwapError::Cuda(e.to_string()))?)
+        } else { None };
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(rows * cols)
+        }.map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+
+        // Launch
+        self.launch_many_series_kernel(
+            &d_timestamps,
+            &d_volumes_tm,
+            &d_prices_tm,
+            count,
+            unit_char,
+            &d_first_valids,
+            d_month_ids.as_mut().map(|b| b),
+            cols,
+            rows,
+            &mut d_out_tm,
+        )?;
+        self.stream.synchronize().map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+
+        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+    }
+
+    fn launch_many_series_kernel(
+        &self,
+        d_timestamps: &DeviceBuffer<i64>,
+        d_volumes_tm: &DeviceBuffer<f32>,
+        d_prices_tm: &DeviceBuffer<f32>,
+        count: u32,
+        unit_char: char,
+        d_first_valids: &DeviceBuffer<i32>,
+        d_month_ids: Option<&mut DeviceBuffer<i32>>,
+        cols: usize,
+        rows: usize,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaVwapError> {
+        if cols == 0 || rows == 0 { return Err(CudaVwapError::InvalidInput("empty matrix".into())); }
+        if d_out_tm.len() != rows * cols { return Err(CudaVwapError::InvalidInput("out buf wrong length".into())); }
+
+        let func = self
+            .module
+            .get_function("vwap_multi_series_one_param_f32")
+            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+
+        // unit codes: 0=m,1=h,2=d,3=M
+        let (unit_code, divisor_ms, month_ptr): (i32, i64, u64) = match unit_char {
+            'm' => (0, (count as i64) * 60_000, 0),
+            'h' => (1, (count as i64) * 3_600_000, 0),
+            'd' => (2, (count as i64) * 86_400_000, 0),
+            'M' => (3, 0, d_month_ids.map(|b| b.as_device_ptr().as_raw()).unwrap_or(0)),
+            _ => return Err(CudaVwapError::InvalidInput("unsupported unit".into())),
+        };
+
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
+            ManySeriesKernelPolicy::Auto => 128,
+        };
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let mut ts_ptr = d_timestamps.as_device_ptr().as_raw();
+            let mut vol_ptr = d_volumes_tm.as_device_ptr().as_raw();
+            let mut price_ptr = d_prices_tm.as_device_ptr().as_raw();
+            let mut count_i = count as i32;
+            let mut unit_i = unit_code as i32;
+            let mut divisor_i = divisor_ms as i64;
+            let mut first_valids_ptr = d_first_valids.as_device_ptr().as_raw();
+            let mut month_ptr_u = month_ptr;
+            let mut num_series_i = cols as i32;
+            let mut series_len_i = rows as i32;
+            let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
+
+            let args: &mut [*mut c_void] = &mut [
+                &mut ts_ptr as *mut _ as *mut c_void,
+                &mut vol_ptr as *mut _ as *mut c_void,
+                &mut price_ptr as *mut _ as *mut c_void,
+                &mut count_i as *mut _ as *mut c_void,
+                &mut unit_i as *mut _ as *mut c_void,
+                &mut divisor_i as *mut _ as *mut c_void,
+                &mut first_valids_ptr as *mut _ as *mut c_void,
+                &mut month_ptr_u as *mut _ as *mut c_void,
+                &mut num_series_i as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        }
+
+        unsafe {
+            let this = self as *const _ as *mut CudaVwap;
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+        }
+        self.maybe_log_many_debug();
+        Ok(())
+    }
 }
 
 // ---------- Bench profiles (batch only) ----------
@@ -558,7 +910,34 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        vec![
+        struct VwapManySeriesState {
+            cuda: CudaVwap,
+            ts: Vec<i64>,
+            vol_tm: Vec<f64>,
+            price_tm: Vec<f64>,
+            cols: usize,
+            rows: usize,
+            anchor: String,
+            warmed: bool,
+        }
+        impl CudaBenchState for VwapManySeriesState {
+            fn launch(&mut self) {
+                let _ = self
+                    .cuda
+                    .vwap_many_series_one_param_time_major_dev(
+                        &self.ts,
+                        &self.vol_tm,
+                        &self.price_tm,
+                        self.cols,
+                        self.rows,
+                        &self.anchor,
+                    )
+                    .expect("vwap many-series");
+                if !self.warmed { let _ = self.cuda.synchronize(); self.warmed = true; }
+            }
+        }
+
+        let mut out = vec![
             CudaBenchScenario::new(
                 "vwap",
                 "one_series_many_params",
@@ -568,6 +947,51 @@ pub mod benches {
             )
             .with_sample_size(10)
             .with_mem_required(bytes_one_series_many_params()),
-        ]
+        ];
+
+        // Many-series synthetic (shared timestamps across series)
+        fn synth_many_series(rows: usize, cols: usize) -> (Vec<i64>, Vec<f64>, Vec<f64>) {
+            let mut ts = vec![0i64; rows];
+            for t in 0..rows { ts[t] = (t as i64) * 60_000; }
+            let mut price_tm = vec![f64::NAN; rows * cols];
+            let mut vol_tm = vec![f64::NAN; rows * cols];
+            for s in 0..cols {
+                for t in (s % 7)..rows {
+                    let x = (t as f64) + (s as f64) * 0.1;
+                    price_tm[t * cols + s] = (x * 0.002).sin() + 0.0002 * x;
+                    vol_tm[t * cols + s] = (x * 0.003).cos().abs() + 0.8;
+                }
+            }
+            (ts, vol_tm, price_tm)
+        }
+
+        const MS_COLS: usize = 256;
+        const MS_ROWS: usize = 500_000;
+        fn prep_vwap_many_series_256x500k() -> Box<dyn CudaBenchState> {
+            let (ts, vol_tm, price_tm) = synth_many_series(MS_ROWS, MS_COLS);
+            Box::new(VwapManySeriesState {
+                cuda: CudaVwap::new(0).expect("cuda vwap"),
+                ts,
+                vol_tm,
+                price_tm,
+                cols: MS_COLS,
+                rows: MS_ROWS,
+                anchor: "1d".to_string(),
+                warmed: false,
+            })
+        }
+        out.push(
+            CudaBenchScenario::new(
+                "vwap",
+                "many_series_one_param",
+                "vwap_cuda_many_series_one_param",
+                "256x500k_1d",
+                prep_vwap_many_series_256x500k,
+            )
+            .with_sample_size(10)
+            .with_mem_required(MS_ROWS * 8 + MS_ROWS * MS_COLS * 4 * 3 + 64 * 1024 * 1024),
+        );
+
+        out
     }
 }

@@ -345,6 +345,8 @@ impl CudaMaaq {
         Ok(())
     }
 
+    /// Device-level batch entry: launches `maaq_batch_f32` using preallocated device buffers.
+    /// Mirrors ALMA-style device APIs for benches and advanced callers.
     pub fn maaq_batch_device(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -357,6 +359,16 @@ impl CudaMaaq {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMaaqError> {
+        if series_len == 0 || n_combos == 0 || max_period == 0 {
+            return Err(CudaMaaqError::InvalidInput(
+                "series_len, n_combos, and max_period must be positive".into(),
+            ));
+        }
+        if first_valid > series_len {
+            return Err(CudaMaaqError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
         self.launch_batch_kernel_plain(
             d_prices,
             d_periods,
@@ -369,6 +381,8 @@ impl CudaMaaq {
             d_out,
         )
     }
+
+    
 
     pub fn maaq_batch_dev(
         &self,

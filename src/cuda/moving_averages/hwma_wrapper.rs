@@ -81,15 +81,18 @@ impl CudaHwma {
         let context = Context::new(device).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/hwma_kernel.ptx"));
-        // Prefer context-derived target; keep optimization level default for
-        // numerical parity with existing tests.
-        let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
+        // Match ALMA: prefer DetermineTargetFromContext + O2; fall back to simpler modes.
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => {
-                // Final fallback: no options
-                Module::from_ptx(ptx, &[]).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
-            }
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?,
+            },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
