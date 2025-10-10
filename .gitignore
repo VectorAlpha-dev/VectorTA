@@ -23,7 +23,6 @@ src/data/backup/
 profiling.ps1
 file_structure.py
 profile.ps1
-build.rs
 website/dist/
 website/node_modules/
 website/*.csv
