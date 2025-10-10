@@ -5,7 +5,7 @@ use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::CudaZlema;
 use my_project::indicators::moving_averages::zlema::{
-    zlema_batch_inner_into, ZlemaBatchRange, ZlemaParams,
+    zlema_batch_inner_into, zlema_with_kernel, ZlemaBatchRange, ZlemaInput, ZlemaParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -149,4 +149,75 @@ fn expand_grid_count(range: &ZlemaBatchRange) -> usize {
     } else {
         ((end - start) / step) + 1
     }
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn zlema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[zlema_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    // Build time-major input (rows = time, cols = series)
+    let cols = 8usize;
+    let rows = 1024usize;
+    let mut tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        for t in s..rows {
+            let x = (t as f64) + (s as f64) * 0.17;
+            tm[t * cols + s] = (x * 0.00321).sin() + 0.00051 * x;
+        }
+    }
+
+    let period = 13usize;
+
+    // CPU baseline per-series
+    let mut cpu_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        let mut series = vec![f64::NAN; rows];
+        for t in 0..rows {
+            series[t] = tm[t * cols + s];
+        }
+        let params = ZlemaParams { period: Some(period) };
+        let input = ZlemaInput::from_slice(&series, params);
+        let out = zlema_with_kernel(&input, Kernel::Scalar)?;
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
+    }
+
+    let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
+    let cuda = CudaZlema::new(0).expect("CudaZlema::new");
+    let params = ZlemaParams { period: Some(period) };
+    let dev = cuda
+        .zlema_many_series_one_param_time_major_dev(&tm_f32, cols, rows, &params)
+        .expect("zlema_many_series_one_param_time_major_dev");
+    assert_eq!(dev.rows, rows);
+    assert_eq!(dev.cols, cols);
+    let mut gpu_tm = vec![0f32; dev.len()];
+    dev.buf.copy_to(&mut gpu_tm)?;
+
+    // Compare with tolerance, honoring warmup per series
+    let tol = 1e-4;
+    for s in 0..cols {
+        // compute first_valid for series
+        let first_valid = (0..rows)
+            .find(|&t| !tm[t * cols + s].is_nan())
+            .unwrap_or(rows);
+        let warm = first_valid + period - 1;
+        for t in 0..rows {
+            let idx = t * cols + s;
+            let c = cpu_tm[idx];
+            let g = gpu_tm[idx] as f64;
+            if t < warm {
+                assert!(c.is_nan());
+                assert!(g.is_nan());
+            } else {
+                assert!((c - g).abs() <= tol + c.abs() * 1e-4, "mismatch at ({}, {}): cpu={} gpu={}", t, s, c, g);
+            }
+        }
+    }
+
+    Ok(())
 }

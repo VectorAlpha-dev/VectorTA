@@ -630,15 +630,14 @@ impl CudaEhlersKama {
 
         match launch {
             ManySeriesKernelPolicy::OneD { block_x } => {
-                // Reuse the 2D kernel with a (tx=block_x, ty=1) configuration,
-                // so OneD maps to a contiguous tile of series per block.
+                // Use the dedicated 1D kernel for one-param many-series.
+                // Grid.x maps to series, each block processes one full series sequentially.
                 let func = self
                     .module
-                    .get_function("ehlers_kama_multi_series_one_param_2d_f32")
+                    .get_function("ehlers_kama_multi_series_one_param_f32")
                     .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
                 let tx = block_x.max(1);
-                let tile = tx; // ty=1
-                let blocks = ((num_series as u32 + tile - 1) / tile).max(1);
+                let blocks = (num_series as u32).max(1);
                 let grid: GridSize = (blocks, 1, 1).into();
                 let block: BlockSize = (tx, 1, 1).into();
                 unsafe {

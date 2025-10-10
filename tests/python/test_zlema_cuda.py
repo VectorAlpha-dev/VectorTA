@@ -65,3 +65,33 @@ class TestZlemaCuda:
             atol=5e-4,
             msg="CUDA ZLEMA mismatch vs CPU baseline",
         )
+
+    def test_zlema_cuda_many_series_one_param_matches_cpu(self):
+        if not hasattr(ti, "zlema_cuda_many_series_one_param_dev"):
+            pytest.skip("zlema_cuda_many_series_one_param_dev not available")
+
+        cols = 6
+        rows = 1024
+        # time-major: rows x cols
+        tm = np.full((rows, cols), np.nan, dtype=np.float64)
+        for s in range(cols):
+            for t in range(s, rows):
+                x = float(t) + float(s) * 0.13
+                tm[t, s] = np.sin(x * 0.003) + 0.0004 * x
+
+        period = 13
+
+        # CPU baseline per series
+        cpu_tm = np.full((rows, cols), np.nan, dtype=np.float64)
+        for s in range(cols):
+            series = tm[:, s]
+            cpu_series = ti.zlema(series, period)
+            cpu_tm[:, s] = cpu_series
+
+        handle = ti.zlema_cuda_many_series_one_param_dev(tm.astype(np.float32), period)
+        gpu_tm = cp.asnumpy(cp.asarray(handle)).astype(np.float64)
+
+        # Compare where CPU is not NaN
+        mask = ~np.isnan(cpu_tm)
+        assert_close(gpu_tm[mask], cpu_tm[mask], rtol=1e-4, atol=5e-4,
+                     msg="CUDA ZLEMA many-series mismatch vs CPU baseline")

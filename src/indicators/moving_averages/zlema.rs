@@ -1761,6 +1761,37 @@ pub fn zlema_cuda_batch_dev_py<'py>(
     Ok((DeviceArrayF32Py { inner }, dict))
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "zlema_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn zlema_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaZlema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let params = ZlemaParams { period: Some(period) };
+        cuda
+            .zlema_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn zlema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {

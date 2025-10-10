@@ -588,6 +588,7 @@ impl CudaDema {
         if period == 0 { return Err(CudaDemaError::InvalidInput("period must be positive".into())); }
 
         let mut first_valids = Vec::with_capacity(num_series);
+        let needed = 2usize.saturating_mul(period.saturating_sub(1));
         for s in 0..num_series {
             let mut found = None;
             for t in 0..series_len {
@@ -596,10 +597,11 @@ impl CudaDema {
             }
             let fv = found.ok_or_else(|| CudaDemaError::InvalidInput(format!("series {} contains only NaNs", s)))?;
             let remaining = series_len - fv as usize;
-            if remaining < period {
+            // Match CPU acceptance: require >= 2*(period - 1) valid samples
+            if remaining < needed {
                 return Err(CudaDemaError::InvalidInput(format!(
-                    "series {} does not have enough valid data: need {} valid samples, have {}",
-                    s, period, remaining
+                    "series {} does not have enough valid data: need >= {}, have {}",
+                    s, needed, remaining
                 )));
             }
             first_valids.push(fv);

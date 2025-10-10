@@ -524,7 +524,9 @@ use crate::indicators::moving_averages::wma::{
     wma_cuda_batch_dev_py, wma_cuda_many_series_one_param_dev_py,
 };
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::zlema::zlema_cuda_batch_dev_py;
+use crate::indicators::moving_averages::zlema::{
+    zlema_cuda_batch_dev_py, zlema_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::zlema::{zlema_batch_py, zlema_py, ZlemaStreamPy};
 #[cfg(feature = "python")]
@@ -738,6 +740,10 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(wad_cuda_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(zscore_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(zlema_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            zlema_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
         m.add_function(wrap_pyfunction!(trendflex_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(
             trendflex_cuda_many_series_one_param_dev_py,

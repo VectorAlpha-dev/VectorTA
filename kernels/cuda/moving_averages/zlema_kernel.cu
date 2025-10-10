@@ -74,3 +74,60 @@ void zlema_batch_f32(const float* __restrict__ prices,
         return;
     }
 }
+
+// Many-series × one-param (time-major layout)
+// prices_tm/out_tm are time-major: index = row * num_series + series
+extern "C" __global__
+void zlema_many_series_one_param_f32(const float* __restrict__ prices_tm,
+                                     const int* __restrict__ first_valids,
+                                     int num_series,
+                                     int series_len,
+                                     int period,
+                                     float alpha,
+                                     float* __restrict__ out_tm) {
+    const int series = blockIdx.x * blockDim.x + threadIdx.x;
+    if (series >= num_series) {
+        return;
+    }
+
+    if (period <= 0 || num_series <= 0 || series_len <= 0) {
+        return;
+    }
+
+    const int stride = num_series;
+    const int first_valid = first_valids[series];
+    if (first_valid < 0 || first_valid >= series_len) {
+        return;
+    }
+
+    const int lag = (period - 1) / 2;
+    const float one_minus_alpha = 1.0f - alpha;
+    const int warm = first_valid + period - 1;
+
+    // Initialize warmup prefix to NaN
+    for (int row = 0; row < warm && row < series_len; ++row) {
+        out_tm[row * stride + series] = ZLEMA_NAN;
+    }
+
+    float last_ema = prices_tm[first_valid * stride + series];
+
+    // Handle period == 1 explicitly: warm == first_valid
+    if (warm <= first_valid) {
+        out_tm[first_valid * stride + series] = last_ema;
+    }
+
+    for (int t = first_valid + 1; t < series_len; ++t) {
+        const float cur = prices_tm[t * stride + series];
+        float val;
+        if (t < first_valid + lag) {
+            val = cur;
+        } else {
+            const float lagged = prices_tm[(t - lag) * stride + series];
+            val = 2.0f * cur - lagged;
+        }
+        last_ema = alpha * val + one_minus_alpha * last_ema;
+        if (t >= warm) {
+            out_tm[t * stride + series] = last_ema;
+        }
+    }
+}

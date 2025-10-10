@@ -1,9 +1,13 @@
 //! CUDA scaffolding for the Simple Moving Average (SMA).
 //!
-//! Mirrors the VRAM-first integrations provided for ALMA/VPWMA/etc.: host-side
-//! validation expands parameter sweeps, kernels execute entirely in FP32, and
-//! results are returned in zero-copy `DeviceArrayF32` handles with optional
-//! host-copy helpers layered on top.
+//! Mirrors the VRAM-first integrations provided for ALMA/CWMA:
+//! - Host-side validation expands parameter sweeps and checks warmup (NaN) semantics.
+//! - Kernels execute in FP32 and return VRAM-resident `DeviceArrayF32` handles, with
+//!   host-copy helpers layered on top for convenience.
+//! - PTX is JITed with conservative options (DetermineTargetFromContext + O2) and
+//!   falls back progressively for driver stability.
+//! - Adds light VRAM checks to guard against accidental OOM for large sweeps; users
+//!   can override headroom via `CUDA_MEM_HEADROOM`.
 
 #![cfg(feature = "cuda")]
 
@@ -13,7 +17,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
@@ -51,7 +55,21 @@ impl CudaSma {
         let context = Context::new(device).map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sma_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
+        // Align with ALMA/CWMA: JIT target from context + O2, then progressively relax
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaSmaError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
 
@@ -60,6 +78,31 @@ impl CudaSma {
             stream,
             _context: context,
         })
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        cust::memory::mem_get_info().ok()
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
 
     fn prepare_batch_inputs(
@@ -122,7 +165,12 @@ impl CudaSma {
             .get_function("sma_batch_f32")
             .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = 128;
+        // Allow tuning via SMA_BLOCK_X; default 128
+        let block_x: u32 = env::var("SMA_BLOCK_X")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(128);
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -159,6 +207,22 @@ impl CudaSma {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaSmaError> {
+        // Optional VRAM check (rough estimate) like ALMA/CWMA wrappers
+        let rows = combos.len();
+        let bytes_required = len * std::mem::size_of::<f32>()   // prices
+            + rows * std::mem::size_of::<i32>()                 // periods
+            + rows * len * std::mem::size_of::<f32>();          // outputs
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        if !Self::will_fit(bytes_required, headroom) {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "insufficient VRAM: need ~{} MB (incl headroom)",
+                (bytes_required + headroom) / (1024 * 1024)
+            )));
+        }
+
         let d_prices =
             DeviceBuffer::from_slice(data_f32).map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
@@ -290,7 +354,12 @@ impl CudaSma {
             .get_function("sma_many_series_one_param_f32")
             .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = 128;
+        // Allow tuning via SMA_MS_BLOCK_X; default 128
+        let block_x: u32 = env::var("SMA_MS_BLOCK_X")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(128);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();

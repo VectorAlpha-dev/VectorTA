@@ -1007,16 +1007,24 @@ pub fn sma_py<'py>(
     // Validate kernel with CPU feature detection
     let kern = validate_kernel(kernel, false)?;
 
-    let data_slice = data.as_slice()?;
     let params = SmaParams {
         period: Some(period),
     };
-    let input = SmaInput::from_slice(data_slice, params);
 
-    // Compute SMA using the standard function with zero-copy
-    let result_vec: Vec<f64> = py
-        .allow_threads(|| sma_with_kernel(&input, kern).map(|o| o.values))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    // Prefer zero-copy for contiguous input; fallback to minimal copy for non-contiguous views.
+    let result_vec: Vec<f64> = if let Ok(data_slice) = data.as_slice() {
+        let input = SmaInput::from_slice(data_slice, params);
+        py.allow_threads(|| sma_with_kernel(&input, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+    } else {
+        let owned = data.as_array().to_owned();
+        let data_slice = owned
+            .as_slice()
+            .expect("owned numpy array should be contiguous");
+        let input = SmaInput::from_slice(data_slice, params);
+        py.allow_threads(|| sma_with_kernel(&input, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+    };
 
     // Use zero-copy transfer to Python
     Ok(result_vec.into_pyarray(py))

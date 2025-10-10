@@ -133,3 +133,65 @@ fn expand_grid_count(range: &DemaBatchRange) -> usize {
         ((end - start) / step) + 1
     }
 }
+
+#[cfg(feature = "cuda")]
+#[test]
+fn dema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[dema_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    // Time-major layout: rows = series_len, cols = num_series
+    let cols = 8usize;
+    let rows = 1536usize;
+    let mut price_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        for t in (4 + s)..rows {
+            // vary phase per-series slightly; keep some NaNs at the head
+            let x = (t as f64) + (s as f64) * 0.25;
+            price_tm[t * cols + s] = (x * 0.00237).sin() + (x * 0.00071).cos() * 0.5 + 0.00021 * x;
+        }
+    }
+
+    let period = 24usize;
+
+    // CPU baseline per series
+    let mut cpu_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        let mut series = vec![f64::NAN; rows];
+        for t in 0..rows { series[t] = price_tm[t * cols + s]; }
+        let params = DemaParams { period: Some(period) };
+        let input = my_project::indicators::moving_averages::dema::DemaInput { data: my_project::indicators::moving_averages::dema::DemaData::Slice(&series), params };
+        let out = my_project::indicators::moving_averages::dema::dema_with_kernel(&input, Kernel::Scalar)?;
+        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+    }
+
+    let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
+    let cuda = CudaDema::new(0).expect("CudaDema::new");
+    let dev = cuda
+        .dema_many_series_one_param_time_major_dev(&price_tm_f32, cols, rows, &DemaParams { period: Some(period) })
+        .expect("dema_many_series_one_param_time_major_dev");
+
+    assert_eq!(dev.rows, rows);
+    assert_eq!(dev.cols, cols);
+
+    let mut gpu_tm = vec![0f32; dev.len()];
+    dev.buf.copy_to(&mut gpu_tm)?;
+
+    // Tolerance similar to batch test; allow small FP32 rounding
+    let tol = 5e-6;
+    for idx in 0..gpu_tm.len() {
+        let c = cpu_tm[idx];
+        let g = gpu_tm[idx] as f64;
+        if c.is_nan() {
+            assert!(g.is_nan(), "warmup NaN mismatch at {}", idx);
+        } else {
+            let diff = (c - g).abs();
+            let rtol = 5e-6 * c.abs();
+            assert!(diff <= tol + rtol, "mismatch at {}: cpu={} gpu={} diff={} tol={} rtol={}", idx, c, g, diff, tol, rtol);
+        }
+    }
+
+    Ok(())
+}
