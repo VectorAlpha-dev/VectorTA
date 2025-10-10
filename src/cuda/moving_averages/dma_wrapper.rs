@@ -17,6 +17,8 @@ use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cu;
+use std::mem::{size_of, zeroed};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
@@ -116,7 +118,7 @@ impl CudaDma {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/dma_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O3),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -154,6 +156,57 @@ impl CudaDma {
         self.stream
             .synchronize()
             .map_err(|e| CudaDmaError::Cuda(e.to_string()))
+    }
+
+    #[inline]
+    fn maybe_enable_l2_persist_for_prices(&self, d_prices_bytes: usize, d_prices_ptr: u64) -> Result<(), CudaDmaError> {
+        // Default-on best-effort: if unsupported, quietly no-op.
+        unsafe {
+            // Get current device from context
+            let mut dev: cu::CUdevice = 0;
+            let rc_dev = cu::cuCtxGetDevice(&mut dev as *mut _);
+            if rc_dev != cu::CUresult::CUDA_SUCCESS { return Ok(()); }
+
+            // Query device caps
+            let mut max_persist_bytes: i32 = 0;
+            let _ = cu::cuDeviceGetAttribute(
+                &mut max_persist_bytes as *mut i32,
+                cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_PERSISTING_L2_CACHE_SIZE,
+                dev,
+            );
+            if max_persist_bytes <= 0 { return Ok(()); }
+
+            let mut max_window: i32 = 0;
+            let _ = cu::cuDeviceGetAttribute(
+                &mut max_window as *mut i32,
+                cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+                dev,
+            );
+            if max_window <= 0 { return Ok(()); }
+
+            // Set context limit (set-aside)
+            let set_aside = d_prices_bytes.min(max_persist_bytes as usize);
+            let _ = cu::cuCtxSetLimit(cu::CUlimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, set_aside);
+
+            // Configure stream access policy window
+            let mut apw: cu::CUaccessPolicyWindow = zeroed();
+            apw.base_ptr = d_prices_ptr as u64;
+            apw.num_bytes = d_prices_bytes.min(max_window as usize);
+            apw.hitRatio = 1.0;
+            apw.hitProp = cu::CUaccessProperty::CU_ACCESS_PROPERTY_PERSISTING;
+            apw.missProp = cu::CUaccessProperty::CU_ACCESS_PROPERTY_NORMAL;
+
+            let mut attr: cu::CUstreamAttrValue = zeroed();
+            *attr.accessPolicyWindow.as_mut() = apw;
+
+            let hstream = self.stream.as_inner();
+            let _ = cu::cuStreamSetAttribute(
+                hstream,
+                cu::CUstreamAttrID::CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW,
+                &mut attr as *mut _,
+            );
+        }
+        Ok(())
     }
 
     #[inline]
@@ -257,8 +310,10 @@ impl CudaDma {
             )));
         }
         let arr = self.run_batch_with_prices_host(data_f32, &inputs)?;
-        arr.buf
-            .copy_to(out)
+        unsafe { arr.buf.async_copy_to(out, &self.stream) }
+            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
             .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
         Ok((arr.rows, arr.cols, inputs.combos))
     }
@@ -402,8 +457,10 @@ impl CudaDma {
             hull_type,
             sqrt_len,
         )?;
-        arr.buf
-            .copy_to(out_tm)
+        unsafe { arr.buf.async_copy_to(out_tm, &self.stream) }
+            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
             .map_err(|e| CudaDmaError::Cuda(e.to_string()))
     }
 
@@ -433,14 +490,24 @@ impl CudaDma {
             DeviceBuffer::from_slice_async(data_f32, &self.stream)
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
         };
-        let d_hulls = DeviceBuffer::from_slice(&inputs.hull_lengths)
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        let d_emas = DeviceBuffer::from_slice(&inputs.ema_lengths)
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        let d_gains = DeviceBuffer::from_slice(&inputs.ema_gain_limits)
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        let d_types = DeviceBuffer::from_slice(&inputs.hull_types)
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+        // Enable L2 persisting cache hint for prices (best-effort)
+        let _ = self.maybe_enable_l2_persist_for_prices(series_len * size_of::<f32>(), d_prices.as_device_ptr().as_raw());
+        let d_hulls = unsafe {
+            DeviceBuffer::from_slice_async(&inputs.hull_lengths, &self.stream)
+                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+        };
+        let d_emas = unsafe {
+            DeviceBuffer::from_slice_async(&inputs.ema_lengths, &self.stream)
+                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+        };
+        let d_gains = unsafe {
+            DeviceBuffer::from_slice_async(&inputs.ema_gain_limits, &self.stream)
+                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+        };
+        let d_types = unsafe {
+            DeviceBuffer::from_slice_async(&inputs.hull_types, &self.stream)
+                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+        };
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
@@ -506,18 +573,28 @@ impl CudaDma {
                 }
             });
         }
-        let d_hulls = DeviceBuffer::from_slice(&hulls)
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        let d_emas = DeviceBuffer::from_slice(&emas)
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        let d_gains = DeviceBuffer::from_slice(&gains)
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        let d_types = DeviceBuffer::from_slice(&types)
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+        let d_hulls = unsafe {
+            DeviceBuffer::from_slice_async(&hulls, &self.stream)
+                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+        };
+        let d_emas = unsafe {
+            DeviceBuffer::from_slice_async(&emas, &self.stream)
+                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+        };
+        let d_gains = unsafe {
+            DeviceBuffer::from_slice_async(&gains, &self.stream)
+                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+        };
+        let d_types = unsafe {
+            DeviceBuffer::from_slice_async(&types, &self.stream)
+                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+        };
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
         };
+        // Hint L2 persistence for device-resident prices
+        let _ = self.maybe_enable_l2_persist_for_prices(series_len * size_of::<f32>(), d_prices.as_device_ptr().as_raw());
         self.launch_batch_kernels(
             d_prices,
             &d_hulls,
@@ -578,7 +655,8 @@ impl CudaDma {
                 .get_function(func_name)
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
             let block: BlockSize = (tx, 1, 1).into();
-            let shared_bytes = (max_sqrt_len * tx as usize * std::mem::size_of::<f32>()) as u32;
+            let mut shared_bytes = (max_sqrt_len * tx as usize * size_of::<f32>()) as u32;
+            shared_bytes = (shared_bytes + 255) & !255;
 
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -630,7 +708,8 @@ impl CudaDma {
                 _ => 1,
             };
             let block: BlockSize = (block_x, 1, 1).into();
-            let shared_bytes = (max_sqrt_len * std::mem::size_of::<f32>()) as u32;
+            let mut shared_bytes = (max_sqrt_len * size_of::<f32>()) as u32;
+            shared_bytes = (shared_bytes + 255) & !255;
             for (start, len) in Self::grid_y_chunks(n_combos) {
                 let grid: GridSize = (len as u32, 1, 1).into();
                 let out_ptr = unsafe { d_out.as_device_ptr() };
@@ -686,8 +765,12 @@ impl CudaDma {
             DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
         };
-        let d_first =
-            DeviceBuffer::from_slice(first_valids).map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+        // Hint L2 persist for entire slab (time-major)
+        let _ = self.maybe_enable_l2_persist_for_prices(elems * size_of::<f32>(), d_prices.as_device_ptr().as_raw());
+        let d_first = unsafe {
+            DeviceBuffer::from_slice_async(first_valids, &self.stream)
+                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+        };
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(elems, &self.stream)
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
@@ -755,7 +838,8 @@ impl CudaDma {
                 .get_function(func_name)
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
             let block: BlockSize = (1, ty, 1).into();
-            let shared_bytes = (sqrt_len * ty as usize * std::mem::size_of::<f32>()) as u32;
+            let mut shared_bytes = (sqrt_len * ty as usize * size_of::<f32>()) as u32;
+            shared_bytes = (shared_bytes + 255) & !255;
             let grid_x = ((num_series as u32) + ty - 1) / ty;
             let grid: GridSize = (grid_x, 1, 1).into();
             let stream = &self.stream;
