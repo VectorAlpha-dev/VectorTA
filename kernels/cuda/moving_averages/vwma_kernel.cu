@@ -13,8 +13,8 @@
 #include <math.h>
 
 extern "C" __global__
-void vwma_batch_f32(const float* __restrict__ pv_prefix,
-                    const float* __restrict__ vol_prefix,
+void vwma_batch_f32(const double* __restrict__ pv_prefix,
+                    const double* __restrict__ vol_prefix,
                     const int* __restrict__ periods,
                     int series_len,
                     int n_combos,
@@ -40,15 +40,16 @@ void vwma_batch_f32(const float* __restrict__ pv_prefix,
             const int start = t - period + 1;
             const int prev = start - 1;
 
-            float sum_pv = pv_prefix[t];
-            float sum_vol = vol_prefix[t];
+            // Prefix arrays are double; do math in double for accuracy
+            double sum_pv = pv_prefix[t];
+            double sum_vol = vol_prefix[t];
 
             if (prev >= 0) {
                 sum_pv -= pv_prefix[prev];
                 sum_vol -= vol_prefix[prev];
             }
 
-            value = sum_pv / sum_vol;
+            value = static_cast<float>(sum_pv / sum_vol);
         }
 
         out[base_out + t] = value;
@@ -57,8 +58,8 @@ void vwma_batch_f32(const float* __restrict__ pv_prefix,
 }
 
 extern "C" __global__
-void vwma_multi_series_one_param_f32(const float* __restrict__ pv_prefix_tm,
-                                     const float* __restrict__ vol_prefix_tm,
+void vwma_multi_series_one_param_f32(const double* __restrict__ pv_prefix_tm,
+                                     const double* __restrict__ vol_prefix_tm,
                                      int period,
                                      int num_series,
                                      int series_len,
@@ -82,8 +83,9 @@ void vwma_multi_series_one_param_f32(const float* __restrict__ pv_prefix_tm,
             const int prev = start - 1;
             const int idx = t * num_series + series_idx;
 
-            float sum_pv = pv_prefix_tm[idx];
-            float sum_vol = vol_prefix_tm[idx];
+            // Prefix arrays are double; use double math
+            double sum_pv = pv_prefix_tm[idx];
+            double sum_vol = vol_prefix_tm[idx];
 
             if (prev >= 0) {
                 const int prev_idx = prev * num_series + series_idx;
@@ -91,7 +93,7 @@ void vwma_multi_series_one_param_f32(const float* __restrict__ pv_prefix_tm,
                 sum_vol -= vol_prefix_tm[prev_idx];
             }
 
-            out_tm[out_idx] = sum_pv / sum_vol;
+            out_tm[out_idx] = static_cast<float>(sum_pv / sum_vol);
         }
 
         t += stride;

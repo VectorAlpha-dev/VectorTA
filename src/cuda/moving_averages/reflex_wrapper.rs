@@ -402,8 +402,8 @@ impl CudaReflex {
         // Chunk very large sweeps to avoid grid dimension pitfalls and reduce launch failures.
         const MAX_CHUNK: usize = 65_535; // conservative (matches ALMA grid.y rule)
         let block: BlockSize = (1, 1, 1).into();
-        // Ring buffer of size period+1 is used in kernels
-        let shared_bytes = ((max_period + 1) * std::mem::size_of::<f32>()) as u32;
+        // Ring buffer of size period+1 is used in kernels (double-precision)
+        let shared_bytes = ((max_period + 1) * std::mem::size_of::<f64>()) as u32;
         let mut start = 0usize;
         while start < n_combos {
             let len = (n_combos - start).min(MAX_CHUNK);
@@ -459,8 +459,8 @@ impl CudaReflex {
 
         let grid: GridSize = (num_series as u32, 1, 1).into();
         let block: BlockSize = (1, 1, 1).into();
-        // Ring buffer of size period+1 is used in kernels
-        let shared_bytes = ((period + 1) * std::mem::size_of::<f32>()) as u32;
+        // Ring buffer of size period+1 is used in kernels (double-precision)
+        let shared_bytes = ((period + 1) * std::mem::size_of::<f64>()) as u32;
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();

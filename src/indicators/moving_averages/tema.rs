@@ -1604,20 +1604,22 @@ pub fn tema_py<'py>(
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{IntoPyArray, PyArrayMethods};
 
-    let slice_in = data.as_slice()?;
+    // Match ALMA Python API: accept non-contiguous inputs by copying once.
     let kern = validate_kernel(kernel, false)?; // Validate before allow_threads
 
-    let params = TemaParams {
-        period: Some(period),
+    let params = TemaParams { period: Some(period) };
+    let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
+        let tema_in = TemaInput::from_slice(slice_in, params);
+        py.allow_threads(|| tema_with_kernel(&tema_in, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+    } else {
+        let owned = data.as_array().to_owned();
+        let slice_in = owned.as_slice().expect("owned array should be contiguous");
+        let tema_in = TemaInput::from_slice(slice_in, params);
+        py.allow_threads(|| tema_with_kernel(&tema_in, kern).map(|o| o.values))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
     };
-    let tema_in = TemaInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function
-    let result_vec: Vec<f64> = py
-        .allow_threads(|| tema_with_kernel(&tema_in, kern).map(|o| o.values))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    // Zero-copy transfer to NumPy
     Ok(result_vec.into_pyarray(py))
 }
 

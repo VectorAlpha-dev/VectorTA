@@ -63,9 +63,10 @@ Cross-crate demos:
 Goal: implement AVX2/AVX512 kernels that are functionally identical to scalar and measurably faster. Success means all unit tests pass and AVX2/AVX512 benchmarks beat scalar. Do not benchmark batch mode unless you implemented per-row optimized kernels for the batch function.
 
 - Scalar-first optimization (required before SIMD)
-  - Optimize the safe scalar implementation of the indicator first and treat it as the reference path. Do not convert a safe API to unsafe just for speed.
+  - Optimize the safe scalar implementation of the indicator first and treat it as the reference path.
   - If the scalar indicator calls helpers, inline/loop-jam them when possible unless they use dynamic dispatch (e.g., the "MA" selector).
   - After each scalar change, run the indicator’s unit tests and its benches; keep only consistently positive improvements. Do not change unit test reference values.
+  - Unsafe in scalar is allowed when SIMD kernels are stubs/disabled: keep `unsafe` narrowly scoped, document the rationale, preserve a safe public API, and validate with tests/benches. Revisit and simplify once SIMD is enabled.
   - Use `src/indicators/moving_averages/alma.rs` as the gold standard for API shape, warmup handling, allocation, and optimization patterns.
 
 - Guarding and targets
@@ -90,7 +91,7 @@ Goal: implement AVX2/AVX512 kernels that are functionally identical to scalar an
 - Optimize the scalar implementation of the indicator first; SIMD comes only after the scalar path is as fast and clean as possible.
 - If the scalar indicator calls other helpers in the hot loop, prefer loop-jamming/inlining those helpers into the indicator loop to eliminate call overhead and enable hoisting invariants — except when the helper involves dynamic dispatch (e.g., the "MA" selector), in which case keep the selector at a higher level and avoid inlining dynamic branches into hot loops.
 - Every scalar optimization/change must be validated with unit tests and a benchmark run for that indicator. Use the existing commands in this guide (scalar tests and Criterion benches) and record the deltas in your PR description.
-- Keep the scalar path safe: do not introduce `unsafe` into the scalar implementation if it is currently safe. Only use `unsafe` inside tightly scoped SIMD/intrinsics blocks later.
+- Unsafe in scalar is allowed if SIMD kernels are stubs/disabled and the change provides a clear, measured benefit. Scope `unsafe` tightly (intrinsics/critical loops), document assumptions and rationale (see Decision Logging), keep public APIs safe, and ensure unit tests/benches pass without altering references.
 
 ### Benchmark registration (required before SIMD)
 - Ensure the Rust indicator is registered in `benches/indicator_benchmark.rs` so its scalar path has a baseline benchmark before adding SIMD.

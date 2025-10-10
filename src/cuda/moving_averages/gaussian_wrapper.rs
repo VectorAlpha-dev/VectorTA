@@ -18,7 +18,8 @@ use crate::indicators::moving_averages::gaussian::{GaussianBatchRange, GaussianP
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
+use cust::memory::{DeviceBuffer, LockedBuffer};
+use cust::memory::AsyncCopyDestination;
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -170,9 +171,21 @@ impl CudaGaussian {
         }
 
         let arr = self.run_batch_kernel(prices, &inputs)?;
-        arr.buf
-            .copy_to(out)
+
+        // Use pinned host memory + async copy for better D2H throughput.
+        let mut pinned: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(arr.len())
+                .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?
+        };
+        unsafe {
+            arr.buf
+                .async_copy_to(pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
             .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        out.copy_from_slice(pinned.as_slice());
         let BatchInputs { combos, .. } = inputs;
         Ok((arr.rows, arr.cols, combos))
     }
@@ -414,40 +427,64 @@ impl CudaGaussian {
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
             BatchKernelPolicy::Auto => 1,
         };
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x.min(1), 1, 1).into();
 
-        // Introspection
+        // Introspection (constant for all chunks)
         unsafe {
             let this = self as *const _ as *mut CudaGaussian;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x: 1 });
         }
         self.maybe_log_batch_debug();
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut poles_ptr = d_poles.as_device_ptr().as_raw();
-            let mut coeffs_ptr = d_coeffs.as_device_ptr().as_raw();
-            let mut coeff_stride_i = COEFF_STRIDE as i32;
-            let mut series_len_i = series_len as i32;
-            let mut combos_i = n_combos as i32;
-            let mut first_valid_i = first_valid as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut poles_ptr as *mut _ as *mut c_void,
-                &mut coeffs_ptr as *mut _ as *mut c_void,
-                &mut coeff_stride_i as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut combos_i as *mut _ as *mut c_void,
-                &mut first_valid_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        // Chunk grid to avoid excessive grid dimension for very large sweeps.
+        const MAX_CHUNK: usize = 65_535;
+        let mut launched = 0usize;
+        while launched < n_combos {
+            let chunk = (n_combos - launched).min(MAX_CHUNK);
+            let grid: GridSize = (chunk as u32, 1, 1).into();
+
+            unsafe {
+                let prices_base = d_prices.as_device_ptr().as_raw();
+                let periods_base = d_periods.as_device_ptr().as_raw();
+                let poles_base = d_poles.as_device_ptr().as_raw();
+                let coeffs_base = d_coeffs.as_device_ptr().as_raw();
+                let out_base = d_out.as_device_ptr().as_raw();
+
+                // Byte offsets for chunk starts
+                let periods_ptr = periods_base + (launched as u64) * (std::mem::size_of::<i32>() as u64);
+                let poles_ptr = poles_base + (launched as u64) * (std::mem::size_of::<i32>() as u64);
+                let coeffs_ptr = coeffs_base
+                    + (launched as u64) * (COEFF_STRIDE as u64) * (std::mem::size_of::<f32>() as u64);
+                let out_ptr = out_base
+                    + (launched as u64) * (series_len as u64) * (std::mem::size_of::<f32>() as u64);
+
+                let mut prices_ptr_m = prices_base;
+                let mut periods_ptr_m = periods_ptr;
+                let mut poles_ptr_m = poles_ptr;
+                let mut coeffs_ptr_m = coeffs_ptr;
+                let mut coeff_stride_i = COEFF_STRIDE as i32;
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = chunk as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut out_ptr_m = out_ptr;
+
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr_m as *mut _ as *mut c_void,
+                    &mut periods_ptr_m as *mut _ as *mut c_void,
+                    &mut poles_ptr_m as *mut _ as *mut c_void,
+                    &mut coeffs_ptr_m as *mut _ as *mut c_void,
+                    &mut coeff_stride_i as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_ptr_m as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+            }
+
+            launched += chunk;
         }
         Ok(())
     }
