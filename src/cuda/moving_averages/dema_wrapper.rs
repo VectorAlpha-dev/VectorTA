@@ -18,6 +18,7 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cu;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,7 +98,7 @@ impl CudaDema {
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/dema_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -237,7 +238,8 @@ impl CudaDema {
             first_valid.max(0) as usize,
             n_combos as usize,
             d_out,
-        )
+        )?;
+        self.synchronize()
     }
 
     /// Convenience: run DEMA batch using device-resident prices. Builds the
@@ -371,14 +373,17 @@ impl CudaDema {
     ) -> Result<(), CudaDemaError> {
         if n_combos == 0 { return Ok(()); }
 
+        // Prefill outputs with canonical qNaN on this stream
+        memset_f32_qnan_async(&self.stream, d_out)?;
+
         let func = self
             .module
             .get_function("dema_batch_f32")
             .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
 
-        // Block size for NaN init; thread 0 runs the sequential recurrence
-        let mut block_x: u32 = 256;
-        if let BatchKernelPolicy::Plain { block_x: bx } = self.policy.batch { block_x = bx; }
+        // Single-threaded sequential recurrence per combo
+        let mut block_x: u32 = 1;
+        if let BatchKernelPolicy::Plain { block_x: bx } = self.policy.batch { block_x = bx.max(1); }
         unsafe {
             let this = self as *const _ as *mut CudaDema;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
@@ -408,8 +413,8 @@ impl CudaDema {
                 .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
         }
 
-        // Deterministic timing for callers
-        self.synchronize()
+        // No implicit sync; public API decides synchronization
+        Ok(())
     }
 
     // ---------- many-series (time-major) ----------
@@ -482,7 +487,8 @@ impl CudaDema {
             num_series,
             series_len,
             d_out_tm,
-        )
+        )?;
+        self.synchronize()
     }
 
     pub fn dema_many_series_one_param_time_major_into_host_f32(
@@ -523,15 +529,26 @@ impl CudaDema {
             .get_function("dema_many_series_one_param_time_major_f32")
             .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
 
-        let mut block_x: u32 = 128;
-        if let ManySeriesKernelPolicy::OneD { block_x: bx } = self.policy.many_series { block_x = bx; }
+        // Prefill output with qNaN (entire time-major buffer)
+        memset_f32_qnan_async(&self.stream, d_out_tm)?;
+
+        // Warp-mapped launch config
+        let mut block_x_req: u32 = 128; // default 4 warps per block
+        if let ManySeriesKernelPolicy::OneD { block_x: bx } = self.policy.many_series {
+            block_x_req = bx.max(32);
+        }
+        let warps_per_block = (block_x_req / 32).max(1);
+        let block_x = warps_per_block * 32;
+        let total_warps = ((num_series as u32) + 31) / 32;
+        let grid_x = (total_warps + warps_per_block - 1) / warps_per_block;
+
         unsafe {
             let this = self as *const _ as *mut CudaDema;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
         }
         self.maybe_log_many_debug();
 
-        let grid: GridSize = (num_series as u32, 1, 1).into();
+        let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
@@ -553,7 +570,7 @@ impl CudaDema {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
         }
-        self.synchronize()
+        Ok(())
     }
 
     // ---------- helpers ----------
@@ -607,6 +624,22 @@ impl CudaDema {
             first_valids.push(fv);
         }
         Ok((first_valids, period))
+    }
+}
+
+// --- utility: async memset to canonical quiet-NaN (0x7FC0_0000) ---
+#[inline]
+fn memset_f32_qnan_async(stream: &Stream, buf: &mut DeviceBuffer<f32>) -> Result<(), CudaDemaError> {
+    const QNAN_BITS: u32 = 0x7FC0_0000;
+    unsafe {
+        let ptr: cu::CUdeviceptr = buf.as_device_ptr().as_raw();
+        let n: usize = buf.len();
+        let st: cu::CUstream = stream.as_inner();
+        let res = cu::cuMemsetD32Async(ptr, QNAN_BITS, n, st);
+        match res {
+            cu::CUresult::CUDA_SUCCESS => Ok(()),
+            e => Err(CudaDemaError::Cuda(format!("cuMemsetD32Async failed: {:?}", e))),
+        }
     }
 }
 
