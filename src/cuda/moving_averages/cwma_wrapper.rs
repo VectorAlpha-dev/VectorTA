@@ -11,8 +11,8 @@ use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::cwma::{CwmaBatchRange, CwmaParams};
 use cust::context::Context;
 use cust::device::Device;
-use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer, LockedBuffer};
+use cust::function::{BlockSize, GridSize, CacheConfig, SharedMemoryConfig, Function};
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -116,11 +116,17 @@ impl CudaCwma {
         let context = Context::new(device).map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cwma_kernel.ptx"));
-        let jit_opts = &[
+        // Prefer most aggressive JIT optimization; optional register cap via env
+        let mut jit_vec: Vec<ModuleJitOption> = vec![
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
+        if let Ok(v) = std::env::var("CWMA_JIT_MAXREGS") {
+            if let Ok(cap) = v.parse::<u32>() {
+                jit_vec.push(ModuleJitOption::MaxRegisters(cap));
+            }
+        }
+        let module = match Module::from_ptx(ptx, &jit_vec) {
             Ok(m) => m,
             Err(_) => {
                 if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
@@ -178,6 +184,22 @@ impl CudaCwma {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else {
             true
+        }
+    }
+
+    #[inline]
+    fn prefer_shared_and_optin_smem(&self, func: &Function, requested_dynamic_smem: usize) {
+        // Prefer shared L1 partitioning for shared-heavy kernels
+        let _ = func.set_cache_config(CacheConfig::PreferShared);
+        let _ = func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize);
+        // Best-effort: request larger opt-in dynamic shared memory and shared carve-out
+        unsafe {
+            use cust::sys::{cuFuncSetAttribute, CUfunction_attribute_enum as Attr};
+            let raw = func.to_raw();
+            // Request up to requested_dynamic_smem bytes
+            let _ = cuFuncSetAttribute(raw, Attr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, requested_dynamic_smem as i32);
+            // Hint: prefer allocating on-chip storage to shared (0..=100)
+            let _ = cuFuncSetAttribute(raw, Attr::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, 100);
         }
     }
 
@@ -306,9 +328,16 @@ impl CudaCwma {
                 (required as f64) / (1024.0 * 1024.0)
             )));
         }
-        // Common device buffers
-        let d_prices = DeviceBuffer::from_slice(data_f32)
+        // Common device buffers: page-locked host -> async copy to device
+        let h_prices = LockedBuffer::from_slice(data_f32)
             .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
+            .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        unsafe {
+            d_prices
+                .async_copy_from(&*h_prices, &self.stream)
+                .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        }
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
             .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
 
@@ -333,7 +362,7 @@ impl CudaCwma {
                 .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
 
             // Launch precompute: one block per combo
-            let func = self.module.get_function("cwma_precompute_weights_f32")
+            let func = self.module.get_function("cwma_precompute_weights_oldest_first_f32")
                 .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
             let grid: GridSize = (n_combos as u32, 1, 1).into();
             let block: BlockSize = (128, 1, 1).into();
@@ -368,7 +397,7 @@ impl CudaCwma {
                 &mut d_out,
             )?;
         } else {
-            // Host precompute (default): build weights and pre-scale by inv-norm
+            // Host precompute (default): build oldest-first weights and pre-scale by inv-norm
             let mut weights_flat = vec![0f32; n_combos * weights_stride];
             let mut inv_norms = vec![0f32; n_combos];
             for (idx, prm) in combos.iter().enumerate() {
@@ -376,7 +405,7 @@ impl CudaCwma {
                 let weight_len = period - 1;
                 let mut norm = 0.0f32;
                 for k in 0..weight_len {
-                    let weight = ((period - k) as f32).powi(3);
+                    let weight = ((k + 2) as f32).powi(3);
                     weights_flat[idx * weights_stride + k] = weight;
                     norm += weight;
                 }
@@ -451,9 +480,17 @@ impl CudaCwma {
         // bytes = align16(wlen*4) + (tile_x + wlen)*4, with wlen <= max_period-1 and using worst-case wlen.
         let align16 = |x: usize| (x + 15) & !15usize;
         if use_tiled {
-            // Choose function name
+            // Heuristic: prefer 2x-per-thread for larger windows when policy is Auto
+            let wlen = max_period.saturating_sub(1);
+            if matches!(self.policy.batch, BatchKernelPolicy::Auto) {
+                use_two = wlen >= 32;
+            }
+            // Choose function name. If 2x per-thread, prefer async variant when present
             let func_name = if use_two {
-                match tile_x { 128 => "cwma_batch_tiled_f32_2x_tile128", _ => "cwma_batch_tiled_f32_2x_tile256" }
+                match tile_x {
+                    128 => if self.module.get_function("cwma_batch_tiled_async_f32_2x_tile128").is_ok() { "cwma_batch_tiled_async_f32_2x_tile128" } else { "cwma_batch_tiled_f32_2x_tile128" },
+                    _   => if self.module.get_function("cwma_batch_tiled_async_f32_2x_tile256").is_ok() { "cwma_batch_tiled_async_f32_2x_tile256" } else { "cwma_batch_tiled_f32_2x_tile256" },
+                }
             } else {
                 match tile_x { 128 => "cwma_batch_tiled_f32_tile128",  _ => "cwma_batch_tiled_f32_tile256" }
             };
@@ -469,13 +506,30 @@ impl CudaCwma {
             }
             self.maybe_log_batch_debug();
 
-            let block_x = if use_two { (tile_x / 2).max(1) } else { tile_x };
-            let grid_x = ((series_len as u32) + tile_x - 1) / tile_x;
-            let block: BlockSize = (block_x, 1, 1).into();
             // Shared: weights (<= wlen=max_period-1) aligned to 16B + tile (tile_x + wlen)
             let wlen = max_period.saturating_sub(1);
-            let shared_bytes = (align16(wlen * std::mem::size_of::<f32>())
-                + (tile_x as usize + wlen) * std::mem::size_of::<f32>()) as u32;
+            let mut tile_x_used = tile_x;
+            let mut shared_bytes = (align16(wlen * std::mem::size_of::<f32>())
+                + (tile_x_used as usize + wlen) * std::mem::size_of::<f32>()) as u32;
+            // Downshift tile if shared memory exceeds device capacity
+            let dev = Device::get_device(self.device_id).ok();
+            let max_smem_default: usize = dev
+                .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock).ok())
+                .unwrap_or(48 * 1024) as usize;
+            let max_smem_optin: usize = dev
+                .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlockOptin).ok())
+                .unwrap_or(max_smem_default as i32) as usize;
+            let avail = max_smem_optin.max(max_smem_default);
+            while (shared_bytes as usize) > avail && tile_x_used > 64 {
+                tile_x_used /= 2;
+                shared_bytes = (align16(wlen * std::mem::size_of::<f32>())
+                    + (tile_x_used as usize + wlen) * std::mem::size_of::<f32>()) as u32;
+            }
+            // Hint kernel for larger dynamic shared memory when available
+            self.prefer_shared_and_optin_smem(&func, shared_bytes as usize);
+            let block_x = if use_two { (tile_x_used / 2).max(1) } else { tile_x_used };
+            let grid_x = ((series_len as u32) + tile_x_used - 1) / tile_x_used;
+            let block: BlockSize = (block_x, 1, 1).into();
 
             for (start, len) in Self::grid_y_chunks(n_combos) {
                 let grid: GridSize = (grid_x, len as u32, 1).into();
@@ -508,16 +562,23 @@ impl CudaCwma {
                 }
             }
         } else {
-            // Plain kernel path
-            let block_x: u32 = tile_x.max(1);
-            let grid_x = ((series_len as u32) + block_x - 1) / block_x;
-            let block: BlockSize = (block_x, 1, 1).into();
+            // Plain kernel path (use occupancy suggestion when Auto)
             let shared_bytes = ((max_period.saturating_sub(1)) * std::mem::size_of::<f32>()) as u32;
-
             let func = self
                 .module
                 .get_function("cwma_batch_f32")
                 .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+            let block_x: u32 = match self.policy.batch {
+                BatchKernelPolicy::Plain { block_x } => block_x,
+                _ => func
+                    .suggested_launch_configuration(shared_bytes as usize, BlockSize::xyz(0, 0, 0))
+                    .map(|(_, bx)| bx)
+                    .unwrap_or(256)
+                    .max(64)
+                    .min(1024),
+            };
+            let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+            let block: BlockSize = (block_x, 1, 1).into();
 
             for (start, len) in Self::grid_y_chunks(n_combos) {
                 unsafe {
@@ -658,9 +719,19 @@ impl CudaCwma {
             )));
         }
         let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len, max_period)?;
-        arr.buf
-            .copy_to(out)
+        // Async device->pinned copy, then slice copy
+        let mut pinned: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(out.len())
+        }.map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        unsafe {
+            arr.buf
+                .async_copy_to(&mut pinned, &self.stream)
+                .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
             .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        out.copy_from_slice(pinned.as_slice());
         Ok((arr.rows, arr.cols, combos))
     }
 
@@ -718,7 +789,7 @@ impl CudaCwma {
         let mut weights = vec![0f32; weight_len];
         let mut norm = 0.0f32;
         for k in 0..weight_len {
-            let w = ((period - k) as f32).powi(3);
+            let w = ((k + 2) as f32).powi(3);
             weights[k] = w;
             norm += w;
         }
@@ -756,8 +827,16 @@ impl CudaCwma {
             )));
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
+        // Pinned + async HtoD for prices
+        let h_prices = LockedBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        unsafe {
+            d_prices
+                .async_copy_from(&*h_prices, &self.stream)
+                .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        }
         let d_first_valids = DeviceBuffer::from_slice(first_valids)
             .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
         let d_weights =
@@ -850,8 +929,59 @@ impl CudaCwma {
                 let wlen = period.saturating_sub(1);
                 let align16 = |x: usize| (x + 15) & !15usize;
                 let total = tx as usize + wlen;
+                // Account for optional 1-column padding when TY divides 32 (CWMA_PAD_2D=1)
+                let ty_pad = if (32 % (ty as usize)) == 0 { (ty + 1) as usize } else { ty as usize };
                 let shared_bytes = (align16(wlen * std::mem::size_of::<f32>())
-                    + total * ty as usize * std::mem::size_of::<f32>()) as u32;
+                    + total * ty_pad * std::mem::size_of::<f32>()) as u32;
+                // Prefer shared and request opt-in dynamic smem
+                self.prefer_shared_and_optin_smem(&func, shared_bytes as usize);
+                // If dynamic shared memory exceeds capacity, fall back to 1D kernel
+                let dev = Device::get_device(self.device_id).ok();
+                let max_smem_default: usize = dev
+                    .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock).ok())
+                    .unwrap_or(48 * 1024) as usize;
+                let max_smem_optin: usize = dev
+                    .and_then(|d| d.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlockOptin).ok())
+                    .unwrap_or(max_smem_default as i32) as usize;
+                let avail = max_smem_optin.max(max_smem_default);
+                if (shared_bytes as usize) > avail {
+                    // Try smaller TY variant if we started with TY=4
+                    if ty == 4 {
+                        if let Ok(func2) = self.module.get_function("cwma_ms1p_tiled_f32_tx128_ty2") {
+                            let ty2: u32 = 2;
+                            let ty2_pad = if (32 % (ty2 as usize)) == 0 { (ty2 + 1) as usize } else { ty2 as usize };
+                            let shared_bytes2 = (align16(wlen * std::mem::size_of::<f32>())
+                                + total * ty2_pad * std::mem::size_of::<f32>()) as u32;
+                            if (shared_bytes2 as usize) <= avail {
+                                self.prefer_shared_and_optin_smem(&func2, shared_bytes2 as usize);
+                                let grid_x = ((rows as u32) + tx - 1) / tx;
+                                let grid_y = ((cols as u32) + ty2 - 1) / ty2;
+                                let grid: GridSize = (grid_x, grid_y, 1).into();
+                                let block: BlockSize = (tx, ty2, 1).into();
+                                self.stream
+                                    .launch(&func2, grid, block, shared_bytes2, args)
+                                    .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+                                unsafe { let this = self as *const _ as *mut CudaCwma; (*this).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty: ty2 }); }
+                                self.maybe_log_many_debug();
+                                return Ok(());
+                            }
+                        }
+                    }
+                    // Fallback: 1D mapping
+                    let func1d = self.module.get_function("cwma_multi_series_one_param_time_major_f32")
+                        .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+                    let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+                    let grid_x = ((rows as u32) + block_x - 1) / block_x;
+                    let grid: GridSize = (grid_x, cols as u32, 1).into();
+                    let block: BlockSize = (block_x, 1, 1).into();
+                    let shared_1d = (wlen * std::mem::size_of::<f32>()) as u32;
+                    self.stream
+                        .launch(&func1d, grid, block, shared_1d, args)
+                        .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+                    unsafe { let this = self as *const _ as *mut CudaCwma; (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+                    self.maybe_log_many_debug();
+                    return Ok(());
+                }
                 let grid_x = ((rows as u32) + tx - 1) / tx;
                 let grid_y = ((cols as u32) + ty - 1) / ty;
                 let grid: GridSize = (grid_x, grid_y, 1).into();
@@ -860,11 +990,21 @@ impl CudaCwma {
                     .launch(&func, grid, block, shared_bytes, args)
                     .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
             } else {
-                let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+                let wlen = period.saturating_sub(1);
+                let shared_bytes = (wlen * std::mem::size_of::<f32>()) as u32;
+                let block_x: u32 = match self.policy.many_series {
+                    ManySeriesKernelPolicy::OneD { block_x } => block_x,
+                    _ => func
+                        .suggested_launch_configuration(shared_bytes as usize, BlockSize::xyz(0, 0, 0))
+                        .map(|(_, bx)| bx)
+                        .unwrap_or(128)
+                        .max(64)
+                        .min(1024),
+                };
                 let grid_x = ((rows as u32) + block_x - 1) / block_x;
                 let grid: GridSize = (grid_x, cols as u32, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
-                let shared_bytes = (period.saturating_sub(1) * std::mem::size_of::<f32>()) as u32;
+                let shared_bytes = shared_bytes;
                 self.stream
                     .launch(&func, grid, block, shared_bytes, args)
                     .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
@@ -947,9 +1087,20 @@ impl CudaCwma {
             &weights,
             inv_norm,
         )?;
-        arr.buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaCwmaError::Cuda(e.to_string()))
+        // Async device->pinned copy, then slice copy
+        let mut pinned: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(out_tm.len())
+        }.map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        unsafe {
+            arr.buf
+                .async_copy_to(&mut pinned, &self.stream)
+                .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        out_tm.copy_from_slice(pinned.as_slice());
+        Ok(())
     }
 }
 

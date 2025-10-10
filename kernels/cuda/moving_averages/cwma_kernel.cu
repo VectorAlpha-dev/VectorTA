@@ -22,6 +22,30 @@
 #include <math.h>
 #include <stdint.h>
 
+// ---- Feature toggles -------------------------------------------------------
+#ifndef CWMA_USE_ASYNC_COPY       // SM80+ cp.async via libcu++ pipeline
+#define CWMA_USE_ASYNC_COPY 1
+#endif
+
+#ifndef CWMA_WEIGHTS_OLDEST_FIRST // Set to 1 if weights[] are oldest->newest
+#define CWMA_WEIGHTS_OLDEST_FIRST 1
+#endif
+
+// Optional padding for 2D many-series tiles to avoid bank conflicts
+#ifndef CWMA_PAD_2D
+#define CWMA_PAD_2D 1
+#endif
+
+// ---- Asynchronous copy/pipeline (Ampere+) ----------------------------------
+#if CWMA_USE_ASYNC_COPY
+#  if defined(__CUDACC__)
+#    include <cooperative_groups.h>
+#    include <cooperative_groups/memcpy_async.h>
+#    include <cuda/pipeline>
+     namespace cg = cooperative_groups;
+#  endif
+#endif
+
 // ------------------------------- Utilities ---------------------------------
 
 #ifndef CWMA_ASSUME
@@ -163,6 +187,18 @@ void cwma_batch_f32(const float* __restrict__ prices,
             out[out_idx] = NAN;
         } else {
             float s = 0.0f, c = 0.0f;
+#if CWMA_WEIGHTS_OLDEST_FIRST
+            // Process window in chronological order: [t - wlen + 1 .. t]
+            const int start = t - weight_len + 1;
+            #pragma unroll 4
+            for (int k = 0; k < weight_len; ++k) {
+                float term = __fmaf_rn(prices[start + k], shared_weights[k], 0.0f);
+                float y = term - c;
+                float u = s + y;
+                c = (u - s) - y;
+                s = u;
+            }
+#else
             #pragma unroll 4
             for (int k = 0; k < weight_len; ++k) {
                 float term = __fmaf_rn(prices[t - k], shared_weights[k], 0.0f);
@@ -171,6 +207,7 @@ void cwma_batch_f32(const float* __restrict__ prices,
                 c = (u - s) - y;
                 s = u;
             }
+#endif
             out[out_idx] = __fmul_rn(s, inv_norm);
         }
         t += stride;
@@ -213,11 +250,11 @@ struct CwmaBatchTiledPrecomputed1x {
 
     // Load weights into shared (vectorized when aligned)
     const float* wsrc = weights_flat + combo * max_period;
-    // Load then reverse weights in shared so w[0] corresponds to newest sample
-    for (int i = threadIdx.x; i < wlen; i += TILE) {
-      w[i] = wsrc[i];
-    }
+    // Load weights, then optionally reverse so w[0] multiplies the oldest sample
+    for (int i = threadIdx.x; i < wlen; i += TILE) { w[i] = wsrc[i]; }
     __syncthreads();
+#if !CWMA_WEIGHTS_OLDEST_FIRST
+    // Reverse to oldest-first so w[0] multiplies the oldest sample in the tile
     for (int i = threadIdx.x; i < (wlen >> 1); i += TILE) {
       float tmp = w[i];
       int j = wlen - 1 - i;
@@ -225,6 +262,7 @@ struct CwmaBatchTiledPrecomputed1x {
       w[j] = tmp;
     }
     __syncthreads();
+#endif
 
     const int warm = first_valid + wlen;
     const int combo_base = combo * series_len;
@@ -292,6 +330,8 @@ struct CwmaBatchTiledPrecomputed2x {
     const float* wsrc = weights_flat + combo * max_period;
     for (int i = threadIdx.x; i < wlen; i += blockDim.x) w[i] = wsrc[i];
     __syncthreads();
+#if !CWMA_WEIGHTS_OLDEST_FIRST
+    // Reverse to oldest-first so w[0] multiplies the oldest sample in the tile
     for (int i = threadIdx.x; i < (wlen >> 1); i += blockDim.x) {
       float tmp = w[i];
       int j = wlen - 1 - i;
@@ -299,6 +339,7 @@ struct CwmaBatchTiledPrecomputed2x {
       w[j] = tmp;
     }
     __syncthreads();
+#endif
 
     const int warm = first_valid + wlen;
     const int combo_base = combo * series_len;
@@ -366,6 +407,153 @@ DEFINE_CWMA_BATCH_TILED_1X(cwma_batch_tiled_f32_tile128, 128)
 DEFINE_CWMA_BATCH_TILED_1X(cwma_batch_tiled_f32_tile256, 256)
 DEFINE_CWMA_BATCH_TILED_2X(cwma_batch_tiled_f32_2x_tile128, 128)
 DEFINE_CWMA_BATCH_TILED_2X(cwma_batch_tiled_f32_2x_tile256, 256)
+
+// -------- 3b) Async double-buffered 2x/thread kernel (Ampere/Ada+) ---------
+
+template<int TILE, int STAGES /*2 recommended*/>
+struct CwmaBatchTiledPrecomputed2xAsync {
+  static __device__ __forceinline__
+  void run(const float* __restrict__ prices,
+           const float* __restrict__ weights_flat,
+           const int*   __restrict__ periods,
+           const float* __restrict__ inv_norms,
+           int max_period,
+           int series_len,
+           int n_combos,
+           int first_valid,
+           float* __restrict__ out) {
+
+#if !CWMA_USE_ASYNC_COPY || (__CUDA_ARCH__ < 800)
+    // Fallback to the synchronous 2x implementation
+    CwmaBatchTiledPrecomputed2x<TILE>::run(prices, weights_flat, periods, inv_norms,
+                                           max_period, series_len, n_combos, first_valid, out);
+    return;
+#else
+    static_assert(TILE % 2 == 0, "TILE must be even (2 outputs/thread)");
+    if ((blockDim.x * 2) != TILE) return;
+
+    const int combo = blockIdx.y;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    const int wlen   = max(0, period - 1);
+    const int total  = TILE + wlen - 1;
+
+    const int combo_base = combo * series_len;
+    const int warm = first_valid + wlen;
+
+    extern __shared__ __align__(16) unsigned char shraw[];
+    size_t off = 0;
+    float* w = reinterpret_cast<float*>(shraw + off);               // [wlen]
+    off = cwma_align_up(off + size_t(wlen) * sizeof(float), 16);
+    // Two stage double buffer for tiles
+    float* tile = reinterpret_cast<float*>(shraw + off);            // [STAGES * (TILE + wlen)]
+    const int tile_span = total;
+
+    // Load weights (and conditionally reverse)
+    const float* wsrc = weights_flat + combo * max_period;
+    for (int i = threadIdx.x; i < wlen; i += blockDim.x) w[i] = wsrc[i];
+    __syncthreads();
+#if !CWMA_WEIGHTS_OLDEST_FIRST
+    for (int i = threadIdx.x; i < (wlen >> 1); i += blockDim.x) {
+      float tmp = w[i]; int j = wlen - 1 - i; w[i] = w[j]; w[j] = tmp;
+    }
+    __syncthreads();
+#endif
+
+    auto block = cg::this_thread_block();
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, STAGES> pss;
+    auto pipe = cuda::make_pipeline(block, &pss);
+
+    const int lane = threadIdx.x;
+    const int grid_tile_stride = gridDim.x * TILE;
+
+    int t_base = blockIdx.x * TILE;
+    int stage  = 0;
+
+    // Preload up to STAGES tiles
+    for (int s = 0; s < STAGES; ++s) {
+      pipe.producer_acquire();
+      const int t0 = t_base + s * grid_tile_stride;
+      const int p0 = t0 - (wlen - 1);
+      // Cooperative copy of the tile into tile[s]
+      for (int dt = lane; dt < tile_span; dt += blockDim.x) {
+        const int tcur = p0 + dt;
+        if (tcur >= 0 && tcur < series_len) {
+          cuda::memcpy_async(&tile[s * tile_span + dt], &prices[tcur], sizeof(float), pipe);
+        } else {
+          // OOB zero-fill (no async copy for invalid pointers)
+          tile[s * tile_span + dt] = 0.f;
+        }
+      }
+      pipe.producer_commit();
+    }
+
+    // Main loop over this CTA's tiles (grid-stride by TILE)
+    while (t_base < series_len) {
+      // Ensure current stage is ready
+      cuda::pipeline_consumer_wait_prior<STAGES - 1>(pipe);
+      __syncthreads();
+
+      // Compute the 2x outputs per thread from tile[stage]
+      const float* tbuf = &tile[stage * tile_span];
+      const int t_even  = t_base + (lane * 2);
+      const int t_odd   = t_even + 1;
+      if (t_even < series_len) {
+        int start = lane * 2;  // within tile
+        float s0 = 0.f, s1 = 0.f;
+        cwma_dot2_shared(tbuf, start, w, wlen, s0, s1);
+
+        float out0 = NAN, out1 = NAN;
+        if (t_even >= warm) out0 = __fmul_rn(s0, inv_norms[combo]);
+        if (t_odd  <  series_len && t_odd >= warm) out1 = __fmul_rn(s1, inv_norms[combo]);
+
+        out[combo_base + t_even] = out0;
+        if (t_odd < series_len) out[combo_base + t_odd] = out1;
+      }
+
+      __syncthreads();
+      pipe.consumer_release();  // free current stage buffer
+
+      // Preload the next tile STAGES*stride ahead to keep pipeline full
+      pipe.producer_acquire();
+      const int next_t0 = t_base + STAGES * grid_tile_stride;
+      const int next_p0 = next_t0 - (wlen - 1);
+      const int next_stage = stage;  // we rotate over same slot just released
+
+      for (int dt = lane; dt < tile_span; dt += blockDim.x) {
+        const int tcur = next_p0 + dt;
+        if (tcur >= 0 && tcur < series_len) {
+          cuda::memcpy_async(&tile[next_stage * tile_span + dt], &prices[tcur], sizeof(float), pipe);
+        } else {
+          tile[next_stage * tile_span + dt] = 0.f;
+        }
+      }
+      pipe.producer_commit();
+
+      // Advance to next tile in this CTA's grid-stride walk
+      t_base += grid_tile_stride;
+      stage   = (stage + 1) % STAGES;
+    }
+#endif
+  }
+};
+
+#define DEFINE_CWMA_BATCH_TILED_2X_ASYNC(NAME, TILE)                                   \
+extern "C" __global__ void NAME(                                                       \
+  const float* __restrict__ prices,                                                    \
+  const float* __restrict__ weights_flat,                                              \
+  const int*   __restrict__ periods,                                                   \
+  const float* __restrict__ inv_norms,                                                 \
+  int max_period, int series_len, int n_combos, int first_valid,                       \
+  float* __restrict__ out) {                                                           \
+  CwmaBatchTiledPrecomputed2xAsync<TILE, 2>::run(prices, weights_flat, periods,        \
+                                                 inv_norms, max_period, series_len,    \
+                                                 n_combos, first_valid, out);          \
+}
+
+DEFINE_CWMA_BATCH_TILED_2X_ASYNC(cwma_batch_tiled_async_f32_2x_tile128, 128)
+DEFINE_CWMA_BATCH_TILED_2X_ASYNC(cwma_batch_tiled_async_f32_2x_tile256, 256)
 
 // ---------------------- 4) Many-series 1D kernel ---------------------------
 
@@ -435,20 +623,25 @@ void cwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
 
   if (t0 >= series_len || s0 >= num_series) return;
 
-  // Shared: weights + tile [ (TX + wlen) x TY ]
+  // Shared: weights + tile [ (TX + wlen) x (TY + PAD) ] if padding enabled
   const int total = TX_ + wlen - 1;
   extern __shared__ __align__(16) unsigned char shraw[];
   size_t off = 0;
   float* w = reinterpret_cast<float*>(shraw + off);
   off = cwma_align_up(off + size_t(wlen) * sizeof(float), 16);
-  float* tile = reinterpret_cast<float*>(shraw + off);
+  // Add 1-column padding if enabled and TY_ divides 32 banks to avoid worst-case conflicts
+  constexpr int PAD = (CWMA_PAD_2D && (32 % TY_ == 0)) ? 1 : 0;
+  const int STRIDE = TY_ + PAD;
+  float* tile = reinterpret_cast<float*>(shraw + off); // [total * STRIDE]
 
   // Load weights into shared (vectorized if aligned)
-  // Load weights then reverse in shared so w[0] corresponds to newest sample
+  // Load weights then (optionally) reverse so w[0] corresponds to oldest sample
   for (int i = threadIdx.y * blockDim.x + threadIdx.x; i < wlen; i += blockDim.x * blockDim.y) {
     w[i] = weights[i];
   }
   __syncthreads();
+  
+#if !CWMA_WEIGHTS_OLDEST_FIRST
   for (int i = threadIdx.y * blockDim.x + threadIdx.x; i < (wlen >> 1); i += blockDim.x * blockDim.y) {
     float tmp = w[i];
     int j = wlen - 1 - i;
@@ -456,6 +649,7 @@ void cwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     w[j] = tmp;
   }
   __syncthreads();
+#endif
 
   // Cooperative load of tile across series and time
   const bool vec_ok = (TY_ == 4) && ((num_series & 3) == 0) && ((s0 & 3) == 0);
@@ -468,19 +662,19 @@ void cwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
         // Vectorized load across 4 contiguous series columns
         const float4* src4 = reinterpret_cast<const float4*>(&prices_tm[t * num_series + s0]);
         float4 v = src4[0];
-        tile[dt * TY_ + 0] = v.x;
-        tile[dt * TY_ + 1] = v.y;
-        tile[dt * TY_ + 2] = v.z;
-        tile[dt * TY_ + 3] = v.w;
+        tile[dt * STRIDE + 0] = v.x;
+        tile[dt * STRIDE + 1] = v.y;
+        tile[dt * STRIDE + 2] = v.z;
+        tile[dt * STRIDE + 3] = v.w;
       } else {
         int s = s0 + threadIdx.y;
         float val = 0.f;
         if (s < num_series) val = prices_tm[t * num_series + s];
-        tile[dt * TY_ + threadIdx.y] = val;
+        tile[dt * STRIDE + threadIdx.y] = val;
       }
     } else {
-      int idx = dt * TY_ + threadIdx.y;
-      if (idx < total * TY_) tile[idx] = 0.f;
+      int idx = dt * STRIDE + threadIdx.y;
+      if (idx < total * STRIDE) tile[idx] = 0.f;
     }
   }
   __syncthreads();
@@ -499,12 +693,12 @@ void cwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   }
 
   int start = threadIdx.x; // within tile
-  const float* xptr = &tile[start * TY_ + threadIdx.y];
-  // strided dot across series dimension (stride = TY_) with compensation
+  const float* xptr = &tile[start * STRIDE + threadIdx.y];
+  // strided dot across series dimension (stride = STRIDE) with compensation
   float s_acc = 0.f, c_acc = 0.f;
   #pragma unroll 4
   for (int i = 0; i < wlen; ++i) {
-    float term = __fmaf_rn(xptr[i * TY_], w[i], 0.f);
+    float term = __fmaf_rn(xptr[i * STRIDE], w[i], 0.f);
     float y = term - c_acc;
     float u = s_acc + y;
     c_acc = (u - s_acc) - y;
@@ -572,5 +766,48 @@ void cwma_precompute_weights_f32(const int* __restrict__ periods,
     }
 
     inv_norms[combo] = 1.0f; // pre-scaled
+  }
+}
+
+// -------- 7) On-device precompute (oldest-first layout variant) ------------
+
+extern "C" __global__
+void cwma_precompute_weights_oldest_first_f32(const int* __restrict__ periods,
+                                              int n_combos,
+                                              int max_period,
+                                              float* __restrict__ weights_flat,
+                                              float* __restrict__ inv_norms) {
+  const int combo = blockIdx.x;
+  if (combo >= n_combos) return;
+
+  const int period = periods[combo];
+  const int wlen   = max(0, period - 1);
+  const int off    = combo * max_period;
+
+  // Emit weights in oldest->newest order: w[i] = (i+2)^3, i in [0,wlen-1]
+  for (int i = threadIdx.x; i < wlen; i += blockDim.x) {
+    float t = float(i + 2);
+    float w = t * t * t;
+    weights_flat[off + i] = w;
+  }
+  __syncthreads();
+
+  // Normalize in FP32 using Neumaier compensation; force exact 1.0 sum.
+  if (threadIdx.x == 0) {
+    float s = 0.f, c = 0.f;
+    for (int i = 0; i < wlen; ++i) {
+      float y = weights_flat[off + i] - c;
+      float u = s + y; c = (u - s) - y; s = u;
+    }
+    s = fmaxf(s, 1e-30f);
+    float inv = __frcp_rn(s);
+    for (int i = 0; i < wlen; ++i) weights_flat[off + i] = __fmul_rn(weights_flat[off + i], inv);
+
+    // Exact sum fix: adjust the largest tap (last entry == newest sample)
+    if (wlen > 0) {
+      float s2 = 0.f; for (int i = 0; i < wlen; ++i) s2 = __fadd_rn(s2, weights_flat[off + i]);
+      weights_flat[off + (wlen - 1)] = __fadd_rn(weights_flat[off + (wlen - 1)], __fsub_rn(1.0f, s2));
+    }
+    inv_norms[combo] = 1.0f; // already normalized
   }
 }
