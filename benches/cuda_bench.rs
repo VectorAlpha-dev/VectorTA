@@ -49,6 +49,7 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::moving_averages::highpass2_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::trendflex_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::supersmoother_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::moving_averages::supersmoother_3_pole_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::mama_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::ehlers_pma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::linreg_wrapper::benches::bench_profiles());
@@ -60,6 +61,7 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::moving_averages::srwma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::sqwma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::frama_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::moving_averages::tradjema_wrapper::benches::bench_profiles());
 
     // Non-MA wrappers
     v.extend(my_project::cuda::zscore_wrapper::benches::bench_profiles());

@@ -1,11 +1,14 @@
 //! CUDA wrapper for the Endpoint Moving Average (EPMA) kernels.
 //!
-//! Mirrors the VRAM-first pattern established by the ALMA wrapper: kernels
-//! operate on pre-staged device buffers in FP32 while the weight accumulation
-//! runs in FP64 to minimise drift versus the CPU reference. The batch variant
-//! evaluates a single price series across multiple `(period, offset)` pairs,
-//! and the many-series variant processes a time-major matrix where each column
-//! shares a common parameter pair.
+//! Aligned with the ALMA wrapper API/policy:
+//! - PTX loaded with target-from-context and JIT O2→fallbacks
+//! - Policy-driven kernel selection (Plain only for EPMA today)
+//! - VRAM estimates + headroom checks; grid.y chunking (<= 65_535)
+//! - Warmup/NaN semantics identical to scalar reference
+//!
+//! Kernels expected (present minimal set):
+//! - "epma_batch_f32"                                   // one-series × many-params
+//! - "epma_many_series_one_param_time_major_f32"       // many-series × one-param (time-major)
 
 #![cfg(feature = "cuda")]
 
@@ -14,14 +17,48 @@ use crate::indicators::moving_averages::epma::{EpmaBatchRange, EpmaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// -------- Kernel selection policy (mirrors ALMA, minimal variants enabled) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaEpmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for CudaEpmaPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+// -------- Introspection (selected kernel) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
 
 #[derive(Debug)]
 pub enum CudaEpmaError {
@@ -44,6 +81,12 @@ pub struct CudaEpma {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaEpmaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaEpma {
@@ -77,7 +120,31 @@ impl CudaEpma {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaEpmaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    /// Create using an explicit policy.
+    pub fn new_with_policy(device_id: usize, policy: CudaEpmaPolicy) -> Result<Self, CudaEpmaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaEpmaPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaEpmaPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+
+    /// Expose synchronize for benches/tests that pre-stage device buffers.
+    pub fn synchronize(&self) -> Result<(), CudaEpmaError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))
     }
 
     fn mem_check_enabled() -> bool {
@@ -87,18 +154,7 @@ impl CudaEpma {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
@@ -108,6 +164,36 @@ impl CudaEpma {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else {
             true
+        }
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_s = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_s || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] EPMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaEpma)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_s = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_s || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] EPMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaEpma)).debug_many_logged = true; }
+            }
         }
     }
 
@@ -231,7 +317,10 @@ impl CudaEpma {
             )));
         }
 
-        const BLOCK_X: u32 = 256;
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+        } as u32;
         let func = self
             .module
             .get_function("epma_batch_f32")
@@ -239,9 +328,9 @@ impl CudaEpma {
 
         // Chunk over grid.y to respect device limit and offset params/output pointers per chunk.
         for (start_combo, len_combo) in Self::grid_y_chunks(n_combos) {
-            let grid_x = ((series_len as u32) + BLOCK_X - 1) / BLOCK_X;
+            let grid_x = ((series_len as u32) + block_x - 1) / block_x;
             let grid: GridSize = (grid_x.max(1), len_combo as u32, 1).into();
-            let block: BlockSize = (BLOCK_X, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
 
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -276,6 +365,11 @@ impl CudaEpma {
                     .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
             }
         }
+        unsafe {
+            let this = self as *const _ as *mut CudaEpma;
+            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
+        }
+        self.maybe_log_batch_debug();
         Ok(())
     }
 
@@ -300,7 +394,7 @@ impl CudaEpma {
         let offsets_bytes = n_combos * std::mem::size_of::<i32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + periods_bytes + offsets_bytes + out_bytes;
-        let headroom = 32 * 1024 * 1024; // 32 MB safety margin
+        let headroom = 64 * 1024 * 1024; // 64 MB safety margin (align with ALMA)
         if !Self::will_fit(required, headroom) {
             return Err(CudaEpmaError::InvalidInput(format!(
                 "estimated device memory {:.2} MB exceeds free VRAM",
@@ -487,10 +581,13 @@ impl CudaEpma {
             )));
         }
 
-        const BLOCK_X: u32 = 128;
-        let grid_x = ((rows as u32) + BLOCK_X - 1) / BLOCK_X;
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
+        } as u32;
+        let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         let func = self
             .module
@@ -518,6 +615,11 @@ impl CudaEpma {
                 .launch(&func, grid, block, shared_bytes as u32, args)
                 .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
         }
+        unsafe {
+            let this = self as *const _ as *mut CudaEpma;
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+        }
+        self.maybe_log_many_debug();
         Ok(())
     }
 
@@ -535,7 +637,7 @@ impl CudaEpma {
         let first_bytes = cols * std::mem::size_of::<i32>();
         let out_bytes = total * std::mem::size_of::<f32>();
         let required = prices_bytes + first_bytes + out_bytes;
-        let headroom = 32 * 1024 * 1024;
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             return Err(CudaEpmaError::InvalidInput(format!(
                 "estimated device memory {:.2} MB exceeds free VRAM",

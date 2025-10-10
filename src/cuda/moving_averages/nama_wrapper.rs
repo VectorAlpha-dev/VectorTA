@@ -105,6 +105,8 @@ pub struct CudaNama {
 }
 
 impl CudaNama {
+    #[inline]
+    fn has_function(&self, name: &str) -> bool { self.module.get_function(name).is_ok() }
     pub fn new(device_id: usize) -> Result<Self, CudaNamaError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
         let device =
@@ -283,6 +285,7 @@ impl CudaNama {
         d_high: Option<&DeviceBuffer<f32>>,
         d_low: Option<&DeviceBuffer<f32>>,
         d_close: Option<&DeviceBuffer<f32>>,
+        d_prefix_tr: Option<&DeviceBuffer<f32>>,
         d_periods: &DeviceBuffer<i32>,
         series_len: usize,
         n_chunk: usize,
@@ -318,38 +321,65 @@ impl CudaNama {
         let grid: GridSize = (n_chunk as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        let func = self
-            .module
-            .get_function("nama_batch_f32")
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
-
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut high_ptr = d_high.map(|buf| buf.as_device_ptr().as_raw()).unwrap_or(0);
-            let mut low_ptr = d_low.map(|buf| buf.as_device_ptr().as_raw()).unwrap_or(0);
-            let mut close_ptr = d_close.map(|buf| buf.as_device_ptr().as_raw()).unwrap_or(0);
-            let mut has_ohlc_i = if has_ohlc { 1i32 } else { 0i32 };
-            // Offset periods and output by start_combo
-            let mut periods_ptr = d_periods.as_device_ptr().add(start_combo).as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut combos_i = n_chunk as i32;
-            let mut first_valid_i = first_valid as i32;
-            let mut out_ptr = d_out.as_device_ptr().add(start_combo * series_len).as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut high_ptr as *mut _ as *mut c_void,
-                &mut low_ptr as *mut _ as *mut c_void,
-                &mut close_ptr as *mut _ as *mut c_void,
-                &mut has_ohlc_i as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut combos_i as *mut _ as *mut c_void,
-                &mut first_valid_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes as u32, args)
+        if let Some(d_prefix) = d_prefix_tr {
+            let func = self
+                .module
+                .get_function("nama_batch_prefix_f32")
                 .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut prefix_ptr = d_prefix.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().add(start_combo).as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = n_chunk as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut out_ptr = d_out.as_device_ptr().add(start_combo * series_len).as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut prefix_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes as u32, args)
+                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+            }
+        } else {
+            let func = self
+                .module
+                .get_function("nama_batch_f32")
+                .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut high_ptr = d_high.map(|buf| buf.as_device_ptr().as_raw()).unwrap_or(0);
+                let mut low_ptr = d_low.map(|buf| buf.as_device_ptr().as_raw()).unwrap_or(0);
+                let mut close_ptr = d_close.map(|buf| buf.as_device_ptr().as_raw()).unwrap_or(0);
+                let mut has_ohlc_i = if has_ohlc { 1i32 } else { 0i32 };
+                // Offset periods and output by start_combo
+                let mut periods_ptr = d_periods.as_device_ptr().add(start_combo).as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = n_chunk as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut out_ptr = d_out.as_device_ptr().add(start_combo * series_len).as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut high_ptr as *mut _ as *mut c_void,
+                    &mut low_ptr as *mut _ as *mut c_void,
+                    &mut close_ptr as *mut _ as *mut c_void,
+                    &mut has_ohlc_i as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes as u32, args)
+                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+            }
         }
 
         Ok(())
@@ -386,7 +416,9 @@ impl CudaNama {
         };
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + ohlc_bytes + periods_bytes + out_bytes;
+        // Budget for prefix path (series_len + 1) even if we may fall back
+        let prefix_bytes = (series_len + 1) * std::mem::size_of::<f32>();
+        let required = prices_bytes + ohlc_bytes + periods_bytes + out_bytes + prefix_bytes;
         let headroom = 64 * 1024 * 1024; // 64 MiB safety margin
         if !Self::will_fit(required, headroom) {
             return Err(CudaNamaError::InvalidInput(
@@ -427,6 +459,27 @@ impl CudaNama {
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
                 .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
 
+        // Optional prefix path: only when no OHLC is provided and kernel exists
+        let use_prefix = !has_ohlc && self.has_function("nama_batch_prefix_f32");
+        let d_prefix = if use_prefix {
+            // Build degenerate TR prefix (NaN-insensitive): prefix[0]=0, prefix[t]=sum_{k=1..t}|p[k]-p[k-1]|
+            let mut prefix: Vec<f32> = Vec::with_capacity(series_len + 1);
+            prefix.push(0.0f32);
+            let mut acc = 0.0f32;
+            for i in 1..series_len {
+                let cur = prices[i];
+                let prev = prices[i - 1];
+                let diff = if cur.is_nan() || prev.is_nan() { 0.0f32 } else { (cur - prev).abs() };
+                acc += diff;
+                prefix.push(acc);
+            }
+            // pad to series_len + 1
+            prefix.push(acc);
+            Some(DeviceBuffer::from_slice(&prefix).map_err(|e| CudaNamaError::Cuda(e.to_string()))?)
+        } else {
+            None
+        };
+
         // Launch in chunks to respect grid size limits (mirror ALMA approach)
         const MAX_GRID_X: usize = 65_535; // conservative chunking
         let mut launched_any = false;
@@ -438,6 +491,7 @@ impl CudaNama {
                 d_high.as_ref(),
                 d_low.as_ref(),
                 d_close.as_ref(),
+                d_prefix.as_ref(),
                 &d_periods,
                 series_len,
                 len,
@@ -571,6 +625,7 @@ impl CudaNama {
             d_high,
             d_low,
             d_close,
+            None,
             d_periods,
             series_len as usize,
             n_combos as usize,

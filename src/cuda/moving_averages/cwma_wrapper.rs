@@ -306,59 +306,111 @@ impl CudaCwma {
                 (required as f64) / (1024.0 * 1024.0)
             )));
         }
-
-        let mut periods_i32 = vec![0i32; n_combos];
-        let mut weights_flat = vec![0f32; n_combos * weights_stride];
-        let mut inv_norms = vec![0f32; n_combos];
-
-        for (idx, prm) in combos.iter().enumerate() {
-            let period = prm.period.unwrap();
-            let weight_len = period - 1;
-            let mut norm = 0.0f32;
-            for k in 0..weight_len {
-                let weight = ((period - k) as f32).powi(3);
-                weights_flat[idx * weights_stride + k] = weight;
-                norm += weight;
-            }
-            if norm == 0.0 {
-                return Err(CudaCwmaError::InvalidInput(format!(
-                    "period {} produced zero normalization",
-                    period
-                )));
-            }
-            // Pre-scale weights by inv_norm to drop per-output multiply in kernels
-            let inv = 1.0 / norm;
-            for k in 0..weight_len {
-                let base = idx * weights_stride + k;
-                weights_flat[base] *= inv;
-            }
-            periods_i32[idx] = period as i32;
-            inv_norms[idx] = 1.0; // weights already scaled
-        }
-
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
-        let d_weights = DeviceBuffer::from_slice(&weights_flat)
+        // Common device buffers
+        let d_prices = DeviceBuffer::from_slice(data_f32)
             .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+            .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+
+        // Prepare periods on host (shared across paths)
+        let mut periods_i32 = vec![0i32; n_combos];
+        for (idx, prm) in combos.iter().enumerate() {
+            periods_i32[idx] = prm.period.unwrap() as i32;
+        }
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
-        let d_inv_norms =
-            DeviceBuffer::from_slice(&inv_norms).map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+
+        // Optional: on-device weight precompute path (env CWMA_BATCH_ONDEV=1 or small sweeps)
+        let has_precompute = self.module.get_function("cwma_precompute_weights_f32").is_ok();
+        let env_force_ondev = matches!(std::env::var("CWMA_BATCH_ONDEV"), Ok(ref v) if v == "1" || v.eq_ignore_ascii_case("true"));
+        let prefer_ondev = env_force_ondev || (n_combos <= 16);
+
+        if has_precompute && prefer_ondev {
+            // Allocate device weights/inv_norms and build them on-device
+            let mut d_weights: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * weights_stride) }
+                .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+            let mut d_inv_norms: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos) }
                 .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
 
-        self.launch_batch_kernel(
-            &d_prices,
-            &d_weights,
-            &d_periods,
-            &d_inv_norms,
-            series_len,
-            n_combos,
-            first_valid,
-            max_period,
-            &mut d_out,
-        )?;
+            // Launch precompute: one block per combo
+            let func = self.module.get_function("cwma_precompute_weights_f32")
+                .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+            let grid: GridSize = (n_combos as u32, 1, 1).into();
+            let block: BlockSize = (128, 1, 1).into();
+            unsafe {
+                let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+                let mut n_combos_i = n_combos as i32;
+                let mut max_period_i = max_period as i32;
+                let mut weights_ptr = d_weights.as_device_ptr().as_raw();
+                let mut inv_ptr = d_inv_norms.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut n_combos_i as *mut _ as *mut c_void,
+                    &mut max_period_i as *mut _ as *mut c_void,
+                    &mut weights_ptr as *mut _ as *mut c_void,
+                    &mut inv_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+            }
+
+            // Now launch batch kernel using on-device precomputed weights
+            self.launch_batch_kernel(
+                &d_prices,
+                &d_weights,
+                &d_periods,
+                &d_inv_norms,
+                series_len,
+                n_combos,
+                first_valid,
+                max_period,
+                &mut d_out,
+            )?;
+        } else {
+            // Host precompute (default): build weights and pre-scale by inv-norm
+            let mut weights_flat = vec![0f32; n_combos * weights_stride];
+            let mut inv_norms = vec![0f32; n_combos];
+            for (idx, prm) in combos.iter().enumerate() {
+                let period = prm.period.unwrap();
+                let weight_len = period - 1;
+                let mut norm = 0.0f32;
+                for k in 0..weight_len {
+                    let weight = ((period - k) as f32).powi(3);
+                    weights_flat[idx * weights_stride + k] = weight;
+                    norm += weight;
+                }
+                if norm == 0.0 {
+                    return Err(CudaCwmaError::InvalidInput(format!(
+                        "period {} produced zero normalization",
+                        period
+                    )));
+                }
+                // Pre-scale weights by inv_norm to drop per-output multiply in kernels
+                let inv = 1.0 / norm;
+                for k in 0..weight_len {
+                    let base = idx * weights_stride + k;
+                    weights_flat[base] *= inv;
+                }
+                inv_norms[idx] = 1.0; // weights already scaled
+            }
+            let d_weights = DeviceBuffer::from_slice(&weights_flat)
+                .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+            let d_inv_norms = DeviceBuffer::from_slice(&inv_norms)
+                .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;
+
+            self.launch_batch_kernel(
+                &d_prices,
+                &d_weights,
+                &d_periods,
+                &d_inv_norms,
+                series_len,
+                n_combos,
+                first_valid,
+                max_period,
+                &mut d_out,
+            )?;
+        }
 
         self.stream
             .synchronize()

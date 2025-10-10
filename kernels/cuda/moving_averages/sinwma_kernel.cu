@@ -50,6 +50,17 @@ void sinwma_batch_f32(const float* __restrict__ prices,
     __syncthreads();
 
     if (norm <= 0.0f) {
+        // Degenerate: fill warmup with NaN and post-warm with 0.0 to match
+        // the "zero denominator -> 0.0" guidance (batch path).
+        const int warm = first_valid + period - 1;
+        const int base_out = combo * series_len;
+        int t = blockIdx.x * blockDim.x + threadIdx.x;
+        const int stride = gridDim.x * blockDim.x;
+        while (t < series_len) {
+            const int out_idx = base_out + t;
+            out[out_idx] = (t < warm) ? NAN : 0.0f;
+            t += stride;
+        }
         return;
     }
 
@@ -89,6 +100,11 @@ void sinwma_many_series_one_param_time_major_f32(
         return;
     }
 
+    const int series_idx = blockIdx.y;
+    if (series_idx >= num_series) {
+        return;
+    }
+
     extern __shared__ float weights[];
     __shared__ float norm;
 
@@ -107,15 +123,19 @@ void sinwma_many_series_one_param_time_major_f32(
     __syncthreads();
 
     if (norm <= 0.0f) {
+        // Degenerate normalization: write warmup NaNs then 0.0s post-warm.
+        const int warm = first_valids[series_idx] + period - 1;
+        int t = blockIdx.x * blockDim.x + threadIdx.x;
+        const int stride = gridDim.x * blockDim.x;
+        while (t < series_len) {
+            const int out_idx = t * num_series + series_idx;
+            out_tm[out_idx] = (t < warm) ? NAN : 0.0f;
+            t += stride;
+        }
         return;
     }
 
     const float inv_norm = 1.0f / norm;
-
-    const int series_idx = blockIdx.y;
-    if (series_idx >= num_series) {
-        return;
-    }
 
     const int warm = first_valids[series_idx] + period - 1;
 

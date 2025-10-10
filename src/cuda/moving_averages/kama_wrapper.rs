@@ -272,6 +272,67 @@ impl CudaKama {
         Ok(())
     }
 
+    fn launch_batch_kernel_with_prefix(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_prefix_roc1: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaKamaError> {
+        let func = self
+            .module
+            .get_function("kama_batch_prefix_f32")
+            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+
+        // Record selection for introspection/debug (same OneD shape)
+        unsafe {
+            let this = self as *const _ as *mut CudaKama;
+            (*this).last_batch = Some(BatchKernelSelected::OneD { block_x: 128 });
+        }
+        self.maybe_log_batch_debug();
+
+        const BLOCK_X: u32 = 128;
+        for (start, len) in Self::grid_chunks(n_combos) {
+            let grid: GridSize = (len as u32, 1, 1).into();
+            let block: BlockSize = (BLOCK_X, 1, 1).into();
+
+            let d_periods_off = unsafe { d_periods.as_device_ptr().add(start) };
+            let d_out_off = unsafe { d_out.as_device_ptr().add(start * series_len) };
+
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut prefix_ptr = d_prefix_roc1.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods_off.as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = len as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut out_ptr = d_out_off.as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut prefix_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn build_roc1_prefix_bytes(series_len: usize) -> usize {
+        // prefix length = series_len + 1
+        (series_len + 1) * std::mem::size_of::<f32>()
+    }
+
     fn run_batch_kernel(
         &self,
         data_f32: &[f32],
@@ -283,7 +344,9 @@ impl CudaKama {
         let prices_bytes = series_len * std::mem::size_of::<f32>();
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + out_bytes;
+        let prefix_bytes = Self::build_roc1_prefix_bytes(series_len);
+        // Budget for prefix path; we will skip allocating it if kernel not present.
+        let required = prices_bytes + periods_bytes + out_bytes + prefix_bytes;
         let headroom = 64 * 1024 * 1024; // 64MB cushion (match ALMA default)
         if !Self::will_fit(required, headroom) {
             return Err(CudaKamaError::InvalidInput(format!(
@@ -301,14 +364,42 @@ impl CudaKama {
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
                 .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
 
-        self.launch_batch_kernel(
-            &d_prices,
-            &d_periods,
-            series_len,
-            n_combos,
-            first_valid,
-            &mut d_out,
-        )?;
+        if self.has_function("kama_batch_prefix_f32") {
+            // Host-shared precompute for Σ|Δp| prefix (NaN-insensitive accumulation)
+            let mut prefix: Vec<f32> = Vec::with_capacity(series_len + 1);
+            prefix.push(0.0f32);
+            let mut acc = 0.0f32;
+            let mut prev = data_f32.get(0).copied().unwrap_or(f32::NAN);
+            for i in 1..series_len {
+                let cur = data_f32[i];
+                let diff = if prev.is_nan() || cur.is_nan() { 0.0f32 } else { (cur - prev).abs() };
+                acc += diff;
+                prefix.push(acc);
+                prev = cur;
+            }
+            // pad last element to length = series_len + 1
+            prefix.push(acc);
+            let d_prefix = DeviceBuffer::from_slice(&prefix)
+                .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+            self.launch_batch_kernel_with_prefix(
+                &d_prices,
+                &d_prefix,
+                &d_periods,
+                series_len,
+                n_combos,
+                first_valid,
+                &mut d_out,
+            )?;
+        } else {
+            self.launch_batch_kernel(
+                &d_prices,
+                &d_periods,
+                series_len,
+                n_combos,
+                first_valid,
+                &mut d_out,
+            )?;
+        }
 
         self.stream
             .synchronize()

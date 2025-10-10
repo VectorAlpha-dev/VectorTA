@@ -1,9 +1,9 @@
 //! CUDA wrapper for the 3-pole SuperSmoother filter kernels.
 //!
-//! This mirrors the VRAM-first design used by the other moving average CUDA
-//! wrappers: kernels operate in FP32, intermediates promote to FP64 for
-//! numerical stability, and public entry points return `DeviceArrayF32`
-//! handles so callers control when/if results are copied back to host memory.
+//! Mirrors the ALMA/CWMA-style wrapper: VRAM-first device handles, simple
+//! policy selection (plain kernels only), JIT options for PTX loading,
+//! VRAM checks, and chunked launches to respect grid limits. Kernels operate
+//! in FP32 with FP64 intermediates to match f64 scalar behavior.
 
 #![cfg(feature = "cuda")]
 
@@ -14,14 +14,14 @@ use crate::indicators::moving_averages::supersmoother_3_pole::{
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
-use cust::module::Module;
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaSuperSmoother3PoleError {
@@ -42,10 +42,46 @@ impl fmt::Display for CudaSuperSmoother3PoleError {
 
 impl std::error::Error for CudaSuperSmoother3PoleError {}
 
+// -------- Kernel policy + introspection (kept minimal; no tiled variants) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaSupersmoother3PolePolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+impl Default for CudaSupersmoother3PolePolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+
 pub struct CudaSupersmoother3Pole {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaSupersmoother3PolePolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaSupersmoother3Pole {
@@ -58,8 +94,22 @@ impl CudaSupersmoother3Pole {
             Context::new(device).map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/supersmoother_3_pole_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[])
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        // Use context-targeted JIT with moderate opt level for stability.
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
 
@@ -67,7 +117,31 @@ impl CudaSupersmoother3Pole {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaSupersmoother3PolePolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaSupersmoother3PolePolicy,
+    ) -> Result<Self, CudaSuperSmoother3PoleError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaSupersmoother3PolePolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaSupersmoother3PolePolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn synchronize(&self) -> Result<(), CudaSuperSmoother3PoleError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))
     }
 
     fn mem_check_enabled() -> bool {
@@ -77,18 +151,7 @@ impl CudaSupersmoother3Pole {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
@@ -176,33 +239,58 @@ impl CudaSupersmoother3Pole {
             ));
         }
 
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        // Policy selection (plain blocks: one thread per block)
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => 1,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+        };
+        unsafe { (*(self as *const _ as *mut CudaSupersmoother3Pole)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
 
         let func = self
             .module
             .get_function("supersmoother_3_pole_batch_f32")
             .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut combos_i = n_combos as i32;
-            let mut first_valid_i = first_valid as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut combos_i as *mut _ as *mut c_void,
-                &mut first_valid_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        // Chunk grid.x into <= 65_535 blocks by launching in segments
+        const MAX_GRID_X: usize = 65_535;
+        let mut launched = 0usize;
+        while launched < n_combos {
+            let launch_cnt = (n_combos - launched).min(MAX_GRID_X);
+            let grid: GridSize = (launch_cnt as u32, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                // Offset periods/out by launched rows
+                let mut periods_ptr = d_periods
+                    .as_device_ptr()
+                    .add(launched)
+                    .as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = launch_cnt as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut out_ptr = d_out
+                    .as_device_ptr()
+                    .add(launched * series_len)
+                    .as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+            }
+            
+            launched += launch_cnt;
         }
+
+        // Debug log selected kernel if requested
+        self.maybe_log_batch_debug();
 
         Ok(())
     }
@@ -219,7 +307,7 @@ impl CudaSupersmoother3Pole {
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + periods_bytes + out_bytes;
-        let headroom = 32 * 1024 * 1024; // 32MB cushion
+        let headroom = 64 * 1024 * 1024; // 64MB cushion
         if !Self::will_fit(required, headroom) {
             return Err(CudaSuperSmoother3PoleError::InvalidInput(format!(
                 "estimated device memory {:.2} MB exceeds free VRAM",
@@ -383,33 +471,60 @@ impl CudaSupersmoother3Pole {
             ));
         }
 
-        let grid: GridSize = (cols as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        // Policy selection
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 1,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
+        };
+        unsafe { (*(self as *const _ as *mut CudaSupersmoother3Pole)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
 
         let func = self
             .module
             .get_function("supersmoother_3_pole_many_series_one_param_time_major_f32")
             .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut period_i = period as i32;
-            let mut cols_i = cols as i32;
-            let mut rows_i = rows as i32;
-            let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut period_i as *mut _ as *mut c_void,
-                &mut cols_i as *mut _ as *mut c_void,
-                &mut rows_i as *mut _ as *mut c_void,
-                &mut first_ptr as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        // Chunk grid.x across series to <= 65_535; stride remains full `cols`.
+        const MAX_GRID_X: usize = 65_535;
+        let mut launched = 0usize;
+        while launched < cols {
+            let launch_cnt = (cols - launched).min(MAX_GRID_X);
+            let grid: GridSize = (launch_cnt as u32, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+
+            unsafe {
+                let mut prices_ptr = d_prices
+                    .as_device_ptr()
+                    .add(launched)
+                    .as_raw();
+                let mut period_i = period as i32;
+                let mut cols_i = cols as i32; // keep full stride
+                let mut rows_i = rows as i32;
+                let mut first_ptr = d_first_valids
+                    .as_device_ptr()
+                    .add(launched)
+                    .as_raw();
+                let mut out_ptr = d_out
+                    .as_device_ptr()
+                    .add(launched)
+                    .as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut first_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+            }
+
+            launched += launch_cnt;
         }
+
+        // Debug log
+        self.maybe_log_many_debug();
 
         Ok(())
     }
@@ -426,7 +541,7 @@ impl CudaSupersmoother3Pole {
         let first_valid_bytes = cols * std::mem::size_of::<i32>();
         let out_bytes = cols * rows * std::mem::size_of::<f32>();
         let required = prices_bytes + first_valid_bytes + out_bytes;
-        let headroom = 32 * 1024 * 1024;
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             return Err(CudaSuperSmoother3PoleError::InvalidInput(format!(
                 "estimated device memory {:.2} MB exceeds free VRAM",
@@ -505,4 +620,55 @@ impl CudaSupersmoother3Pole {
         }
         self.launch_many_series_kernel(d_prices, period, cols, rows, d_first_valids, d_out)
     }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] SS3P batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaSupersmoother3Pole)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] SS3P many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaSupersmoother3Pole)).debug_many_logged = true; }
+            }
+        }
+    }
+}
+
+// ---------- Bench profiles ----------
+
+pub mod benches {
+    use super::*;
+    use crate::define_ma_period_benches;
+
+    define_ma_period_benches!(
+        supersmoother_3_pole_benches,
+        CudaSupersmoother3Pole,
+        crate::indicators::moving_averages::supersmoother_3_pole::SuperSmoother3PoleBatchRange,
+        crate::indicators::moving_averages::supersmoother_3_pole::SuperSmoother3PoleParams,
+        supersmoother_3_pole_batch_dev,
+        supersmoother_3_pole_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::supersmoother_3_pole::SuperSmoother3PoleBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::supersmoother_3_pole::SuperSmoother3PoleParams { period: Some(64) },
+        "supersmoother_3_pole",
+        "supersmoother_3_pole"
+    );
+    pub use supersmoother_3_pole_benches::bench_profiles;
 }

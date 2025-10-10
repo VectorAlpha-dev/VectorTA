@@ -59,6 +59,43 @@ void wma_batch_f32(const float* __restrict__ prices,
     }
 }
 
+// Prefix-sum variant for batch: uses A and B prefixes to compute windowed WMA in O(1).
+extern "C" __global__
+void wma_batch_prefix_f32(const float* __restrict__ pref_a,
+                          const float* __restrict__ pref_b,
+                          const int* __restrict__ periods,
+                          int series_len,
+                          int n_combos,
+                          int first_valid,
+                          float* __restrict__ out) {
+    const int combo = blockIdx.y;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    if (period <= 1) return;
+
+    const float inv_norm = 2.0f / (float(period) * float(period + 1));
+    const int warm = first_valid + period - 1;
+    const int base_out = combo * series_len;
+
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = gridDim.x * blockDim.x;
+    while (t < series_len) {
+        const int out_idx = base_out + t;
+        if (t < warm) {
+            out[out_idx] = NAN;
+        } else {
+            // Window [t - period + 1 .. t]
+            const int start = t + 1 - period; // 1-based start index for prefixes
+            const float s_a = pref_a[t + 1] - pref_a[start];
+            const float s_b = pref_b[t + 1] - pref_b[start];
+            const float wsum = fmaf(-float(t - period), s_a, s_b);
+            out[out_idx] = wsum * inv_norm;
+        }
+        t += stride;
+    }
+}
+
 extern "C" __global__
 void wma_multi_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,

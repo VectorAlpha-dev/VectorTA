@@ -205,6 +205,163 @@ void nama_batch_f32(const float* __restrict__ prices,
     }
 }
 
+// Prefix-optimized batch kernel (degenerate TR only):
+// Uses host-precomputed prefix of |p[t] - p[t-1]| (NaN-insensitive) to seed the
+// initial eff_sum for the warmup window in O(1), then updates eff_sum using
+// prefix differences. Mirrors the CPU batch optimization that precomputes TR
+// once and reuses it across rows.
+//
+// prefix_tr must have length = series_len + 1 and follow:
+//   prefix_tr[0] = 0
+//   prefix_tr[t] = sum_{k=1..t} |p[k] - p[k-1]|  (with NaN-insensitive accumulation)
+extern "C" __global__
+void nama_batch_prefix_f32(const float* __restrict__ prices,
+                           const float* __restrict__ prefix_tr,
+                           const int* __restrict__ periods,
+                           int series_len,
+                           int n_combos,
+                           int first_valid,
+                           float* __restrict__ out) {
+    const int combo = blockIdx.x;
+    if (combo >= n_combos) {
+        return;
+    }
+
+    const int period = periods[combo];
+    if (period <= 0 || period > series_len) {
+        return;
+    }
+    const int warm = first_valid + period - 1;
+    const int base = combo * series_len;
+
+    // Initialize NaNs up-front (all threads cooperate)
+    for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
+        out[base + idx] = NAN;
+    }
+    __syncthreads();
+
+    if (threadIdx.x != 0 || warm >= series_len) {
+        return;
+    }
+
+    extern __shared__ int shared_i[];
+    const int capacity = period + 1;
+    int* dq_max = shared_i;
+    int* dq_min = shared_i + capacity;
+
+    int max_front = 0;
+    int max_size = 0;
+    int min_front = 0;
+    int min_size = 0;
+
+    // Seed deques over [first_valid..warm]
+    for (int j = first_valid; j <= warm; ++j) {
+        // push_max
+        const double cur = static_cast<double>(prices[j]);
+        while (max_size > 0) {
+            const int last_pos = (max_front + max_size - 1) % capacity;
+            const int last_idx = dq_max[last_pos];
+            const double last_val = static_cast<double>(prices[last_idx]);
+            if (last_val <= cur) {
+                max_size -= 1;
+            } else {
+                break;
+            }
+        }
+        const int insert_pos_max = (max_front + max_size) % capacity;
+        dq_max[insert_pos_max] = j;
+        max_size += 1;
+
+        // push_min
+        while (min_size > 0) {
+            const int last_pos = (min_front + min_size - 1) % capacity;
+            const int last_idx = dq_min[last_pos];
+            const double last_val = static_cast<double>(prices[last_idx]);
+            if (last_val >= cur) {
+                min_size -= 1;
+            } else {
+                break;
+            }
+        }
+        const int insert_pos_min = (min_front + min_size) % capacity;
+        dq_min[insert_pos_min] = j;
+        min_size += 1;
+    }
+
+    if (max_size == 0 || min_size == 0) {
+        return;
+    }
+
+    // Seed eff_sum using prefix differences: sum_{j=first..warm} TR[j]
+    // For degenerate TR, TR[first] = 0, so this equals prefix_tr[warm] - prefix_tr[first]
+    double eff_sum = static_cast<double>(prefix_tr[warm] - prefix_tr[first_valid]);
+
+    const double hi = static_cast<double>(prices[dq_max[max_front]]);
+    const double lo = static_cast<double>(prices[dq_min[min_front]]);
+    double alpha = 0.0;
+    if (eff_sum != 0.0) {
+        alpha = (hi - lo) / eff_sum;
+    }
+    double prev = alpha * static_cast<double>(prices[warm]);
+    out[base + warm] = static_cast<float>(prev);
+
+    for (int i = warm + 1; i < series_len; ++i) {
+        // push current index
+        const double cur = static_cast<double>(prices[i]);
+        while (max_size > 0) {
+            const int last_pos = (max_front + max_size - 1) % capacity;
+            const int last_idx = dq_max[last_pos];
+            const double last_val = static_cast<double>(prices[last_idx]);
+            if (last_val <= cur) { max_size -= 1; } else { break; }
+        }
+        int insert_pos_max = (max_front + max_size) % capacity;
+        dq_max[insert_pos_max] = i;
+        max_size += 1;
+
+        while (min_size > 0) {
+            const int last_pos = (min_front + min_size - 1) % capacity;
+            const int last_idx = dq_min[last_pos];
+            const double last_val = static_cast<double>(prices[last_idx]);
+            if (last_val >= cur) { min_size -= 1; } else { break; }
+        }
+        int insert_pos_min = (min_front + min_size) % capacity;
+        dq_min[insert_pos_min] = i;
+        min_size += 1;
+
+        // pop older indices
+        const int win_start = i + 1 - period;
+        while (max_size > 0) {
+            const int head = dq_max[max_front];
+            if (head < win_start) { max_front = (max_front + 1) % capacity; max_size -= 1; } else { break; }
+        }
+        while (min_size > 0) {
+            const int head = dq_min[min_front];
+            if (head < win_start) { min_front = (min_front + 1) % capacity; min_size -= 1; } else { break; }
+        }
+
+        // Update eff_sum using prefix differences (degenerate TR):
+        // eff_sum += TR[i] - TR[i - period]
+        // TR[t] = prefix_tr[t] - prefix_tr[t-1]
+        const double tr_add = static_cast<double>(prefix_tr[i] - prefix_tr[i - 1]);
+        const double tr_sub = static_cast<double>(prefix_tr[i - period] - prefix_tr[i - period - 1]);
+        eff_sum = eff_sum + tr_add - tr_sub;
+
+        if (max_size == 0 || min_size == 0) {
+            continue;
+        }
+        const double hi_cur = static_cast<double>(prices[dq_max[max_front]]);
+        const double lo_cur = static_cast<double>(prices[dq_min[min_front]]);
+        alpha = 0.0;
+        if (eff_sum != 0.0) {
+            alpha = (hi_cur - lo_cur) / eff_sum;
+        }
+
+        const double src = static_cast<double>(prices[i]);
+        prev = alpha * src + (1.0 - alpha) * prev;
+        out[base + i] = static_cast<float>(prev);
+    }
+}
+
 __device__ inline double nama_true_range_tm(
     int t,
     int first_valid_t,
