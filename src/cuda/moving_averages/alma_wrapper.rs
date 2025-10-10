@@ -185,6 +185,53 @@ impl CudaAlma {
             .map_err(|e| CudaAlmaError::Cuda(e.to_string()))
     }
 
+    /// Best-effort: request an L2 persisting cache window for read-mostly spans.
+    /// Enabled by default; opt-out via ALMA_L2_PERSIST=0.
+    fn try_enable_persisting_l2(&self, base_dev_ptr: u64, bytes: usize) {
+        if std::env::var("ALMA_L2_PERSIST").ok().as_deref() == Some("0") { return; }
+        unsafe {
+            use cust::device::Device as CuDevice;
+            use cust::sys::{
+                cuCtxSetLimit, cuDeviceGetAttribute, cuStreamSetAttribute,
+                CUaccessPolicyWindow_v1 as CUaccessPolicyWindow,
+                CUaccessProperty_enum as AccessProp,
+                CUdevice_attribute_enum as DevAttr,
+                CUlimit_enum as CULimit,
+                CUstreamAttrID_enum as StreamAttrId,
+                CUstreamAttrValue_v1 as CUstreamAttrValue,
+            };
+
+            // Max window size supported by device
+            let mut max_window_bytes_i32: i32 = 0;
+            if let Ok(dev) = CuDevice::get_device(self.device_id) {
+                let _ = cuDeviceGetAttribute(
+                    &mut max_window_bytes_i32 as *mut _,
+                    DevAttr::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+                    dev.as_raw(),
+                );
+            }
+            let max_window_bytes = (max_window_bytes_i32.max(0) as usize).min(bytes);
+
+            // Best-effort set-aside for L2 persistence
+            let _ = cuCtxSetLimit(CULimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, max_window_bytes);
+
+            // Configure the stream access policy window
+            let mut val: CUstreamAttrValue = std::mem::zeroed();
+            val.accessPolicyWindow = CUaccessPolicyWindow {
+                base_ptr: base_dev_ptr as *mut std::ffi::c_void,
+                num_bytes: max_window_bytes,
+                hitRatio: 0.6f32,
+                hitProp: AccessProp::CU_ACCESS_PROPERTY_PERSISTING,
+                missProp: AccessProp::CU_ACCESS_PROPERTY_STREAMING,
+            };
+            let _ = cuStreamSetAttribute(
+                self.stream.as_inner(),
+                StreamAttrId::CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW,
+                &mut val as *mut _,
+            );
+        }
+    }
+
     /// Create using an explicit policy.
     pub fn new_with_policy(device_id: usize, policy: CudaAlmaPolicy) -> Result<Self, CudaAlmaError> {
         let mut s = Self::new(device_id)?;
@@ -541,6 +588,9 @@ impl CudaAlma {
     ) -> Result<DeviceArrayF32, CudaAlmaError> {
         let n_combos = combos.len();
 
+        // Best-effort: keep the large, read-mostly prices region warm in L2 for this stream
+        self.try_enable_persisting_l2(d_prices.as_device_ptr().as_raw(), series_len * std::mem::size_of::<f32>());
+
         // Output buffer
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
@@ -707,6 +757,9 @@ impl CudaAlma {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
                 .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+
+        // Best-effort: persist the time-major price matrix in L2 for this stream
+        self.try_enable_persisting_l2(d_prices.as_device_ptr().as_raw(), cols * rows * std::mem::size_of::<f32>());
 
         // Prefer host-precomputed weights/normalization for accuracy.
         // Pre-scale weights to eliminate per-output multiply in kernels.
