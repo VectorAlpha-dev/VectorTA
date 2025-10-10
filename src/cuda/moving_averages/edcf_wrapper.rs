@@ -98,7 +98,7 @@ impl CudaEdcf {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/edcf_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -171,6 +171,122 @@ impl CudaEdcf {
                 unsafe { (*(self as *const _ as *mut CudaEdcf)).debug_many_logged = true; }
             }
         }
+    }
+
+    #[inline]
+    fn dist_impl_override() -> Option<&'static str> {
+        match std::env::var("EDCF_DIST_IMPL").ok().as_deref() {
+            Some("rolling") => Some("rolling"),
+            Some("plain") => Some("plain"),
+            _ => None,
+        }
+    }
+
+    /// Try to enable L2 persisting cache access policy window for the given base pointer range.
+    /// Best-effort: silently ignores unsupported configurations.
+    fn try_enable_persisting_l2(&self, base_dev_ptr: u64, bytes: usize) {
+        // Enabled by default; allow explicit opt-out via EDCF_L2_PERSIST=0
+        if std::env::var("EDCF_L2_PERSIST").ok().as_deref() == Some("0") { return; }
+        unsafe {
+            use cust::device::Device as CuDevice;
+            use cust::sys::{
+                cuCtxSetLimit, cuDeviceGetAttribute, cuStreamSetAttribute,
+                CUaccessPolicyWindow_v1 as CUaccessPolicyWindow,
+                CUaccessProperty_enum as AccessProp,
+                CUdevice_attribute_enum as DevAttr,
+                CUlimit_enum as CULimit,
+                CUstreamAttrID_enum as StreamAttrId,
+                CUstreamAttrValue_v1 as CUstreamAttrValue,
+            };
+
+            // Determine max window size supported
+            let mut max_window_bytes_i32: i32 = 0;
+            if let Ok(dev) = CuDevice::get_device(self.device_id) {
+                let raw_dev = dev.as_raw();
+                let _ = cuDeviceGetAttribute(
+                    &mut max_window_bytes_i32 as *mut _,
+                    DevAttr::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+                    raw_dev,
+                );
+            }
+            let max_window_bytes = (max_window_bytes_i32.max(0) as usize).min(bytes);
+
+            // Optionally set aside some L2 for persistence (best effort)
+            let _ = cuCtxSetLimit(CULimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, max_window_bytes);
+
+            // Configure the access policy window on this stream
+            let mut val: CUstreamAttrValue = std::mem::zeroed();
+            val.accessPolicyWindow = CUaccessPolicyWindow {
+                base_ptr: base_dev_ptr as *mut std::ffi::c_void,
+                num_bytes: max_window_bytes,
+                hitRatio: 0.6f32,
+                hitProp: AccessProp::CU_ACCESS_PROPERTY_PERSISTING,
+                missProp: AccessProp::CU_ACCESS_PROPERTY_STREAMING,
+            };
+            let _ = cuStreamSetAttribute(
+                self.stream.as_inner(),
+                StreamAttrId::CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW,
+                &mut val as *mut _,
+            );
+        }
+    }
+
+    /// Heuristic launcher for distance computation: uses rolling tiled kernels when beneficial.
+    fn launch_compute_dist_auto(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        period: usize,
+        first_valid: usize,
+        d_dist: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaEdcfError> {
+        let prefer_rolling = period >= 8 && len >= (period * 4);
+        let force = Self::dist_impl_override();
+
+        if force == Some("plain") || (!prefer_rolling && force.is_none()) {
+            let func = self
+                .module
+                .get_function("edcf_compute_dist_f32")
+                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+            return self.launch_compute_dist(&func, d_prices, len, period, first_valid, d_dist);
+        }
+
+        let tile: u32 = if len >= (1 << 18) { 512 } else if len >= (1 << 16) { 256 } else { 128 };
+        let fname = match tile {
+            128 => "edcf_compute_dist_rolling_f32_tile128",
+            256 => "edcf_compute_dist_rolling_f32_tile256",
+            _ => "edcf_compute_dist_rolling_f32_tile512",
+        };
+        let func = self
+            .module
+            .get_function(fname)
+            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+
+        let outputs_per_block = tile;
+        let mut grid_x = ((len as u32) + outputs_per_block - 1) / outputs_per_block;
+        if grid_x == 0 { grid_x = 1; }
+        let block_x = 128u32;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        // Shared memory: (TILE + period - 1) floats
+        let sh_elems = (tile as usize + period - 1);
+        let shared_bytes = (sh_elems * std::mem::size_of::<f32>()) as u32;
+
+        let stream = &self.stream;
+        unsafe {
+            launch!(
+                func<<<grid, block, shared_bytes, stream>>>(
+                    d_prices.as_device_ptr(),
+                    (len as i32),
+                    (period as i32),
+                    (first_valid as i32),
+                    d_dist.as_device_ptr()
+                )
+            )
+            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        }
+        Ok(())
     }
 
     #[inline]
@@ -291,6 +407,41 @@ impl CudaEdcf {
         Ok((combos.len(), series_len, combos))
     }
 
+    /// Optimized variant: write results into a pinned host buffer to avoid an extra host copy.
+    pub fn edcf_batch_into_pinned_host_f32(
+        &self,
+        data_f32: &[f32],
+        sweep: &EdcfBatchRange,
+        out_pinned: &mut LockedBuffer<f32>,
+    ) -> Result<(usize, usize, Vec<EdcfParams>), CudaEdcfError> {
+        let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
+        let expected = combos.len() * series_len;
+        if out_pinned.len() != expected {
+            return Err(CudaEdcfError::InvalidInput(format!(
+                "out_pinned wrong length: got {}, expected {}",
+                out_pinned.len(),
+                expected
+            )));
+        }
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
+            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
+            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
+            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+
+        self.edcf_batch_device_impl(&d_prices, &combos, first_valid, series_len, &mut d_dist, &mut d_out)?;
+        self.synchronize()?;
+
+        unsafe {
+            d_out
+                .async_copy_to(out_pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        }
+        self.synchronize()?;
+        Ok((combos.len(), series_len, combos))
+    }
+
     /// Device-friendly path: run batch using preallocated device buffers.
     ///
     /// - `d_prices`: device-resident prices (length `series_len`).
@@ -377,10 +528,8 @@ impl CudaEdcf {
             ));
         }
 
-        let compute_fn = self
-            .module
-            .get_function("edcf_compute_dist_f32")
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        // Try to keep price window warm in L2 for sequential passes (best effort)
+        self.try_enable_persisting_l2(d_prices.as_device_ptr().as_raw(), series_len * std::mem::size_of::<f32>());
 
         for (row_idx, params) in combos.iter().enumerate() {
             let period = params.period.unwrap_or(0);
@@ -405,8 +554,7 @@ impl CudaEdcf {
                 )));
             }
 
-            self.launch_compute_dist(
-                &compute_fn,
+            self.launch_compute_dist_auto(
                 d_prices,
                 series_len,
                 period,
@@ -449,8 +597,8 @@ impl CudaEdcf {
                 let block_x = 128u32;
                 let grid: GridSize = (grid_x, 1, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
-                // shared: prices (tile+P-1) + dist (tile+P-1)
-                let sh_elems = (tile as usize + period - 1) * 2;
+                // shared: prices + dist + wv + pref_w + pref_wv
+                let sh_elems = (tile as usize + period - 1) * 5;
                 let shared_bytes = (sh_elems * std::mem::size_of::<f32>()) as u32;
 
                 let stream = &self.stream;
@@ -679,7 +827,7 @@ impl CudaEdcf {
             // Shared size per block
             let prices_elems = (tx as usize) + 2 * (period - 1);
             let dist_elems   = (tx as usize) + (period - 1);
-            let per_series = (prices_elems + dist_elems) * std::mem::size_of::<f32>();
+            let per_series = (prices_elems + 4 * dist_elems) * std::mem::size_of::<f32>();
             let shared_bytes = (per_series * (ty as usize)) as u32;
             let grid_x = ((rows as u32) + tx - 1) / tx;
             let grid_y = ((cols as u32) + ty - 1) / ty;
@@ -754,13 +902,15 @@ impl CudaEdcf {
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEdcfError> {
         if cols == 0 || rows == 0 || period == 0 { return Err(CudaEdcfError::InvalidInput("invalid dims/period".into())); }
+        // Best-effort L2 persisting cache for the time-major prices
+        self.try_enable_persisting_l2(d_prices_tm.as_device_ptr().as_raw(), cols * rows * std::mem::size_of::<f32>());
         // Try 2D tiled first (ty=4 then ty=2)
         let try_2d = |tx: u32, ty: u32| -> Result<bool, CudaEdcfError> {
             let fname = match (tx, ty) { (128, 4) => "edcf_ms1p_tiled_f32_tx128_ty4", (128, 2) => "edcf_ms1p_tiled_f32_tx128_ty2", _ => return Ok(false) };
             let func = match self.module.get_function(fname) { Ok(f) => f, Err(_) => return Ok(false) };
             let prices_elems = (tx as usize) + 2 * (period - 1);
             let dist_elems   = (tx as usize) + (period - 1);
-            let per_series = (prices_elems + dist_elems) * std::mem::size_of::<f32>();
+            let per_series = (prices_elems + 4 * dist_elems) * std::mem::size_of::<f32>();
             let shared_bytes = (per_series * (ty as usize)) as u32;
             let grid_x = ((rows as u32) + tx - 1) / tx; let grid_y = ((cols as u32) + ty - 1) / ty;
             let grid: GridSize = (grid_x, grid_y, 1).into(); let block: BlockSize = (128, ty, 1).into();

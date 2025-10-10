@@ -26,6 +26,8 @@ void edcf_compute_dist_f32(const float* __restrict__ prices,
                            int period,
                            int first_valid,
                            float* __restrict__ dist) {
+    // Plain O(P) distance per k. Left in place as a reliable fallback.
+    // Rolling-tiled O(1) variants are provided below for integration where appropriate.
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
     const int start = first_valid + period;
@@ -48,6 +50,105 @@ void edcf_compute_dist_f32(const float* __restrict__ prices,
         }
         dist[k] = sum_h + sum_c;
     }
+}
+
+// ---- O(1) distance via rolling sums (tiled) ----
+// Uses: sum1 = sum of last (period-1) prices; sum2 = sum of their squares.
+// For outputs k in [base..base+TILE-1], with j0 = max(start, base).
+template<int TILE>
+__device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float* __restrict__ prices,
+                                                    int len,
+                                                    int period,
+                                                    int first_valid,
+                                                    float* __restrict__ dist)
+{
+    const int m = period - 1;
+    if (m <= 0 || len <= 0) return;
+
+    const int start = first_valid + period;               // first k where window is full
+    const int base  = blockIdx.x * TILE;
+    const int j1    = min(base + TILE - 1, len - 1);
+
+    // If entire tile is before 'start', quickly zero and exit
+    if (j1 < start) {
+        for (int k = base + threadIdx.x; k <= j1; k += blockDim.x) dist[k] = 0.0f;
+        return;
+    }
+
+    const int j0 = max(start, base);
+    const int p_start = j0 - m;                           // first element needed
+    const int p_len   = j1 - p_start + 1;                 // m "prev" + outputs
+
+    extern __shared__ float sh_prices[];                  // size >= m + TILE
+    // Coalesced load of [p_start..j1] into shared
+    for (int t = threadIdx.x; t < p_len; t += blockDim.x) {
+        sh_prices[t] = prices[p_start + t];
+    }
+    __syncthreads();
+
+    // Initialize rolling sums for the first output at j0
+    if (threadIdx.x == 0) {
+        // Kahan/Neumaier-compensated accumulators for s1=sum(x), s2=sum(x^2)
+        float s1 = 0.f, c1 = 0.f;
+        float s2 = 0.f, c2 = 0.f;
+        #pragma unroll 1
+        for (int i = 0; i < m; ++i) {
+            const float v  = sh_prices[i];
+            const float v2 = v * v;
+
+            // Kahan for s1
+            float y = v - c1;
+            float t = s1 + y;
+            c1 = (t - s1) - y;
+            s1 = t;
+
+            // Kahan for s2
+            float y2 = v2 - c2;
+            float t2 = s2 + y2;
+            c2 = (t2 - s2) - y2;
+            s2 = t2;
+        }
+        float sum1 = s1 + c1;
+        float sum2 = s2 + c2;
+
+        // Emit zeros for [base..j0-1] (tile head before warm)
+        for (int k = base; k < j0; ++k) if (k <= j1) dist[k] = 0.0f;
+
+        // Slide across outputs j in [j0..j1]
+        const int out_cnt = j1 - j0 + 1;
+        #pragma unroll 1
+        for (int u = 0; u < out_cnt; ++u) {
+            const float xk   = sh_prices[m + u];
+            const float xk2  = xk * xk;
+            const float w    = __fmaf_rn((float)m, xk2, __fmaf_rn(-2.f * xk, sum1, sum2));
+            dist[j0 + u] = w;
+
+            // Advance window: remove sh_prices[u], add xk
+            const float v_out  = sh_prices[u];
+            const float v_out2 = v_out * v_out;
+            sum1 += (xk - v_out);
+            sum2 += (xk2 - v_out2);
+        }
+    }
+}
+
+extern "C" __global__
+void edcf_compute_dist_rolling_f32_tile128(const float* __restrict__ prices,
+                                           int len, int period, int first_valid,
+                                           float* __restrict__ dist) {
+    edcf_compute_dist_rolling_tiled_f32<128>(prices, len, period, first_valid, dist);
+}
+extern "C" __global__
+void edcf_compute_dist_rolling_f32_tile256(const float* __restrict__ prices,
+                                           int len, int period, int first_valid,
+                                           float* __restrict__ dist) {
+    edcf_compute_dist_rolling_tiled_f32<256>(prices, len, period, first_valid, dist);
+}
+extern "C" __global__
+void edcf_compute_dist_rolling_f32_tile512(const float* __restrict__ prices,
+                                           int len, int period, int first_valid,
+                                           float* __restrict__ dist) {
+    edcf_compute_dist_rolling_tiled_f32<512>(prices, len, period, first_valid, dist);
 }
 
 extern "C" __global__
@@ -119,100 +220,80 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
                                                                   int period,
                                                                   int first_valid,
                                                                   float* __restrict__ out_row) {
-    const int block_outputs = TILE;
-    const int base = blockIdx.x * block_outputs;
+    const int P = period;
+    const int m = P - 1;
+    const int base = blockIdx.x * TILE;
     if (base >= len) { return; }
 
-    // Dynamic shared: [prices | dist], 16-byte aligned (match ALMA convention)
+    // Dynamic shared: [prices | dist]; reuse in-place to hold prefix_wv and prefix_w respectively.
     extern __shared__ __align__(16) unsigned char smem_raw[];
     float* smem = reinterpret_cast<float*>(smem_raw);
-    const int tile_prices_elems = (block_outputs + period - 1); // for [base-(P-1) .. base+TILE-1]
+    const int tile_prices_elems = (TILE + m); // [base-m .. base+TILE-1]
     float* sh_prices = smem;
-    // Round up to 16B boundary (multiple of 4 floats) for second region
-    const int sh_prices_aligned_elems = ((tile_prices_elems + 3) / 4) * 4;
+    const int sh_prices_aligned_elems = ((tile_prices_elems + 3) / 4) * 4; // align to 16B
     float* sh_dist   = sh_prices + sh_prices_aligned_elems;
 
-    // Load contiguous windows from global to shared (zero fill OOB)
-    // Start index in global memory
-    const int start = base - (period - 1);
-    const int end_incl = min(base + block_outputs - 1, len - 1);
+    // Load [prices, dist] window to shared (zero fill OOB)
+    const int start = base - m;
+    const int end_incl = min(base + TILE - 1, len - 1);
     const int tile_elems = (end_incl - start + 1);
 
     // Vectorized load when aligned and length >= 4
-    const int vec_elems = (tile_elems / 4) * 4; // floor to multiple of 4
+    const int vec_elems = (tile_elems / 4) * 4;
     for (int i = threadIdx.x * 4; i < vec_elems; i += blockDim.x * 4) {
         int gidx = start + i;
         float4 pv = make_float4(0.f, 0.f, 0.f, 0.f);
         float4 dv = make_float4(0.f, 0.f, 0.f, 0.f);
-        // Require 16B alignment of global pointers for vectorized path
         if (gidx >= 0 && gidx + 3 < len && ((gidx & 3) == 0)) {
             const float4* __restrict__ p4 = reinterpret_cast<const float4*>(prices + gidx);
             const float4* __restrict__ d4 = reinterpret_cast<const float4*>(dist + gidx);
-            pv = *p4;
-            dv = *d4;
+            pv = *p4; dv = *d4;
         } else {
-            // Partial overlap: load scalars with bounds checks
             #pragma unroll
             for (int k = 0; k < 4; ++k) {
                 int idx = gidx + k;
-                float p = 0.f, d = 0.f;
-                if (idx >= 0 && idx < len) { p = prices[idx]; d = dist[idx]; }
-                ((float*)&pv)[k] = p;
-                ((float*)&dv)[k] = d;
+                float p = 0.f, w = 0.f;
+                if (idx >= 0 && idx < len) { p = prices[idx]; w = dist[idx]; }
+                ((float*)&pv)[k] = p; ((float*)&dv)[k] = w;
             }
         }
-        // sh_prices is 16B-aligned, and i is multiple of 4 floats here
         reinterpret_cast<float4*>(sh_prices + i)[0] = pv;
         reinterpret_cast<float4*>(sh_dist   + i)[0] = dv;
     }
-    // Tail scalars
     for (int t = vec_elems + threadIdx.x; t < tile_elems; t += blockDim.x) {
         int gidx = start + t;
-        float p = 0.f, d = 0.f;
-        if (gidx >= 0 && gidx < len) { p = prices[gidx]; d = dist[gidx]; }
+        float p = 0.f, w = 0.f;
+        if (gidx >= 0 && gidx < len) { p = prices[gidx]; w = dist[gidx]; }
         sh_prices[t] = p;
-        sh_dist[t] = d;
+        sh_dist[t]   = w;
     }
     __syncthreads();
 
-    const int warm = first_valid + 2 * period;
+    // Build in-place prefix sums: sh_dist := pref_w, sh_prices := pref_wv
+    if (threadIdx.x == 0) {
+        float a = 0.f, b = 0.f;
+        #pragma unroll 1
+        for (int i = 0; i < tile_elems; ++i) {
+            const float w = sh_dist[i];
+            const float p = sh_prices[i];
+            a += w;
+            b = __fmaf_rn(w, p, b);
+            sh_dist[i]   = a; // prefix_w
+            sh_prices[i] = b; // prefix_wv
+        }
+    }
+    __syncthreads();
 
-    // Each thread computes one output (optionally more via striding)
-    for (int off = threadIdx.x; off < block_outputs && (base + off) < len; off += blockDim.x) {
+    const int warm = first_valid + 2 * P;
+
+    for (int off = threadIdx.x; off < TILE && (base + off) < len; off += blockDim.x) {
         const int j = base + off;
-        if (j < warm) {
-            out_row[j] = CUDART_NAN_F;
-            continue;
-        }
-        // Local window in shared memory starts at (off)
-        const int sh_off = (off + (period - 1)) - (period - 1); // = off
-        float n0 = 0.f, n1 = 0.f, n2 = 0.f, n3 = 0.f;
-        float d0 = 0.f, d1 = 0.f, d2 = 0.f, d3 = 0.f;
-        int i2 = 0;
-        for (; i2 + 3 < period; i2 += 4) {
-            const float w0 = sh_dist[sh_off + i2 + 0];
-            const float w1 = sh_dist[sh_off + i2 + 1];
-            const float w2 = sh_dist[sh_off + i2 + 2];
-            const float w3 = sh_dist[sh_off + i2 + 3];
-            const float v0 = sh_prices[sh_off + i2 + 0];
-            const float v1 = sh_prices[sh_off + i2 + 1];
-            const float v2 = sh_prices[sh_off + i2 + 2];
-            const float v3 = sh_prices[sh_off + i2 + 3];
-            n0 = __fmaf_rn(w0, v0, n0);
-            n1 = __fmaf_rn(w1, v1, n1);
-            n2 = __fmaf_rn(w2, v2, n2);
-            n3 = __fmaf_rn(w3, v3, n3);
-            d0 += w0; d1 += w1; d2 += w2; d3 += w3;
-        }
-        for (; i2 < period; ++i2) {
-            const float w = sh_dist[sh_off + i2];
-            const float v = sh_prices[sh_off + i2];
-            n0 = __fmaf_rn(w, v, n0);
-            d0 += w;
-        }
-        const float num = (n0 + n1) + (n2 + n3);
-        const float den = (d0 + d1) + (d2 + d3);
-        out_row[j] = (den != 0.f) ? (num / den) : CUDART_NAN_F;
+        if (j < warm) { out_row[j] = CUDART_NAN_F; continue; }
+        const int pos_j    = j - start; // index in tile arrays
+        const int pos_prev = pos_j - P;
+        const float pw  = sh_dist[pos_j]  - ((pos_prev >= 0) ? sh_dist[pos_prev]  : 0.f);
+        const float pwv = sh_prices[pos_j]- ((pos_prev >= 0) ? sh_prices[pos_prev]: 0.f);
+        out_row[j] = (pw != 0.f) ? (pwv / pw) : CUDART_NAN_F;
     }
 }
 
@@ -285,52 +366,49 @@ void edcf_many_series_one_param_f32(const float* __restrict__ prices_tm,
         head = (head + 1) % period;
     }
 
+    // Rolling sums for O(1) apply
+    float w_sum = 0.f;
+    float wv_sum = 0.f;
+
     // Compute distances for t in [first_valid + period .. series_len)
     for (int t = first_valid + period; t < series_len; ++t) {
         const float xk = prices_tm[t * stride + series_idx];
+
+        // Remove outgoing slot from rolling sums
+        const float w_out = ring_d[head];
+        const float p_out = ring_p[head];
+        w_sum  -= w_out;
+        wv_sum -= w_out * p_out;
+
+        // Compute new distance for xk vs previous P-1 prices
         float sum_h = 0.f, sum_c = 0.f;
         int pos = (head + period - 1) % period;
         for (int lb = 1; lb < period; ++lb) {
-            float prev = ring_p[pos];
-            float d = xk - prev;
-            float q = d * d;
-            float qe = __fmaf_rn(d, d, -q);
-            float tsum = sum_h + q;
-            float z = (fabsf(sum_h) >= fabsf(q)) ? (sum_h - tsum) + q : (q - tsum) + sum_h;
+            const float prev = ring_p[pos];
+            const float d  = xk - prev;
+            const float q  = d * d;
+            const float qe = __fmaf_rn(d, d, -q);
+            const float tsum = sum_h + q;
+            const float z  = (fabsf(sum_h) >= fabsf(q)) ? (sum_h - tsum) + q : (q - tsum) + sum_h;
             sum_c += z + qe;
-            sum_h = tsum;
+            sum_h  = tsum;
             pos = (pos + period - 1) % period;
         }
+        const float w_new = sum_h + sum_c;
+
+        // Overwrite head with the new sample
         ring_p[head] = xk;
-        ring_d[head] = sum_h + sum_c;
+        ring_d[head] = w_new;
+
+        // Add new slot to rolling sums
+        w_sum  += w_new;
+        wv_sum = __fmaf_rn(w_new, xk, wv_sum);
+
         head = (head + 1) % period;
 
-        // Once we pass warm, emit output
+        // Emit once we pass warm
         if (t >= warm) {
-            // Accumulate over last `period` (aligned so ring head points to next slot)
-            float n0 = 0.f, n1 = 0.f, n2 = 0.f, n3 = 0.f;
-            float d0 = 0.f, d1 = 0.f, d2 = 0.f, d3 = 0.f;
-            int ppos = (head + period - 1) % period;
-            int i = 0;
-            for (; i + 3 < period; i += 4) {
-                float w0 = ring_d[ppos]; float v0 = ring_p[ppos]; ppos = (ppos + period - 1) % period;
-                float w1 = ring_d[ppos]; float v1 = ring_p[ppos]; ppos = (ppos + period - 1) % period;
-                float w2 = ring_d[ppos]; float v2 = ring_p[ppos]; ppos = (ppos + period - 1) % period;
-                float w3 = ring_d[ppos]; float v3 = ring_p[ppos]; ppos = (ppos + period - 1) % period;
-                n0 = __fmaf_rn(w0, v0, n0);
-                n1 = __fmaf_rn(w1, v1, n1);
-                n2 = __fmaf_rn(w2, v2, n2);
-                n3 = __fmaf_rn(w3, v3, n3);
-                d0 += w0; d1 += w1; d2 += w2; d3 += w3;
-            }
-            for (; i < period; ++i) {
-                float w = ring_d[ppos]; float v = ring_p[ppos]; ppos = (ppos + period - 1) % period;
-                n0 = __fmaf_rn(w, v, n0);
-                d0 += w;
-            }
-            float num = (n0 + n1) + (n2 + n3);
-            float den = (d0 + d1) + (d2 + d3);
-            out_tm[t * stride + series_idx] = (den != 0.f) ? (num / den) : CUDART_NAN_F;
+            out_tm[t * stride + series_idx] = (w_sum != 0.f) ? (wv_sum / w_sum) : CUDART_NAN_F;
         }
     }
 }
@@ -419,47 +497,33 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
     }
     __syncthreads();
 
+    // Build in-place prefix sums over dist and dist*price in the dist-space [d_start..d_end]
+    // Reuse sh_dist as prefix_w, and the head of sh_prices as prefix_wv (safe since p_idx = i + (d_start - p_start) = i + (period-1) > i).
+    if (threadIdx.x == 0) {
+        float a = 0.f, b = 0.f;
+        #pragma unroll 1
+        for (int i = 0; i < d_len; ++i) {
+            const int xp = i + (d_start - p_start);
+            const float w = sh_dist[i];
+            const float p = (xp >= 0 && xp < p_len) ? sh_prices[xp] : 0.f;
+            a += w;
+            b = __fmaf_rn(w, p, b);
+            sh_dist[i]   = a;     // prefix_w at dist-space index
+            sh_prices[i] = b;     // prefix_wv stored contiguously at head of sh_prices
+        }
+    }
+    __syncthreads();
+
     // Emit outputs for j in [t0 .. t0+TX-1]
     for (int off = threadIdx.x; off < TX && (tile_t0 + off) < rows; off += blockDim.x) {
-        int j = tile_t0 + off;
+        const int j = tile_t0 + off;
         float y = CUDART_NAN_F;
         if (j >= warm) {
-            float n0 = 0.f, n1 = 0.f, n2 = 0.f, n3 = 0.f;
-            float d0 = 0.f, d1 = 0.f, d2 = 0.f, d3 = 0.f;
-            // indexes relative to sh arrays
-            int sh_off = (j - (d_start)); // index into sh_dist where k=j
-            int sh_p_off0 = (j - p_start); // index into sh_prices where t=j
-            int i = 0;
-            for (; i + 3 < period; i += 4) {
-                float w0 = 0.f, v0 = 0.f;
-                float w1 = 0.f, v1 = 0.f;
-                float w2 = 0.f, v2 = 0.f;
-                float w3 = 0.f, v3 = 0.f;
-                int k0 = sh_off - (i + 0); int p0 = sh_p_off0 - (i + 0);
-                int k1 = sh_off - (i + 1); int p1 = sh_p_off0 - (i + 1);
-                int k2 = sh_off - (i + 2); int p2 = sh_p_off0 - (i + 2);
-                int k3 = sh_off - (i + 3); int p3 = sh_p_off0 - (i + 3);
-                if (k0 >= 0 && k0 < d_len) w0 = sh_dist[k0]; if (p0 >= 0 && p0 < p_len) v0 = sh_prices[p0];
-                if (k1 >= 0 && k1 < d_len) w1 = sh_dist[k1]; if (p1 >= 0 && p1 < p_len) v1 = sh_prices[p1];
-                if (k2 >= 0 && k2 < d_len) w2 = sh_dist[k2]; if (p2 >= 0 && p2 < p_len) v2 = sh_prices[p2];
-                if (k3 >= 0 && k3 < d_len) w3 = sh_dist[k3]; if (p3 >= 0 && p3 < p_len) v3 = sh_prices[p3];
-                n0 = __fmaf_rn(w0, v0, n0); d0 += w0;
-                n1 = __fmaf_rn(w1, v1, n1); d1 += w1;
-                n2 = __fmaf_rn(w2, v2, n2); d2 += w2;
-                n3 = __fmaf_rn(w3, v3, n3); d3 += w3;
-            }
-            for (; i < period; ++i) {
-                float w = 0.f, v = 0.f;
-                int k_rel = sh_off - i;
-                int p_rel = sh_p_off0 - i;
-                if (k_rel >= 0 && k_rel < d_len) w = sh_dist[k_rel];
-                if (p_rel >= 0 && p_rel < p_len) v = sh_prices[p_rel];
-                n0 = __fmaf_rn(w, v, n0);
-                d0 += w;
-            }
-            float num = (n0 + n1) + (n2 + n3);
-            float den = (d0 + d1) + (d2 + d3);
-            y = (den != 0.f) ? (num / den) : CUDART_NAN_F;
+            const int pos_j    = (j - d_start);      // index into prefix arrays
+            const int pos_prev = pos_j - period;
+            const float pw  = sh_dist[pos_j]   - ((pos_prev >= 0) ? sh_dist[pos_prev]   : 0.f);
+            const float pwv = sh_prices[pos_j] - ((pos_prev >= 0) ? sh_prices[pos_prev] : 0.f);
+            y = (pw != 0.f) ? (pwv / pw) : CUDART_NAN_F;
         }
         out_tm[j * stride + s] = y;
     }
