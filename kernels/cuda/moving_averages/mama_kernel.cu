@@ -18,8 +18,7 @@ namespace {
 constexpr double PI_D = 3.14159265358979323846264338327950288;
 constexpr double RAD2DEG_D = 180.0 / PI_D;
 
-static __device__ __forceinline__ double hilbert(double x0, double x2, double x4, double x6) {
-    // Match Rust FMA cascade: H0.mul_add(x0, H1.mul_add(x2, H2.mul_add(x4, H3 * x6)))
+static __device__ __forceinline__ double hilbert_fma(double x0, double x2, double x4, double x6) {
     const double H0 = 0.0962;
     const double H1 = 0.5769;
     const double H2 = -0.5769;
@@ -29,24 +28,35 @@ static __device__ __forceinline__ double hilbert(double x0, double x2, double x4
     return fma(H0, x0, t);
 }
 
+// A non-FMA variant to better match CPU scalar code when fused ops are not used
+static __device__ __forceinline__ double hilbert_nfma(double x0, double x2, double x4, double x6) {
+    const double H0 = 0.0962;
+    const double H1 = 0.5769;
+    const double H2 = -0.5769;
+    const double H3 = -0.0962;
+    return H0 * x0 + H1 * x2 + H2 * x4 + H3 * x6;
+}
+
 static __device__ __forceinline__ double atan_fast_f64(double z) {
-    // Match Rust atan_fast implementation exactly.
+    // Match Rust atan_fast exactly (FMA sequencing and no extra z* on the +t term).
     const double C0 = 0.2447;
     const double C1 = 0.0663;
-    const double PIO4 = PI_D * 0.25;
-    const double PIO2 = PI_D * 0.5;
+    const double PIO4 = PI_D * 0.25; // FRAC_PI_4
+    const double PIO2 = PI_D * 0.5;  // FRAC_PI_2
 
     double a = fabs(z);
     if (a <= 1.0) {
-        double t = C1 * a + C0;               // C0 + C1·|z|
-        double term = (a - 1.0) * t;          // (|z|-1)*(C0 + C1·|z|)
-        return fma(PIO4, z, z * term);        // z*π/4 + z*term
+        // PIO4.mul_add(z, z.mul_add(a - 1.0, t))
+        double t = fma(C1, a, C0);                 // t = C1*a + C0
+        double inner = fma(z, (a - 1.0), t);       // z*(a-1) + t
+        return fma(PIO4, z, inner);                // PIO4*z + inner
     } else {
+        // inv = 1/z; base = PIO4.mul_add(inv, inv.mul_add(|inv|-1.0, t))
         double inv = 1.0 / z;
         double ai = fabs(inv);
-        double t = C1 * ai + C0;              // C0 + C1·|1/z|
-        double term = (ai - 1.0) * t;         // (|1/z|-1)*t
-        double base = fma(PIO4, inv, inv * term);
+        double t = fma(C1, ai, C0);                // C1*|inv| + C0
+        double inner = fma(inv, (ai - 1.0), t);    // inv*(|inv|-1) + t
+        double base = fma(PIO4, inv, inner);       // PIO4*inv + inner
         return (z > 0.0) ? (PIO2 - base) : (-PIO2 - base);
     }
 }
@@ -143,7 +153,7 @@ void mama_batch_f32(const float* __restrict__ prices,
         double x6 = smooth_buf[(idx - 6) & MASK];
 
         double mesa_mult = 0.075 * prev_mesa_period + 0.54;
-        double dt_val = hilbert(x0, x2, x4, x6) * mesa_mult;
+        double dt_val = hilbert_fma(x0, x2, x4, x6) * mesa_mult;
         detrender_buf[idx] = dt_val;
 
         // Always take 3-bar lag from the ring; early samples read from the
@@ -155,14 +165,14 @@ void mama_batch_f32(const float* __restrict__ prices,
         double d2 = detrender_buf[(idx - 2) & MASK];
         double d4 = detrender_buf[(idx - 4) & MASK];
         double d6 = detrender_buf[(idx - 6) & MASK];
-        double q1_val = hilbert(d0, d2, d4, d6) * mesa_mult;
+        double q1_val = hilbert_fma(d0, d2, d4, d6) * mesa_mult;
         q1_buf[idx] = q1_val;
 
-        double j_i = hilbert(i1_buf[idx],
+        double j_i = hilbert_fma(i1_buf[idx],
                              i1_buf[(idx - 2) & MASK],
                              i1_buf[(idx - 4) & MASK],
                              i1_buf[(idx - 6) & MASK]) * mesa_mult;
-        double j_q = hilbert(q1_buf[idx],
+        double j_q = hilbert_fma(q1_buf[idx],
                              q1_buf[(idx - 2) & MASK],
                              q1_buf[(idx - 4) & MASK],
                              q1_buf[(idx - 6) & MASK]) * mesa_mult;
@@ -186,10 +196,13 @@ void mama_batch_f32(const float* __restrict__ prices,
             mesa_period = candidate;
         }
 
+        // Match Rust scalar ordering: min→max→max→min (no combined clamp)
         double upper = 1.5 * prev_mesa_period;
         double lower = 0.67 * prev_mesa_period;
-        mesa_period = clamp_double(mesa_period, lower, upper);
-        mesa_period = clamp_double(mesa_period, 6.0, 50.0);
+        if (mesa_period > upper) mesa_period = upper;
+        if (mesa_period < lower) mesa_period = lower;
+        if (mesa_period < 6.0) mesa_period = 6.0;
+        if (mesa_period > 50.0) mesa_period = 50.0;
         mesa_period = 0.2 * mesa_period + 0.8 * prev_mesa_period;
         prev_mesa_period = mesa_period;
 
@@ -313,8 +326,9 @@ void mama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         double x4 = smooth_buf[(idx - 4) & MASK];
         double x6 = smooth_buf[(idx - 6) & MASK];
 
+        // Use non-FMA path in many-series to improve parity with CPU scalar
         double mesa_mult = 0.075 * prev_mesa_period + 0.54;
-        double dt_val = hilbert(x0, x2, x4, x6) * mesa_mult;
+        double dt_val = hilbert_nfma(x0, x2, x4, x6) * mesa_mult;
         detrender_buf[idx] = dt_val;
 
         // Always take 3-bar lag from the ring; early samples read from the
@@ -326,14 +340,14 @@ void mama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         double d2 = detrender_buf[(idx - 2) & MASK];
         double d4 = detrender_buf[(idx - 4) & MASK];
         double d6 = detrender_buf[(idx - 6) & MASK];
-        double q1_val = hilbert(d0, d2, d4, d6) * mesa_mult;
+        double q1_val = hilbert_nfma(d0, d2, d4, d6) * mesa_mult;
         q1_buf[idx] = q1_val;
 
-        double j_i = hilbert(i1_buf[idx],
+        double j_i = hilbert_nfma(i1_buf[idx],
                              i1_buf[(idx - 2) & MASK],
                              i1_buf[(idx - 4) & MASK],
                              i1_buf[(idx - 6) & MASK]) * mesa_mult;
-        double j_q = hilbert(q1_buf[idx],
+        double j_q = hilbert_nfma(q1_buf[idx],
                              q1_buf[(idx - 2) & MASK],
                              q1_buf[(idx - 4) & MASK],
                              q1_buf[(idx - 6) & MASK]) * mesa_mult;
@@ -357,10 +371,13 @@ void mama_many_series_one_param_f32(const float* __restrict__ prices_tm,
             mesa_period = candidate;
         }
 
+        // Match Rust scalar ordering: min→max→max→min (no combined clamp)
         double upper = 1.5 * prev_mesa_period;
         double lower = 0.67 * prev_mesa_period;
-        mesa_period = clamp_double(mesa_period, lower, upper);
-        mesa_period = clamp_double(mesa_period, 6.0, 50.0);
+        if (mesa_period > upper) mesa_period = upper;
+        if (mesa_period < lower) mesa_period = lower;
+        if (mesa_period < 6.0) mesa_period = 6.0;
+        if (mesa_period > 50.0) mesa_period = 50.0;
         mesa_period = 0.2 * mesa_period + 0.8 * prev_mesa_period;
         prev_mesa_period = mesa_period;
 

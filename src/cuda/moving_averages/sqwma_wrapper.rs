@@ -13,7 +13,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
@@ -53,7 +53,21 @@ impl CudaSqwma {
         let context = Context::new(device).map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sqwma_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        let module = match Module::from_ptx(
+            ptx,
+            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)],
+        ) {
+            Ok(m) => m,
+            Err(_) => {
+                // Retry with simpler options for better driver/toolkit compatibility
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
 
@@ -241,7 +255,7 @@ impl CudaSqwma {
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + periods_bytes + out_bytes;
-        let headroom = 32 * 1024 * 1024; // 32MB safety margin
+        let headroom = 64 * 1024 * 1024; // ~64MB safety margin
 
         if !Self::will_fit(required, headroom) {
             return Err(CudaSqwmaError::InvalidInput(
@@ -290,7 +304,7 @@ impl CudaSqwma {
         let first_valid_bytes = prepared.first_valids.len() * std::mem::size_of::<i32>();
         let out_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
         let required = prices_bytes + first_valid_bytes + out_bytes;
-        let headroom = 32 * 1024 * 1024; // 32MB safety margin
+        let headroom = 64 * 1024 * 1024; // ~64MB safety margin
 
         if !Self::will_fit(required, headroom) {
             return Err(CudaSqwmaError::InvalidInput(

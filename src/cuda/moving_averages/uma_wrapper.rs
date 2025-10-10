@@ -1,11 +1,19 @@
 //! CUDA scaffolding for the Ultimate Moving Average (UMA).
 //!
-//! The GPU path mirrors the scalar UMA implementation by evaluating each
-//! parameter combination sequentially on device while keeping the series data
-//! resident. Sliding sums produce the max-length mean/std window and the
-//! adaptive power weights plus optional smoothing are performed entirely on the
-//! GPU. The wrapper exposes convenience helpers that align with the existing
-//! ALMA/DMA/VWMA APIs.
+//! API parity with ALMA/CWMA wrappers:
+//! - Policy enums for batch and many-series selection (kept simple; UMA kernels
+//!   are single-variant and do not currently tile).
+//! - PTX load with `DetermineTargetFromContext` and `OptLevel::O2` JIT options
+//!   with fallbacks for driver stability.
+//! - VRAM checks via `mem_get_info()` with ~64MB headroom.
+//! - NON_BLOCKING stream and optional one-time BENCH_DEBUG logging of selected
+//!   kernel policy.
+//!
+//! UMA math pattern is adaptive/recurrent (non dot-product). We do not try to
+//! precompute weights; instead the kernel mirrors the scalar path: fixed
+//! max-length mean/std window, dynamic length update, power-weights scan, and
+//! optional trailing WMA smoothing. Warmup/NaN semantics match the scalar
+//! implementation.
 
 #![cfg(feature = "cuda")]
 
@@ -14,14 +22,14 @@ use crate::indicators::moving_averages::uma::{expand_grid_uma, UmaBatchRange, Um
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaUmaError {
@@ -40,10 +48,48 @@ impl fmt::Display for CudaUmaError {
 
 impl std::error::Error for CudaUmaError {}
 
+// -------- Kernel selection policy (parity with ALMA/CWMA style) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaUmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for CudaUmaPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+
 pub struct CudaUma {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaUmaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaUma {
@@ -55,7 +101,19 @@ impl CudaUma {
         let context = Context::new(device).map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/uma_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        // Prefer context-targeted JIT with moderate opt level; fallback progressively
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaUmaError::Cuda(e.to_string()))?,
+            },
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
 
@@ -63,8 +121,23 @@ impl CudaUma {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaUmaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
     }
+
+    /// Create using an explicit policy.
+    pub fn new_with_policy(device_id: usize, policy: CudaUmaPolicy) -> Result<Self, CudaUmaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaUmaPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaUmaPolicy { &self.policy }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -75,18 +148,7 @@ impl CudaUma {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -97,6 +159,36 @@ impl CudaUma {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else {
             true
+        }
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] UMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaUma)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] UMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaUma)).debug_many_logged = true; }
+            }
         }
     }
 
@@ -449,8 +541,13 @@ impl CudaUma {
             .get_function("uma_batch_f32")
             .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
 
+        // Policy: single-thread per block kernel; allow setting block_x for consistency
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => 1u32,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+        };
         let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -485,6 +582,8 @@ impl CudaUma {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaUmaError::Cuda(e.to_string()))?
         }
+        unsafe { (*(self as *const _ as *mut CudaUma)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        self.maybe_log_batch_debug();
         Ok(())
     }
 
@@ -514,8 +613,12 @@ impl CudaUma {
             .get_function("uma_many_series_one_param_f32")
             .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
 
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 1u32,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
+        };
         let grid: GridSize = (num_series as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -550,6 +653,8 @@ impl CudaUma {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaUmaError::Cuda(e.to_string()))?
         }
+        unsafe { (*(self as *const _ as *mut CudaUma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        self.maybe_log_many_debug();
         Ok(())
     }
 

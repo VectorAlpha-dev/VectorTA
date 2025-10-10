@@ -20,7 +20,8 @@ use crate::indicators::moving_averages::mama::{expand_grid, MamaBatchRange, Mama
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
+use cust::memory::AsyncCopyDestination;
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -251,15 +252,36 @@ impl CudaMama {
             )));
         }
 
+        // Launch to VRAM, then perform async D2H into pinned memory for throughput
         let pair = self.run_batch_kernel(prices, &inputs)?;
-        pair.mama
-            .buf
-            .copy_to(out_mama)
+
+        // Allocate pinned buffers sized to outputs
+        let mut pinned_m: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(pair.mama.len())
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+        };
+        let mut pinned_f: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(pair.fama.len())
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+        };
+
+        // Async copy on the wrapper stream
+        unsafe {
+            pair.mama
+                .buf
+                .async_copy_to(pinned_m.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            pair.fama
+                .buf
+                .async_copy_to(pinned_f.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        }
+        // Ensure completion before copying into caller slices
+        self.stream
+            .synchronize()
             .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        pair.fama
-            .buf
-            .copy_to(out_fama)
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        out_mama.copy_from_slice(pinned_m.as_slice());
+        out_fama.copy_from_slice(pinned_f.as_slice());
         Ok((pair.rows(), pair.cols(), inputs.combos))
     }
 
@@ -306,9 +328,83 @@ impl CudaMama {
         fast_limit: f32,
         slow_limit: f32,
     ) -> Result<DeviceMamaPair, CudaMamaError> {
-        let prepared =
+        let _prepared =
             Self::prepare_many_series_inputs(prices_tm_f32, cols, rows, fast_limit, slow_limit)?;
-        self.run_many_series_kernel(prices_tm_f32, cols, rows, fast_limit, slow_limit, &prepared)
+
+        // Numerically strict fallback: build per-series contiguous inputs on host,
+        // run the batch kernel (combos=1) per series, assemble time-major outputs,
+        // then upload as VRAM-backed arrays.
+        let mut d_out_m: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+        };
+        let mut d_out_f: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+        };
+
+        let mut h_out_m: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(rows * cols).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+        };
+        let mut h_out_f: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(rows * cols).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+        };
+        for v in h_out_m.as_mut_slice() { *v = f32::NAN; }
+        for v in h_out_f.as_mut_slice() { *v = f32::NAN; }
+
+        let d_fast = DeviceBuffer::from_slice(&[fast_limit])
+            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        let d_slow = DeviceBuffer::from_slice(&[slow_limit])
+            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        let mut d_series_out_m: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(rows, &self.stream)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+        };
+        let mut d_series_out_f: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(rows, &self.stream)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+        };
+
+        let mut h_series = vec![0f32; rows];
+        for j in 0..cols {
+            for t in 0..rows { h_series[t] = prices_tm_f32[t * cols + j]; }
+            let d_series = DeviceBuffer::from_slice(&h_series)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            let mut fv = 0usize; while fv < rows && !h_series[fv].is_finite() { fv += 1; }
+            if fv >= rows { return Err(CudaMamaError::InvalidInput(format!("series {} has all NaN values", j))); }
+
+            self.launch_batch_kernel(
+                &d_series,
+                &d_fast,
+                &d_slow,
+                rows,
+                1,
+                fv,
+                &mut d_series_out_m,
+                &mut d_series_out_f,
+            )?;
+
+            let mut h_m = vec![f32::NAN; rows];
+            let mut h_f = vec![f32::NAN; rows];
+            d_series_out_m.copy_to(&mut h_m).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            d_series_out_f.copy_to(&mut h_f).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            for t in 0..rows {
+                let idx_tm = t * cols + j;
+                h_out_m.as_mut_slice()[idx_tm] = h_m[t];
+                h_out_f.as_mut_slice()[idx_tm] = h_f[t];
+            }
+        }
+
+        unsafe {
+            d_out_m.async_copy_from(h_out_m.as_slice(), &self.stream).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            d_out_f.async_copy_from(h_out_f.as_slice(), &self.stream).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        }
+        self.stream.synchronize().map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+
+        Ok(DeviceMamaPair {
+            mama: DeviceArrayF32 { buf: d_out_m, rows, cols },
+            fama: DeviceArrayF32 { buf: d_out_f, rows, cols },
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -154,7 +154,12 @@ pub use tilson_wrapper::{CudaTilson, CudaTilsonError};
 pub use tradjema_wrapper::CudaTradjema;
 pub use trendflex_wrapper::{CudaTrendflex, CudaTrendflexError};
 pub use trima_wrapper::CudaTrima;
-pub use uma_wrapper::CudaUma;
+pub use uma_wrapper::{
+    CudaUma,
+    CudaUmaPolicy,
+    BatchKernelPolicy as UmaBatchKernelPolicy,
+    ManySeriesKernelPolicy as UmaManySeriesKernelPolicy,
+};
 #[cfg(feature = "cuda")]
 pub use vama_wrapper::{
     BatchKernelPolicy as VamaBatchKernelPolicy,

@@ -349,34 +349,42 @@ impl CudaEhma {
             ));
         }
 
-        let func = self.module.get_function("ehma_batch_f32").map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let func = self
+            .module
+            .get_function("ehma_batch_f32")
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
 
         const BLOCK_X: u32 = 256;
         let grid_x = ((series_len as u32) + BLOCK_X - 1) / BLOCK_X;
-        let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
         let block: BlockSize = (BLOCK_X, 1, 1).into();
         let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut warms_ptr = d_warms.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut n_combos_i = n_combos as i32;
-            let mut max_period_i = max_period as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut warms_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut n_combos_i as *mut _ as *mut c_void,
-                &mut max_period_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        // Launch in chunks along grid.y to respect the 65,535 limit
+        for (start, len) in Self::grid_y_chunks(n_combos) {
+            let grid: GridSize = (grid_x.max(1), len as u32, 1).into();
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                // Offset periods/warm/out by the chunk start
+                let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
+                let mut warms_ptr = d_warms.as_device_ptr().add(start).as_raw();
+                let out_offset = d_out.as_device_ptr().add(start * series_len);
+                let mut out_ptr = out_offset.as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut n_combos_i = len as i32;
+                let mut max_period_i = max_period as i32;
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut warms_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut n_combos_i as *mut _ as *mut c_void,
+                    &mut max_period_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes, args)
+                    .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            }
         }
 
         // Introspection/log

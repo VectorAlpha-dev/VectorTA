@@ -13,7 +13,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
@@ -53,7 +53,22 @@ impl CudaVwma {
         let context = Context::new(device).map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vwma_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        // Prefer context-derived target and O2 JIT, with graceful fallback
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
 
@@ -100,8 +115,8 @@ impl CudaVwma {
 
     pub fn vwma_batch_device(
         &self,
-        d_pv_prefix: &DeviceBuffer<f32>,
-        d_vol_prefix: &DeviceBuffer<f32>,
+        d_pv_prefix: &DeviceBuffer<f64>,
+        d_vol_prefix: &DeviceBuffer<f64>,
         d_periods: &DeviceBuffer<i32>,
         series_len: usize,
         n_combos: usize,
@@ -137,8 +152,8 @@ impl CudaVwma {
 
     pub fn vwma_many_series_one_param_device(
         &self,
-        d_pv_prefix_tm: &DeviceBuffer<f32>,
-        d_vol_prefix_tm: &DeviceBuffer<f32>,
+        d_pv_prefix_tm: &DeviceBuffer<f64>,
+        d_vol_prefix_tm: &DeviceBuffer<f64>,
         period: usize,
         num_series: usize,
         series_len: usize,
@@ -227,8 +242,8 @@ impl CudaVwma {
 
         let (pv_prefix, vol_prefix) = compute_prefix_sums(prices, volumes, first_valid, series_len);
 
-        let pv_bytes = pv_prefix.len() * std::mem::size_of::<f32>();
-        let vol_bytes = vol_prefix.len() * std::mem::size_of::<f32>();
+        let pv_bytes = pv_prefix.len() * std::mem::size_of::<f64>();
+        let vol_bytes = vol_prefix.len() * std::mem::size_of::<f64>();
         let period_bytes = n_combos * std::mem::size_of::<i32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
         let required = pv_bytes + vol_bytes + period_bytes + out_bytes;
@@ -272,8 +287,8 @@ impl CudaVwma {
 
     fn launch_batch_kernel(
         &self,
-        d_pv_prefix: &DeviceBuffer<f32>,
-        d_vol_prefix: &DeviceBuffer<f32>,
+        d_pv_prefix: &DeviceBuffer<f64>,
+        d_vol_prefix: &DeviceBuffer<f64>,
         d_periods: &DeviceBuffer<i32>,
         series_len: usize,
         n_combos: usize,
@@ -296,39 +311,55 @@ impl CudaVwma {
             .get_function("vwma_batch_f32")
             .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
 
+        const MAX_GRID_Y: usize = 65_535;
         let block_x: u32 = 256;
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x, n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        unsafe {
-            let mut pv_ptr = d_pv_prefix.as_device_ptr().as_raw();
-            let mut vol_ptr = d_vol_prefix.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut combos_i = n_combos as i32;
-            let mut first_valid_i = first_valid as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut pv_ptr as *mut _ as *mut c_void,
-                &mut vol_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut combos_i as *mut _ as *mut c_void,
-                &mut first_valid_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?
+        let total_out_elems = (n_combos as u64) * (series_len as u64);
+        let out_base = d_out.as_device_ptr().as_raw();
+        let periods_base = d_periods.as_device_ptr().as_raw();
+        let pv_base = d_pv_prefix.as_device_ptr().as_raw();
+        let vol_base = d_vol_prefix.as_device_ptr().as_raw();
+
+        let mut start = 0usize;
+        while start < n_combos {
+            let chunk = (n_combos - start).min(MAX_GRID_Y);
+            let grid: GridSize = (grid_x, chunk as u32, 1).into();
+
+            unsafe {
+                let mut pv_ptr = pv_base;
+                let mut vol_ptr = vol_base;
+                let mut periods_ptr = periods_base
+                    .saturating_add((start as u64) * (std::mem::size_of::<i32>() as u64));
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = chunk as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut out_ptr = out_base.saturating_add(
+                    (start as u64) * (series_len as u64) * (std::mem::size_of::<f32>() as u64),
+                );
+                let args: &mut [*mut c_void] = &mut [
+                    &mut pv_ptr as *mut _ as *mut c_void,
+                    &mut vol_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+            }
+            start += chunk;
         }
         Ok(())
     }
 
     fn launch_many_series_kernel(
         &self,
-        d_pv_prefix_tm: &DeviceBuffer<f32>,
-        d_vol_prefix_tm: &DeviceBuffer<f32>,
+        d_pv_prefix_tm: &DeviceBuffer<f64>,
+        d_vol_prefix_tm: &DeviceBuffer<f64>,
         period: usize,
         num_series: usize,
         series_len: usize,
@@ -381,8 +412,8 @@ impl CudaVwma {
         let series_len = rows;
         let num_series = cols;
 
-        let pv_bytes = inputs.pv_prefix_tm.len() * std::mem::size_of::<f32>();
-        let vol_bytes = inputs.vol_prefix_tm.len() * std::mem::size_of::<f32>();
+        let pv_bytes = inputs.pv_prefix_tm.len() * std::mem::size_of::<f64>();
+        let vol_bytes = inputs.vol_prefix_tm.len() * std::mem::size_of::<f64>();
         let first_valid_bytes = inputs.first_valids.len() * std::mem::size_of::<i32>();
         let out_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
         let required = pv_bytes + vol_bytes + first_valid_bytes + out_bytes;
@@ -728,8 +759,8 @@ struct BatchInputs {
 
 struct ManySeriesPrepared {
     first_valids: Vec<i32>,
-    pv_prefix_tm: Vec<f32>,
-    vol_prefix_tm: Vec<f32>,
+    pv_prefix_tm: Vec<f64>,
+    vol_prefix_tm: Vec<f64>,
 }
 
 fn compute_prefix_sums(
@@ -737,18 +768,19 @@ fn compute_prefix_sums(
     volumes: &[f32],
     first_valid: usize,
     series_len: usize,
-) -> (Vec<f32>, Vec<f32>) {
-    let mut pv_prefix = vec![0f32; series_len];
-    let mut vol_prefix = vec![0f32; series_len];
-    let mut acc_pv = 0f32;
-    let mut acc_vol = 0f32;
+) -> (Vec<f64>, Vec<f64>) {
+    let mut pv_prefix = vec![0f64; series_len];
+    let mut vol_prefix = vec![0f64; series_len];
+    // Accumulate in f64 for better numerical agreement with CPU f64 path
+    let mut acc_pv = 0f64;
+    let mut acc_vol = 0f64;
 
     for i in first_valid..series_len {
-        let p = prices[i];
-        let v = volumes[i];
+        let p = prices[i] as f64;
+        let v = volumes[i] as f64;
         if p.is_nan() || v.is_nan() || acc_pv.is_nan() || acc_vol.is_nan() {
-            acc_pv = f32::NAN;
-            acc_vol = f32::NAN;
+            acc_pv = f64::NAN;
+            acc_vol = f64::NAN;
         } else {
             acc_pv += p * v;
             acc_vol += v;
@@ -766,22 +798,23 @@ fn compute_prefix_sums_time_major(
     cols: usize,
     rows: usize,
     first_valids: &[i32],
-) -> (Vec<f32>, Vec<f32>) {
-    let mut pv_prefix = vec![0f32; prices_tm.len()];
-    let mut vol_prefix = vec![0f32; volumes_tm.len()];
+) -> (Vec<f64>, Vec<f64>) {
+    let mut pv_prefix = vec![0f64; prices_tm.len()];
+    let mut vol_prefix = vec![0f64; volumes_tm.len()];
 
     for series_idx in 0..cols {
         let fv = first_valids[series_idx].max(0) as usize;
-        let mut acc_pv = 0f32;
-        let mut acc_vol = 0f32;
+        // Accumulate in f64 for better agreement
+        let mut acc_pv = 0f64;
+        let mut acc_vol = 0f64;
         for row in 0..rows {
             let idx = row * cols + series_idx;
             if row >= fv {
-                let p = prices_tm[idx];
-                let v = volumes_tm[idx];
+                let p = prices_tm[idx] as f64;
+                let v = volumes_tm[idx] as f64;
                 if p.is_nan() || v.is_nan() || acc_pv.is_nan() || acc_vol.is_nan() {
-                    acc_pv = f32::NAN;
-                    acc_vol = f32::NAN;
+                    acc_pv = f64::NAN;
+                    acc_vol = f64::NAN;
                 } else {
                     acc_pv += p * v;
                     acc_vol += v;
