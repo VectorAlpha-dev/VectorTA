@@ -105,6 +105,90 @@ void kama_batch_f32(const float* __restrict__ prices,
     }
 }
 
+// Prefix-optimized batch kernel: uses host-precomputed prefix of |p[t]-p[t-1]| to
+// seed the initial sum_roc1 in O(1) per combo, matching scalar behavior.
+//
+// prefix_roc1 must be a length-(series_len+1) array where:
+//   prefix_roc1[0] = 0
+//   prefix_roc1[t] = sum_{k=1..t} |p[k]-p[k-1]| with NaN-insensitive accumulation (host)
+extern "C" __global__
+void kama_batch_prefix_f32(const float* __restrict__ prices,
+                           const float* __restrict__ prefix_roc1,
+                           const int* __restrict__ periods,
+                           int series_len,
+                           int n_combos,
+                           int first_valid,
+                           float* __restrict__ out) {
+    const int combo = blockIdx.x;
+    if (combo >= n_combos) {
+        return;
+    }
+
+    const int period = periods[combo];
+    const int base = combo * series_len;
+
+    const float nan_f = NAN;
+    for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
+        out[base + idx] = nan_f;
+    }
+    __syncthreads();
+
+    if (threadIdx.x != 0) {
+        return;
+    }
+
+    if (period <= 0 || first_valid < 0 || first_valid >= series_len) {
+        return;
+    }
+
+    const int valid = series_len - first_valid;
+    if (period >= valid) {
+        return;
+    }
+
+    const int lookback = period - 1;
+    const int initial_idx = first_valid + lookback + 1;
+    if (initial_idx >= series_len) {
+        return;
+    }
+
+    // Seed Σ|Δp| via prefix sums (host-precomputed)
+    double sum_roc1 = static_cast<double>(
+        prefix_roc1[first_valid + period] - prefix_roc1[first_valid]
+    );
+
+    // Seed first output
+    double prev_kama = static_cast<double>(prices[initial_idx]);
+    out[base + initial_idx] = static_cast<float>(prev_kama);
+
+    int trailing_idx = first_valid;
+    double trailing_value = static_cast<double>(prices[trailing_idx]);
+
+    const double const_max = kama_const_max();
+    const double const_diff = kama_const_diff();
+
+    for (int i = initial_idx + 1; i < series_len; ++i) {
+        const double price = static_cast<double>(prices[i]);
+        const double prev_price = static_cast<double>(prices[i - 1]);
+        const double next_trailing = static_cast<double>(prices[trailing_idx + 1]);
+
+        sum_roc1 -= fabs(next_trailing - trailing_value);
+        sum_roc1 += fabs(price - prev_price);
+
+        trailing_value = next_trailing;
+        trailing_idx += 1;
+
+        const double anchor = static_cast<double>(prices[trailing_idx]);
+        const double direction = fabs(price - anchor);
+        const double er = (sum_roc1 == 0.0) ? 0.0 : (direction / sum_roc1);
+        double sc = er * const_diff + const_max;
+        sc *= sc;
+
+        prev_kama += (price - prev_kama) * sc;
+        out[base + i] = static_cast<float>(prev_kama);
+    }
+}
+
 extern "C" __global__
 void kama_many_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,
