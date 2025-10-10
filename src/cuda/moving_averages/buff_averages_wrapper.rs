@@ -12,11 +12,13 @@ use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::buff_averages::BuffAveragesBatchRange;
 use cust::context::Context;
 use cust::device::Device;
+use cust::context::CacheConfig;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{DeviceBuffer, mem_get_info};
+use cust::memory::{DeviceBuffer, LockedBuffer, mem_get_info, AsyncCopyDestination, CopyDestination};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
@@ -248,12 +250,15 @@ impl CudaBuffAverages {
             Context::new(device).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/buff_averages_kernel.ptx"));
-        // Align with ALMA JIT policy: prefer DetermineTargetFromContext + O2, then progressively relax
-        let jit_opts = &[
+        // Align with ALMA JIT policy: prefer DetermineTargetFromContext + O2, allow optional MaxRegisters via env
+        let mut jit_vec: Vec<ModuleJitOption> = vec![
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
+        if let Ok(rs) = std::env::var("BUFF_MAXREG") {
+            if let Ok(v) = rs.parse::<u32>() { jit_vec.push(ModuleJitOption::MaxRegisters(v)); }
+        }
+        let module = match Module::from_ptx(ptx, &jit_vec) {
             Ok(m) => m,
             Err(_) => {
                 if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
@@ -298,6 +303,97 @@ impl CudaBuffAverages {
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaBuffAveragesError> {
         self.stream.synchronize().map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))
+    }
+
+    /// Best-effort: prefer L1 cache for global-memory-heavy kernels.
+    #[inline]
+    fn prefer_l1(&self, func: &mut cust::function::Function) {
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+    }
+
+    /// Best-effort: set an L2 persisting cache window on the current stream.
+    /// Window covers [base, base+bytes). Falls back silently if unsupported.
+    unsafe fn set_l2_persist_window(&self, base: u64, bytes: usize, hit_ratio: f32) {
+        if bytes == 0 { return; }
+
+        // Clamp to device max APW size
+        let device = Device::get_device(self.device_id).ok();
+        let mut max_win: i32 = 0;
+        if let Some(dev) = device {
+            let _ = cu::cuDeviceGetAttribute(
+                &mut max_win as *mut _,
+                cu::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+                dev.as_raw()
+            );
+        }
+        let win_bytes = if max_win > 0 { bytes.min(max_win as usize) } else { bytes };
+
+        // Reserve some L2 set-aside for persisting
+        let mut max_persist: i32 = 0;
+        if let Some(dev) = device {
+            let _ = cu::cuDeviceGetAttribute(
+                &mut max_persist as *mut _,
+                cu::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_PERSISTING_L2_CACHE_SIZE,
+                dev.as_raw()
+            );
+        }
+        if max_persist > 0 {
+            let want = (win_bytes as u64)
+                .min(std::env::var("BUFF_APW_SETASIDE_BYTES").ok()
+                    .and_then(|v| v.parse::<u64>().ok()).unwrap_or(win_bytes as u64));
+            let _ = cu::cuCtxSetLimit(
+                cu::CUlimit_enum::CU_LIMIT_PERSISTING_L2_CACHE_SIZE,
+                want.min(max_persist as u64) as usize
+            );
+        }
+
+        // Build the APW on the current stream
+        let mut val: cu::CUstreamAttrValue = std::mem::zeroed();
+        let apw = cu::CUaccessPolicyWindow_v1 {
+            base_ptr: base as *mut std::ffi::c_void,
+            num_bytes: win_bytes,
+            hitRatio: std::env::var("BUFF_APW_RATIO").ok()
+                .and_then(|v| v.parse::<f32>().ok()).unwrap_or(hit_ratio),
+            hitProp: cu::CUaccessProperty_enum::CU_ACCESS_PROPERTY_PERSISTING,
+            missProp: cu::CUaccessProperty_enum::CU_ACCESS_PROPERTY_NORMAL,
+        };
+        // SAFETY: set only the APW field of the union
+        *(&mut val.accessPolicyWindow) = apw;
+
+        let _ = cu::cuStreamSetAttribute(
+            self.stream.as_inner(),
+            cu::CUstreamAttrID_enum::CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW,
+            &val
+        );
+    }
+
+    /// Convenience: set a window that covers two buffers; if span exceeds device
+    /// max, fall back to the larger of the two.
+    #[inline]
+    unsafe fn set_l2_window_for_pair(&self, a_ptr: u64, a_bytes: usize, b_ptr: u64, b_bytes: usize) {
+        if std::env::var("BUFF_APW").ok().as_deref() == Some("0") { return; }
+        let start = a_ptr.min(b_ptr);
+        let end   = (a_ptr + a_bytes as u64).max(b_ptr + b_bytes as u64);
+        let span  = (end - start) as usize;
+
+        let device = Device::get_device(self.device_id).ok();
+        let mut max_win: i32 = 0;
+        if let Some(dev) = device {
+            let _ = cu::cuDeviceGetAttribute(
+                &mut max_win as *mut _,
+                cu::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+                dev.as_raw()
+            );
+        }
+        if max_win > 0 && span > max_win as usize {
+            if a_bytes >= b_bytes {
+                self.set_l2_persist_window(a_ptr, a_bytes, 0.70);
+            } else {
+                self.set_l2_persist_window(b_ptr, b_bytes, 0.70);
+            }
+        } else {
+            self.set_l2_persist_window(start, span, 0.70);
+        }
     }
 
     #[inline]
@@ -475,10 +571,20 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
             BatchKernelPolicy::Tiled { tile } => { use_tiled = true; tile_choice = Some(tile); }
         }
 
+        // Try to persist the prefix arrays in L2 during this run (best-effort).
+        unsafe {
+            let pv_ptr = d_prefix_pv.as_device_ptr().as_raw();
+            let vv_ptr = d_prefix_vv.as_device_ptr().as_raw();
+            let pv_bytes = (len + 1) * std::mem::size_of::<f32>();
+            let vv_bytes = (len + 1) * std::mem::size_of::<f32>();
+            self.set_l2_window_for_pair(pv_ptr, pv_bytes, vv_ptr, vv_bytes);
+        }
+
         if use_tiled {
             block_x = tile_choice.unwrap_or_else(|| self.pick_tiled_block(len));
             let func_name = match block_x { 128 => "buff_averages_batch_prefix_tiled_f32_tile128", _ => "buff_averages_batch_prefix_tiled_f32_tile256" };
-            let func = self.module.get_function(func_name).or_else(|_| self.module.get_function("buff_averages_batch_prefix_f32")).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+            let mut func = self.module.get_function(func_name).or_else(|_| self.module.get_function("buff_averages_batch_prefix_f32")).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+            self.prefer_l1(&mut func);
 
             // Introspection
             unsafe { (*(self as *const _ as *mut CudaBuffAverages)).last_batch = Some(BatchKernelSelected::Tiled1x { tile: block_x }); }
@@ -517,7 +623,8 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
                 start += chunk;
             }
         } else {
-            let func = self.module.get_function("buff_averages_batch_prefix_f32").map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+            let mut func = self.module.get_function("buff_averages_batch_prefix_f32").map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+            self.prefer_l1(&mut func);
             // Introspection
             unsafe { (*(self as *const _ as *mut CudaBuffAverages)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
             self.maybe_log_batch_debug();
@@ -631,18 +738,56 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
             return Err(CudaBuffAveragesError::InvalidInput("periods must be positive".into()));
         }
 
-        // Prefer 2D tiles when available
+        // Best-effort: persist the time-major prefix matrices in L2 for this run.
+        unsafe {
+            let pv_ptr = d_pv_prefix_tm.as_device_ptr().as_raw();
+            let vv_ptr = d_vv_prefix_tm.as_device_ptr().as_raw();
+            let bytes = (series_len + 1) * num_series * std::mem::size_of::<f32>();
+            self.set_l2_window_for_pair(pv_ptr, bytes, vv_ptr, bytes);
+        }
+
+        // Prefer 2D tiles when available; try swizzled (sx*) first, then fall back to tx*
         let try_2d = |tx: u32, ty: u32| -> Option<()> {
-            let fname = match (tx, ty) {
-                (128, 4) => "buff_averages_many_series_one_param_tiled2d_f32_tx128_ty4",
-                (128, 2) => "buff_averages_many_series_one_param_tiled2d_f32_tx128_ty2",
+            let fname_candidates: &[&str] = match (tx, ty) {
+                (128, 4) => &[
+                    // swizzled first (if present), then legacy tx*
+                    "buff_averages_many_series_one_param_tiled2d_f32_sx128_ty4", // may not exist
+                    "buff_averages_many_series_one_param_tiled2d_f32_tx128_ty4",
+                ],
+                (128, 2) => &[
+                    "buff_averages_many_series_one_param_tiled2d_f32_sx128_ty2",
+                    "buff_averages_many_series_one_param_tiled2d_f32_tx128_ty2",
+                ],
+                (128, 1) => &[
+                    "buff_averages_many_series_one_param_tiled2d_f32_sx128_ty1",
+                ],
                 _ => return None,
             };
-            let func = match self.module.get_function(fname) { Ok(f) => f, Err(_) => return None };
-            let grid_x = ((series_len as u32) + tx - 1) / tx;
-            let grid_y = ((num_series as u32) + ty - 1) / ty;
+            let (mut func, picked): (cust::function::Function, &str) = {
+                let mut sel: Option<(cust::function::Function, &str)> = None;
+                for &name in fname_candidates {
+                    if let Ok(f) = self.module.get_function(name) {
+                        sel = Some((f, name)); break;
+                    }
+                }
+                sel?
+            };
+
+            // Compute grid depending on kernel mapping (swizzled vs legacy)
+            let (grid_x, grid_y) = if picked.contains("_sx") {
+                // swizzled: block.x = 128 maps series; block.y = ty maps time rows
+                let gx = ((series_len as u32) + ty - 1) / ty;
+                let gy = ((num_series as u32) + 128 - 1) / 128;
+                (gx, gy)
+            } else {
+                // legacy tx*: block.x = tx maps time; block.y = ty maps series
+                let gx = ((series_len as u32) + tx - 1) / tx;
+                let gy = ((num_series as u32) + ty - 1) / ty;
+                (gx, gy)
+            };
             let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
-            let block: BlockSize = (tx, ty, 1).into();
+            let block: BlockSize = (128, ty, 1).into();
+            self.prefer_l1(&mut func);
             unsafe {
                 let mut pv_ptr = d_pv_prefix_tm.as_device_ptr().as_raw();
                 let mut vv_ptr = d_vv_prefix_tm.as_device_ptr().as_raw();
@@ -691,9 +836,10 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         }
 
         // Fallback 1D
-        let func = self.module
+        let mut func = self.module
             .get_function("buff_averages_many_series_one_param_f32")
             .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        self.prefer_l1(&mut func);
         let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), num_series as u32, 1).into();
@@ -759,8 +905,8 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         let d_slow = DeviceBuffer::from_slice(&slow_periods).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         let elems = combos.len() * len;
-        let mut d_fast_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_slow_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_fast_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_slow_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
             &d_prefix_pv,
@@ -863,18 +1009,27 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
 
         // Outputs
         let elems = combos.len() * len;
-        let mut d_fast_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_slow_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_fast_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_slow_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         // Launch plain 1D expansion kernel
-        let func = self.module
+        let mut func = self.module
             .get_function("buff_averages_batch_prefix_exp2_f32")
             .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        self.prefer_l1(&mut func);
         let block_x: u32 = 256;
         let grid_x = ((len as u32) + block_x - 1) / block_x;
         let block: BlockSize = (block_x, 1, 1).into();
         const MAX_GRID_Y: usize = 65_535;
         let mut start = 0usize;
+        // Best-effort: persist PV/VV hi prefixes in L2 for this run
+        unsafe {
+            let pv_ptr = d_pv_hi.as_device_ptr().as_raw();
+            let vv_ptr = d_vv_hi.as_device_ptr().as_raw();
+            let bytes = (len + 1) * std::mem::size_of::<f32>();
+            self.set_l2_window_for_pair(pv_ptr, bytes, vv_ptr, bytes);
+        }
+
         while start < combos.len() {
             let chunk = (combos.len() - start).min(MAX_GRID_Y);
             let grid: GridSize = (grid_x.max(1), chunk as u32, 1).into();
@@ -940,8 +1095,8 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         let d_pv = DeviceBuffer::from_slice(&prep.pv_prefix_tm).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         let d_vv = DeviceBuffer::from_slice(&prep.vv_prefix_tm).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         let d_fv = DeviceBuffer::from_slice(&prep.first_valids).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_fast_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_slow_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_fast_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_slow_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
             &d_pv,
@@ -988,16 +1143,24 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         let d_vv_hi = DeviceBuffer::from_slice(&vv_hi_tm).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         let d_vv_lo = DeviceBuffer::from_slice(&vv_lo_tm).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         let d_fv = DeviceBuffer::from_slice(&prep.first_valids).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_fast_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_slow_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_fast_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_slow_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
-        let func = self.module
+        let mut func = self.module
             .get_function("buff_averages_many_series_one_param_exp2_f32")
             .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        self.prefer_l1(&mut func);
         let block_x: u32 = 128;
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        // Best-effort: persist prefixes in L2 (use hi arrays as representative windows)
+        unsafe {
+            let pv_ptr = d_pv_hi.as_device_ptr().as_raw();
+            let vv_ptr = d_vv_hi.as_device_ptr().as_raw();
+            let bytes = (rows + 1) * cols * std::mem::size_of::<f32>();
+            self.set_l2_window_for_pair(pv_ptr, bytes, vv_ptr, bytes);
+        }
         unsafe {
             let mut pv_hi_ptr = d_pv_hi.as_device_ptr().as_raw();
             let mut pv_lo_ptr = d_pv_lo.as_device_ptr().as_raw();
@@ -1090,6 +1253,41 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
             .buf
             .copy_to(slow_out)
             .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+
+        Ok((combos.len(), len, combos))
+    }
+
+    /// Same as `buff_averages_batch_into_host_f32`, but writes into page-locked
+    /// host buffers so we avoid the extra staging copy and can use async D2H.
+    ///
+    /// SAFETY: The caller must ensure the `LockedBuffer` lifetime covers the copy.
+    pub fn buff_averages_batch_into_pinned_host_f32(
+        &self,
+        price_f32: &[f32],
+        volume_f32: &[f32],
+        sweep: &BuffAveragesBatchRange,
+        fast_out_pinned: &mut LockedBuffer<f32>,
+        slow_out_pinned: &mut LockedBuffer<f32>,
+    ) -> Result<(usize, usize, Vec<(usize, usize)>), CudaBuffAveragesError> {
+        let (combos, first_valid, len) = Self::prepare_batch_inputs(price_f32, volume_f32, sweep)?;
+        let expected = combos.len() * len;
+        if fast_out_pinned.len() != expected || slow_out_pinned.len() != expected {
+            return Err(CudaBuffAveragesError::InvalidInput(format!(
+                "output slice mismatch (expected {}, fast={}, slow={})",
+                expected, fast_out_pinned.len(), slow_out_pinned.len()
+            )));
+        }
+
+        let (fast_dev, slow_dev) = self.run_batch_kernel(price_f32, volume_f32, &combos, first_valid)?;
+
+        // Asynchronous D2H into pinned memory, then sync once
+        unsafe {
+            fast_dev.buf.async_copy_to(fast_out_pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+            slow_dev.buf.async_copy_to(slow_out_pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        }
+        self.stream.synchronize().map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         Ok((combos.len(), len, combos))
     }
