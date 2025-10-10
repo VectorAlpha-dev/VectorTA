@@ -1,8 +1,10 @@
 //! CUDA scaffolding for VPWMA (Variable Power Weighted Moving Average).
 //!
-//! Mirrors the ALMA/ZLEMA GPU integration pattern: parameter sweeps are expanded
-//! on the host, weights are precomputed in FP32, and the kernel evaluates each
-//! row independently while sharing the flattened weight buffer.
+//! Mirrors the ALMA/CWMA GPU integration pattern: parameter sweeps are expanded
+//! on the host, weights are precomputed in FP32 (category-appropriate), and the
+//! kernel evaluates each row independently while sharing the flattened weight
+//! buffer. Warmup/NaN semantics match the scalar path: write NaN up to
+//! `first_valid + (period - 1)` per row/series.
 
 #![cfg(feature = "cuda")]
 
@@ -11,13 +13,14 @@ use crate::indicators::moving_averages::vpwma::{expand_grid_vpwma, VpwmaBatchRan
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaVpwmaError {
@@ -36,10 +39,48 @@ impl fmt::Display for CudaVpwmaError {
 
 impl std::error::Error for CudaVpwmaError {}
 
+// -------- Kernel selection policy (plain variants; mirrors ALMA/CWMA shape) --------
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaVpwmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for CudaVpwmaPolicy {
+    fn default() -> Self {
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected { Plain { block_x: u32 } }
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+
 pub struct CudaVpwma {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaVpwmaPolicy,
+    last_batch: Option<BatchKernelSelected>,
+    last_many: Option<ManySeriesKernelSelected>,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaVpwma {
@@ -50,7 +91,21 @@ impl CudaVpwma {
         let context = Context::new(device).map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vpwma_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
+        // Prefer context-targeted and O2; gracefully fall back for brittle drivers
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?
+                }
+            }
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
 
@@ -58,7 +113,75 @@ impl CudaVpwma {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaVpwmaPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
+    }
+
+    pub fn new_with_policy(device_id: usize, policy: CudaVpwmaPolicy) -> Result<Self, CudaVpwmaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaVpwmaPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaVpwmaPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn synchronize(&self) -> Result<(), CudaVpwmaError> {
+        self.stream.synchronize().map_err(|e| CudaVpwmaError::Cuda(e.to_string()))
+    }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else { true }
+    }
+
+    #[inline]
+    fn maybe_log_batch_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_batch_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_batch {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] VPWMA batch selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaVpwma)).debug_batch_logged = true; }
+            }
+        }
+    }
+
+    #[inline]
+    fn maybe_log_many_debug(&self) {
+        static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
+        if self.debug_many_logged { return; }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if let Some(sel) = self.last_many {
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] VPWMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe { (*(self as *const _ as *mut CudaVpwma)).debug_many_logged = true; }
+            }
+        }
     }
 
     fn prepare_batch_inputs(
@@ -215,7 +338,11 @@ impl CudaVpwma {
             .get_function("vpwma_batch_f32")
             .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = 128;
+        // Policy: allow override of batch block size; default 128
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+        };
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -249,7 +376,9 @@ impl CudaVpwma {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
         }
-
+        // Record introspection for debug once-per-run
+        unsafe { (*(self as *const _ as *mut CudaVpwma)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        self.maybe_log_batch_debug();
         Ok(())
     }
 
@@ -269,7 +398,10 @@ impl CudaVpwma {
             .get_function("vpwma_many_series_one_param_f32")
             .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = 128;
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 128,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
+        };
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -299,7 +431,9 @@ impl CudaVpwma {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
         }
-
+        // Record introspection for debug once-per-run
+        unsafe { (*(self as *const _ as *mut CudaVpwma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        self.maybe_log_many_debug();
         Ok(())
     }
 
@@ -310,9 +444,6 @@ impl CudaVpwma {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaVpwmaError> {
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
-
         let n_combos = combos.len();
         let mut periods = Vec::with_capacity(n_combos);
         let mut win_lengths = Vec::with_capacity(n_combos);
@@ -323,6 +454,25 @@ impl CudaVpwma {
             .map(|c| c.period.unwrap() - 1)
             .max()
             .unwrap_or(1);
+
+        // VRAM estimate (prices + params + weights + out) with ~64MB headroom
+        let prices_bytes = len * std::mem::size_of::<f32>();
+        let weights_bytes = n_combos * stride * std::mem::size_of::<f32>();
+        let periods_bytes = n_combos * std::mem::size_of::<i32>();
+        let winlens_bytes = n_combos * std::mem::size_of::<i32>();
+        let invnorm_bytes = n_combos * std::mem::size_of::<f32>();
+        let out_bytes = n_combos * len * std::mem::size_of::<f32>();
+        let required = prices_bytes + weights_bytes + periods_bytes + winlens_bytes + invnorm_bytes + out_bytes;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaVpwmaError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
+        let d_prices =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
 
         let mut weights_flat = vec![0f32; n_combos * stride];
 
@@ -376,7 +526,9 @@ impl CudaVpwma {
             n_combos,
             &mut d_out,
         )?;
-
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
