@@ -492,7 +492,7 @@ struct CwmaBatchTiledPrecomputed2xAsync {
     // Main loop over this CTA's tiles (grid-stride by TILE)
     while (t_base < series_len) {
       // Ensure current stage is ready
-      cuda::pipeline_consumer_wait_prior<STAGES - 1>(pipe);
+      pipe.consumer_wait();
       __syncthreads();
 
       // Compute the 2x outputs per thread from tile[stage]

@@ -394,7 +394,7 @@ extern "C" __global__ void buff_averages_many_series_one_param_tiled2d_f32_tx128
 // ---------------- Swizzled 2D kernel (coalesced across series) -------------
 // Warp spans X (series) at a fixed time-row; grid.x tiles time, grid.y tiles columns.
 template<int SX, int TY>
-__global__ void buff_averages_many_series_one_param_tiled2d_swizzled_f32(
+__device__ __forceinline__ void buff_averages_many_series_one_param_tiled2d_swizzled_f32(
     const float* __restrict__ pv_prefix_tm,  // (rows+1) x cols, time-major
     const float* __restrict__ vv_prefix_tm,  // (rows+1) x cols, time-major
     int fast_period,
