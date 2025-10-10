@@ -30,6 +30,41 @@ static __device__ __forceinline__ void kahan_add(float value, float& sum, float&
     sum = t;
 }
 
+// Quantized closed-form best-gain for the adaptive EMA.
+// Matches argmin over {0, 0.1, 0.2, ..., ema_gain_limit*0.1} used in the loop.
+static __device__ __forceinline__
+float dma_quantized_best_gain(float x,
+                              float e0_prev,
+                              float ec_prev,
+                              float alpha_e,
+                              int   ema_gain_limit) {
+    // pred(g) = ec_prev + alpha_e*( (e0_prev + g*(x-ec_prev)) - ec_prev )
+    // Minimize |x - pred(g)| -> solve for zero crossing, then quantize.
+    const float base  = fmaf(alpha_e, e0_prev - ec_prev, ec_prev);
+    const float denom = alpha_e * (x - ec_prev);
+    const float step  = 0.1f;
+    const float gmax  = (float)ema_gain_limit * step;
+
+    if (fabsf(denom) < 1e-20f) return 0.0f;
+
+    float g_est = (x - base) / denom;
+    float g = nearbyintf(g_est / step) * step;  // round to nearest 0.1
+    g = fminf(gmax, fmaxf(0.0f, g));
+    return g;
+}
+
+// Compute the updated ec value using the quantized optimal gain.
+static __device__ __forceinline__
+float dma_update_ec(float x,
+                    float e0_prev,
+                    float ec_prev,
+                    float alpha_e,
+                    int   ema_gain_limit) {
+    const float g = dma_quantized_best_gain(x, e0_prev, ec_prev, alpha_e, ema_gain_limit);
+    const float target = fmaf(g, x - ec_prev, e0_prev);
+    return fmaf(alpha_e, target - ec_prev, ec_prev);
+}
+
 extern "C" __global__
 void dma_batch_f32(const float* __restrict__ prices,
                    const int* __restrict__ hull_lengths,
@@ -61,6 +96,12 @@ void dma_batch_f32(const float* __restrict__ prices,
 
     const int half = hull_length / 2;
     const int sqrt_len = static_cast<int>(floorf(sqrtf(static_cast<float>(hull_length)) + 0.5f));
+    const float denom_half_f = (half        > 0 ? wsum_norm_i32(half)        : 1.0f);
+    const float denom_full_f = (hull_length > 0 ? wsum_norm_i32(hull_length) : 1.0f);
+    const float denom_sqrt_f = (sqrt_len    > 0 ? wsum_norm_i32(sqrt_len)    : 1.0f);
+    const float inv_w_half   = 1.0f / denom_half_f;
+    const float inv_w_full   = 1.0f / denom_full_f;
+    const float inv_w_sqrt   = 1.0f / denom_sqrt_f;
 
     const int base_out = combo * series_len;
     for (int i = 0; i < series_len; ++i) {
@@ -211,10 +252,8 @@ void dma_batch_f32(const float* __restrict__ prices,
             }
 
             if (half_ready && full_ready) {
-                const float denom_half = fmaxf(wsum_norm_i32(half), 1.0f);
-                const float denom_full = fmaxf(wsum_norm_i32(hull_length), 1.0f);
-                const float w_half = sum_read(s_half, s_half_c) / denom_half;
-                const float w_full = sum_read(s_full, s_full_c) / denom_full;
+                const float w_half = sum_read(s_half, s_half_c) * inv_w_half;
+                const float w_full = sum_read(s_full, s_full_c) * inv_w_full;
                 diff_now = 2.0f * w_half - w_full;
             }
         } else {
@@ -276,8 +315,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                             kahan_add(w * v, s_diff, s_diff_c);
                         }
                         diff_wma_init_done = true;
-                        const float denom = fmaxf(wsum_norm_i32(sqrt_len), 1.0f);
-                        hull_val = sum_read(s_diff, s_diff_c) / denom;
+                        hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                     } else {
                         diff_ema = sum_read(diff_sum_seed, diff_sum_seed_c) / static_cast<float>(sqrt_len);
                         diff_ema_init_done = true;
@@ -287,7 +325,7 @@ void dma_batch_f32(const float* __restrict__ prices,
             } else {
                 const float old = diff_ring[diff_pos];
                 diff_ring[diff_pos] = diff_now;
-                diff_pos = (diff_pos + 1) % sqrt_len;
+                diff_pos += 1; if (diff_pos == sqrt_len) diff_pos = 0;
 
                 if (is_wma) {
                     if (!diff_wma_init_done) {
@@ -297,8 +335,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                     kahan_add(diff_now - old, a_diff, a_diff_c);
                     // Rolling WMA(diff) weighted-sum update: s_new = s_prev + sqrt_len * diff_now - a_prev
                     kahan_add(fmaf(static_cast<float>(sqrt_len), diff_now, -a_prev), s_diff, s_diff_c);
-                    const float denom = fmaxf(wsum_norm_i32(sqrt_len), 1.0f);
-                    hull_val = sum_read(s_diff, s_diff_c) / denom;
+                    hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                 } else {
                     if (!diff_ema_init_done) {
                         diff_ema = diff_now;
@@ -318,20 +355,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                 ec_now = ec_prev;
                 ec_init_done = true;
             } else {
-                float least_error = FLT_MAX;
-                float best_gain = 0.0f;
-                for (int gain_i = 0; gain_i <= ema_gain_limit; ++gain_i) {
-                    const float g = static_cast<float>(gain_i) / 10.0f;
-                    const float target_g = e0_prev + g * (x - ec_prev);
-                    const float pred = fmaf(alpha_e, target_g - ec_prev, ec_prev);
-                    const float err = fabsf(x - pred);
-                    if (err < least_error) {
-                        least_error = err;
-                        best_gain = g;
-                    }
-                }
-                const float target = e0_prev + best_gain * (x - ec_prev);
-                ec_now = fmaf(alpha_e, target - ec_prev, ec_prev);
+                ec_now = dma_update_ec(x, e0_prev, ec_prev, alpha_e, ema_gain_limit);
                 ec_prev = ec_now;
             }
         }
@@ -377,6 +401,12 @@ __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
 
     const int half = hull_length / 2;
     const int sqrt_len = max(1, (int)floorf(sqrtf((float)hull_length) + 0.5f));
+    const float denom_half_f = (half        > 0 ? wsum_norm_i32(half)        : 1.0f);
+    const float denom_full_f = (hull_length > 0 ? wsum_norm_i32(hull_length) : 1.0f);
+    const float denom_sqrt_f = (sqrt_len    > 0 ? wsum_norm_i32(sqrt_len)    : 1.0f);
+    const float inv_w_half   = 1.0f / denom_half_f;
+    const float inv_w_full   = 1.0f / denom_full_f;
+    const float inv_w_sqrt   = 1.0f / denom_sqrt_f;
 
     const int base_out = global_idx * series_len;
     // initialize outputs to NaN (one thread covers its series)
@@ -462,9 +492,8 @@ __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
                 }
             }
             if (half_ready && full_ready) {
-                const float denom_half = fmaxf(wsum_norm_i32(half), 1.0f);
-                const float denom_full = fmaxf(wsum_norm_i32(hull_length), 1.0f);
-                const float w_half = sum_read(s_half, s_half_c) / denom_half; const float w_full = sum_read(s_full, s_full_c) / denom_full;
+                const float w_half = sum_read(s_half, s_half_c) * inv_w_half;
+                const float w_full = sum_read(s_full, s_full_c) * inv_w_full;
                 diff_now = 2.0f * w_half - w_full;
             }
         } else {
@@ -500,20 +529,20 @@ __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
                             const float w = float(j + 1); const float v = diff_ring[j];
                             kahan_add(v, a_diff, a_diff_c); kahan_add(w * v, s_diff, s_diff_c);
                         }
-                        diff_wma_init_done = true; const float denom = fmaxf(wsum_norm_i32(sqrt_len), 1.0f);
-                        hull_val = sum_read(s_diff, s_diff_c) / denom;
+                        diff_wma_init_done = true;
+                        hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                     } else {
                         diff_ema = sum_read(diff_sum_seed, diff_sum_seed_c) / float(sqrt_len); diff_ema_init_done = true; hull_val = diff_ema;
                     }
                 }
             } else {
-                const float old = diff_ring[diff_pos]; diff_ring[diff_pos] = diff_now; diff_pos = (diff_pos + 1) % sqrt_len;
+                const float old = diff_ring[diff_pos]; diff_ring[diff_pos] = diff_now; diff_pos += 1; if (diff_pos == sqrt_len) diff_pos = 0;
                 if (is_wma) {
                     if (!diff_wma_init_done) { diff_wma_init_done = true; }
                     const float a_prev = a_diff;
                     kahan_add(diff_now - old, a_diff, a_diff_c);
                     kahan_add(fmaf(float(sqrt_len), diff_now, -a_prev), s_diff, s_diff_c);
-                    const float denom = fmaxf(wsum_norm_i32(sqrt_len), 1.0f); hull_val = sum_read(s_diff, s_diff_c) / denom;
+                    hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                 } else {
                     if (!diff_ema_init_done) { diff_ema = diff_now; diff_ema_init_done = true; }
                     else { diff_ema = fmaf(alpha_sqrt, diff_now - diff_ema, diff_ema); }
@@ -525,19 +554,7 @@ __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
         float ec_now = NAN;
         if (e0_init_done) {
             if (!ec_init_done) { ec_prev = e0_prev; ec_now = ec_prev; ec_init_done = true; }
-            else {
-                float least_error = FLT_MAX; float best_gain = 0.0f;
-                for (int gain_i = 0; gain_i <= ema_gain_limit; ++gain_i) {
-                    const float g = float(gain_i) / 10.0f;
-                    const float target_g = e0_prev + g * (x - ec_prev);
-                    const float pred = fmaf(alpha_e, target_g - ec_prev, ec_prev);
-                    const float err = fabsf(x - pred);
-                    if (err < least_error) { least_error = err; best_gain = g; }
-                }
-                const float target = e0_prev + best_gain * (x - ec_prev);
-                ec_now = fmaf(alpha_e, target - ec_prev, ec_prev);
-                ec_prev = ec_now;
-            }
+            else { ec_now = dma_update_ec(x, e0_prev, ec_prev, alpha_e, ema_gain_limit); ec_prev = ec_now; }
         }
 
         if (!isnan(hull_val) && !isnan(ec_now)) { out[base_out + i] = 0.5f * (hull_val + ec_now); }
@@ -759,10 +776,8 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
             }
 
             if (half_ready && full_ready) {
-                const float denom_half = fmaxf(wsum_norm_i32(half), 1.0f);
-                const float denom_full = fmaxf(wsum_norm_i32(hull_length), 1.0f);
-                const float w_half = sum_read(s_half, s_half_c) / denom_half;
-                const float w_full = sum_read(s_full, s_full_c) / denom_full;
+                const float w_half = sum_read(s_half, s_half_c) * inv_w_half;
+                const float w_full = sum_read(s_full, s_full_c) * inv_w_full;
                 diff_now = 2.0f * w_half - w_full;
             }
         } else {
@@ -824,8 +839,7 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                             kahan_add(w * v, s_diff, s_diff_c);
                         }
                         diff_wma_init_done = true;
-                        const float denom = fmaxf(wsum_norm_i32(sqrt_len_clamped), 1.0f);
-                        hull_val = sum_read(s_diff, s_diff_c) / denom;
+                        hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                     } else {
                         diff_ema = sum_read(diff_sum_seed, diff_sum_seed_c) / static_cast<float>(sqrt_len_clamped);
                         diff_ema_init_done = true;
@@ -835,7 +849,7 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
             } else {
                 const float old = diff_ring[diff_pos];
                 diff_ring[diff_pos] = diff_now;
-                diff_pos = (diff_pos + 1) % sqrt_len_clamped;
+                diff_pos += 1; if (diff_pos == sqrt_len_clamped) diff_pos = 0;
 
                 if (is_wma) {
                     if (!diff_wma_init_done) {
@@ -845,8 +859,7 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     kahan_add(diff_now - old, a_diff, a_diff_c);
                     // Rolling WMA(diff) weighted-sum update: s_new = s_prev + sqrt_len * diff_now - a_prev
                     kahan_add(fmaf(static_cast<float>(sqrt_len_clamped), diff_now, -a_prev), s_diff, s_diff_c);
-                    const float denom = fmaxf(wsum_norm_i32(sqrt_len_clamped), 1.0f);
-                    hull_val = sum_read(s_diff, s_diff_c) / denom;
+                    hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                 } else {
                     if (!diff_ema_init_done) {
                         diff_ema = diff_now;
@@ -866,20 +879,7 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                 ec_now = ec_prev;
                 ec_init_done = true;
             } else {
-                float least_error = FLT_MAX;
-                float best_gain = 0.0f;
-                for (int gain_i = 0; gain_i <= ema_gain_limit; ++gain_i) {
-                    const float g = static_cast<float>(gain_i) / 10.0f;
-                    const float target_g = e0_prev + g * (x - ec_prev);
-                    const float pred = fmaf(alpha_e, target_g - ec_prev, ec_prev);
-                    const float err = fabsf(x - pred);
-                    if (err < least_error) {
-                        least_error = err;
-                        best_gain = g;
-                    }
-                }
-                const float target = e0_prev + best_gain * (x - ec_prev);
-                ec_now = fmaf(alpha_e, target - ec_prev, ec_prev);
+                ec_now = dma_update_ec(x, e0_prev, ec_prev, alpha_e, ema_gain_limit);
                 ec_prev = ec_now;
             }
         }
@@ -927,6 +927,12 @@ __device__ void dma_ms1p_tiled_f32_tx1_ty_core(const float* __restrict__ prices_
 
     const int half = hull_length / 2;
     const int sqrt_len_clamped = max(1, sqrt_len);
+    const float denom_half_f = (half        > 0 ? wsum_norm_i32(half)              : 1.0f);
+    const float denom_full_f = (hull_length > 0 ? wsum_norm_i32(hull_length)       : 1.0f);
+    const float denom_sqrt_f = (sqrt_len_clamped > 0 ? wsum_norm_i32(sqrt_len_clamped) : 1.0f);
+    const float inv_w_half   = 1.0f / denom_half_f;
+    const float inv_w_full   = 1.0f / denom_full_f;
+    const float inv_w_sqrt   = 1.0f / denom_sqrt_f;
 
     const float alpha_e = 2.0f / (float(ema_length) + 1.0f);
     const int i0_e = first_valid + (ema_length > 0 ? ema_length - 1 : 0);
@@ -1000,9 +1006,7 @@ __device__ void dma_ms1p_tiled_f32_tx1_ty_core(const float* __restrict__ prices_
                 }
             }
             if (half_ready && full_ready) {
-                const float denom_half = fmaxf(wsum_norm_i32(half), 1.0f);
-                const float denom_full = fmaxf(wsum_norm_i32(hull_length), 1.0f);
-                const float w_half = sum_read(s_half, s_half_c) / denom_half; const float w_full = sum_read(s_full, s_full_c) / denom_full;
+                const float w_half = sum_read(s_half, s_half_c) * inv_w_half; const float w_full = sum_read(s_full, s_full_c) * inv_w_full;
                 diff_now = 2.0f * w_half - w_full;
             }
         } else {
@@ -1038,20 +1042,20 @@ __device__ void dma_ms1p_tiled_f32_tx1_ty_core(const float* __restrict__ prices_
                             const float w = float(j + 1); const float v = diff_ring[j];
                             kahan_add(v, a_diff, a_diff_c); kahan_add(w * v, s_diff, s_diff_c);
                         }
-                        diff_wma_init_done = true; const float denom = fmaxf(wsum_norm_i32(sqrt_len_clamped), 1.0f);
-                        hull_val = sum_read(s_diff, s_diff_c) / denom;
+                        diff_wma_init_done = true;
+                        hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                     } else {
                         diff_ema = sum_read(diff_sum_seed, diff_sum_seed_c) / float(sqrt_len_clamped); diff_ema_init_done = true; hull_val = diff_ema;
                     }
                 }
             } else {
-                const float old = diff_ring[diff_pos]; diff_ring[diff_pos] = diff_now; diff_pos = (diff_pos + 1) % sqrt_len_clamped;
+                const float old = diff_ring[diff_pos]; diff_ring[diff_pos] = diff_now; diff_pos += 1; if (diff_pos == sqrt_len_clamped) diff_pos = 0;
                 if (is_wma) {
                     if (!diff_wma_init_done) { diff_wma_init_done = true; }
                     const float a_prev = a_diff;
                     kahan_add(diff_now - old, a_diff, a_diff_c);
                     kahan_add(fmaf(float(sqrt_len_clamped), diff_now, -a_prev), s_diff, s_diff_c);
-                    const float denom = fmaxf(wsum_norm_i32(sqrt_len_clamped), 1.0f); hull_val = sum_read(s_diff, s_diff_c) / denom;
+                    hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                 } else {
                     if (!diff_ema_init_done) { diff_ema = diff_now; diff_ema_init_done = true; }
                     else { diff_ema = fmaf(alpha_sqrt, diff_now - diff_ema, diff_ema); }
@@ -1063,19 +1067,7 @@ __device__ void dma_ms1p_tiled_f32_tx1_ty_core(const float* __restrict__ prices_
         float ec_now = NAN;
         if (e0_init_done) {
             if (!ec_init_done) { ec_prev = e0_prev; ec_now = ec_prev; ec_init_done = true; }
-            else {
-                float least_error = FLT_MAX; float best_gain = 0.0f;
-                for (int gain_i = 0; gain_i <= ema_gain_limit; ++gain_i) {
-                    const float g = float(gain_i) / 10.0f;
-                    const float target_g = e0_prev + g * (x - ec_prev);
-                    const float pred = fmaf(alpha_e, target_g - ec_prev, ec_prev);
-                    const float err = fabsf(x - pred);
-                    if (err < least_error) { least_error = err; best_gain = g; }
-                }
-                const float target = e0_prev + best_gain * (x - ec_prev);
-                ec_now = fmaf(alpha_e, target - ec_prev, ec_prev);
-                ec_prev = ec_now;
-            }
+            else { ec_now = dma_update_ec(x, e0_prev, ec_prev, alpha_e, ema_gain_limit); ec_prev = ec_now; }
         }
 
         if (!isnan(hull_val) && !isnan(ec_now)) { out_tm[base_out + i * stride] = 0.5f * (hull_val + ec_now); }
