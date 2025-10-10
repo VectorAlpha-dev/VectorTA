@@ -64,3 +64,32 @@ class TestVwapCuda:
 
         assert gpu.shape == cpu_values.shape
         assert_close(gpu, cpu_values, rtol=1e-4, atol=5e-4, msg="CUDA batch vs CPU mismatch")
+
+    def test_vwap_cuda_many_series_one_param_matches_cpu(self, test_data):
+        ts = test_data["timestamp"]
+        rows = ts.shape[0]
+        cols = 8
+
+        # Build time-major matrices
+        prices_tm = np.full((rows, cols), np.nan, dtype=np.float64)
+        volumes_tm = np.full((rows, cols), np.nan, dtype=np.float64)
+        for s in range(cols):
+            for t in range(s % 5, rows):
+                x = float(t) + float(s) * 0.25
+                prices_tm[t, s] = np.sin(x * 0.002) + 0.0003 * x
+                volumes_tm[t, s] = abs(np.cos(x * 0.001)) + 0.6
+
+        anchor = "1m"
+
+        # CPU baseline per series via single-series VWAP
+        cpu_tm = np.full((rows, cols), np.nan, dtype=np.float64)
+        for s in range(cols):
+            vals = ti.vwap(ts, volumes_tm[:, s], prices_tm[:, s], anchor)
+            cpu_tm[:, s] = np.asarray(vals, dtype=np.float64)
+
+        # GPU
+        handle = ti.vwap_cuda_many_series_one_param_dev(ts, prices_tm, volumes_tm, anchor)
+        gpu_tm = cp.asnumpy(cp.asarray(handle)).astype(np.float64)
+
+        assert gpu_tm.shape == cpu_tm.shape
+        assert_close(gpu_tm, cpu_tm, rtol=1e-4, atol=5e-4, msg="CUDA many-series vs CPU mismatch")

@@ -2321,6 +2321,56 @@ pub fn vwap_cuda_batch_dev_py(
     Ok(DeviceArrayF32Py { inner })
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vwap_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (timestamps, prices_tm, volumes_tm, anchor, device_id=0))]
+pub fn vwap_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    timestamps: numpy::PyReadonlyArray1<'_, i64>,
+    prices_tm: numpy::PyReadonlyArray2<'_, f64>,
+    volumes_tm: numpy::PyReadonlyArray2<'_, f64>,
+    anchor: String,
+    device_id: usize,
+    
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+    use numpy::PyArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let ts_slice = timestamps.as_slice()?;
+    let p_shape = prices_tm.shape();
+    let v_shape = volumes_tm.shape();
+    if p_shape != v_shape {
+        return Err(PyValueError::new_err("prices_tm and volumes_tm shapes must match"));
+    }
+    let rows = p_shape[0];
+    let cols = p_shape[1];
+    if ts_slice.len() != rows {
+        return Err(PyValueError::new_err("timestamps length must equal rows of matrices"));
+    }
+    let prices_flat = prices_tm.as_slice()?;
+    let volumes_flat = volumes_tm.as_slice()?;
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVwap::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .vwap_many_series_one_param_time_major_dev(
+                ts_slice,
+                volumes_flat,
+                prices_flat,
+                cols,
+                rows,
+                &anchor,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn vwap_js(

@@ -1242,6 +1242,7 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(vwap_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(vwap_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
     // Register ZLEMA functions with their user-facing names
