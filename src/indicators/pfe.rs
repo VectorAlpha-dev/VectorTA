@@ -252,11 +252,15 @@ fn pfe_compute_into(
     out: &mut [f64],
 ) {
     let len = data.len();
-    if len == 0 { return; }
+    if len == 0 {
+        return;
+    }
 
     // Earliest computable index for PFE
     let start = first + period;
-    if start >= len { return; }
+    if start >= len {
+        return;
+    }
 
     // Precompute constants
     let p = period as f64;
@@ -294,7 +298,11 @@ fn pfe_compute_into(
         let long_leg = (diff.mul_add(diff, p2)).sqrt();
 
         // Compute raw, protect against vanishing denom
-        let raw = if denom <= f64::EPSILON { 0.0 } else { 100.0 * (long_leg / denom) };
+        let raw = if denom <= f64::EPSILON {
+            0.0
+        } else {
+            100.0 * (long_leg / denom)
+        };
         let signed = if diff > 0.0 { raw } else { -raw };
 
         // EMA smoothing with standard warmup seed
@@ -318,7 +326,9 @@ fn pfe_compute_into(
             denom += new_s - old;
             seg[head] = new_s;
             head += 1;
-            if head == period { head = 0; }
+            if head == period {
+                head = 0;
+            }
         }
     }
 }
@@ -743,7 +753,11 @@ unsafe fn pfe_row_scalar(
         let diff = cur - past;
 
         let long_leg = (diff.mul_add(diff, p2)).sqrt();
-        let raw = if denom <= f64::EPSILON { 0.0 } else { 100.0 * (long_leg / denom) };
+        let raw = if denom <= f64::EPSILON {
+            0.0
+        } else {
+            100.0 * (long_leg / denom)
+        };
         let signed = if diff > 0.0 { raw } else { -raw };
 
         let val = if !ema_started {
@@ -766,7 +780,9 @@ unsafe fn pfe_row_scalar(
             *seg.get_unchecked_mut(head) = new_s;
 
             head += 1;
-            if head == period { head = 0; }
+            if head == period {
+                head = 0;
+            }
         }
     }
 }
@@ -839,7 +855,11 @@ unsafe fn pfe_row_avx2(
         let diff = cur - past;
 
         let long_leg = (diff.mul_add(diff, p2)).sqrt();
-        let raw = if denom <= f64::EPSILON { 0.0 } else { 100.0 * (long_leg / denom) };
+        let raw = if denom <= f64::EPSILON {
+            0.0
+        } else {
+            100.0 * (long_leg / denom)
+        };
         let signed = if diff > 0.0 { raw } else { -raw };
 
         let val = if !ema_started {
@@ -862,7 +882,9 @@ unsafe fn pfe_row_avx2(
             *seg.get_unchecked_mut(head) = new_s;
 
             head += 1;
-            if head == period { head = 0; }
+            if head == period {
+                head = 0;
+            }
         }
     }
 }
@@ -912,8 +934,14 @@ unsafe fn pfe_row_avx512(
         let hi256 = _mm512_extractf64x4_pd(sq, 1);
         let hadd_lo = _mm256_hadd_pd(lo256, lo256);
         let hadd_hi = _mm256_hadd_pd(hi256, hi256);
-        let lo_pair = _mm_add_pd(_mm256_extractf128_pd(hadd_lo, 0), _mm256_extractf128_pd(hadd_lo, 1));
-        let hi_pair = _mm_add_pd(_mm256_extractf128_pd(hadd_hi, 0), _mm256_extractf128_pd(hadd_hi, 1));
+        let lo_pair = _mm_add_pd(
+            _mm256_extractf128_pd(hadd_lo, 0),
+            _mm256_extractf128_pd(hadd_lo, 1),
+        );
+        let hi_pair = _mm_add_pd(
+            _mm256_extractf128_pd(hadd_hi, 0),
+            _mm256_extractf128_pd(hadd_hi, 1),
+        );
         denom += _mm_cvtsd_f64(lo_pair) + _mm_cvtsd_f64(hi_pair);
 
         j += 8;
@@ -937,7 +965,11 @@ unsafe fn pfe_row_avx512(
         let diff = cur - past;
 
         let long_leg = (diff.mul_add(diff, p2)).sqrt();
-        let raw = if denom <= f64::EPSILON { 0.0 } else { 100.0 * (long_leg / denom) };
+        let raw = if denom <= f64::EPSILON {
+            0.0
+        } else {
+            100.0 * (long_leg / denom)
+        };
         let signed = if diff > 0.0 { raw } else { -raw };
 
         let val = if !ema_started {
@@ -960,7 +992,9 @@ unsafe fn pfe_row_avx512(
             *seg.get_unchecked_mut(head) = new_s;
 
             head += 1;
-            if head == period { head = 0; }
+            if head == period {
+                head = 0;
+            }
         }
     }
 }
@@ -993,7 +1027,11 @@ unsafe fn pfe_row_scalar_with_prefix(
 
         let long_leg = (diff.mul_add(diff, p2)).sqrt();
         let denom = *prefix.get_unchecked(t) - *prefix.get_unchecked(t - period);
-        let raw = if denom <= f64::EPSILON { 0.0 } else { 100.0 * (long_leg / denom) };
+        let raw = if denom <= f64::EPSILON {
+            0.0
+        } else {
+            100.0 * (long_leg / denom)
+        };
         let signed = if diff > 0.0 { raw } else { -raw };
 
         let val = if !ema_started {
@@ -1029,10 +1067,10 @@ pub struct PfeStream {
     price_count: usize, // how many prices we have (<= period+1)
 
     // ring of last `period` short-leg step lengths: sqrt(1 + d^2)
-    seg: Vec<f64>,      // capacity = period
-    seg_pos: usize,     // next position to overwrite in `seg`
-    seg_count: usize,   // how many segments we have (<= period)
-    short_sum: f64,     // running sum of `seg`
+    seg: Vec<f64>,    // capacity = period
+    seg_pos: usize,   // next position to overwrite in `seg`
+    seg_count: usize, // how many segments we have (<= period)
+    short_sum: f64,   // running sum of `seg`
 
     // step state
     last_price: f64,
@@ -1047,7 +1085,10 @@ impl PfeStream {
     pub fn try_new(params: PfeParams) -> Result<Self, PfeError> {
         let period = params.period.unwrap_or(10);
         if period == 0 {
-            return Err(PfeError::InvalidPeriod { period, data_len: 0 });
+            return Err(PfeError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let smoothing = params.smoothing.unwrap_or(5);
         if smoothing == 0 {
@@ -1069,7 +1110,11 @@ impl PfeStream {
             price_pos: cap_prices - 1, // so first write lands at 0
             price_count: 0,
 
-            seg: if cap_seg > 0 { vec![0.0; cap_seg] } else { Vec::new() },
+            seg: if cap_seg > 0 {
+                vec![0.0; cap_seg]
+            } else {
+                Vec::new()
+            },
             seg_pos: 0,
             seg_count: 0,
             short_sum: 0.0,
@@ -1097,7 +1142,9 @@ impl PfeStream {
                 if self.period > 0 {
                     self.seg[self.seg_pos] = new_s;
                     self.seg_pos += 1;
-                    if self.seg_pos == self.period { self.seg_pos = 0; }
+                    if self.seg_pos == self.period {
+                        self.seg_pos = 0;
+                    }
                 }
                 self.seg_count += 1;
             } else if self.period > 0 {
@@ -1106,7 +1153,9 @@ impl PfeStream {
                 self.short_sum += new_s - old;
                 self.seg[self.seg_pos] = new_s;
                 self.seg_pos += 1;
-                if self.seg_pos == self.period { self.seg_pos = 0; }
+                if self.seg_pos == self.period {
+                    self.seg_pos = 0;
+                }
             }
         }
         self.last_price = price;
@@ -1115,7 +1164,9 @@ impl PfeStream {
         // 2) Insert the new price into the price ring
         let cap_prices = self.period + 1;
         self.price_pos += 1;
-        if self.price_pos == cap_prices { self.price_pos = 0; }
+        if self.price_pos == cap_prices {
+            self.price_pos = 0;
+        }
         self.prices[self.price_pos] = price;
         if self.price_count < cap_prices {
             self.price_count += 1;
@@ -1137,7 +1188,11 @@ impl PfeStream {
         let denom = self.short_sum;
 
         // 6) Raw PFE (guard small denom), sign by diff>0
-        let inv = if denom <= f64::EPSILON { 0.0 } else { 1.0 / denom };
+        let inv = if denom <= f64::EPSILON {
+            0.0
+        } else {
+            1.0 / denom
+        };
         let raw = 100.0 * long_leg * inv;
         let signed = if diff > 0.0 { raw } else { -raw };
 
@@ -1147,7 +1202,9 @@ impl PfeStream {
             self.ema_val = signed;
             signed
         } else {
-            self.ema_val = self.alpha.mul_add(signed, self.one_minus_alpha * self.ema_val);
+            self.ema_val = self
+                .alpha
+                .mul_add(signed, self.one_minus_alpha * self.ema_val);
             self.ema_val
         };
 

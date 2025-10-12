@@ -387,7 +387,11 @@ pub unsafe fn adosc_scalar(
     let c0 = *cp;
     let v0 = *vp;
     let hl0 = h0 - l0;
-    let mfm0 = if hl0 != 0.0 { ((c0 - l0) - (h0 - c0)) / hl0 } else { 0.0 };
+    let mfm0 = if hl0 != 0.0 {
+        ((c0 - l0) - (h0 - c0)) / hl0
+    } else {
+        0.0
+    };
     let mfv0 = mfm0 * v0;
     let mut sum_ad = mfv0;
     let mut short_ema = sum_ad;
@@ -403,7 +407,11 @@ pub unsafe fn adosc_scalar(
         let v = *vp.add(i);
 
         let hl = h - l;
-        let mfm = if hl != 0.0 { ((c - l) - (h - c)) / hl } else { 0.0 };
+        let mfm = if hl != 0.0 {
+            ((c - l) - (h - c)) / hl
+        } else {
+            0.0
+        };
         let mfv = mfm * v;
         sum_ad += mfv;
         short_ema = alpha_short * sum_ad + one_minus_alpha_short * short_ema;
@@ -690,7 +698,11 @@ fn adosc_batch_inner(
         let c0 = *cp;
         let v0 = *vp;
         let hl0 = h0 - l0;
-        let mfm0 = if hl0 != 0.0 { ((c0 - l0) - (h0 - c0)) / hl0 } else { 0.0 };
+        let mfm0 = if hl0 != 0.0 {
+            ((c0 - l0) - (h0 - c0)) / hl0
+        } else {
+            0.0
+        };
         let mfv0 = mfm0 * v0;
         *ap = mfv0; // sum_ad at i=0
 
@@ -702,7 +714,11 @@ fn adosc_batch_inner(
             let v = *vp.add(i);
             let prev = *ap.add(i - 1);
             let hl = h - l;
-            let mfm = if hl != 0.0 { ((c - l) - (h - c)) / hl } else { 0.0 };
+            let mfm = if hl != 0.0 {
+                ((c - l) - (h - c)) / hl
+            } else {
+                0.0
+            };
             let mfv = mfm * v;
             *ap.add(i) = prev + mfv;
             i += 1;
@@ -828,7 +844,11 @@ pub fn adosc_batch_inner_into(
         let c0 = *cp;
         let v0 = *vp;
         let hl0 = h0 - l0;
-        let mfm0 = if hl0 != 0.0 { ((c0 - l0) - (h0 - c0)) / hl0 } else { 0.0 };
+        let mfm0 = if hl0 != 0.0 {
+            ((c0 - l0) - (h0 - c0)) / hl0
+        } else {
+            0.0
+        };
         let mfv0 = mfm0 * v0;
         *ap = mfv0;
 
@@ -840,7 +860,11 @@ pub fn adosc_batch_inner_into(
             let v = *vp.add(i);
             let prev = *ap.add(i - 1);
             let hl = h - l;
-            let mfm = if hl != 0.0 { ((c - l) - (h - c)) / hl } else { 0.0 };
+            let mfm = if hl != 0.0 {
+                ((c - l) - (h - c)) / hl
+            } else {
+                0.0
+            };
             let mfv = mfm * v;
             *ap.add(i) = prev + mfv;
             i += 1;
@@ -927,7 +951,11 @@ pub unsafe fn adosc_row_scalar(
     let c0 = *cp;
     let v0 = *vp;
     let hl0 = h0 - l0;
-    let mfm0 = if hl0 != 0.0 { ((c0 - l0) - (h0 - c0)) / hl0 } else { 0.0 };
+    let mfm0 = if hl0 != 0.0 {
+        ((c0 - l0) - (h0 - c0)) / hl0
+    } else {
+        0.0
+    };
     let mfv0 = mfm0 * v0;
     let mut sum_ad = mfv0;
     let mut short_ema = sum_ad;
@@ -943,7 +971,11 @@ pub unsafe fn adosc_row_scalar(
         let v = *vp.add(i);
 
         let hl = h - l;
-        let mfm = if hl != 0.0 { ((c - l) - (h - c)) / hl } else { 0.0 };
+        let mfm = if hl != 0.0 {
+            ((c - l) - (h - c)) / hl
+        } else {
+            0.0
+        };
         let mfv = mfm * v;
         sum_ad += mfv;
         short_ema = alpha_short * sum_ad + one_minus_alpha_short * short_ema;
@@ -1036,7 +1068,11 @@ impl AdoscStream {
         let short = params.short_period.unwrap_or(3);
         let long = params.long_period.unwrap_or(10);
         if short == 0 || long == 0 {
-            return Err(AdoscError::InvalidPeriod { short, long, data_len: 0 });
+            return Err(AdoscError::InvalidPeriod {
+                short,
+                long,
+                data_len: 0,
+            });
         }
         if short >= long {
             return Err(AdoscError::ShortPeriodGreaterThanLong { short, long });

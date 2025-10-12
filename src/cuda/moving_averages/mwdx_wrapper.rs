@@ -77,11 +77,11 @@ impl CudaMwdx {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaMwdxError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -101,15 +101,26 @@ impl CudaMwdx {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaMwdxPolicy) -> Result<Self, CudaMwdxError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaMwdxPolicy,
+    ) -> Result<Self, CudaMwdxError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaMwdxPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaMwdxPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaMwdxPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaMwdxPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaMwdxError> {
         self.stream
             .synchronize()
@@ -357,7 +368,9 @@ impl CudaMwdx {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMwdxError> {
-        if n_combos == 0 { return Ok(()); }
+        if n_combos == 0 {
+            return Ok(());
+        }
 
         // Policy: only Plain makes sense for a sequential recurrence; choose block_x
         let block_x = match self.policy.batch {
@@ -423,7 +436,11 @@ impl CudaMwdx {
         // Pick 1D vs 2D tiled kernel based on policy and shape
         let (use_tiled, tx, ty) = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => {
-                if series_len >= 4096 && num_series >= 2 { (true, 128u32, if num_series % 4 == 0 { 4 } else { 2 }) } else { (false, 256, 1) }
+                if series_len >= 4096 && num_series >= 2 {
+                    (true, 128u32, if num_series % 4 == 0 { 4 } else { 2 })
+                } else {
+                    (false, 256, 1)
+                }
             }
             ManySeriesKernelPolicy::OneD { block_x } => (false, block_x.max(64).min(1024), 1),
             ManySeriesKernelPolicy::Tiled2D { tx, ty } => (true, tx, ty),
@@ -435,7 +452,10 @@ impl CudaMwdx {
                 (128, 4) => "mwdx_many_series_one_param_tiled2d_f32_tx128_ty4",
                 _ => "mwdx_many_series_one_param_tiled2d_f32_tx128_ty2",
             };
-            let func = self.module.get_function(func_name).map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+            let func = self
+                .module
+                .get_function(func_name)
+                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
 
             // Introspection
             unsafe {
@@ -628,7 +648,9 @@ pub mod benches {
         crate::indicators::moving_averages::mwdx::MwdxParams,
         mwdx_batch_dev,
         mwdx_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::mwdx::MwdxBatchRange { factor: (0.05, 0.05 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001) },
+        crate::indicators::moving_averages::mwdx::MwdxBatchRange {
+            factor: (0.05, 0.05 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001)
+        },
         crate::indicators::moving_averages::mwdx::MwdxParams { factor: Some(0.2) },
         "mwdx",
         "mwdx"
@@ -645,14 +667,22 @@ pub struct CudaMwdxPolicy {
 }
 impl Default for CudaMwdxPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 }, Tiled2D { tx: u32, ty: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
 
 impl CudaMwdx {
     #[inline]
@@ -663,11 +693,19 @@ impl CudaMwdx {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Some((free, _total)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
     #[inline]
     fn grid_y_chunks(n_combos: usize) -> impl Iterator<Item = (usize, usize)> {
@@ -680,28 +718,38 @@ impl CudaMwdx {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] MWDX batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMwdx)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMwdx)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] MWDX many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMwdx)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMwdx)).debug_many_logged = true;
+                }
             }
         }
     }

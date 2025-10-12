@@ -653,7 +653,10 @@ impl PwmaStream {
     pub fn try_new(params: PwmaParams) -> Result<Self, PwmaError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(PwmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(PwmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let n = period.saturating_sub(1);
 

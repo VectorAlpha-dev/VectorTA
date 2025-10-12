@@ -546,7 +546,10 @@ impl DecyclerStream {
         let hp_period = params.hp_period.unwrap_or(125);
         let k = params.k.unwrap_or(0.707);
         if hp_period < 2 {
-            return Err(DecyclerError::InvalidPeriod { period: hp_period, data_len: 0 });
+            return Err(DecyclerError::InvalidPeriod {
+                period: hp_period,
+                data_len: 0,
+            });
         }
         if !k.is_finite() || k <= 0.0 {
             return Err(DecyclerError::InvalidK { k });
@@ -559,7 +562,11 @@ impl DecyclerStream {
         let (sin_val, cos_val) = angle.sin_cos();
 
         const EPS: f64 = 1e-10;
-        let cos_safe = if cos_val.abs() < EPS { EPS.copysign(cos_val) } else { cos_val };
+        let cos_safe = if cos_val.abs() < EPS {
+            EPS.copysign(cos_val)
+        } else {
+            cos_val
+        };
         let alpha = 1.0 + (sin_val - 1.0) * (1.0 / cos_safe);
 
         let oma = 1.0 - alpha;

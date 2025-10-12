@@ -346,7 +346,10 @@ impl TemaStream {
     pub fn try_new(params: TemaParams) -> Result<Self, TemaError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(TemaError::InvalidPeriod { period, data_len: 0 });
+            return Err(TemaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         // α = 2/(N+1); keep both α and (1-α) to avoid recomputing
@@ -1607,7 +1610,9 @@ pub fn tema_py<'py>(
     // Match ALMA Python API: accept non-contiguous inputs by copying once.
     let kern = validate_kernel(kernel, false)?; // Validate before allow_threads
 
-    let params = TemaParams { period: Some(period) };
+    let params = TemaParams {
+        period: Some(period),
+    };
     let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
         let tema_in = TemaInput::from_slice(slice_in, params);
         py.allow_threads(|| tema_with_kernel(&tema_in, kern).map(|o| o.values))

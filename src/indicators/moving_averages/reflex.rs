@@ -438,22 +438,22 @@ pub struct ReflexStream {
     c: f64,
 
     // precomputed normalization weights
-    alpha: f64,  // (p+1)/(2p)
-    beta: f64,   // 1 - alpha
-    inv_p: f64,  // 1/p
+    alpha: f64, // (p+1)/(2p)
+    beta: f64,  // 1 - alpha
+    inv_p: f64, // 1/p
 
     // ring buffer only to recall ssf[t - period] and maintain the rolling sum
     ssf_buf: Vec<f64>,
-    head: usize,  // write position: t mod (period+1)
-    tail: usize,  // position of ssf[t - period] once t >= period
+    head: usize, // write position: t mod (period+1)
+    tail: usize, // position of ssf[t - period] once t >= period
 
     // rolling state
-    ssf_sum: f64,     // Σ_{k=t-period..t-1} ssf[k] at entry
-    last_ms: f64,     // EW variance proxy MS[t-1]
-    prev_x: f64,      // raw x[t-1]
-    last_ssf1: f64,   // ssf[t-1]
-    last_ssf2: f64,   // ssf[t-2]
-    count: usize,     // t
+    ssf_sum: f64,   // Σ_{k=t-period..t-1} ssf[k] at entry
+    last_ms: f64,   // EW variance proxy MS[t-1]
+    prev_x: f64,    // raw x[t-1]
+    last_ssf1: f64, // ssf[t-1]
+    last_ssf2: f64, // ssf[t-2]
+    count: usize,   // t
 }
 
 impl ReflexStream {

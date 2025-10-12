@@ -38,11 +38,11 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::collections::VecDeque;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-use std::collections::VecDeque;
 
 // --- INPUT/OUTPUT TYPES ---
 
@@ -370,7 +370,10 @@ impl MidpointStream {
     pub fn try_new(params: MidpointParams) -> Result<Self, MidpointError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(MidpointError::InvalidPeriod { period, data_len: 0 });
+            return Err(MidpointError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         Ok(Self {
             period,

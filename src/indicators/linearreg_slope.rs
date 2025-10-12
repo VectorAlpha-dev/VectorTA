@@ -288,7 +288,7 @@ pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &m
     // Emit slope for each window using rolling O(1) updates
     let mut i = first + period - 1; // first valid output index
     let mut step = 0usize; // steps since initial window
-    // Kahan compensation terms to curb drift in rolling updates
+                           // Kahan compensation terms to curb drift in rolling updates
     let mut s0_c = 0.0f64;
     let mut s1_c = 0.0f64;
     const RECALC_EVERY: usize = 256; // periodic exact recompute to limit drift
@@ -695,7 +695,8 @@ fn linearreg_slope_batch_inner_into(
         };
         let do_row_scalar = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
             let period = combos[row].period.unwrap();
-            let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+            let dst =
+                core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
             match kern {
                 Kernel::Scalar => linearreg_slope_row_scalar(data, first, period, dst),
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -752,12 +753,16 @@ fn linearreg_slope_batch_inner_into(
             if denom.abs() < f64::EPSILON {
                 return;
             }
-            let dst = unsafe { core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len()) };
+            let dst = unsafe {
+                core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
+            };
             let start_i = first + period - 1;
             for i in start_i..cols {
                 let s = i + 1 - period;
                 let sy = unsafe { *py.get_unchecked(i + 1) - *py.get_unchecked(s) };
-                let sxy = unsafe { (*pky.get_unchecked(i + 1) - *pky.get_unchecked(s)) - (s as f64) * sy };
+                let sxy = unsafe {
+                    (*pky.get_unchecked(i + 1) - *pky.get_unchecked(s)) - (s as f64) * sy
+                };
                 let num = n.mul_add(sxy, -sum_x * sy);
                 dst[i] = num / denom;
             }
@@ -830,13 +835,12 @@ unsafe fn linearreg_slope_row_avx512_long(
     linearreg_slope_scalar(data, period, first, out)
 }
 
-
 #[derive(Debug, Clone)]
 pub struct LinearRegSlopeStream {
     // Window config / ring buffer
     period: usize,
     buffer: Vec<f64>,
-    head: usize,       // index of the oldest element (slot to overwrite next)
+    head: usize, // index of the oldest element (slot to overwrite next)
     filled: bool,
     warm_count: usize, // 0..=period; number of samples accumulated since last reset
 
@@ -849,10 +853,10 @@ pub struct LinearRegSlopeStream {
     inv_denom: f64,
 
     // Rolling accumulators (Kahan compensated)
-    sum_y: f64,   // S_y = sum y
-    sum_y_c: f64, // Kahan compensation for S_y
-    sum_xy: f64,  // S_xy = sum j*y_j with j in [0..n-1]
-    sum_xy_c: f64,// Kahan compensation for S_xy
+    sum_y: f64,    // S_y = sum y
+    sum_y_c: f64,  // Kahan compensation for S_y
+    sum_xy: f64,   // S_xy = sum j*y_j with j in [0..n-1]
+    sum_xy_c: f64, // Kahan compensation for S_xy
 
     // Housekeeping for periodic exact recompute to bound drift
     step: usize,
@@ -864,7 +868,10 @@ impl LinearRegSlopeStream {
     pub fn try_new(params: LinearRegSlopeParams) -> Result<Self, LinearRegSlopeError> {
         let period = params.period.unwrap_or(14);
         if period < 2 {
-            return Err(LinearRegSlopeError::InvalidPeriod { period, data_len: 0 });
+            return Err(LinearRegSlopeError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         let n = period as f64;
@@ -877,7 +884,11 @@ impl LinearRegSlopeStream {
 
         let denom = n * sum_x2 - sum_x * sum_x;
         // denom should be > 0 for period >= 2
-        let inv_denom = if denom.abs() > f64::EPSILON { 1.0 / denom } else { f64::NAN };
+        let inv_denom = if denom.abs() > f64::EPSILON {
+            1.0 / denom
+        } else {
+            f64::NAN
+        };
 
         Ok(Self {
             period,
@@ -1012,7 +1023,9 @@ impl LinearRegSlopeStream {
             sy += y;
             sxy = (j as f64).mul_add(y, sxy);
             idx += 1;
-            if idx == self.period { idx = 0; }
+            if idx == self.period {
+                idx = 0;
+            }
         }
         self.sum_y = sy;
         self.sum_y_c = 0.0;
@@ -1025,8 +1038,10 @@ impl LinearRegSlopeStream {
         self.head = 0;
         self.filled = false;
         self.warm_count = 0;
-        self.sum_y = 0.0; self.sum_y_c = 0.0;
-        self.sum_xy = 0.0; self.sum_xy_c = 0.0;
+        self.sum_y = 0.0;
+        self.sum_y_c = 0.0;
+        self.sum_xy = 0.0;
+        self.sum_xy_c = 0.0;
         // Leave buffer contents as-is; warm-up logic ignores old values.
     }
 }

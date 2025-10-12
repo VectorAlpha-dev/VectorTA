@@ -340,9 +340,9 @@ pub struct OttoStream {
     a_ott_base: f64, // 2/(ott_period + 1)
 
     // OTT % scaling
-    fark: f64,           // ott_percent * 0.01
-    scale_up: f64,       // (200+ott_percent)/200
-    scale_dn: f64,       // (200-ott_percent)/200
+    fark: f64,     // ott_percent * 0.01
+    scale_up: f64, // (200+ott_percent)/200
+    scale_dn: f64, // (200-ott_percent)/200
 
     // --- CMO(9) on input (ring buffers) ---
     ring_up_in: [f64; 9],
@@ -435,7 +435,10 @@ impl OttoStream {
         let ott_percent = params.ott_percent.unwrap_or(0.6);
 
         if ott_period == 0 {
-            return Err(OttoError::InvalidPeriod { period: 0, data_len: 0 });
+            return Err(OttoError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            });
         }
 
         // VIDYA periods (preserve scalar semantics)
@@ -443,7 +446,10 @@ impl OttoStream {
         let p2 = slow;
         let p3 = slow.saturating_mul(fast);
         if p1 == 0 || p2 == 0 || p3 == 0 {
-            return Err(OttoError::InvalidPeriod { period: 0, data_len: 0 });
+            return Err(OttoError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            });
         }
 
         // precompute alphas
@@ -465,7 +471,7 @@ impl OttoStream {
         let wma_denom = (ott_period as f64) * (ott_period as f64 + 1.0) * 0.5;
 
         let tma_p1 = (ott_period + 1) / 2; // ceil(L/2)
-        let tma_p2 = ott_period / 2 + 1;   // floor(L/2)+1
+        let tma_p2 = ott_period / 2 + 1; // floor(L/2)+1
         let tma_ring1 = vec![0.0; tma_p1.max(1)];
         let tma_ring2 = vec![0.0; tma_p2.max(1)];
 
@@ -564,7 +570,11 @@ impl OttoStream {
     #[inline]
     fn cmo_abs_from_ring(sum_up: f64, sum_dn: f64) -> f64 {
         let denom = sum_up + sum_dn;
-        if denom != 0.0 { ((sum_up - sum_dn) / denom).abs() } else { 0.0 }
+        if denom != 0.0 {
+            ((sum_up - sum_dn) / denom).abs()
+        } else {
+            0.0
+        }
     }
 
     /// Update with one value; returns (HOTT, LOTT) after warmup, otherwise None.
@@ -579,7 +589,9 @@ impl OttoStream {
         // ---- CMO(9) on input, update ring ----
         if self.have_prev_in {
             let mut d = value - self.prev_x_in;
-            if !value.is_finite() || !self.prev_x_in.is_finite() { d = 0.0; }
+            if !value.is_finite() || !self.prev_x_in.is_finite() {
+                d = 0.0;
+            }
             if i >= 9 {
                 // remove head
                 self.sum_up_in -= self.ring_up_in[self.head_in];
@@ -591,14 +603,20 @@ impl OttoStream {
             self.sum_up_in += up;
             self.sum_dn_in += dn;
             self.head_in += 1;
-            if self.head_in == 9 { self.head_in = 0; }
+            if self.head_in == 9 {
+                self.head_in = 0;
+            }
         } else {
             self.have_prev_in = true;
         }
         self.prev_x_in = value;
 
         // abs(CMO) for VIDYA
-        let c_abs = if i >= 9 { Self::cmo_abs_from_ring(self.sum_up_in, self.sum_dn_in) } else { 0.0 };
+        let c_abs = if i >= 9 {
+            Self::cmo_abs_from_ring(self.sum_up_in, self.sum_dn_in)
+        } else {
+            0.0
+        };
 
         // ---- three VIDYA tracks on source ----
         // v = a*x + (1-a)*v  => use mul_add when possible
@@ -621,7 +639,9 @@ impl OttoStream {
                 // CMO(9) on LOTT, then VIDYA(LOTT) with period = ott_period
                 if self.have_prev_lott {
                     let mut d = lott - self.prev_lott;
-                    if !lott.is_finite() || !self.prev_lott.is_finite() { d = 0.0; }
+                    if !lott.is_finite() || !self.prev_lott.is_finite() {
+                        d = 0.0;
+                    }
                     if i >= 9 {
                         self.sum_up_lott -= self.ring_up_lott[self.head_lott];
                         self.sum_dn_lott -= self.ring_dn_lott[self.head_lott];
@@ -632,13 +652,19 @@ impl OttoStream {
                     self.sum_up_lott += up;
                     self.sum_dn_lott += dn;
                     self.head_lott += 1;
-                    if self.head_lott == 9 { self.head_lott = 0; }
+                    if self.head_lott == 9 {
+                        self.head_lott = 0;
+                    }
                 } else {
                     self.have_prev_lott = true;
                 }
                 self.prev_lott = lott;
 
-                let c2 = if i >= 9 { Self::cmo_abs_from_ring(self.sum_up_lott, self.sum_dn_lott) } else { 0.0 };
+                let c2 = if i >= 9 {
+                    Self::cmo_abs_from_ring(self.sum_up_lott, self.sum_dn_lott)
+                } else {
+                    0.0
+                };
                 let a = self.a_ott_base * c2;
                 self.ma_prev = a.mul_add(lott, (1.0 - a) * self.ma_prev);
                 Some(self.ma_prev)
@@ -695,8 +721,14 @@ impl OttoStream {
                 self.sma_buf[self.sma_head] = lott;
                 self.sma_sum += lott;
                 self.sma_head += 1;
-                if self.sma_head == p { self.sma_head = 0; }
-                if self.sma_count >= p { Some(self.sma_sum / p as f64) } else { None }
+                if self.sma_head == p {
+                    self.sma_head = 0;
+                }
+                if self.sma_count >= p {
+                    Some(self.sma_sum / p as f64)
+                } else {
+                    None
+                }
             }
 
             "WMA" => {
@@ -713,11 +745,17 @@ impl OttoStream {
                 // write new
                 self.wma_buf[self.wma_head] = lott;
                 self.wma_head += 1;
-                if self.wma_head == p { self.wma_head = 0; }
+                if self.wma_head == p {
+                    self.wma_head = 0;
+                }
                 // update sums
                 self.wma_sumwx = self.wma_sumwx - self.wma_sumx + (p as f64) * lott;
                 self.wma_sumx = self.wma_sumx + lott - x_old;
-                if self.wma_count >= p { Some(self.wma_sumwx / self.wma_denom) } else { None }
+                if self.wma_count >= p {
+                    Some(self.wma_sumwx / self.wma_denom)
+                } else {
+                    None
+                }
             }
 
             "TMA" => {
@@ -734,8 +772,14 @@ impl OttoStream {
                 self.tma_ring1[self.tma_head1] = lott;
                 self.tma_sum1 += lott;
                 self.tma_head1 += 1;
-                if self.tma_head1 == p1 { self.tma_head1 = 0; }
-                let stage1 = if self.tma_count1 >= p1 { self.tma_sum1 / p1 as f64 } else { return None };
+                if self.tma_head1 == p1 {
+                    self.tma_head1 = 0;
+                }
+                let stage1 = if self.tma_count1 >= p1 {
+                    self.tma_sum1 / p1 as f64
+                } else {
+                    return None;
+                };
 
                 // stage 2 SMA over stage1 outputs
                 let p2 = self.tma_p2;
@@ -750,27 +794,44 @@ impl OttoStream {
                 self.tma_ring2[self.tma_head2] = stage1;
                 self.tma_sum2 += stage1;
                 self.tma_head2 += 1;
-                if self.tma_head2 == p2 { self.tma_head2 = 0; }
-                if self.tma_count2 >= p2 { Some(self.tma_sum2 / p2 as f64) } else { None }
+                if self.tma_head2 == p2 {
+                    self.tma_head2 = 0;
+                }
+                if self.tma_count2 >= p2 {
+                    Some(self.tma_sum2 / p2 as f64)
+                } else {
+                    None
+                }
             }
 
             "ZLEMA" => {
                 // x_adj = 2*x - x_lag  (lag = floor((p-1)/2))
                 let lag = self.zlema_lag;
-                let x_lag = if self.zlema_count <= lag { 0.0 } else {
-                    self.zlema_ring[(self.zlema_head + self.zlema_ring.len() - lag - 1) % self.zlema_ring.len()]
+                let x_lag = if self.zlema_count <= lag {
+                    0.0
+                } else {
+                    self.zlema_ring[(self.zlema_head + self.zlema_ring.len() - lag - 1)
+                        % self.zlema_ring.len()]
                 };
                 let x_adj = 2.0 * lott - x_lag;
 
                 // push into ring
-                if self.zlema_count < self.zlema_ring.len() { self.zlema_count += 1; }
+                if self.zlema_count < self.zlema_ring.len() {
+                    self.zlema_count += 1;
+                }
                 self.zlema_ring[self.zlema_head] = lott;
                 self.zlema_head += 1;
-                if self.zlema_head == self.zlema_ring.len() { self.zlema_head = 0; }
+                if self.zlema_head == self.zlema_ring.len() {
+                    self.zlema_head = 0;
+                }
 
                 let a = self.zlema_alpha;
-                if !self.zlema_init { self.zlema_prev = x_adj; self.zlema_init = true; }
-                else { self.zlema_prev = a.mul_add(x_adj, (1.0 - a) * self.zlema_prev); }
+                if !self.zlema_init {
+                    self.zlema_prev = x_adj;
+                    self.zlema_init = true;
+                } else {
+                    self.zlema_prev = a.mul_add(x_adj, (1.0 - a) * self.zlema_prev);
+                }
                 Some(self.zlema_prev)
             }
 
@@ -779,16 +840,25 @@ impl OttoStream {
         };
 
         // --- gate + OTT state machine ---
-        if self.idx < self.required_len { return None; }
+        if self.idx < self.required_len {
+            return None;
+        }
 
-        let ma = match ma_opt { Some(v) => v, None => return None };
+        let ma = match ma_opt {
+            Some(v) => v,
+            None => return None,
+        };
 
         // First bar after warmup initializes OTT trail
         if !self.ott_init {
             self.long_stop_prev = ma * (1.0 - self.fark);
             self.short_stop_prev = ma * (1.0 + self.fark);
             let mt = self.long_stop_prev;
-            let hott0 = if ma > mt { mt * self.scale_up } else { mt * self.scale_dn };
+            let hott0 = if ma > mt {
+                mt * self.scale_up
+            } else {
+                mt * self.scale_dn
+            };
             self.ott_init = true;
             return Some((hott0, lott));
         }
@@ -796,13 +866,29 @@ impl OttoStream {
         // normal OTT step
         let ls = ma * (1.0 - self.fark);
         let ss = ma * (1.0 + self.fark);
-        let long_stop = if ma > self.long_stop_prev { ls.max(self.long_stop_prev) } else { ls };
-        let short_stop = if ma < self.short_stop_prev { ss.min(self.short_stop_prev) } else { ss };
-        let dir = if self.dir_prev == -1 && ma > self.short_stop_prev { 1 }
-                  else if self.dir_prev == 1 && ma < self.long_stop_prev { -1 }
-                  else { self.dir_prev };
+        let long_stop = if ma > self.long_stop_prev {
+            ls.max(self.long_stop_prev)
+        } else {
+            ls
+        };
+        let short_stop = if ma < self.short_stop_prev {
+            ss.min(self.short_stop_prev)
+        } else {
+            ss
+        };
+        let dir = if self.dir_prev == -1 && ma > self.short_stop_prev {
+            1
+        } else if self.dir_prev == 1 && ma < self.long_stop_prev {
+            -1
+        } else {
+            self.dir_prev
+        };
         let mt = if dir == 1 { long_stop } else { short_stop };
-        let hott = if ma > mt { mt * self.scale_up } else { mt * self.scale_dn };
+        let hott = if ma > mt {
+            mt * self.scale_up
+        } else {
+            mt * self.scale_dn
+        };
 
         self.long_stop_prev = long_stop;
         self.short_stop_prev = short_stop;
@@ -820,7 +906,8 @@ impl OttoStream {
             slow_vidya_length: Some(self.slow_vidya_length),
             correcting_constant: Some(self.correcting_constant),
             ma_type: Some(self.ma_type.clone()),
-        }).expect("OttoStream::reset: params should remain valid");
+        })
+        .expect("OttoStream::reset: params should remain valid");
     }
 }
 
@@ -1157,7 +1244,10 @@ pub fn otto_into_slices(
 
     // Preserve error semantics for zero-length VIDYA periods
     if p1 == 0 || p2 == 0 || p3 == 0 {
-        return Err(OttoError::InvalidPeriod { period: 0, data_len: n });
+        return Err(OttoError::InvalidPeriod {
+            period: 0,
+            data_len: n,
+        });
     }
 
     let coco = input.get_correcting_constant();
@@ -1214,7 +1304,11 @@ pub fn otto_into_slices(
 
         let cmo_abs = if i >= CMO_P {
             let denom = sum_up + sum_dn;
-            if denom != 0.0 { ((sum_up - sum_dn) / denom).abs() } else { 0.0 }
+            if denom != 0.0 {
+                ((sum_up - sum_dn) / denom).abs()
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
@@ -1261,20 +1355,35 @@ pub fn otto_into_slices(
             if i > 0 {
                 let x = lott_dst[i];
                 let mut d = x - prev_lott;
-                if !x.is_finite() || !prev_lott.is_finite() { d = 0.0; }
+                if !x.is_finite() || !prev_lott.is_finite() {
+                    d = 0.0;
+                }
                 if i >= CMO_P2 {
                     sum_up2 -= ring_up2[head2];
                     sum_dn2 -= ring_dn2[head2];
                 }
                 let (up, dn) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
-                ring_up2[head2] = up; ring_dn2[head2] = dn; sum_up2 += up; sum_dn2 += dn;
-                head2 += 1; if head2 == CMO_P2 { head2 = 0; }
+                ring_up2[head2] = up;
+                ring_dn2[head2] = dn;
+                sum_up2 += up;
+                sum_dn2 += dn;
+                head2 += 1;
+                if head2 == CMO_P2 {
+                    head2 = 0;
+                }
                 prev_lott = x;
             }
 
             let c_abs = if i >= CMO_P2 {
-                let denom = sum_up2 + sum_dn2; if denom != 0.0 { ((sum_up2 - sum_dn2) / denom).abs() } else { 0.0 }
-            } else { 0.0 };
+                let denom = sum_up2 + sum_dn2;
+                if denom != 0.0 {
+                    ((sum_up2 - sum_dn2) / denom).abs()
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
 
             // VIDYA(LOTT)
             let a = a_base * c_abs;
@@ -1286,18 +1395,40 @@ pub fn otto_into_slices(
                 long_stop_prev = ma * (1.0 - fark);
                 short_stop_prev = ma * (1.0 + fark);
                 let mt = long_stop_prev;
-                hott_dst[i] = if ma > mt { mt * scale_up } else { mt * scale_dn };
+                hott_dst[i] = if ma > mt {
+                    mt * scale_up
+                } else {
+                    mt * scale_dn
+                };
             } else {
                 let ls = ma * (1.0 - fark);
                 let ss = ma * (1.0 + fark);
-                let long_stop = if ma > long_stop_prev { ls.max(long_stop_prev) } else { ls };
-                let short_stop = if ma < short_stop_prev { ss.min(short_stop_prev) } else { ss };
-                let dir = if dir_prev == -1 && ma > short_stop_prev { 1 }
-                          else if dir_prev == 1 && ma < long_stop_prev { -1 }
-                          else { dir_prev };
+                let long_stop = if ma > long_stop_prev {
+                    ls.max(long_stop_prev)
+                } else {
+                    ls
+                };
+                let short_stop = if ma < short_stop_prev {
+                    ss.min(short_stop_prev)
+                } else {
+                    ss
+                };
+                let dir = if dir_prev == -1 && ma > short_stop_prev {
+                    1
+                } else if dir_prev == 1 && ma < long_stop_prev {
+                    -1
+                } else {
+                    dir_prev
+                };
                 let mt = if dir == 1 { long_stop } else { short_stop };
-                hott_dst[i] = if ma > mt { mt * scale_up } else { mt * scale_dn };
-                long_stop_prev = long_stop; short_stop_prev = short_stop; dir_prev = dir;
+                hott_dst[i] = if ma > mt {
+                    mt * scale_up
+                } else {
+                    mt * scale_dn
+                };
+                long_stop_prev = long_stop;
+                short_stop_prev = short_stop;
+                dir_prev = dir;
             }
         }
     } else {
@@ -1310,26 +1441,53 @@ pub fn otto_into_slices(
         let mut dir_prev: i32 = 1;
 
         let start = mavg.iter().position(|&x| !x.is_nan()).unwrap_or(n);
-        for i in 0..start.min(n) { hott_dst[i] = f64::NAN; }
+        for i in 0..start.min(n) {
+            hott_dst[i] = f64::NAN;
+        }
         if start < n {
             let ma0 = mavg[start];
             long_stop_prev = ma0 * (1.0 - fark);
             short_stop_prev = ma0 * (1.0 + fark);
             let mt0 = long_stop_prev;
-            hott_dst[start] = if ma0 > mt0 { mt0 * scale_up } else { mt0 * scale_dn };
+            hott_dst[start] = if ma0 > mt0 {
+                mt0 * scale_up
+            } else {
+                mt0 * scale_dn
+            };
             for i in (start + 1)..n {
                 let ma = mavg[i];
-                if ma.is_nan() { hott_dst[i] = hott_dst[i - 1]; continue; }
+                if ma.is_nan() {
+                    hott_dst[i] = hott_dst[i - 1];
+                    continue;
+                }
                 let ls = ma * (1.0 - fark);
                 let ss = ma * (1.0 + fark);
-                let long_stop = if ma > long_stop_prev { ls.max(long_stop_prev) } else { ls };
-                let short_stop = if ma < short_stop_prev { ss.min(short_stop_prev) } else { ss };
-                let dir = if dir_prev == -1 && ma > short_stop_prev { 1 }
-                          else if dir_prev == 1 && ma < long_stop_prev { -1 }
-                          else { dir_prev };
+                let long_stop = if ma > long_stop_prev {
+                    ls.max(long_stop_prev)
+                } else {
+                    ls
+                };
+                let short_stop = if ma < short_stop_prev {
+                    ss.min(short_stop_prev)
+                } else {
+                    ss
+                };
+                let dir = if dir_prev == -1 && ma > short_stop_prev {
+                    1
+                } else if dir_prev == 1 && ma < long_stop_prev {
+                    -1
+                } else {
+                    dir_prev
+                };
                 let mt = if dir == 1 { long_stop } else { short_stop };
-                hott_dst[i] = if ma > mt { mt * scale_up } else { mt * scale_dn };
-                long_stop_prev = long_stop; short_stop_prev = short_stop; dir_prev = dir;
+                hott_dst[i] = if ma > mt {
+                    mt * scale_up
+                } else {
+                    mt * scale_dn
+                };
+                long_stop_prev = long_stop;
+                short_stop_prev = short_stop;
+                dir_prev = dir;
             }
         }
     }
@@ -1509,7 +1667,9 @@ fn cmo_abs9_stream(data: &[f64]) -> Vec<f64> {
     const CMO_P: usize = 9;
     let n = data.len();
     let mut out = vec![0.0f64; n];
-    if n == 0 { return out; }
+    if n == 0 {
+        return out;
+    }
 
     let mut ring_up = [0.0f64; CMO_P];
     let mut ring_dn = [0.0f64; CMO_P];
@@ -1522,16 +1682,31 @@ fn cmo_abs9_stream(data: &[f64]) -> Vec<f64> {
         let x = data[i];
         if i > 0 {
             let mut d = x - prev_x;
-            if !x.is_finite() || !prev_x.is_finite() { d = 0.0; }
-            if i >= CMO_P { sum_up -= ring_up[head]; sum_dn -= ring_dn[head]; }
+            if !x.is_finite() || !prev_x.is_finite() {
+                d = 0.0;
+            }
+            if i >= CMO_P {
+                sum_up -= ring_up[head];
+                sum_dn -= ring_dn[head];
+            }
             let (up, dn) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
-            ring_up[head] = up; ring_dn[head] = dn; sum_up += up; sum_dn += dn;
-            head += 1; if head == CMO_P { head = 0; }
+            ring_up[head] = up;
+            ring_dn[head] = dn;
+            sum_up += up;
+            sum_dn += dn;
+            head += 1;
+            if head == CMO_P {
+                head = 0;
+            }
             prev_x = x;
         }
         if i >= CMO_P {
             let denom = sum_up + sum_dn;
-            out[i] = if denom != 0.0 { ((sum_up - sum_dn) / denom).abs() } else { 0.0 };
+            out[i] = if denom != 0.0 {
+                ((sum_up - sum_dn) / denom).abs()
+            } else {
+                0.0
+            };
         } else {
             out[i] = 0.0;
         }
@@ -1582,7 +1757,10 @@ pub fn otto_batch_with_kernel(
         let p2 = slow;
         let p3 = slow.saturating_mul(fast);
         if p1 == 0 || p2 == 0 || p3 == 0 {
-            return Err(OttoError::InvalidPeriod { period: 0, data_len: n });
+            return Err(OttoError::InvalidPeriod {
+                period: 0,
+                data_len: n,
+            });
         }
 
         let a1_base = 2.0 / (p1 as f64 + 1.0);
@@ -1621,27 +1799,54 @@ pub fn otto_batch_with_kernel(
         let mut dir_prev: i32 = 1;
 
         let start = mavg.iter().position(|&x| !x.is_nan()).unwrap_or(n);
-        for i in 0..start.min(n) { row_h[i] = f64::NAN; }
+        for i in 0..start.min(n) {
+            row_h[i] = f64::NAN;
+        }
 
         if start < n {
             let ma0 = mavg[start];
             long_stop_prev = ma0 * (1.0 - fark);
             short_stop_prev = ma0 * (1.0 + fark);
             let mt0 = long_stop_prev;
-            row_h[start] = if ma0 > mt0 { mt0 * scale_up } else { mt0 * scale_dn };
+            row_h[start] = if ma0 > mt0 {
+                mt0 * scale_up
+            } else {
+                mt0 * scale_dn
+            };
             for i in (start + 1)..n {
                 let ma = mavg[i];
-                if ma.is_nan() { row_h[i] = row_h[i - 1]; continue; }
+                if ma.is_nan() {
+                    row_h[i] = row_h[i - 1];
+                    continue;
+                }
                 let ls = ma * (1.0 - fark);
                 let ss = ma * (1.0 + fark);
-                let long_stop = if ma > long_stop_prev { ls.max(long_stop_prev) } else { ls };
-                let short_stop = if ma < short_stop_prev { ss.min(short_stop_prev) } else { ss };
-                let dir = if dir_prev == -1 && ma > short_stop_prev { 1 }
-                          else if dir_prev == 1 && ma < long_stop_prev { -1 }
-                          else { dir_prev };
+                let long_stop = if ma > long_stop_prev {
+                    ls.max(long_stop_prev)
+                } else {
+                    ls
+                };
+                let short_stop = if ma < short_stop_prev {
+                    ss.min(short_stop_prev)
+                } else {
+                    ss
+                };
+                let dir = if dir_prev == -1 && ma > short_stop_prev {
+                    1
+                } else if dir_prev == 1 && ma < long_stop_prev {
+                    -1
+                } else {
+                    dir_prev
+                };
                 let mt = if dir == 1 { long_stop } else { short_stop };
-                row_h[i] = if ma > mt { mt * scale_up } else { mt * scale_dn };
-                long_stop_prev = long_stop; short_stop_prev = short_stop; dir_prev = dir;
+                row_h[i] = if ma > mt {
+                    mt * scale_up
+                } else {
+                    mt * scale_dn
+                };
+                long_stop_prev = long_stop;
+                short_stop_prev = short_stop;
+                dir_prev = dir;
             }
         }
     }

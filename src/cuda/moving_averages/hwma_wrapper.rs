@@ -17,7 +17,7 @@ use crate::indicators::moving_averages::hwma::{expand_grid, HwmaBatchRange, Hwma
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -45,21 +45,39 @@ impl std::error::Error for CudaHwmaError {}
 // -------- Kernel policy + introspection (subset for recurrence) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelPolicy { Auto, Plain { block_x: u32 } }
-
-#[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy { Auto, OneD { block_x: u32 } }
-
-#[derive(Clone, Copy, Debug)]
-pub struct CudaHwmaPolicy { pub batch: BatchKernelPolicy, pub many_series: ManySeriesKernelPolicy }
-impl Default for CudaHwmaPolicy {
-    fn default() -> Self { Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto } }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub struct CudaHwmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+impl Default for CudaHwmaPolicy {
+    fn default() -> Self {
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaHwma {
     module: Module,
@@ -81,7 +99,7 @@ impl CudaHwma {
         let context = Context::new(device).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/hwma_kernel.ptx"));
-        // Match ALMA: prefer DetermineTargetFromContext + O2; fall back to simpler modes.
+        // Prefer DetermineTargetFromContext + O2 for stability; fall back to simpler modes.
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -90,8 +108,9 @@ impl CudaHwma {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -110,47 +129,134 @@ impl CudaHwma {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaHwmaPolicy) -> Result<Self, CudaHwmaError> {
-        let mut s = Self::new(device_id)?; s.policy = policy; Ok(s)
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaHwmaPolicy,
+    ) -> Result<Self, CudaHwmaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaHwmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaHwmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
-    pub fn synchronize(&self) -> Result<(), CudaHwmaError> { self.stream.synchronize().map_err(|e| CudaHwmaError::Cuda(e.to_string())) }
+    pub fn set_policy(&mut self, policy: CudaHwmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaHwmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
+    pub fn synchronize(&self) -> Result<(), CudaHwmaError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaHwmaError::Cuda(e.to_string()))
+    }
+
+    // -------- Host↔Device helpers (pinned+async by default) --------
+    #[inline]
+    fn env_flag(name: &str, default: bool) -> bool {
+        match env::var(name) {
+            Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false")),
+            Err(_) => default,
+        }
+    }
+
+    fn h2d_f32(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaHwmaError> {
+        if Self::env_flag("HWMA_PINNED", true) {
+            let host =
+                LockedBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            let dev = unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
+                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            Ok(dev)
+        } else {
+            DeviceBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))
+        }
+    }
+
+    fn h2d_i32(&self, src: &[i32]) -> Result<DeviceBuffer<i32>, CudaHwmaError> {
+        if Self::env_flag("HWMA_PINNED", true) {
+            let host =
+                LockedBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            let dev = unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
+                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            Ok(dev)
+        } else {
+            DeviceBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))
+        }
+    }
+
+    fn h2d_f64(&self, src: &[f64]) -> Result<DeviceBuffer<f64>, CudaHwmaError> {
+        if Self::env_flag("HWMA_PINNED", true) {
+            let host =
+                LockedBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            let dev = unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
+                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            Ok(dev)
+        } else {
+            DeviceBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))
+        }
+    }
 
     // VRAM helpers
     #[inline]
-    fn mem_check_enabled() -> bool { match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"), Err(_) => true } }
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
+    }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Some((free, _)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) { eprintln!("[DEBUG] HWMA batch selected kernel: {:?}", sel); }
-                unsafe { (*(self as *const _ as *mut CudaHwma)).debug_batch_logged = true; }
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] HWMA batch selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaHwma)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) { eprintln!("[DEBUG] HWMA many-series selected kernel: {:?}", sel); }
-                unsafe { (*(self as *const _ as *mut CudaHwma)).debug_many_logged = true; }
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] HWMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaHwma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -198,14 +304,13 @@ impl CudaHwma {
 
     fn launch_batch_kernel(
         &self,
-        d_prices: &DeviceBuffer<f32>,
-        d_nas: &DeviceBuffer<f32>,
-        d_nbs: &DeviceBuffer<f32>,
-        d_ncs: &DeviceBuffer<f32>,
+        d_prices: &DeviceBuffer<f64>,
+        d_nas: &DeviceBuffer<f64>,
+        d_nbs: &DeviceBuffer<f64>,
+        d_ncs: &DeviceBuffer<f64>,
         first_valid: usize,
         series_len: usize,
         n_combos: usize,
-        start_combo: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaHwmaError> {
         if series_len == 0 || n_combos == 0 {
@@ -229,11 +334,12 @@ impl CudaHwma {
             .get_function("hwma_batch_f32")
             .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
 
-        // Policy/env override for block size
+        // Occupancy-guided block size with optional env override
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => std::env::var("HWMA_BLOCK_X")
-                .ok().and_then(|v| v.parse::<u32>().ok())
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
                 .filter(|&v| matches!(v, 64 | 128 | 256 | 512))
                 .unwrap_or(128),
         };
@@ -242,19 +348,21 @@ impl CudaHwma {
         let block: BlockSize = (block_x, 1, 1).into();
 
         // Introspection
-        unsafe { (*(self as *const _ as *mut CudaHwma)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaHwma)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            // Offset param/output pointers by start_combo when chunking
-            let mut nas_ptr = d_nas.as_device_ptr().add(start_combo).as_raw();
-            let mut nbs_ptr = d_nbs.as_device_ptr().add(start_combo).as_raw();
-            let mut ncs_ptr = d_ncs.as_device_ptr().add(start_combo).as_raw();
+            let mut nas_ptr = d_nas.as_device_ptr().as_raw();
+            let mut nbs_ptr = d_nbs.as_device_ptr().as_raw();
+            let mut ncs_ptr = d_ncs.as_device_ptr().as_raw();
             let mut first_valid_i = first_valid as i32;
             let mut series_len_i = series_len as i32;
             let mut n_combos_i = n_combos as i32;
-            let mut out_ptr = d_out.as_device_ptr().add(start_combo * series_len).as_raw();
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut std::ffi::c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut std::ffi::c_void,
                 &mut nas_ptr as *mut _ as *mut std::ffi::c_void,
@@ -275,10 +383,10 @@ impl CudaHwma {
 
     pub fn hwma_batch_device(
         &self,
-        d_prices: &DeviceBuffer<f32>,
-        d_nas: &DeviceBuffer<f32>,
-        d_nbs: &DeviceBuffer<f32>,
-        d_ncs: &DeviceBuffer<f32>,
+        d_prices: &DeviceBuffer<f64>,
+        d_nas: &DeviceBuffer<f64>,
+        d_nbs: &DeviceBuffer<f64>,
+        d_ncs: &DeviceBuffer<f64>,
         first_valid: usize,
         series_len: usize,
         n_combos: usize,
@@ -292,7 +400,6 @@ impl CudaHwma {
             first_valid,
             series_len,
             n_combos,
-            0,
             d_out,
         )
     }
@@ -318,46 +425,58 @@ impl CudaHwma {
             )));
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+        // Promote prices to f64 to reduce accumulation error vs CPU f64 baseline
+        let prices_f64: Vec<f64> = data_f32.iter().map(|&x| x as f64).collect();
+        let d_prices = self.h2d_f64(&prices_f64)?;
 
-        let mut nas = Vec::with_capacity(n_combos);
-        let mut nbs = Vec::with_capacity(n_combos);
-        let mut ncs = Vec::with_capacity(n_combos);
+        let mut nas: Vec<f64> = Vec::with_capacity(n_combos);
+        let mut nbs: Vec<f64> = Vec::with_capacity(n_combos);
+        let mut ncs: Vec<f64> = Vec::with_capacity(n_combos);
         for prm in &combos {
-            nas.push(prm.na.unwrap_or(0.2) as f32);
-            nbs.push(prm.nb.unwrap_or(0.1) as f32);
-            ncs.push(prm.nc.unwrap_or(0.1) as f32);
+            nas.push(prm.na.unwrap_or(0.2));
+            nbs.push(prm.nb.unwrap_or(0.1));
+            ncs.push(prm.nc.unwrap_or(0.1));
         }
-        let d_nas =
-            DeviceBuffer::from_slice(&nas).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
-        let d_nbs =
-            DeviceBuffer::from_slice(&nbs).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
-        let d_ncs =
-            DeviceBuffer::from_slice(&ncs).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+        let d_nas = if Self::env_flag("HWMA_PINNED", true) {
+            let host =
+                LockedBuffer::from_slice(&nas).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
+                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+        } else {
+            DeviceBuffer::from_slice(&nas).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+        };
+        let d_nbs = if Self::env_flag("HWMA_PINNED", true) {
+            let host =
+                LockedBuffer::from_slice(&nbs).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
+                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+        } else {
+            DeviceBuffer::from_slice(&nbs).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+        };
+        let d_ncs = if Self::env_flag("HWMA_PINNED", true) {
+            let host =
+                LockedBuffer::from_slice(&ncs).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
+                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+        } else {
+            DeviceBuffer::from_slice(&ncs).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+        };
 
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
                 .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
 
-        // Chunk to <= 65_535 combos per launch (mirrors ALMA grid.y chunking behavior)
-        const MAX_CHUNK: usize = 65_535;
-        let mut launched = 0usize;
-        while launched < n_combos {
-            let len = (n_combos - launched).min(MAX_CHUNK);
-            self.launch_batch_kernel(
-                &d_prices,
-                &d_nas,
-                &d_nbs,
-                &d_ncs,
-                first_valid,
-                series_len,
-                len,
-                launched,
-                &mut d_out,
-            )?;
-            launched += len;
-        }
+        // Single launch: grid-stride kernel covers all combos
+        self.launch_batch_kernel(
+            &d_prices,
+            &d_nas,
+            &d_nbs,
+            &d_ncs,
+            first_valid,
+            series_len,
+            n_combos,
+            &mut d_out,
+        )?;
         self.stream
             .synchronize()
             .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
@@ -456,16 +575,28 @@ impl CudaHwma {
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
-            ManySeriesKernelPolicy::Auto => std::env::var("HWMA_MS_BLOCK_X")
-                .ok().and_then(|v| v.parse::<u32>().ok())
-                .filter(|&v| matches!(v, 64 | 128 | 256 | 512))
-                .unwrap_or(128),
+            ManySeriesKernelPolicy::Auto => {
+                if let Ok(v) = std::env::var("HWMA_MS_BLOCK_X") {
+                    v.parse::<u32>()
+                        .ok()
+                        .filter(|&v| matches!(v, 64 | 128 | 256 | 512))
+                        .unwrap_or(128)
+                } else {
+                    match func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0)) {
+                        Ok((_min_grid, suggested_block)) => suggested_block.max(128),
+                        Err(_) => 256,
+                    }
+                }
+            }
         };
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        unsafe { (*(self as *const _ as *mut CudaHwma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaHwma)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         unsafe {
@@ -546,10 +677,8 @@ impl CudaHwma {
             )));
         }
 
-        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+        let d_prices_tm = self.h2d_f32(data_tm_f32)?;
+        let d_first_valids = self.h2d_i32(&first_valids)?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
 
@@ -588,8 +717,16 @@ pub mod benches {
         crate::indicators::moving_averages::hwma::HwmaParams,
         hwma_batch_dev,
         hwma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::hwma::HwmaBatchRange { na: (0.05, 0.05 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001), nb: (0.1, 0.1, 0.0), nc: (0.1, 0.1, 0.0) },
-        crate::indicators::moving_averages::hwma::HwmaParams { na: Some(0.2), nb: Some(0.1), nc: Some(0.1) },
+        crate::indicators::moving_averages::hwma::HwmaBatchRange {
+            na: (0.05, 0.05 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001),
+            nb: (0.1, 0.1, 0.0),
+            nc: (0.1, 0.1, 0.0)
+        },
+        crate::indicators::moving_averages::hwma::HwmaParams {
+            na: Some(0.2),
+            nb: Some(0.1),
+            nc: Some(0.1)
+        },
         "hwma",
         "hwma"
     );

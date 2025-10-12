@@ -319,13 +319,7 @@ pub fn ad_avx2(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &m
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
-unsafe fn ad_avx2_inner(
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
-    volume: &[f64],
-    out: &mut [f64],
-) {
+unsafe fn ad_avx2_inner(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: &mut [f64]) {
     use core::arch::x86_64::*;
 
     let n = high.len();
@@ -623,40 +617,38 @@ fn ad_batch_inner_into(
         k => k,
     };
 
-    let do_row = |row: usize, dst: &mut [f64]| {
-        unsafe {
-            match actual {
-                Kernel::Scalar | Kernel::ScalarBatch => ad_row_scalar(
-                    data.highs[row],
-                    data.lows[row],
-                    data.closes[row],
-                    data.volumes[row],
-                    dst,
-                ),
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx2 | Kernel::Avx2Batch => ad_row_avx2(
-                    data.highs[row],
-                    data.lows[row],
-                    data.closes[row],
-                    data.volumes[row],
-                    dst,
-                ),
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 | Kernel::Avx512Batch => ad_row_avx512(
-                    data.highs[row],
-                    data.lows[row],
-                    data.closes[row],
-                    data.volumes[row],
-                    dst,
-                ),
-                _ => ad_row_scalar(
-                    data.highs[row],
-                    data.lows[row],
-                    data.closes[row],
-                    data.volumes[row],
-                    dst,
-                ),
-            }
+    let do_row = |row: usize, dst: &mut [f64]| unsafe {
+        match actual {
+            Kernel::Scalar | Kernel::ScalarBatch => ad_row_scalar(
+                data.highs[row],
+                data.lows[row],
+                data.closes[row],
+                data.volumes[row],
+                dst,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => ad_row_avx2(
+                data.highs[row],
+                data.lows[row],
+                data.closes[row],
+                data.volumes[row],
+                dst,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => ad_row_avx512(
+                data.highs[row],
+                data.lows[row],
+                data.closes[row],
+                data.volumes[row],
+                dst,
+            ),
+            _ => ad_row_scalar(
+                data.highs[row],
+                data.lows[row],
+                data.closes[row],
+                data.volumes[row],
+                dst,
+            ),
         }
     };
 

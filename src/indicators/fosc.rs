@@ -334,7 +334,11 @@ pub fn fosc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let x = 0.5 * p * (p + 1.0);
     let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0;
     let denom = p * x2 - x * x;
-    let bd = if denom.abs() < f64::EPSILON { 0.0 } else { 1.0 / denom };
+    let bd = if denom.abs() < f64::EPSILON {
+        0.0
+    } else {
+        1.0 / denom
+    };
     let inv_p = 1.0 / p;
     let p1 = p + 1.0;
 
@@ -416,7 +420,11 @@ pub unsafe fn fosc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f6
     let x = 0.5 * p * (p + 1.0);
     let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0;
     let denom = p * x2 - x * x;
-    let bd = if denom.abs() < f64::EPSILON { 0.0 } else { 1.0 / denom };
+    let bd = if denom.abs() < f64::EPSILON {
+        0.0
+    } else {
+        1.0 / denom
+    };
     let inv_p = 1.0 / p;
     let p1 = p + 1.0;
 
@@ -501,20 +509,20 @@ pub unsafe fn fosc_avx512_long(data: &[f64], period: usize, first: usize, out: &
 pub struct FoscStream {
     period: usize,
     buffer: Vec<f64>,
-    idx: usize,     // circular write index (points to oldest)
+    idx: usize, // circular write index (points to oldest)
     filled: bool,
 
     // OLS invariants for x = 1..=p
-    x: f64,         // sum i
-    x2: f64,        // sum i^2
-    inv_den: f64,   // 1 / (p*x2 - x*x)
-    inv_p: f64,     // 1 / p
-    p_f64: f64,     // p as f64
-    p1: f64,        // p + 1
+    x: f64,       // sum i
+    x2: f64,      // sum i^2
+    inv_den: f64, // 1 / (p*x2 - x*x)
+    inv_p: f64,   // 1 / p
+    p_f64: f64,   // p as f64
+    p1: f64,      // p + 1
 
     // Running window stats (full window once filled)
-    y: f64,         // sum y_i
-    xy: f64,        // sum i*y_i (i=1 oldest .. p newest)
+    y: f64,  // sum y_i
+    xy: f64, // sum i*y_i (i=1 oldest .. p newest)
 
     // Forecast for next bar computed from the current window
     // (used on the next update to match scalar semantics)
@@ -527,14 +535,21 @@ impl FoscStream {
     pub fn try_new(params: FoscParams) -> Result<Self, FoscError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(FoscError::InvalidPeriod { period, data_len: 0 });
+            return Err(FoscError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let p = period as f64;
         // Closed forms for Σi and Σi^2 to avoid loops
-        let x  = 0.5 * p * (p + 1.0);
-        let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0;  // p(p+1)(2p+1)/6
+        let x = 0.5 * p * (p + 1.0);
+        let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0; // p(p+1)(2p+1)/6
         let den = p * x2 - x * x;
-        let inv_den = if den.abs() < f64::EPSILON { 0.0 } else { 1.0 / den };
+        let inv_den = if den.abs() < f64::EPSILON {
+            0.0
+        } else {
+            1.0 / den
+        };
 
         Ok(Self {
             period,
@@ -565,12 +580,14 @@ impl FoscStream {
         // Warmup: build the initial window (no outputs yet)
         if self.count < self.period {
             self.buffer[self.idx] = value;
-            self.y  += value;
+            self.y += value;
             self.xy += value * (self.count as f64 + 1.0);
 
             // advance ring index without modulo
             self.idx += 1;
-            if self.idx == self.period { self.idx = 0; }
+            if self.idx == self.period {
+                self.idx = 0;
+            }
             self.count += 1;
 
             if self.count == self.period {
@@ -597,11 +614,13 @@ impl FoscStream {
         let old = self.buffer[self.idx];
         self.buffer[self.idx] = value;
         self.idx += 1;
-        if self.idx == self.period { self.idx = 0; }
+        if self.idx == self.period {
+            self.idx = 0;
+        }
 
         // O(1) accumulator updates
         let y_prev = self.y;
-        self.y  = y_prev - old + value;
+        self.y = y_prev - old + value;
         self.xy = self.xy - y_prev + self.p_f64 * value;
 
         // Compute forecast for the next bar (used on the next update)

@@ -287,7 +287,9 @@ pub fn natr_scalar(
     out: &mut [f64],
 ) {
     let len = out.len();
-    if first >= len { return; }
+    if first >= len {
+        return;
+    }
 
     let inv_p: f64 = 1.0 / (period as f64);
     let k100: f64 = 100.0;
@@ -307,7 +309,11 @@ pub fn natr_scalar(
 
     let mut atr = sum_tr * inv_p;
     let c_we = close[warm_end];
-    out[warm_end] = if c_we.is_finite() && c_we != 0.0 { (atr / c_we) * k100 } else { f64::NAN };
+    out[warm_end] = if c_we.is_finite() && c_we != 0.0 {
+        (atr / c_we) * k100
+    } else {
+        f64::NAN
+    };
 
     // Main loop: unrolled by 4 for better ILP; Wilder smoothing remains sequential.
     let mut idx = warm_end + 1;
@@ -333,19 +339,35 @@ pub fn natr_scalar(
 
         atr = (tr0 - atr).mul_add(inv_p, atr);
         let c0 = close[idx + 0];
-        out[idx + 0] = if c0.is_finite() && c0 != 0.0 { (atr / c0) * k100 } else { f64::NAN };
+        out[idx + 0] = if c0.is_finite() && c0 != 0.0 {
+            (atr / c0) * k100
+        } else {
+            f64::NAN
+        };
 
         atr = (tr1 - atr).mul_add(inv_p, atr);
         let c1v = close[idx + 1];
-        out[idx + 1] = if c1v.is_finite() && c1v != 0.0 { (atr / c1v) * k100 } else { f64::NAN };
+        out[idx + 1] = if c1v.is_finite() && c1v != 0.0 {
+            (atr / c1v) * k100
+        } else {
+            f64::NAN
+        };
 
         atr = (tr2 - atr).mul_add(inv_p, atr);
         let c2v = close[idx + 2];
-        out[idx + 2] = if c2v.is_finite() && c2v != 0.0 { (atr / c2v) * k100 } else { f64::NAN };
+        out[idx + 2] = if c2v.is_finite() && c2v != 0.0 {
+            (atr / c2v) * k100
+        } else {
+            f64::NAN
+        };
 
         atr = (tr3 - atr).mul_add(inv_p, atr);
         let c3v = close[idx + 3];
-        out[idx + 3] = if c3v.is_finite() && c3v != 0.0 { (atr / c3v) * k100 } else { f64::NAN };
+        out[idx + 3] = if c3v.is_finite() && c3v != 0.0 {
+            (atr / c3v) * k100
+        } else {
+            f64::NAN
+        };
 
         idx += 4;
     }
@@ -358,7 +380,11 @@ pub fn natr_scalar(
         atr = (tr - atr).mul_add(inv_p, atr);
 
         let cv = close[idx];
-        out[idx] = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+        out[idx] = if cv.is_finite() && cv != 0.0 {
+            (atr / cv) * k100
+        } else {
+            f64::NAN
+        };
         idx += 1;
     }
 }
@@ -393,7 +419,9 @@ pub unsafe fn natr_avx2(
     use core::arch::x86_64::*;
     debug_assert!(high.len() == low.len() && high.len() == close.len() && high.len() == out.len());
     let len = out.len();
-    if first >= len { return; }
+    if first >= len {
+        return;
+    }
 
     let inv_p: f64 = 1.0 / (period as f64);
     let k100: f64 = 100.0;
@@ -440,7 +468,11 @@ pub unsafe fn natr_avx2(
 
     let mut atr = sum_tr * inv_p;
     let c_we = *c.add(warm_end);
-    *o.add(warm_end) = if c_we.is_finite() && c_we != 0.0 { (atr / c_we) * k100 } else { f64::NAN };
+    *o.add(warm_end) = if c_we.is_finite() && c_we != 0.0 {
+        (atr / c_we) * k100
+    } else {
+        f64::NAN
+    };
 
     // Main loop: batch TR in AVX2, sequential recurrence
     let mut idx = warm_end + 1;
@@ -462,19 +494,35 @@ pub unsafe fn natr_avx2(
 
         atr = (tr[0] - atr).mul_add(inv_p, atr);
         let c0 = *c.add(idx + 0);
-        *o.add(idx + 0) = if c0.is_finite() && c0 != 0.0 { (atr / c0) * k100 } else { f64::NAN };
+        *o.add(idx + 0) = if c0.is_finite() && c0 != 0.0 {
+            (atr / c0) * k100
+        } else {
+            f64::NAN
+        };
 
         atr = (tr[1] - atr).mul_add(inv_p, atr);
         let c1 = *c.add(idx + 1);
-        *o.add(idx + 1) = if c1.is_finite() && c1 != 0.0 { (atr / c1) * k100 } else { f64::NAN };
+        *o.add(idx + 1) = if c1.is_finite() && c1 != 0.0 {
+            (atr / c1) * k100
+        } else {
+            f64::NAN
+        };
 
         atr = (tr[2] - atr).mul_add(inv_p, atr);
         let c2 = *c.add(idx + 2);
-        *o.add(idx + 2) = if c2.is_finite() && c2 != 0.0 { (atr / c2) * k100 } else { f64::NAN };
+        *o.add(idx + 2) = if c2.is_finite() && c2 != 0.0 {
+            (atr / c2) * k100
+        } else {
+            f64::NAN
+        };
 
         atr = (tr[3] - atr).mul_add(inv_p, atr);
         let c3 = *c.add(idx + 3);
-        *o.add(idx + 3) = if c3.is_finite() && c3 != 0.0 { (atr / c3) * k100 } else { f64::NAN };
+        *o.add(idx + 3) = if c3.is_finite() && c3 != 0.0 {
+            (atr / c3) * k100
+        } else {
+            f64::NAN
+        };
 
         idx += 4;
     }
@@ -486,7 +534,11 @@ pub unsafe fn natr_avx2(
         atr = (tr - atr).mul_add(inv_p, atr);
 
         let cv = *c.add(idx);
-        *o.add(idx) = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+        *o.add(idx) = if cv.is_finite() && cv != 0.0 {
+            (atr / cv) * k100
+        } else {
+            f64::NAN
+        };
         idx += 1;
     }
 }
@@ -505,7 +557,9 @@ unsafe fn natr_avx512_body(
     use core::arch::x86_64::*;
     debug_assert!(high.len() == low.len() && high.len() == close.len() && high.len() == out.len());
     let len = out.len();
-    if first >= len { return; }
+    if first >= len {
+        return;
+    }
 
     let inv_p: f64 = 1.0 / (period as f64);
     let k100: f64 = 100.0;
@@ -552,7 +606,11 @@ unsafe fn natr_avx512_body(
 
     let mut atr = sum_tr * inv_p;
     let c_we = *c.add(warm_end);
-    *o.add(warm_end) = if c_we.is_finite() && c_we != 0.0 { (atr / c_we) * k100 } else { f64::NAN };
+    *o.add(warm_end) = if c_we.is_finite() && c_we != 0.0 {
+        (atr / c_we) * k100
+    } else {
+        f64::NAN
+    };
 
     // Main loop
     let mut idx = warm_end + 1;
@@ -572,22 +630,62 @@ unsafe fn natr_avx512_body(
         let mut tr = [0.0f64; 8];
         _mm512_storeu_pd(tr.as_mut_ptr(), vtr);
 
-        atr = (tr[0] - atr).mul_add(inv_p, atr); let c0 = *c.add(idx + 0);
-        *o.add(idx + 0) = if c0.is_finite() && c0 != 0.0 { (atr / c0) * k100 } else { f64::NAN };
-        atr = (tr[1] - atr).mul_add(inv_p, atr); let c1 = *c.add(idx + 1);
-        *o.add(idx + 1) = if c1.is_finite() && c1 != 0.0 { (atr / c1) * k100 } else { f64::NAN };
-        atr = (tr[2] - atr).mul_add(inv_p, atr); let c2 = *c.add(idx + 2);
-        *o.add(idx + 2) = if c2.is_finite() && c2 != 0.0 { (atr / c2) * k100 } else { f64::NAN };
-        atr = (tr[3] - atr).mul_add(inv_p, atr); let c3 = *c.add(idx + 3);
-        *o.add(idx + 3) = if c3.is_finite() && c3 != 0.0 { (atr / c3) * k100 } else { f64::NAN };
-        atr = (tr[4] - atr).mul_add(inv_p, atr); let c4 = *c.add(idx + 4);
-        *o.add(idx + 4) = if c4.is_finite() && c4 != 0.0 { (atr / c4) * k100 } else { f64::NAN };
-        atr = (tr[5] - atr).mul_add(inv_p, atr); let c5 = *c.add(idx + 5);
-        *o.add(idx + 5) = if c5.is_finite() && c5 != 0.0 { (atr / c5) * k100 } else { f64::NAN };
-        atr = (tr[6] - atr).mul_add(inv_p, atr); let c6 = *c.add(idx + 6);
-        *o.add(idx + 6) = if c6.is_finite() && c6 != 0.0 { (atr / c6) * k100 } else { f64::NAN };
-        atr = (tr[7] - atr).mul_add(inv_p, atr); let c7 = *c.add(idx + 7);
-        *o.add(idx + 7) = if c7.is_finite() && c7 != 0.0 { (atr / c7) * k100 } else { f64::NAN };
+        atr = (tr[0] - atr).mul_add(inv_p, atr);
+        let c0 = *c.add(idx + 0);
+        *o.add(idx + 0) = if c0.is_finite() && c0 != 0.0 {
+            (atr / c0) * k100
+        } else {
+            f64::NAN
+        };
+        atr = (tr[1] - atr).mul_add(inv_p, atr);
+        let c1 = *c.add(idx + 1);
+        *o.add(idx + 1) = if c1.is_finite() && c1 != 0.0 {
+            (atr / c1) * k100
+        } else {
+            f64::NAN
+        };
+        atr = (tr[2] - atr).mul_add(inv_p, atr);
+        let c2 = *c.add(idx + 2);
+        *o.add(idx + 2) = if c2.is_finite() && c2 != 0.0 {
+            (atr / c2) * k100
+        } else {
+            f64::NAN
+        };
+        atr = (tr[3] - atr).mul_add(inv_p, atr);
+        let c3 = *c.add(idx + 3);
+        *o.add(idx + 3) = if c3.is_finite() && c3 != 0.0 {
+            (atr / c3) * k100
+        } else {
+            f64::NAN
+        };
+        atr = (tr[4] - atr).mul_add(inv_p, atr);
+        let c4 = *c.add(idx + 4);
+        *o.add(idx + 4) = if c4.is_finite() && c4 != 0.0 {
+            (atr / c4) * k100
+        } else {
+            f64::NAN
+        };
+        atr = (tr[5] - atr).mul_add(inv_p, atr);
+        let c5 = *c.add(idx + 5);
+        *o.add(idx + 5) = if c5.is_finite() && c5 != 0.0 {
+            (atr / c5) * k100
+        } else {
+            f64::NAN
+        };
+        atr = (tr[6] - atr).mul_add(inv_p, atr);
+        let c6 = *c.add(idx + 6);
+        *o.add(idx + 6) = if c6.is_finite() && c6 != 0.0 {
+            (atr / c6) * k100
+        } else {
+            f64::NAN
+        };
+        atr = (tr[7] - atr).mul_add(inv_p, atr);
+        let c7 = *c.add(idx + 7);
+        *o.add(idx + 7) = if c7.is_finite() && c7 != 0.0 {
+            (atr / c7) * k100
+        } else {
+            f64::NAN
+        };
 
         idx += 8;
     }
@@ -599,7 +697,11 @@ unsafe fn natr_avx512_body(
         atr = (tr - atr).mul_add(inv_p, atr);
 
         let cv = *c.add(idx);
-        *o.add(idx) = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+        *o.add(idx) = if cv.is_finite() && cv != 0.0 {
+            (atr / cv) * k100
+        } else {
+            f64::NAN
+        };
         idx += 1;
     }
 }
@@ -634,8 +736,8 @@ pub unsafe fn natr_avx512_long(
 #[derive(Debug, Clone)]
 pub struct NatrStream {
     period: usize,
-    alpha: f64,      // 1 / period
-    k100: f64,       // 100.0
+    alpha: f64, // 1 / period
+    k100: f64,  // 100.0
     // Running state
     count: usize,    // how many updates we've seen
     sum_tr: f64,     // used only until warmup completes
@@ -650,7 +752,10 @@ impl NatrStream {
     pub fn try_new(params: NatrParams) -> Result<Self, NatrError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(NatrError::InvalidPeriod { period, data_len: 0 });
+            return Err(NatrError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         Ok(Self {
             period,
@@ -945,14 +1050,22 @@ fn natr_batch_inner(
             let sum_tr = pref[warm_end + 1] - pref[first];
             let mut atr = sum_tr * inv_p;
             let cw = close[warm_end];
-            out_row[warm_end] = if cw.is_finite() && cw != 0.0 { (atr / cw) * k100 } else { f64::NAN };
+            out_row[warm_end] = if cw.is_finite() && cw != 0.0 {
+                (atr / cw) * k100
+            } else {
+                f64::NAN
+            };
 
             // Main recurrence using TR
             let mut i = warm_end + 1;
             while i < len {
                 atr = (tr[i] - atr).mul_add(inv_p, atr);
                 let cv = close[i];
-                out_row[i] = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+                out_row[i] = if cv.is_finite() && cv != 0.0 {
+                    (atr / cv) * k100
+                } else {
+                    f64::NAN
+                };
                 i += 1;
             }
         };
@@ -1114,13 +1227,21 @@ fn natr_batch_inner_into(
             let sum_tr = pref[warm_end + 1] - pref[first];
             let mut atr = sum_tr * inv_p;
             let cw = close[warm_end];
-            out_row[warm_end] = if cw.is_finite() && cw != 0.0 { (atr / cw) * k100 } else { f64::NAN };
+            out_row[warm_end] = if cw.is_finite() && cw != 0.0 {
+                (atr / cw) * k100
+            } else {
+                f64::NAN
+            };
 
             let mut i = warm_end + 1;
             while i < len {
                 atr = (tr[i] - atr).mul_add(inv_p, atr);
                 let cv = close[i];
-                out_row[i] = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+                out_row[i] = if cv.is_finite() && cv != 0.0 {
+                    (atr / cv) * k100
+                } else {
+                    f64::NAN
+                };
                 i += 1;
             }
         };
@@ -1202,7 +1323,9 @@ unsafe fn natr_row_scalar_from_tr(
     out: &mut [f64],
 ) {
     let len = out.len();
-    if first >= len { return; }
+    if first >= len {
+        return;
+    }
     let inv_p = 1.0 / (period as f64);
     let k100 = 100.0;
     let warm_end = first + period - 1;
@@ -1214,14 +1337,22 @@ unsafe fn natr_row_scalar_from_tr(
     }
     let mut atr = sum_tr * inv_p;
     let cw = close[warm_end];
-    out[warm_end] = if cw.is_finite() && cw != 0.0 { (atr / cw) * k100 } else { f64::NAN };
+    out[warm_end] = if cw.is_finite() && cw != 0.0 {
+        (atr / cw) * k100
+    } else {
+        f64::NAN
+    };
 
     // Main recurrence using TR stream
     let mut i = warm_end + 1;
     while i < len {
         atr = (tr[i] - atr).mul_add(inv_p, atr);
         let cv = close[i];
-        out[i] = if cv.is_finite() && cv != 0.0 { (atr / cv) * k100 } else { f64::NAN };
+        out[i] = if cv.is_finite() && cv != 0.0 {
+            (atr / cv) * k100
+        } else {
+            f64::NAN
+        };
         i += 1;
     }
 }

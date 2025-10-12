@@ -769,7 +769,11 @@ pub fn dma_scalar(
                     let g1 = (i1 as f64) * 0.1;
                     let e0 = (r - t * g0).abs();
                     let e1 = (r - t * g1).abs();
-                    if e0 <= e1 { g0 } else { g1 }
+                    if e0 <= e1 {
+                        g0
+                    } else {
+                        g1
+                    }
                 };
 
                 ec_now = (e0_prev + g_sel * dx).mul_add(alpha_e, one_minus_alpha_e * ec_prev);
@@ -1321,7 +1325,11 @@ unsafe fn dma_avx2(
                     let g1 = (i1 as f64) * 0.1;
                     let e0 = (r - t * g0).abs();
                     let e1 = (r - t * g1).abs();
-                    if e0 <= e1 { g0 } else { g1 }
+                    if e0 <= e1 {
+                        g0
+                    } else {
+                        g1
+                    }
                 };
 
                 ec_now = (e0_prev + g_sel * dx).mul_add(alpha_e, (1.0 - alpha_e) * ec_prev);
@@ -1579,7 +1587,11 @@ unsafe fn dma_avx512(
                     let g1 = (i1 as f64) * 0.1;
                     let e0 = (r - t * g0).abs();
                     let e1 = (r - t * g1).abs();
-                    if e0 <= e1 { g0 } else { g1 }
+                    if e0 <= e1 {
+                        g0
+                    } else {
+                        g1
+                    }
                 };
 
                 ec_now = (e0_prev + g_sel * dx).mul_add(alpha_e, (1.0 - alpha_e) * ec_prev);
@@ -1970,12 +1982,17 @@ impl DmaStream {
                     let g1 = (i1 as f64) * 0.1;
                     let e0 = (r - t * g0).abs();
                     let e1 = (r - t * g1).abs();
-                    if e0 <= e1 { g0 } else { g1 }
+                    if e0 <= e1 {
+                        g0
+                    } else {
+                        g1
+                    }
                 };
 
-                let ec = self
-                    .alpha_e
-                    .mul_add(self.e0_prev + g_sel * dx, (1.0 - self.alpha_e) * self.ec_prev);
+                let ec = self.alpha_e.mul_add(
+                    self.e0_prev + g_sel * dx,
+                    (1.0 - self.alpha_e) * self.ec_prev,
+                );
                 self.ec_prev = ec;
                 ec_now = ec;
             }

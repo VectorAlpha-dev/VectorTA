@@ -61,15 +61,22 @@ pub struct CudaVpwmaPolicy {
 
 impl Default for CudaVpwmaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaVpwma {
     module: Module,
@@ -99,7 +106,8 @@ impl CudaVpwma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?
@@ -122,17 +130,30 @@ impl CudaVpwma {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaVpwmaPolicy) -> Result<Self, CudaVpwmaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaVpwmaPolicy,
+    ) -> Result<Self, CudaVpwmaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaVpwmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaVpwmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaVpwmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaVpwmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaVpwmaError> {
-        self.stream.synchronize().map_err(|e| CudaVpwmaError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))
     }
 
     #[inline]
@@ -144,27 +165,38 @@ impl CudaVpwma {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] VPWMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaVpwma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaVpwma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -172,14 +204,19 @@ impl CudaVpwma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] VPWMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaVpwma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaVpwma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -377,7 +414,10 @@ impl CudaVpwma {
                 .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
         }
         // Record introspection for debug once-per-run
-        unsafe { (*(self as *const _ as *mut CudaVpwma)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaVpwma)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
         Ok(())
     }
@@ -432,7 +472,10 @@ impl CudaVpwma {
                 .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
         }
         // Record introspection for debug once-per-run
-        unsafe { (*(self as *const _ as *mut CudaVpwma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaVpwma)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
         Ok(())
     }
@@ -462,7 +505,12 @@ impl CudaVpwma {
         let winlens_bytes = n_combos * std::mem::size_of::<i32>();
         let invnorm_bytes = n_combos * std::mem::size_of::<f32>();
         let out_bytes = n_combos * len * std::mem::size_of::<f32>();
-        let required = prices_bytes + weights_bytes + periods_bytes + winlens_bytes + invnorm_bytes + out_bytes;
+        let required = prices_bytes
+            + weights_bytes
+            + periods_bytes
+            + winlens_bytes
+            + invnorm_bytes
+            + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             return Err(CudaVpwmaError::InvalidInput(format!(
@@ -682,8 +730,14 @@ pub mod benches {
         crate::indicators::moving_averages::vpwma::VpwmaParams,
         vpwma_batch_dev,
         vpwma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::vpwma::VpwmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), power: (2.0, 2.0, 0.0) },
-        crate::indicators::moving_averages::vpwma::VpwmaParams { period: Some(64), power: Some(2.0) },
+        crate::indicators::moving_averages::vpwma::VpwmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            power: (2.0, 2.0, 0.0)
+        },
+        crate::indicators::moving_averages::vpwma::VpwmaParams {
+            period: Some(64),
+            power: Some(2.0)
+        },
         "vpwma",
         "vpwma"
     );

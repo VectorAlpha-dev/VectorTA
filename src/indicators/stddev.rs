@@ -502,7 +502,11 @@ impl StdDevStream {
                 let den = self.period as f64;
                 let mean = self.sum / den;
                 let var = (self.sum_sqr / den) - (mean * mean);
-                return Some(if var <= 0.0 { 0.0 } else { var.sqrt() * self.nbdev });
+                return Some(if var <= 0.0 {
+                    0.0
+                } else {
+                    var.sqrt() * self.nbdev
+                });
             } else {
                 self.head = next;
                 return None;
@@ -529,7 +533,9 @@ impl StdDevStream {
             }
             (true, false) => {
                 // Old was NaN; just add the finite new
-                if self.nan_count > 0 { self.nan_count -= 1; }
+                if self.nan_count > 0 {
+                    self.nan_count -= 1;
+                }
                 self.sum += value;
                 self.sum_sqr += value * value;
             }
@@ -537,7 +543,9 @@ impl StdDevStream {
                 // NaN slid out and NaN slid in: nan_count unchanged; sums unchanged
                 // Maintain nan_count explicitly
                 // old NaN out
-                if self.nan_count > 0 { self.nan_count -= 1; }
+                if self.nan_count > 0 {
+                    self.nan_count -= 1;
+                }
                 // new NaN in
                 self.nan_count += 1;
             }
@@ -548,7 +556,9 @@ impl StdDevStream {
 
         // Advance ring head without modulo
         self.head += 1;
-        if self.head == self.period { self.head = 0; }
+        if self.head == self.period {
+            self.head = 0;
+        }
 
         // Emit NaN if any NaN in the window
         if self.nan_count > 0 {
@@ -558,7 +568,11 @@ impl StdDevStream {
         let den = self.period as f64;
         let mean = self.sum / den;
         let var = (self.sum_sqr / den) - (mean * mean);
-        Some(if var <= 0.0 { 0.0 } else { var.sqrt() * self.nbdev })
+        Some(if var <= 0.0 {
+            0.0
+        } else {
+            var.sqrt() * self.nbdev
+        })
     }
 }
 
@@ -782,7 +796,11 @@ fn stddev_batch_inner(
 
     // Build prefix sums once (n+1 to simplify window differences); track NaNs like zscore
     #[derive(Clone)]
-    struct StdPrefixes { ps: Vec<f64>, ps2: Vec<f64>, pnan: Vec<i32> }
+    struct StdPrefixes {
+        ps: Vec<f64>,
+        ps2: Vec<f64>,
+        pnan: Vec<i32>,
+    }
     #[inline]
     fn build_std_prefixes(data: &[f64]) -> StdPrefixes {
         let n = data.len();
@@ -813,7 +831,9 @@ fn stddev_batch_inner(
         out_row: &mut [f64],
     ) {
         let n = out_row.len();
-        if n <= warmup_end { return; }
+        if n <= warmup_end {
+            return;
+        }
 
         // Precompute reciprocals to avoid per-element divisions
         let inv_den = 1.0 / (period as f64);
@@ -826,7 +846,7 @@ fn stddev_batch_inner(
                 let sum = pre.ps[i + 1] - pre.ps[i + 1 - period];
                 let sum2 = pre.ps2[i + 1] - pre.ps2[i + 1 - period];
                 // var = sum2 * inv_den - (sum * sum) * inv_den2
-                let var = sum2.mul_add(inv_den, - (sum * sum) * inv_den2);
+                let var = sum2.mul_add(inv_den, -(sum * sum) * inv_den2);
                 out_row[i] = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
             }
             return;
@@ -840,7 +860,7 @@ fn stddev_batch_inner(
             }
             let sum = pre.ps[i + 1] - pre.ps[i + 1 - period];
             let sum2 = pre.ps2[i + 1] - pre.ps2[i + 1 - period];
-            let var = sum2.mul_add(inv_den, - (sum * sum) * inv_den2);
+            let var = sum2.mul_add(inv_den, -(sum * sum) * inv_den2);
             out_row[i] = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
         }
     }
@@ -856,7 +876,9 @@ fn stddev_batch_inner(
     ) {
         use core::arch::x86_64::*;
         let n = out_row.len();
-        if n <= warmup_end { return; }
+        if n <= warmup_end {
+            return;
+        }
         let no_nans = pre.pnan[n] == 0;
         if !no_nans {
             // Fallback to scalar with NaN handling
@@ -909,7 +931,9 @@ fn stddev_batch_inner(
     ) {
         use core::arch::x86_64::*;
         let n = out_row.len();
-        if n <= warmup_end { return; }
+        if n <= warmup_end {
+            return;
+        }
         let no_nans = pre.pnan[n] == 0;
         if !no_nans {
             stddev_from_prefix_scalar(warmup_end, period, nbdev, pre, out_row);
@@ -954,7 +978,9 @@ fn stddev_batch_inner(
         let nbdev = combos[row].nbdev.unwrap();
         let warmup_end = first + period - 1;
         match kern {
-            Kernel::Scalar => stddev_from_prefix_scalar(warmup_end, period, nbdev, &prefixes, out_row),
+            Kernel::Scalar => {
+                stddev_from_prefix_scalar(warmup_end, period, nbdev, &prefixes, out_row)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => unsafe {
                 stddev_from_prefix_avx2(warmup_end, period, nbdev, &prefixes, out_row)
@@ -964,7 +990,9 @@ fn stddev_batch_inner(
                 stddev_from_prefix_avx512(warmup_end, period, nbdev, &prefixes, out_row)
             },
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx512 => stddev_from_prefix_scalar(warmup_end, period, nbdev, &prefixes, out_row),
+            Kernel::Avx2 | Kernel::Avx512 => {
+                stddev_from_prefix_scalar(warmup_end, period, nbdev, &prefixes, out_row)
+            }
             _ => unreachable!(),
         }
     };

@@ -10,11 +10,11 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaEhlersKama;
+use my_project::cuda::moving_averages::ehlers_kama_wrapper::CudaEhlersKamaPolicy as EKPolicy;
 #[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::ehlers_kama_wrapper::ManySeriesKernelPolicy as EKManyPolicy;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::ehlers_kama_wrapper::CudaEhlersKamaPolicy as EKPolicy;
+use my_project::cuda::moving_averages::CudaEhlersKama;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -158,9 +158,12 @@ fn ehlers_kama_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
 
 #[cfg(feature = "cuda")]
 #[test]
-fn ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+fn ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu(
+) -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!("[ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu] skipped - no CUDA device");
+        eprintln!(
+            "[ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu] skipped - no CUDA device"
+        );
         return Ok(());
     }
 
@@ -176,18 +179,32 @@ fn ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu() -> Result<(), Bo
     }
 
     let period = 21;
-    let params = EhlersKamaParams { period: Some(period) };
+    let params = EhlersKamaParams {
+        period: Some(period),
+    };
 
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for j in 0..num_series {
         let mut series = vec![f64::NAN; series_len];
-        for t in 0..series_len { series[t] = data_tm[t * num_series + j]; }
-        let out = EhlersKamaBuilder::new().period(period).apply_slice(&series)?;
-        for t in 0..series_len { cpu_tm[t * num_series + j] = out.values[t]; }
+        for t in 0..series_len {
+            series[t] = data_tm[t * num_series + j];
+        }
+        let out = EhlersKamaBuilder::new()
+            .period(period)
+            .apply_slice(&series)?;
+        for t in 0..series_len {
+            cpu_tm[t * num_series + j] = out.values[t];
+        }
     }
 
-    let mut cuda = CudaEhlersKama::new_with_policy(0, EKPolicy { batch: Default::default(), many_series: EKManyPolicy::Tiled2D { tx: 64, ty: 2 } })
-        .expect("CudaEhlersKama::new_with_policy");
+    let mut cuda = CudaEhlersKama::new_with_policy(
+        0,
+        EKPolicy {
+            batch: Default::default(),
+            many_series: EKManyPolicy::Tiled2D { tx: 64, ty: 2 },
+        },
+    )
+    .expect("CudaEhlersKama::new_with_policy");
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let gpu = cuda
         .ehlers_kama_multi_series_one_param_time_major_dev(
@@ -211,7 +228,13 @@ fn ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu() -> Result<(), Bo
     for idx in 0..(num_series * series_len) {
         let a = cpu_tm[idx];
         let b = gpu_tm[idx] as f64;
-        assert!(approx_eq(a, b, tol), "mismatch at {}: cpu={} gpu={}", idx, a, b);
+        assert!(
+            approx_eq(a, b, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            a,
+            b
+        );
     }
 
     Ok(())

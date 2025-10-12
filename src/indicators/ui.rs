@@ -550,18 +550,18 @@ pub struct UiStream {
     // --- Rolling max (price) via monotonic deque of indices (circular buffer) ---
     // We store indices into the *global* stream. To retrieve a value for index j,
     // use buffer[j % period]. We only keep indices from the last 'period' samples.
-    buffer: Vec<f64>,   // ring of last 'period' prices; written at i % period
-    deq: Vec<usize>,    // circular array of size 'period' holding indices
-    dq_head: usize,     // front pointer
-    dq_tail: usize,     // next write position (one past back)
-    dq_size: usize,     // number of valid entries
+    buffer: Vec<f64>, // ring of last 'period' prices; written at i % period
+    deq: Vec<usize>,  // circular array of size 'period' holding indices
+    dq_head: usize,   // front pointer
+    dq_tail: usize,   // next write position (one past back)
+    dq_size: usize,   // number of valid entries
 
     // --- Last 'period' squared drawdowns (ring) + running sum for O(1) avg ---
-    sq_ring: Vec<f64>,  // squared drawdowns ring buffer
-    ring_idx: usize,    // position to overwrite in sq_ring/valid ring
+    sq_ring: Vec<f64>, // squared drawdowns ring buffer
+    ring_idx: usize,   // position to overwrite in sq_ring/valid ring
 
     // Two validity tracking modes: bitmask (<=64) or byte-ring (>64)
-    valid_mask: u64,    // used when period <= 64
+    valid_mask: u64,             // used when period <= 64
     valid_ring: Option<Vec<u8>>, // used when period > 64
 
     sum_sq: f64,        // running sum of squared drawdowns in the ring
@@ -573,7 +573,10 @@ impl UiStream {
         let period = params.period.unwrap_or(14);
         let scalar = params.scalar.unwrap_or(100.0);
         if period == 0 {
-            return Err(UiError::InvalidPeriod { period, data_len: 0 });
+            return Err(UiError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         if !scalar.is_finite() {
             return Err(UiError::InvalidScalar { scalar });
@@ -608,11 +611,17 @@ impl UiStream {
     #[inline(always)]
     fn dq_inc(x: &mut usize, cap: usize) {
         *x += 1;
-        if *x == cap { *x = 0; }
+        if *x == cap {
+            *x = 0;
+        }
     }
     #[inline(always)]
     fn dq_dec(x: &mut usize, cap: usize) {
-        if *x == 0 { *x = cap - 1; } else { *x -= 1; }
+        if *x == 0 {
+            *x = cap - 1;
+        } else {
+            *x -= 1;
+        }
     }
 
     /// O(1) amortized update.
@@ -662,7 +671,9 @@ impl UiStream {
                     break;
                 }
             }
-            unsafe { *self.deq.get_unchecked_mut(self.dq_tail) = self.i; }
+            unsafe {
+                *self.deq.get_unchecked_mut(self.dq_tail) = self.i;
+            }
             Self::dq_inc(&mut self.dq_tail, cap);
             self.dq_size += 1;
         }
@@ -709,11 +720,17 @@ impl UiStream {
                 self.sum_sq += new_sq;
                 self.count_valid += 1;
             }
-            unsafe { *vr.get_unchecked_mut(self.ring_idx) = if new_valid { 1 } else { 0 }; }
+            unsafe {
+                *vr.get_unchecked_mut(self.ring_idx) = if new_valid { 1 } else { 0 };
+            }
         }
-        unsafe { *self.sq_ring.get_unchecked_mut(self.ring_idx) = new_sq; }
+        unsafe {
+            *self.sq_ring.get_unchecked_mut(self.ring_idx) = new_sq;
+        }
         self.ring_idx += 1;
-        if self.ring_idx == p { self.ring_idx = 0; }
+        if self.ring_idx == p {
+            self.ring_idx = 0;
+        }
 
         // Bump global index after using it everywhere
         let i_now = self.i;
@@ -723,8 +740,10 @@ impl UiStream {
         if let Some(we) = self.warmup_end {
             if i_now >= we && self.count_valid == p {
                 let mut avg = self.sum_sq / (p as f64);
-                if avg < 0.0 { avg = 0.0; } // clamp tiny negatives from FP error
-                // NOTE: If you enable a fast-math sqrt, call it here instead.
+                if avg < 0.0 {
+                    avg = 0.0;
+                } // clamp tiny negatives from FP error
+                  // NOTE: If you enable a fast-math sqrt, call it here instead.
                 return Some(avg.sqrt());
             }
         }

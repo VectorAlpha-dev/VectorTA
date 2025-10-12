@@ -420,7 +420,10 @@ pub unsafe fn cksp_scalar(
     let mut short_values = alloc_with_nan_prefix(size, warmup);
 
     if first_valid_idx >= size {
-        return Ok(CkspOutput { long_values, short_values });
+        return Ok(CkspOutput {
+            long_values,
+            short_values,
+        });
     }
 
     // Monotonic ring buffers (indices and/or values)
@@ -461,17 +464,25 @@ pub unsafe fn cksp_scalar(
 
     #[inline(always)]
     unsafe fn rb_dec(idx: usize, cap: usize) -> usize {
-        if idx == 0 { cap - 1 } else { idx - 1 }
+        if idx == 0 {
+            cap - 1
+        } else {
+            idx - 1
+        }
     }
     #[inline(always)]
     unsafe fn rb_inc(idx: usize, cap: usize) -> usize {
         let mut t = idx + 1;
-        if t == cap { t = 0; }
+        if t == cap {
+            t = 0;
+        }
         t
     }
 
     for i in 0..size {
-        if i < first_valid_idx { continue; }
+        if i < first_valid_idx {
+            continue;
+        }
 
         // True Range
         let hi = *high.get_unchecked(i);
@@ -484,9 +495,17 @@ pub unsafe fn cksp_scalar(
             let hc = (hi - cprev).abs();
             let lc = (lo - cprev).abs();
             if hl >= hc {
-                if hl >= lc { hl } else { lc }
+                if hl >= lc {
+                    hl
+                } else {
+                    lc
+                }
             } else {
-                if hc >= lc { hc } else { lc }
+                if hc >= lc {
+                    hc
+                } else {
+                    lc
+                }
             }
         };
 
@@ -513,12 +532,18 @@ pub unsafe fn cksp_scalar(
         }
         // Prevent full condition: advance head if next tail would collide
         let mut next_tail = rb_inc(h_tail, cap);
-        if next_tail == h_head { h_head = rb_inc(h_head, cap); }
+        if next_tail == h_head {
+            h_head = rb_inc(h_head, cap);
+        }
         *h_idx.get_unchecked_mut(h_tail) = i;
         h_tail = next_tail;
         while h_head != h_tail {
             let front_i = *h_idx.get_unchecked(h_head);
-            if front_i + q <= i { h_head = rb_inc(h_head, cap); } else { break; }
+            if front_i + q <= i {
+                h_head = rb_inc(h_head, cap);
+            } else {
+                break;
+            }
         }
         let mh = *high.get_unchecked(*h_idx.get_unchecked(h_head));
 
@@ -533,12 +558,18 @@ pub unsafe fn cksp_scalar(
             }
         }
         let mut next_tail = rb_inc(l_tail, cap);
-        if next_tail == l_head { l_head = rb_inc(l_head, cap); }
+        if next_tail == l_head {
+            l_head = rb_inc(l_head, cap);
+        }
         *l_idx.get_unchecked_mut(l_tail) = i;
         l_tail = next_tail;
         while l_head != l_tail {
             let front_i = *l_idx.get_unchecked(l_head);
-            if front_i + q <= i { l_head = rb_inc(l_head, cap); } else { break; }
+            if front_i + q <= i {
+                l_head = rb_inc(l_head, cap);
+            } else {
+                break;
+            }
         }
         let ml = *low.get_unchecked(*l_idx.get_unchecked(l_head));
 
@@ -557,13 +588,19 @@ pub unsafe fn cksp_scalar(
                 }
             }
             let mut next_tail = rb_inc(ls_tail, cap);
-            if next_tail == ls_head { ls_head = rb_inc(ls_head, cap); }
+            if next_tail == ls_head {
+                ls_head = rb_inc(ls_head, cap);
+            }
             *ls_idx.get_unchecked_mut(ls_tail) = i;
             *ls_val.get_unchecked_mut(ls_tail) = ls0;
             ls_tail = next_tail;
             while ls_head != ls_tail {
                 let front_i = *ls_idx.get_unchecked(ls_head);
-                if front_i + q <= i { ls_head = rb_inc(ls_head, cap); } else { break; }
+                if front_i + q <= i {
+                    ls_head = rb_inc(ls_head, cap);
+                } else {
+                    break;
+                }
             }
             let mx = *ls_val.get_unchecked(ls_head);
             *long_values.get_unchecked_mut(i) = mx;
@@ -578,20 +615,29 @@ pub unsafe fn cksp_scalar(
                 }
             }
             let mut next_tail = rb_inc(ss_tail, cap);
-            if next_tail == ss_head { ss_head = rb_inc(ss_head, cap); }
+            if next_tail == ss_head {
+                ss_head = rb_inc(ss_head, cap);
+            }
             *ss_idx.get_unchecked_mut(ss_tail) = i;
             *ss_val.get_unchecked_mut(ss_tail) = ss0;
             ss_tail = next_tail;
             while ss_head != ss_tail {
                 let front_i = *ss_idx.get_unchecked(ss_head);
-                if front_i + q <= i { ss_head = rb_inc(ss_head, cap); } else { break; }
+                if front_i + q <= i {
+                    ss_head = rb_inc(ss_head, cap);
+                } else {
+                    break;
+                }
             }
             let mn = *ss_val.get_unchecked(ss_head);
             *short_values.get_unchecked_mut(i) = mn;
         }
     }
 
-    Ok(CkspOutput { long_values, short_values })
+    Ok(CkspOutput {
+        long_values,
+        short_values,
+    })
 }
 
 // ========================= AVX2/AVX512 Stubs =========================
@@ -709,12 +755,26 @@ pub unsafe fn cksp_compute_into(
     let alpha: f64 = 1.0 / (p as f64);
 
     #[inline(always)]
-    unsafe fn rb_dec(idx: usize, cap: usize) -> usize { if idx == 0 { cap - 1 } else { idx - 1 } }
+    unsafe fn rb_dec(idx: usize, cap: usize) -> usize {
+        if idx == 0 {
+            cap - 1
+        } else {
+            idx - 1
+        }
+    }
     #[inline(always)]
-    unsafe fn rb_inc(idx: usize, cap: usize) -> usize { let mut t = idx + 1; if t == cap { t = 0; } t }
+    unsafe fn rb_inc(idx: usize, cap: usize) -> usize {
+        let mut t = idx + 1;
+        if t == cap {
+            t = 0;
+        }
+        t
+    }
 
     for i in 0..size {
-        if i < first_valid_idx { continue; }
+        if i < first_valid_idx {
+            continue;
+        }
 
         let hi = *high.get_unchecked(i);
         let lo = *low.get_unchecked(i);
@@ -725,13 +785,27 @@ pub unsafe fn cksp_compute_into(
             let hl = hi - lo;
             let hc = (hi - cprev).abs();
             let lc = (lo - cprev).abs();
-            if hl >= hc { if hl >= lc { hl } else { lc } } else { if hc >= lc { hc } else { lc } }
+            if hl >= hc {
+                if hl >= lc {
+                    hl
+                } else {
+                    lc
+                }
+            } else {
+                if hc >= lc {
+                    hc
+                } else {
+                    lc
+                }
+            }
         };
 
         let k = i - first_valid_idx;
         if k < p {
             sum_tr += tr;
-            if k == p - 1 { rma = sum_tr / (p as f64); }
+            if k == p - 1 {
+                rma = sum_tr / (p as f64);
+            }
         } else {
             rma = alpha.mul_add(tr - rma, rma);
         }
@@ -740,15 +814,25 @@ pub unsafe fn cksp_compute_into(
         while h_head != h_tail {
             let last = rb_dec(h_tail, cap);
             let last_i = *h_idx.get_unchecked(last);
-            if *high.get_unchecked(last_i) <= hi { h_tail = last; } else { break; }
+            if *high.get_unchecked(last_i) <= hi {
+                h_tail = last;
+            } else {
+                break;
+            }
         }
         let mut next_tail = rb_inc(h_tail, cap);
-        if next_tail == h_head { h_head = rb_inc(h_head, cap); }
+        if next_tail == h_head {
+            h_head = rb_inc(h_head, cap);
+        }
         *h_idx.get_unchecked_mut(h_tail) = i;
         h_tail = next_tail;
         while h_head != h_tail {
             let front_i = *h_idx.get_unchecked(h_head);
-            if front_i + q <= i { h_head = rb_inc(h_head, cap); } else { break; }
+            if front_i + q <= i {
+                h_head = rb_inc(h_head, cap);
+            } else {
+                break;
+            }
         }
         let mh = *high.get_unchecked(*h_idx.get_unchecked(h_head));
 
@@ -756,15 +840,25 @@ pub unsafe fn cksp_compute_into(
         while l_head != l_tail {
             let last = rb_dec(l_tail, cap);
             let last_i = *l_idx.get_unchecked(last);
-            if *low.get_unchecked(last_i) >= lo { l_tail = last; } else { break; }
+            if *low.get_unchecked(last_i) >= lo {
+                l_tail = last;
+            } else {
+                break;
+            }
         }
         let mut next_tail = rb_inc(l_tail, cap);
-        if next_tail == l_head { l_head = rb_inc(l_head, cap); }
+        if next_tail == l_head {
+            l_head = rb_inc(l_head, cap);
+        }
         *l_idx.get_unchecked_mut(l_tail) = i;
         l_tail = next_tail;
         while l_head != l_tail {
             let front_i = *l_idx.get_unchecked(l_head);
-            if front_i + q <= i { l_head = rb_inc(l_head, cap); } else { break; }
+            if front_i + q <= i {
+                l_head = rb_inc(l_head, cap);
+            } else {
+                break;
+            }
         }
         let ml = *low.get_unchecked(*l_idx.get_unchecked(l_head));
 
@@ -774,32 +868,52 @@ pub unsafe fn cksp_compute_into(
 
             while ls_head != ls_tail {
                 let last = rb_dec(ls_tail, cap);
-                if *ls_val.get_unchecked(last) <= ls0 { ls_tail = last; } else { break; }
+                if *ls_val.get_unchecked(last) <= ls0 {
+                    ls_tail = last;
+                } else {
+                    break;
+                }
             }
             let mut next_tail = rb_inc(ls_tail, cap);
-            if next_tail == ls_head { ls_head = rb_inc(ls_head, cap); }
+            if next_tail == ls_head {
+                ls_head = rb_inc(ls_head, cap);
+            }
             *ls_idx.get_unchecked_mut(ls_tail) = i;
             *ls_val.get_unchecked_mut(ls_tail) = ls0;
             ls_tail = next_tail;
             while ls_head != ls_tail {
                 let front_i = *ls_idx.get_unchecked(ls_head);
-                if front_i + q <= i { ls_head = rb_inc(ls_head, cap); } else { break; }
+                if front_i + q <= i {
+                    ls_head = rb_inc(ls_head, cap);
+                } else {
+                    break;
+                }
             }
             let mx = *ls_val.get_unchecked(ls_head);
             *out_long.get_unchecked_mut(i) = mx;
 
             while ss_head != ss_tail {
                 let last = rb_dec(ss_tail, cap);
-                if *ss_val.get_unchecked(last) >= ss0 { ss_tail = last; } else { break; }
+                if *ss_val.get_unchecked(last) >= ss0 {
+                    ss_tail = last;
+                } else {
+                    break;
+                }
             }
             let mut next_tail = rb_inc(ss_tail, cap);
-            if next_tail == ss_head { ss_head = rb_inc(ss_head, cap); }
+            if next_tail == ss_head {
+                ss_head = rb_inc(ss_head, cap);
+            }
             *ss_idx.get_unchecked_mut(ss_tail) = i;
             *ss_val.get_unchecked_mut(ss_tail) = ss0;
             ss_tail = next_tail;
             while ss_head != ss_tail {
                 let front_i = *ss_idx.get_unchecked(ss_head);
-                if front_i + q <= i { ss_head = rb_inc(ss_head, cap); } else { break; }
+                if front_i + q <= i {
+                    ss_head = rb_inc(ss_head, cap);
+                } else {
+                    break;
+                }
             }
             let mn = *ss_val.get_unchecked(ss_head);
             *out_short.get_unchecked_mut(i) = mn;
@@ -948,12 +1062,12 @@ pub struct CkspStream {
     q: usize,
 
     // Precomputed constants/state
-    warmup: usize,     // p + q - 1
-    alpha: f64,        // 1.0 / p
-    sum_tr: f64,       // warmup accumulator for TR
-    rma: f64,          // ATR (RMA) state
-    prev_close: f64,   // for TR
-    i: usize,          // current index (0-based)
+    warmup: usize,   // p + q - 1
+    alpha: f64,      // 1.0 / p
+    sum_tr: f64,     // warmup accumulator for TR
+    rma: f64,        // ATR (RMA) state
+    prev_close: f64, // for TR
+    i: usize,        // current index (0-based)
 
     // Ring buffer capacity (next power-of-two of q+1) and mask for fast wrap
     cap: usize,
@@ -1148,7 +1262,7 @@ impl CkspStream {
         //   ls0 = maxHigh - x*ATR  -> roll MAX over last q -> long
         //   ss0 = minLow  + x*ATR  -> roll MIN over last q -> short
         let ls0 = (-self.x).mul_add(self.rma, max_high); // maxHigh - x*ATR
-        let ss0 =  self.x.mul_add(self.rma, min_low);    // minLow  + x*ATR
+        let ss0 = self.x.mul_add(self.rma, min_low); // minLow  + x*ATR
 
         // Rolling MAX over ls0
         while self.ls_head != self.ls_tail {
@@ -1476,14 +1590,22 @@ fn cksp_batch_inner(
     use std::collections::{BTreeSet, HashMap};
 
     #[inline]
-    fn precompute_atr_series(high: &[f64], low: &[f64], close: &[f64], p: usize, first_valid: usize) -> Vec<f64> {
+    fn precompute_atr_series(
+        high: &[f64],
+        low: &[f64],
+        close: &[f64],
+        p: usize,
+        first_valid: usize,
+    ) -> Vec<f64> {
         let n = close.len();
         let mut atr = vec![0.0; n];
         let mut sum_tr = 0.0;
         let mut rma = 0.0;
         let alpha = 1.0 / (p as f64);
         for i in 0..n {
-            if i < first_valid { continue; }
+            if i < first_valid {
+                continue;
+            }
             let hi = high[i];
             let lo = low[i];
             let tr = if i == first_valid {
@@ -1498,7 +1620,10 @@ fn cksp_batch_inner(
             let k = i - first_valid;
             if k < p {
                 sum_tr += tr;
-                if k == p - 1 { rma = sum_tr / (p as f64); atr[i] = rma; }
+                if k == p - 1 {
+                    rma = sum_tr / (p as f64);
+                    atr[i] = rma;
+                }
             } else {
                 rma += alpha * (tr - rma);
                 atr[i] = rma;
@@ -1513,25 +1638,55 @@ fn cksp_batch_inner(
         let mut out = vec![0.0; n];
         let cap = q + 1;
         let mut idx: Vec<usize> = Vec::with_capacity(cap);
-        unsafe { idx.set_len(cap); }
+        unsafe {
+            idx.set_len(cap);
+        }
         let mut head = 0usize;
         let mut tail = 0usize;
-        #[inline(always)] fn dec(i: usize, c: usize) -> usize { if i == 0 { c - 1 } else { i - 1 } }
-        #[inline(always)] fn inc(i: usize, c: usize) -> usize { let mut t = i + 1; if t == c { t = 0; } t }
+        #[inline(always)]
+        fn dec(i: usize, c: usize) -> usize {
+            if i == 0 {
+                c - 1
+            } else {
+                i - 1
+            }
+        }
+        #[inline(always)]
+        fn inc(i: usize, c: usize) -> usize {
+            let mut t = i + 1;
+            if t == c {
+                t = 0;
+            }
+            t
+        }
         for i in 0..n {
-            if i < first_valid { continue; }
+            if i < first_valid {
+                continue;
+            }
             while head != tail {
                 let last = dec(tail, cap);
                 let li = unsafe { *idx.get_unchecked(last) };
-                if src[li] <= src[i] { tail = last; } else { break; }
+                if src[li] <= src[i] {
+                    tail = last;
+                } else {
+                    break;
+                }
             }
             let mut nt = inc(tail, cap);
-            if nt == head { head = inc(head, cap); }
-            unsafe { *idx.get_unchecked_mut(tail) = i; }
+            if nt == head {
+                head = inc(head, cap);
+            }
+            unsafe {
+                *idx.get_unchecked_mut(tail) = i;
+            }
             tail = nt;
             while head != tail {
                 let fi = unsafe { *idx.get_unchecked(head) };
-                if fi + q <= i { head = inc(head, cap); } else { break; }
+                if fi + q <= i {
+                    head = inc(head, cap);
+                } else {
+                    break;
+                }
             }
             out[i] = src[unsafe { *idx.get_unchecked(head) }];
         }
@@ -1544,25 +1699,55 @@ fn cksp_batch_inner(
         let mut out = vec![0.0; n];
         let cap = q + 1;
         let mut idx: Vec<usize> = Vec::with_capacity(cap);
-        unsafe { idx.set_len(cap); }
+        unsafe {
+            idx.set_len(cap);
+        }
         let mut head = 0usize;
         let mut tail = 0usize;
-        #[inline(always)] fn dec(i: usize, c: usize) -> usize { if i == 0 { c - 1 } else { i - 1 } }
-        #[inline(always)] fn inc(i: usize, c: usize) -> usize { let mut t = i + 1; if t == c { t = 0; } t }
+        #[inline(always)]
+        fn dec(i: usize, c: usize) -> usize {
+            if i == 0 {
+                c - 1
+            } else {
+                i - 1
+            }
+        }
+        #[inline(always)]
+        fn inc(i: usize, c: usize) -> usize {
+            let mut t = i + 1;
+            if t == c {
+                t = 0;
+            }
+            t
+        }
         for i in 0..n {
-            if i < first_valid { continue; }
+            if i < first_valid {
+                continue;
+            }
             while head != tail {
                 let last = dec(tail, cap);
                 let li = unsafe { *idx.get_unchecked(last) };
-                if src[li] >= src[i] { tail = last; } else { break; }
+                if src[li] >= src[i] {
+                    tail = last;
+                } else {
+                    break;
+                }
             }
             let mut nt = inc(tail, cap);
-            if nt == head { head = inc(head, cap); }
-            unsafe { *idx.get_unchecked_mut(tail) = i; }
+            if nt == head {
+                head = inc(head, cap);
+            }
+            unsafe {
+                *idx.get_unchecked_mut(tail) = i;
+            }
             tail = nt;
             while head != tail {
                 let fi = unsafe { *idx.get_unchecked(head) };
-                if fi + q <= i { head = inc(head, cap); } else { break; }
+                if fi + q <= i {
+                    head = inc(head, cap);
+                } else {
+                    break;
+                }
             }
             out[i] = src[unsafe { *idx.get_unchecked(head) }];
         }
@@ -1572,11 +1757,16 @@ fn cksp_batch_inner(
     // Collect unique p and q values
     let mut ps: BTreeSet<usize> = BTreeSet::new();
     let mut qs: BTreeSet<usize> = BTreeSet::new();
-    for prm in &combos { ps.insert(prm.p.unwrap()); qs.insert(prm.q.unwrap()); }
+    for prm in &combos {
+        ps.insert(prm.p.unwrap());
+        qs.insert(prm.q.unwrap());
+    }
 
     // Precompute ATR per unique p
     let mut atr_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(ps.len());
-    for &p in &ps { atr_map.insert(p, precompute_atr_series(high, low, close, p, first_valid)); }
+    for &p in &ps {
+        atr_map.insert(p, precompute_atr_series(high, low, close, p, first_valid));
+    }
     // Precompute mh/ml per unique q
     let mut mh_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(qs.len());
     let mut ml_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(qs.len());
@@ -1609,8 +1799,22 @@ fn cksp_batch_inner(
         ss_val.set_len(cap);
         let mut ss_head = 0usize;
         let mut ss_tail = 0usize;
-        #[inline(always)] fn dec(i: usize, c: usize) -> usize { if i == 0 { c - 1 } else { i - 1 } }
-        #[inline(always)] fn inc(i: usize, c: usize) -> usize { let mut t = i + 1; if t == c { t = 0; } t }
+        #[inline(always)]
+        fn dec(i: usize, c: usize) -> usize {
+            if i == 0 {
+                c - 1
+            } else {
+                i - 1
+            }
+        }
+        #[inline(always)]
+        fn inc(i: usize, c: usize) -> usize {
+            let mut t = i + 1;
+            if t == c {
+                t = 0;
+            }
+            t
+        }
 
         for i in warmup..cols {
             let ls0 = mh[i] - x * atr[i];
@@ -1618,10 +1822,16 @@ fn cksp_batch_inner(
 
             while ls_head != ls_tail {
                 let last = dec(ls_tail, cap);
-                if unsafe { *ls_val.get_unchecked(last) } <= ls0 { ls_tail = last; } else { break; }
+                if unsafe { *ls_val.get_unchecked(last) } <= ls0 {
+                    ls_tail = last;
+                } else {
+                    break;
+                }
             }
             let mut nt = inc(ls_tail, cap);
-            if nt == ls_head { ls_head = inc(ls_head, cap); }
+            if nt == ls_head {
+                ls_head = inc(ls_head, cap);
+            }
             unsafe {
                 *ls_idx.get_unchecked_mut(ls_tail) = i;
                 *ls_val.get_unchecked_mut(ls_tail) = ls0;
@@ -1629,17 +1839,27 @@ fn cksp_batch_inner(
             ls_tail = nt;
             while ls_head != ls_tail {
                 let fi = unsafe { *ls_idx.get_unchecked(ls_head) };
-                if fi + q <= i { ls_head = inc(ls_head, cap); } else { break; }
+                if fi + q <= i {
+                    ls_head = inc(ls_head, cap);
+                } else {
+                    break;
+                }
             }
             let mx = unsafe { *ls_val.get_unchecked(ls_head) };
             *out_long.get_unchecked_mut(i) = mx;
 
             while ss_head != ss_tail {
                 let last = dec(ss_tail, cap);
-                if unsafe { *ss_val.get_unchecked(last) } >= ss0 { ss_tail = last; } else { break; }
+                if unsafe { *ss_val.get_unchecked(last) } >= ss0 {
+                    ss_tail = last;
+                } else {
+                    break;
+                }
             }
             let mut nt2 = inc(ss_tail, cap);
-            if nt2 == ss_head { ss_head = inc(ss_head, cap); }
+            if nt2 == ss_head {
+                ss_head = inc(ss_head, cap);
+            }
             unsafe {
                 *ss_idx.get_unchecked_mut(ss_tail) = i;
                 *ss_val.get_unchecked_mut(ss_tail) = ss0;
@@ -1647,7 +1867,11 @@ fn cksp_batch_inner(
             ss_tail = nt2;
             while ss_head != ss_tail {
                 let fi = unsafe { *ss_idx.get_unchecked(ss_head) };
-                if fi + q <= i { ss_head = inc(ss_head, cap); } else { break; }
+                if fi + q <= i {
+                    ss_head = inc(ss_head, cap);
+                } else {
+                    break;
+                }
             }
             let mn = unsafe { *ss_val.get_unchecked(ss_head) };
             *out_short.get_unchecked_mut(i) = mn;

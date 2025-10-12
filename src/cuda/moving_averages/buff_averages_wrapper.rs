@@ -10,11 +10,13 @@
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::buff_averages::BuffAveragesBatchRange;
+use cust::context::CacheConfig;
 use cust::context::Context;
 use cust::device::Device;
-use cust::context::CacheConfig;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{DeviceBuffer, LockedBuffer, mem_get_info, AsyncCopyDestination, CopyDestination};
+use cust::memory::{
+    mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer,
+};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -41,8 +43,8 @@ impl fmt::Display for CudaBuffAveragesError {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_time_major_prices, gen_time_major_volumes};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
@@ -101,7 +103,10 @@ pub mod benches {
 
     fn prep_buff_averages_batch() -> BuffAveragesBatchState {
         let mut cuda = CudaBuffAverages::new(0).expect("cuda buff averages");
-        cuda.set_policy(CudaBuffPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto });
+        cuda.set_policy(CudaBuffPolicy {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        });
 
         let len = 60_000usize;
         let mut price = vec![f32::NAN; len];
@@ -129,8 +134,10 @@ pub mod benches {
         let d_fast = DeviceBuffer::from_slice(&fast_periods).expect("d_fast");
         let d_slow = DeviceBuffer::from_slice(&slow_periods).expect("d_slow");
         let elems = combos.len() * len;
-        let d_fast_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_fast_out");
-        let d_slow_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_slow_out");
+        let d_fast_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_fast_out");
+        let d_slow_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_slow_out");
 
         BuffAveragesBatchState {
             cuda,
@@ -183,7 +190,10 @@ pub mod benches {
 
     fn prep_buff_averages_many_series() -> BuffAveragesManySeriesState {
         let mut cuda = CudaBuffAverages::new(0).expect("cuda buff averages");
-        cuda.set_policy(CudaBuffPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 } });
+        cuda.set_policy(CudaBuffPolicy {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 },
+        });
 
         let cols = 250usize;
         let rows = 1_000_000usize;
@@ -193,14 +203,30 @@ pub mod benches {
         let slow = 64usize;
 
         // Host prep for prefixes and first_valids
-        let prep = CudaBuffAverages::prepare_many_series_inputs(&price_tm, &volume_tm, cols, rows, fast, slow).expect("prep ms");
+        let prep = CudaBuffAverages::prepare_many_series_inputs(
+            &price_tm, &volume_tm, cols, rows, fast, slow,
+        )
+        .expect("prep ms");
         let d_pv_tm = DeviceBuffer::from_slice(&prep.pv_prefix_tm).expect("d_pv_tm");
         let d_vv_tm = DeviceBuffer::from_slice(&prep.vv_prefix_tm).expect("d_vv_tm");
         let d_first_valids = DeviceBuffer::from_slice(&prep.first_valids).expect("d_first_valids");
-        let d_fast_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_fast_out_tm");
-        let d_slow_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_slow_out_tm");
+        let d_fast_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_fast_out_tm");
+        let d_slow_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_slow_out_tm");
 
-        BuffAveragesManySeriesState { cuda, d_pv_tm, d_vv_tm, d_first_valids, d_fast_out_tm, d_slow_out_tm, cols, rows, fast, slow }
+        BuffAveragesManySeriesState {
+            cuda,
+            d_pv_tm,
+            d_vv_tm,
+            d_first_valids,
+            d_fast_out_tm,
+            d_slow_out_tm,
+            cols,
+            rows,
+            fast,
+            slow,
+        }
     }
 
     fn prep_buff_averages_many_series_box() -> Box<dyn CudaBenchState> {
@@ -223,23 +249,45 @@ pub struct CudaBuffAverages {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelPolicy { Auto, Plain { block_x: u32 }, Tiled { tile: u32 } }
-
-#[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy { Auto, OneD { block_x: u32 }, Tiled2D { tx: u32, ty: u32 } }
-
-#[derive(Clone, Copy, Debug)]
-pub struct CudaBuffPolicy { pub batch: BatchKernelPolicy, pub many_series: ManySeriesKernelPolicy }
-
-impl Default for CudaBuffPolicy {
-    fn default() -> Self { Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto } }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+    Tiled { tile: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 }, Tiled1x { tile: u32 } }
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 }, Tiled2D { tx: u32, ty: u32 } }
+pub struct CudaBuffPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
+impl Default for CudaBuffPolicy {
+    fn default() -> Self {
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+    Tiled1x { tile: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
 
 impl CudaBuffAverages {
     pub fn new(device_id: usize) -> Result<Self, CudaBuffAveragesError> {
@@ -256,12 +304,15 @@ impl CudaBuffAverages {
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
         if let Ok(rs) = std::env::var("BUFF_MAXREG") {
-            if let Ok(v) = rs.parse::<u32>() { jit_vec.push(ModuleJitOption::MaxRegisters(v)); }
+            if let Ok(v) = rs.parse::<u32>() {
+                jit_vec.push(ModuleJitOption::MaxRegisters(v));
+            }
         }
         let module = match Module::from_ptx(ptx, &jit_vec) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])
@@ -286,23 +337,36 @@ impl CudaBuffAverages {
     }
 
     /// Create with an explicit policy (mirrors ALMA convenience).
-    pub fn new_with_policy(device_id: usize, policy: CudaBuffPolicy) -> Result<Self, CudaBuffAveragesError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaBuffPolicy,
+    ) -> Result<Self, CudaBuffAveragesError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
 
     #[inline]
-    pub fn set_policy(&mut self, policy: CudaBuffPolicy) { self.policy = policy; }
+    pub fn set_policy(&mut self, policy: CudaBuffPolicy) {
+        self.policy = policy;
+    }
     #[inline]
-    pub fn policy(&self) -> &CudaBuffPolicy { &self.policy }
+    pub fn policy(&self) -> &CudaBuffPolicy {
+        &self.policy
+    }
     #[inline]
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
     #[inline]
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaBuffAveragesError> {
-        self.stream.synchronize().map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))
     }
 
     /// Best-effort: prefer L1 cache for global-memory-heavy kernels.
@@ -314,7 +378,9 @@ impl CudaBuffAverages {
     /// Best-effort: set an L2 persisting cache window on the current stream.
     /// Window covers [base, base+bytes). Falls back silently if unsupported.
     unsafe fn set_l2_persist_window(&self, base: u64, bytes: usize, hit_ratio: f32) {
-        if bytes == 0 { return; }
+        if bytes == 0 {
+            return;
+        }
 
         // Clamp to device max APW size
         let device = Device::get_device(self.device_id).ok();
@@ -323,10 +389,14 @@ impl CudaBuffAverages {
             let _ = cu::cuDeviceGetAttribute(
                 &mut max_win as *mut _,
                 cu::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
-                dev.as_raw()
+                dev.as_raw(),
             );
         }
-        let win_bytes = if max_win > 0 { bytes.min(max_win as usize) } else { bytes };
+        let win_bytes = if max_win > 0 {
+            bytes.min(max_win as usize)
+        } else {
+            bytes
+        };
 
         // Reserve some L2 set-aside for persisting
         let mut max_persist: i32 = 0;
@@ -334,16 +404,19 @@ impl CudaBuffAverages {
             let _ = cu::cuDeviceGetAttribute(
                 &mut max_persist as *mut _,
                 cu::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_PERSISTING_L2_CACHE_SIZE,
-                dev.as_raw()
+                dev.as_raw(),
             );
         }
         if max_persist > 0 {
-            let want = (win_bytes as u64)
-                .min(std::env::var("BUFF_APW_SETASIDE_BYTES").ok()
-                    .and_then(|v| v.parse::<u64>().ok()).unwrap_or(win_bytes as u64));
+            let want = (win_bytes as u64).min(
+                std::env::var("BUFF_APW_SETASIDE_BYTES")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(win_bytes as u64),
+            );
             let _ = cu::cuCtxSetLimit(
                 cu::CUlimit_enum::CU_LIMIT_PERSISTING_L2_CACHE_SIZE,
-                want.min(max_persist as u64) as usize
+                want.min(max_persist as u64) as usize,
             );
         }
 
@@ -352,8 +425,10 @@ impl CudaBuffAverages {
         let apw = cu::CUaccessPolicyWindow_v1 {
             base_ptr: base as *mut std::ffi::c_void,
             num_bytes: win_bytes,
-            hitRatio: std::env::var("BUFF_APW_RATIO").ok()
-                .and_then(|v| v.parse::<f32>().ok()).unwrap_or(hit_ratio),
+            hitRatio: std::env::var("BUFF_APW_RATIO")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(hit_ratio),
             hitProp: cu::CUaccessProperty_enum::CU_ACCESS_PROPERTY_PERSISTING,
             missProp: cu::CUaccessProperty_enum::CU_ACCESS_PROPERTY_NORMAL,
         };
@@ -363,18 +438,26 @@ impl CudaBuffAverages {
         let _ = cu::cuStreamSetAttribute(
             self.stream.as_inner(),
             cu::CUstreamAttrID_enum::CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW,
-            &val
+            &val,
         );
     }
 
     /// Convenience: set a window that covers two buffers; if span exceeds device
     /// max, fall back to the larger of the two.
     #[inline]
-    unsafe fn set_l2_window_for_pair(&self, a_ptr: u64, a_bytes: usize, b_ptr: u64, b_bytes: usize) {
-        if std::env::var("BUFF_APW").ok().as_deref() == Some("0") { return; }
+    unsafe fn set_l2_window_for_pair(
+        &self,
+        a_ptr: u64,
+        a_bytes: usize,
+        b_ptr: u64,
+        b_bytes: usize,
+    ) {
+        if std::env::var("BUFF_APW").ok().as_deref() == Some("0") {
+            return;
+        }
         let start = a_ptr.min(b_ptr);
-        let end   = (a_ptr + a_bytes as u64).max(b_ptr + b_bytes as u64);
-        let span  = (end - start) as usize;
+        let end = (a_ptr + a_bytes as u64).max(b_ptr + b_bytes as u64);
+        let span = (end - start) as usize;
 
         let device = Device::get_device(self.device_id).ok();
         let mut max_win: i32 = 0;
@@ -382,7 +465,7 @@ impl CudaBuffAverages {
             let _ = cu::cuDeviceGetAttribute(
                 &mut max_win as *mut _,
                 cu::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
-                dev.as_raw()
+                dev.as_raw(),
             );
         }
         if max_win > 0 && span > max_win as usize {
@@ -399,14 +482,18 @@ impl CudaBuffAverages {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] BUFF_AVG batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaBuffAverages)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaBuffAverages)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -414,34 +501,59 @@ impl CudaBuffAverages {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] BUFF_AVG many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaBuffAverages)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaBuffAverages)).debug_many_logged = true;
+                }
             }
         }
     }
 
     #[inline]
     fn mem_check_enabled() -> bool {
-        match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && v.to_lowercase() != "false", Err(_) => true }
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Some((free, _)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
 
     #[inline]
     fn pick_tiled_block(&self, series_len: usize) -> u32 {
-        if let Ok(v) = std::env::var("BUFF_TILE") { if let Ok(tile) = v.parse::<u32>() { if tile == 128 || tile == 256 { return tile; } } }
-        if series_len < 8192 { 128 } else { 256 }
+        if let Ok(v) = std::env::var("BUFF_TILE") {
+            if let Ok(tile) = v.parse::<u32>() {
+                if tile == 128 || tile == 256 {
+                    return tile;
+                }
+            }
+        }
+        if series_len < 8192 {
+            128
+        } else {
+            256
+        }
     }
 
     pub fn expand_grid(range: &BuffAveragesBatchRange) -> Vec<(usize, usize)> {
@@ -525,7 +637,7 @@ impl CudaBuffAverages {
         Ok((combos, first_valid, len))
     }
 
-pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let len = price.len();
         let mut prefix_pv = vec![0.0f32; len + 1];
         let mut prefix_vv = vec![0.0f32; len + 1];
@@ -547,7 +659,7 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
             prefix_vv[i + 1] = acc_vv as f32;
         }
         (prefix_pv, prefix_vv)
-}
+    }
 
     fn launch_batch_kernel(
         &self,
@@ -567,8 +679,14 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         let mut tile_choice: Option<u32> = None;
         match self.policy.batch {
             BatchKernelPolicy::Auto => {}
-            BatchKernelPolicy::Plain { block_x: bx } => { use_tiled = false; block_x = bx; }
-            BatchKernelPolicy::Tiled { tile } => { use_tiled = true; tile_choice = Some(tile); }
+            BatchKernelPolicy::Plain { block_x: bx } => {
+                use_tiled = false;
+                block_x = bx;
+            }
+            BatchKernelPolicy::Tiled { tile } => {
+                use_tiled = true;
+                tile_choice = Some(tile);
+            }
         }
 
         // Try to persist the prefix arrays in L2 during this run (best-effort).
@@ -582,12 +700,22 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
 
         if use_tiled {
             block_x = tile_choice.unwrap_or_else(|| self.pick_tiled_block(len));
-            let func_name = match block_x { 128 => "buff_averages_batch_prefix_tiled_f32_tile128", _ => "buff_averages_batch_prefix_tiled_f32_tile256" };
-            let mut func = self.module.get_function(func_name).or_else(|_| self.module.get_function("buff_averages_batch_prefix_f32")).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+            let func_name = match block_x {
+                128 => "buff_averages_batch_prefix_tiled_f32_tile128",
+                _ => "buff_averages_batch_prefix_tiled_f32_tile256",
+            };
+            let mut func = self
+                .module
+                .get_function(func_name)
+                .or_else(|_| self.module.get_function("buff_averages_batch_prefix_f32"))
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
             self.prefer_l1(&mut func);
 
             // Introspection
-            unsafe { (*(self as *const _ as *mut CudaBuffAverages)).last_batch = Some(BatchKernelSelected::Tiled1x { tile: block_x }); }
+            unsafe {
+                (*(self as *const _ as *mut CudaBuffAverages)).last_batch =
+                    Some(BatchKernelSelected::Tiled1x { tile: block_x });
+            }
             self.maybe_log_batch_debug();
 
             let grid_x = ((len as u32) + block_x - 1) / block_x;
@@ -602,11 +730,23 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
                     let mut prefix_vv_ptr = d_prefix_vv.as_device_ptr().as_raw();
                     let mut len_i = len as i32;
                     let mut first_valid_i = first_valid as i32;
-                    let mut fast_ptr = d_fast.as_device_ptr().as_raw().wrapping_add((start * std::mem::size_of::<i32>()) as u64);
-                    let mut slow_ptr = d_slow.as_device_ptr().as_raw().wrapping_add((start * std::mem::size_of::<i32>()) as u64);
+                    let mut fast_ptr = d_fast
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
+                    let mut slow_ptr = d_slow
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
                     let mut combos_i = chunk as i32;
-                    let mut fast_out_ptr = d_fast_out.as_device_ptr().as_raw().wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
-                    let mut slow_out_ptr = d_slow_out.as_device_ptr().as_raw().wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
+                    let mut fast_out_ptr = d_fast_out
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
+                    let mut slow_out_ptr = d_slow_out
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
                     let args: &mut [*mut c_void] = &mut [
                         &mut prefix_pv_ptr as *mut _ as *mut c_void,
                         &mut prefix_vv_ptr as *mut _ as *mut c_void,
@@ -618,15 +758,23 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
                         &mut fast_out_ptr as *mut _ as *mut c_void,
                         &mut slow_out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+                    self.stream
+                        .launch(&func, grid, block, 0, args)
+                        .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
                 }
                 start += chunk;
             }
         } else {
-            let mut func = self.module.get_function("buff_averages_batch_prefix_f32").map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+            let mut func = self
+                .module
+                .get_function("buff_averages_batch_prefix_f32")
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
             self.prefer_l1(&mut func);
             // Introspection
-            unsafe { (*(self as *const _ as *mut CudaBuffAverages)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+            unsafe {
+                (*(self as *const _ as *mut CudaBuffAverages)).last_batch =
+                    Some(BatchKernelSelected::Plain { block_x });
+            }
             self.maybe_log_batch_debug();
 
             let grid_x = ((len as u32) + block_x - 1) / block_x;
@@ -641,11 +789,23 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
                     let mut prefix_vv_ptr = d_prefix_vv.as_device_ptr().as_raw();
                     let mut len_i = len as i32;
                     let mut first_valid_i = first_valid as i32;
-                    let mut fast_ptr = d_fast.as_device_ptr().as_raw().wrapping_add((start * std::mem::size_of::<i32>()) as u64);
-                    let mut slow_ptr = d_slow.as_device_ptr().as_raw().wrapping_add((start * std::mem::size_of::<i32>()) as u64);
+                    let mut fast_ptr = d_fast
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
+                    let mut slow_ptr = d_slow
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
                     let mut combos_i = chunk as i32;
-                    let mut fast_out_ptr = d_fast_out.as_device_ptr().as_raw().wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
-                    let mut slow_out_ptr = d_slow_out.as_device_ptr().as_raw().wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
+                    let mut fast_out_ptr = d_fast_out
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
+                    let mut slow_out_ptr = d_slow_out
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
                     let args: &mut [*mut c_void] = &mut [
                         &mut prefix_pv_ptr as *mut _ as *mut c_void,
                         &mut prefix_vv_ptr as *mut _ as *mut c_void,
@@ -657,7 +817,9 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
                         &mut fast_out_ptr as *mut _ as *mut c_void,
                         &mut slow_out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+                    self.stream
+                        .launch(&func, grid, block, 0, args)
+                        .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
                 }
                 start += chunk;
             }
@@ -676,19 +838,29 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         slow_period: usize,
     ) -> Result<PreparedManySeries, CudaBuffAveragesError> {
         if prices_tm_f32.len() != volumes_tm_f32.len() {
-            return Err(CudaBuffAveragesError::InvalidInput("price/volume matrix length mismatch".into()));
+            return Err(CudaBuffAveragesError::InvalidInput(
+                "price/volume matrix length mismatch".into(),
+            ));
         }
         if cols == 0 || rows == 0 {
-            return Err(CudaBuffAveragesError::InvalidInput("matrix dims must be positive".into()));
+            return Err(CudaBuffAveragesError::InvalidInput(
+                "matrix dims must be positive".into(),
+            ));
         }
         if prices_tm_f32.len() != cols * rows {
-            return Err(CudaBuffAveragesError::InvalidInput("matrix shape mismatch".into()));
+            return Err(CudaBuffAveragesError::InvalidInput(
+                "matrix shape mismatch".into(),
+            ));
         }
         if fast_period == 0 || slow_period == 0 {
-            return Err(CudaBuffAveragesError::InvalidInput("periods must be positive".into()));
+            return Err(CudaBuffAveragesError::InvalidInput(
+                "periods must be positive".into(),
+            ));
         }
         if fast_period > slow_period {
-            return Err(CudaBuffAveragesError::InvalidInput("fast_period must be <= slow_period".into()));
+            return Err(CudaBuffAveragesError::InvalidInput(
+                "fast_period must be <= slow_period".into(),
+            ));
         }
 
         // Find first valid row per series where both price & volume are finite
@@ -698,26 +870,32 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
             for t in 0..rows {
                 let p = prices_tm_f32[t * cols + s];
                 let v = volumes_tm_f32[t * cols + s];
-                if !p.is_nan() && !v.is_nan() { fv = Some(t); break; }
+                if !p.is_nan() && !v.is_nan() {
+                    fv = Some(t);
+                    break;
+                }
             }
-            let val = fv.ok_or_else(|| CudaBuffAveragesError::InvalidInput(format!("series {} all NaN", s)))?;
+            let val = fv.ok_or_else(|| {
+                CudaBuffAveragesError::InvalidInput(format!("series {} all NaN", s))
+            })?;
             if rows - val < slow_period {
                 return Err(CudaBuffAveragesError::InvalidInput(format!(
                     "series {} not enough valid data (needed >= {}, valid = {})",
-                    s, slow_period, rows - val
+                    s,
+                    slow_period,
+                    rows - val
                 )));
             }
             first_valids[s] = val as i32;
         }
 
-        let (pv_prefix_tm, vv_prefix_tm) = build_prefix_sums_time_major(
-            prices_tm_f32,
-            volumes_tm_f32,
-            cols,
-            rows,
-            &first_valids,
-        );
-        Ok(PreparedManySeries { first_valids, pv_prefix_tm, vv_prefix_tm })
+        let (pv_prefix_tm, vv_prefix_tm) =
+            build_prefix_sums_time_major(prices_tm_f32, volumes_tm_f32, cols, rows, &first_valids);
+        Ok(PreparedManySeries {
+            first_valids,
+            pv_prefix_tm,
+            vv_prefix_tm,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -733,9 +911,13 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         d_fast_out_tm: &mut DeviceBuffer<f32>,
         d_slow_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaBuffAveragesError> {
-        if num_series == 0 || series_len == 0 { return Ok(()); }
+        if num_series == 0 || series_len == 0 {
+            return Ok(());
+        }
         if fast_period == 0 || slow_period == 0 {
-            return Err(CudaBuffAveragesError::InvalidInput("periods must be positive".into()));
+            return Err(CudaBuffAveragesError::InvalidInput(
+                "periods must be positive".into(),
+            ));
         }
 
         // Best-effort: persist the time-major prefix matrices in L2 for this run.
@@ -758,16 +940,15 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
                     "buff_averages_many_series_one_param_tiled2d_f32_sx128_ty2",
                     "buff_averages_many_series_one_param_tiled2d_f32_tx128_ty2",
                 ],
-                (128, 1) => &[
-                    "buff_averages_many_series_one_param_tiled2d_f32_sx128_ty1",
-                ],
+                (128, 1) => &["buff_averages_many_series_one_param_tiled2d_f32_sx128_ty1"],
                 _ => return None,
             };
             let (mut func, picked): (cust::function::Function, &str) = {
                 let mut sel: Option<(cust::function::Function, &str)> = None;
                 for &name in fname_candidates {
                     if let Ok(f) = self.module.get_function(name) {
-                        sel = Some((f, name)); break;
+                        sel = Some((f, name));
+                        break;
                     }
                 }
                 sel?
@@ -814,33 +995,50 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
                     .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))
                     .ok()?;
             }
-            unsafe { (*(self as *const _ as *mut CudaBuffAverages)).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty }); }
+            unsafe {
+                (*(self as *const _ as *mut CudaBuffAverages)).last_many =
+                    Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
+            }
             self.maybe_log_many_debug();
             Some(())
         };
 
         match self.policy.many_series {
             ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
-                if try_2d(tx, ty).is_some() { return Ok(()); }
+                if try_2d(tx, ty).is_some() {
+                    return Ok(());
+                }
             }
             ManySeriesKernelPolicy::Auto => {
                 if num_series >= 128 {
-                    if try_2d(128, 4).is_some() { return Ok(()); }
-                    if try_2d(128, 2).is_some() { return Ok(()); }
+                    if try_2d(128, 4).is_some() {
+                        return Ok(());
+                    }
+                    if try_2d(128, 2).is_some() {
+                        return Ok(());
+                    }
                 } else {
-                    if try_2d(128, 2).is_some() { return Ok(()); }
-                    if try_2d(128, 4).is_some() { return Ok(()); }
+                    if try_2d(128, 2).is_some() {
+                        return Ok(());
+                    }
+                    if try_2d(128, 4).is_some() {
+                        return Ok(());
+                    }
                 }
             }
             ManySeriesKernelPolicy::OneD { .. } => {}
         }
 
         // Fallback 1D
-        let mut func = self.module
+        let mut func = self
+            .module
             .get_function("buff_averages_many_series_one_param_f32")
             .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         self.prefer_l1(&mut func);
-        let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            _ => 128,
+        };
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), num_series as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -869,7 +1067,10 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         }
-        unsafe { (*(self as *const _ as *mut CudaBuffAverages)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaBuffAverages)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
         Ok(())
     }
@@ -888,25 +1089,37 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         let rows = combos.len();
         let bytes_required = (len + 1) * 4 * 2  // prefixes
             + rows * 4 * 2                      // period arrays
-            + rows * len * 4 * 2;               // outputs
-        let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
+            + rows * len * 4 * 2; // outputs
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
         if !Self::will_fit(bytes_required, headroom) {
             return Err(CudaBuffAveragesError::InvalidInput(format!(
-                "insufficient VRAM: need ~{} MB (incl headroom)", (bytes_required + headroom) / (1024*1024)
+                "insufficient VRAM: need ~{} MB (incl headroom)",
+                (bytes_required + headroom) / (1024 * 1024)
             )));
         }
 
-        let d_prefix_pv = DeviceBuffer::from_slice(&prefix_pv).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_prefix_vv = DeviceBuffer::from_slice(&prefix_vv).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_prefix_pv = DeviceBuffer::from_slice(&prefix_pv)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_prefix_vv = DeviceBuffer::from_slice(&prefix_vv)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         let fast_periods: Vec<i32> = combos.iter().map(|&(f, _)| f as i32).collect();
         let slow_periods: Vec<i32> = combos.iter().map(|&(_, s)| s as i32).collect();
-        let d_fast = DeviceBuffer::from_slice(&fast_periods).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_slow = DeviceBuffer::from_slice(&slow_periods).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_fast = DeviceBuffer::from_slice(&fast_periods)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_slow = DeviceBuffer::from_slice(&slow_periods)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         let elems = combos.len() * len;
-        let mut d_fast_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_slow_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_fast_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_slow_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
             &d_prefix_pv,
@@ -920,7 +1133,9 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
             &mut d_slow_out,
         )?;
 
-        self.stream.synchronize().map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         Ok((
             DeviceArrayF32 {
@@ -989,31 +1204,46 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         let rows = combos.len();
         let bytes_required = (len + 1) * 4 * 4  // four prefix arrays
             + rows * 4 * 2                      // period arrays
-            + rows * len * 4 * 2;               // outputs
-        let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
+            + rows * len * 4 * 2; // outputs
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
         if !Self::will_fit(bytes_required, headroom) {
             return Err(CudaBuffAveragesError::InvalidInput(format!(
-                "insufficient VRAM: need ~{} MB (incl headroom)", (bytes_required + headroom) / (1024*1024)
+                "insufficient VRAM: need ~{} MB (incl headroom)",
+                (bytes_required + headroom) / (1024 * 1024)
             )));
         }
 
         // Upload device buffers
-        let d_pv_hi = DeviceBuffer::from_slice(&pv_hi).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_pv_lo = DeviceBuffer::from_slice(&pv_lo).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_vv_hi = DeviceBuffer::from_slice(&vv_hi).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_vv_lo = DeviceBuffer::from_slice(&vv_lo).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_pv_hi = DeviceBuffer::from_slice(&pv_hi)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_pv_lo = DeviceBuffer::from_slice(&pv_lo)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_vv_hi = DeviceBuffer::from_slice(&vv_hi)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_vv_lo = DeviceBuffer::from_slice(&vv_lo)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         let fast_periods: Vec<i32> = combos.iter().map(|&(f, _)| f as i32).collect();
         let slow_periods: Vec<i32> = combos.iter().map(|&(_, s)| s as i32).collect();
-        let d_fast = DeviceBuffer::from_slice(&fast_periods).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_slow = DeviceBuffer::from_slice(&slow_periods).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_fast = DeviceBuffer::from_slice(&fast_periods)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_slow = DeviceBuffer::from_slice(&slow_periods)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         // Outputs
         let elems = combos.len() * len;
-        let mut d_fast_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_slow_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_fast_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_slow_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         // Launch plain 1D expansion kernel
-        let mut func = self.module
+        let mut func = self
+            .module
             .get_function("buff_averages_batch_prefix_exp2_f32")
             .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         self.prefer_l1(&mut func);
@@ -1040,11 +1270,23 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
                 let mut vv_lo_ptr = d_vv_lo.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_valid_i = first_valid as i32;
-                let mut fast_ptr = d_fast.as_device_ptr().as_raw().wrapping_add((start * std::mem::size_of::<i32>()) as u64);
-                let mut slow_ptr = d_slow.as_device_ptr().as_raw().wrapping_add((start * std::mem::size_of::<i32>()) as u64);
+                let mut fast_ptr = d_fast
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
+                let mut slow_ptr = d_slow
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
                 let mut combos_i = chunk as i32;
-                let mut fast_out_ptr = d_fast_out.as_device_ptr().as_raw().wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
-                let mut slow_out_ptr = d_slow_out.as_device_ptr().as_raw().wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
+                let mut fast_out_ptr = d_fast_out
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
+                let mut slow_out_ptr = d_slow_out
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((start * len * std::mem::size_of::<f32>()) as u64);
                 let args: &mut [*mut c_void] = &mut [
                     &mut pv_hi_ptr as *mut _ as *mut c_void,
                     &mut pv_lo_ptr as *mut _ as *mut c_void,
@@ -1064,11 +1306,21 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
             }
             start += chunk;
         }
-        self.stream.synchronize().map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         Ok((
-            DeviceArrayF32 { buf: d_fast_out, rows: combos.len(), cols: len },
-            DeviceArrayF32 { buf: d_slow_out, rows: combos.len(), cols: len },
+            DeviceArrayF32 {
+                buf: d_fast_out,
+                rows: combos.len(),
+                cols: len,
+            },
+            DeviceArrayF32 {
+                buf: d_slow_out,
+                rows: combos.len(),
+                cols: len,
+            },
         ))
     }
 
@@ -1082,21 +1334,41 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         fast_period: usize,
         slow_period: usize,
     ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaBuffAveragesError> {
-        let prep = Self::prepare_many_series_inputs(prices_tm_f32, volumes_tm_f32, cols, rows, fast_period, slow_period)?;
+        let prep = Self::prepare_many_series_inputs(
+            prices_tm_f32,
+            volumes_tm_f32,
+            cols,
+            rows,
+            fast_period,
+            slow_period,
+        )?;
 
         // VRAM estimate
         let elems = cols * rows;
-        let required = ((rows + 1) * cols * 2 + elems * 2) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>();
-        let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
+        let required = ((rows + 1) * cols * 2 + elems * 2) * std::mem::size_of::<f32>()
+            + cols * std::mem::size_of::<i32>();
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
         if !Self::will_fit(required, headroom) {
-            return Err(CudaBuffAveragesError::InvalidInput("insufficient VRAM for many-series run".into()));
+            return Err(CudaBuffAveragesError::InvalidInput(
+                "insufficient VRAM for many-series run".into(),
+            ));
         }
 
-        let d_pv = DeviceBuffer::from_slice(&prep.pv_prefix_tm).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_vv = DeviceBuffer::from_slice(&prep.vv_prefix_tm).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&prep.first_valids).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_fast_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_slow_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_pv = DeviceBuffer::from_slice(&prep.pv_prefix_tm)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_vv = DeviceBuffer::from_slice(&prep.vv_prefix_tm)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_fv = DeviceBuffer::from_slice(&prep.first_valids)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_fast_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_slow_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
             &d_pv,
@@ -1110,10 +1382,20 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
             &mut d_slow_out,
         )?;
 
-        self.stream.synchronize().map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         Ok((
-            DeviceArrayF32 { buf: d_fast_out, rows, cols },
-            DeviceArrayF32 { buf: d_slow_out, rows, cols },
+            DeviceArrayF32 {
+                buf: d_fast_out,
+                rows,
+                cols,
+            },
+            DeviceArrayF32 {
+                buf: d_slow_out,
+                rows,
+                cols,
+            },
         ))
     }
 
@@ -1127,26 +1409,55 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         fast_period: usize,
         slow_period: usize,
     ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaBuffAveragesError> {
-        let prep = Self::prepare_many_series_inputs(prices_tm_f32, volumes_tm_f32, cols, rows, fast_period, slow_period)?;
+        let prep = Self::prepare_many_series_inputs(
+            prices_tm_f32,
+            volumes_tm_f32,
+            cols,
+            rows,
+            fast_period,
+            slow_period,
+        )?;
         let (pv_hi_tm, pv_lo_tm, vv_hi_tm, vv_lo_tm) = build_prefix_sums_time_major_exp2(
-            prices_tm_f32, volumes_tm_f32, cols, rows, &prep.first_valids,
+            prices_tm_f32,
+            volumes_tm_f32,
+            cols,
+            rows,
+            &prep.first_valids,
         );
 
         // VRAM check (four prefix arrays)
         let elems = cols * rows;
-        let required = ((rows + 1) * cols * 4 + elems * 2) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>();
-        let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
-        if !Self::will_fit(required, headroom) { return Err(CudaBuffAveragesError::InvalidInput("insufficient VRAM for many-series run (exp2)".into())); }
+        let required = ((rows + 1) * cols * 4 + elems * 2) * std::mem::size_of::<f32>()
+            + cols * std::mem::size_of::<i32>();
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaBuffAveragesError::InvalidInput(
+                "insufficient VRAM for many-series run (exp2)".into(),
+            ));
+        }
 
-        let d_pv_hi = DeviceBuffer::from_slice(&pv_hi_tm).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_pv_lo = DeviceBuffer::from_slice(&pv_lo_tm).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_vv_hi = DeviceBuffer::from_slice(&vv_hi_tm).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_vv_lo = DeviceBuffer::from_slice(&vv_lo_tm).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&prep.first_valids).map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_fast_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-        let mut d_slow_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_pv_hi = DeviceBuffer::from_slice(&pv_hi_tm)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_pv_lo = DeviceBuffer::from_slice(&pv_lo_tm)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_vv_hi = DeviceBuffer::from_slice(&vv_hi_tm)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_vv_lo = DeviceBuffer::from_slice(&vv_lo_tm)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let d_fv = DeviceBuffer::from_slice(&prep.first_valids)
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_fast_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        let mut d_slow_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
-        let mut func = self.module
+        let mut func = self
+            .module
             .get_function("buff_averages_many_series_one_param_exp2_f32")
             .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         self.prefer_l1(&mut func);
@@ -1190,10 +1501,20 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         }
-        self.stream.synchronize().map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         Ok((
-            DeviceArrayF32 { buf: d_fast_out, rows, cols },
-            DeviceArrayF32 { buf: d_slow_out, rows, cols },
+            DeviceArrayF32 {
+                buf: d_fast_out,
+                rows,
+                cols,
+            },
+            DeviceArrayF32 {
+                buf: d_slow_out,
+                rows,
+                cols,
+            },
         ))
     }
 
@@ -1274,20 +1595,29 @@ pub fn build_prefix_sums(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>) 
         if fast_out_pinned.len() != expected || slow_out_pinned.len() != expected {
             return Err(CudaBuffAveragesError::InvalidInput(format!(
                 "output slice mismatch (expected {}, fast={}, slow={})",
-                expected, fast_out_pinned.len(), slow_out_pinned.len()
+                expected,
+                fast_out_pinned.len(),
+                slow_out_pinned.len()
             )));
         }
 
-        let (fast_dev, slow_dev) = self.run_batch_kernel(price_f32, volume_f32, &combos, first_valid)?;
+        let (fast_dev, slow_dev) =
+            self.run_batch_kernel(price_f32, volume_f32, &combos, first_valid)?;
 
         // Asynchronous D2H into pinned memory, then sync once
         unsafe {
-            fast_dev.buf.async_copy_to(fast_out_pinned.as_mut_slice(), &self.stream)
+            fast_dev
+                .buf
+                .async_copy_to(fast_out_pinned.as_mut_slice(), &self.stream)
                 .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
-            slow_dev.buf.async_copy_to(slow_out_pinned.as_mut_slice(), &self.stream)
+            slow_dev
+                .buf
+                .async_copy_to(slow_out_pinned.as_mut_slice(), &self.stream)
                 .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
         }
-        self.stream.synchronize().map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaBuffAveragesError::Cuda(e.to_string()))?;
 
         Ok((combos.len(), len, combos))
     }
@@ -1350,15 +1680,23 @@ fn prefix_step_f2(x: f32, hi: &mut f32, lo: &mut f32) {
     *lo = r_lo;
 }
 
-pub fn build_prefix_sums_exp2(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+pub fn build_prefix_sums_exp2(
+    price: &[f32],
+    volume: &[f32],
+) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let len = price.len();
     let mut pv_hi = vec![0.0f32; len + 1];
     let mut pv_lo = vec![0.0f32; len + 1];
     let mut vv_hi = vec![0.0f32; len + 1];
     let mut vv_lo = vec![0.0f32; len + 1];
-    let mut sh = 0.0f32; let mut sl = 0.0f32;
-    let mut th = 0.0f32; let mut tl = 0.0f32;
-    pv_hi[0] = 0.0; pv_lo[0] = 0.0; vv_hi[0] = 0.0; vv_lo[0] = 0.0;
+    let mut sh = 0.0f32;
+    let mut sl = 0.0f32;
+    let mut th = 0.0f32;
+    let mut tl = 0.0f32;
+    pv_hi[0] = 0.0;
+    pv_lo[0] = 0.0;
+    vv_hi[0] = 0.0;
+    vv_lo[0] = 0.0;
     for i in 0..len {
         let p = price[i];
         let v = volume[i];
@@ -1368,8 +1706,10 @@ pub fn build_prefix_sums_exp2(price: &[f32], volume: &[f32]) -> (Vec<f32>, Vec<f
         let pv = if v_ok && p_ok { p.mul_add(v, 0.0) } else { 0.0 };
         prefix_step_f2(pv, &mut sh, &mut sl);
         prefix_step_f2(vol, &mut th, &mut tl);
-        pv_hi[i + 1] = sh; pv_lo[i + 1] = sl;
-        vv_hi[i + 1] = th; vv_lo[i + 1] = tl;
+        pv_hi[i + 1] = sh;
+        pv_lo[i + 1] = sl;
+        vv_hi[i + 1] = th;
+        vv_lo[i + 1] = tl;
     }
     (pv_hi, pv_lo, vv_hi, vv_lo)
 }
@@ -1387,10 +1727,14 @@ fn build_prefix_sums_time_major_exp2(
     let mut vv_lo = vec![0.0f32; (rows + 1) * cols];
     for s in 0..cols {
         let fv = first_valids[s].max(0) as usize;
-        let mut sh = 0.0f32; let mut sl = 0.0f32;
-        let mut th = 0.0f32; let mut tl = 0.0f32;
-        pv_hi[0 * cols + s] = 0.0; pv_lo[0 * cols + s] = 0.0;
-        vv_hi[0 * cols + s] = 0.0; vv_lo[0 * cols + s] = 0.0;
+        let mut sh = 0.0f32;
+        let mut sl = 0.0f32;
+        let mut th = 0.0f32;
+        let mut tl = 0.0f32;
+        pv_hi[0 * cols + s] = 0.0;
+        pv_lo[0 * cols + s] = 0.0;
+        vv_hi[0 * cols + s] = 0.0;
+        vv_lo[0 * cols + s] = 0.0;
         for t in 0..rows {
             if t >= fv {
                 let idx = t * cols + s;
@@ -1404,8 +1748,10 @@ fn build_prefix_sums_time_major_exp2(
                 prefix_step_f2(vol, &mut th, &mut tl);
             }
             let w = (t + 1) * cols + s;
-            pv_hi[w] = sh; pv_lo[w] = sl;
-            vv_hi[w] = th; vv_lo[w] = tl;
+            pv_hi[w] = sh;
+            pv_lo[w] = sl;
+            vv_hi[w] = th;
+            vv_lo[w] = tl;
         }
     }
     (pv_hi, pv_lo, vv_hi, vv_lo)

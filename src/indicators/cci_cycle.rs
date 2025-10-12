@@ -103,7 +103,11 @@ impl MonoIdxDeque {
     #[inline(always)]
     fn back(&self) -> usize {
         debug_assert!(!self.is_empty());
-        unsafe { *self.buf.get_unchecked((self.tail.wrapping_sub(1)) & self.mask) }
+        unsafe {
+            *self
+                .buf
+                .get_unchecked((self.tail.wrapping_sub(1)) & self.mask)
+        }
     }
     #[inline(always)]
     fn push_back(&mut self, idx: usize) {
@@ -547,12 +551,7 @@ fn double_ema_scalar(work: &mut [f64], ema_short: &[f64], ema_long: &[f64], star
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn double_ema_avx2(
-    work: &mut [f64],
-    ema_short: &[f64],
-    ema_long: &[f64],
-    start: usize,
-) {
+unsafe fn double_ema_avx2(work: &mut [f64], ema_short: &[f64], ema_long: &[f64], start: usize) {
     let len = work.len();
     let mut i = start;
     while i + 4 <= len {
@@ -573,12 +572,7 @@ unsafe fn double_ema_avx2(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn double_ema_avx512(
-    work: &mut [f64],
-    ema_short: &[f64],
-    ema_long: &[f64],
-    start: usize,
-) {
+unsafe fn double_ema_avx512(work: &mut [f64], ema_short: &[f64], ema_long: &[f64], start: usize) {
     let len = work.len();
     let mut i = start;
     while i + 8 <= len {
@@ -743,7 +737,11 @@ fn fused_pf_and_normalize_scalar(
                     fmadd(f2 - prev_out, factor, prev_out)
                 }
             } else {
-                if i > 0 { prev_out } else { 50.0 }
+                if i > 0 {
+                    prev_out
+                } else {
+                    50.0
+                }
             }
         } else {
             f64::NAN
@@ -880,13 +878,13 @@ pub struct CciCycleStream {
     inv_smma_p: f64,
     alpha_s: f64,
     alpha_l: f64,
-    cci_scale: f64,   // = 1.0 / 0.015
+    cci_scale: f64, // = 1.0 / 0.015
 
     // global index
     i: usize,
 
     // ---- CCI window (SMA + mean deviation) ----
-    x_win: Vec<f64>,     // length
+    x_win: Vec<f64>, // length
     x_sum: f64,
     x_count: usize,      // number of valid samples seen so far (caps at length)
     dev_rma: f64,        // RMA of |x - sma| after exact init
@@ -904,8 +902,8 @@ pub struct CciCycleStream {
     smma_inited: bool,
 
     // ---- Stage buffers (for stoch windows) ----
-    ccis_win: Vec<f64>,   // ring (length) of SMMA(double-EMA)
-    pf_win: Vec<f64>,     // ring (length) of smoothed %K (first stoch)
+    ccis_win: Vec<f64>, // ring (length) of SMMA(double-EMA)
+    pf_win: Vec<f64>,   // ring (length) of smoothed %K (first stoch)
 
     // ---- Deques for rolling min/max (O(1)) ----
     q_min_cc: MonoIdxDeque,
@@ -914,9 +912,9 @@ pub struct CciCycleStream {
     q_max_pf: MonoIdxDeque,
 
     // ---- Smoothing states for the two stoch passes ----
-    prev_f1: f64,     // last unsmoothed %K on ccis (for zero-range fallback)
-    pf_smooth: f64,   // smoothed %K (first pass)
-    out_prev: f64,    // smoothed %K of second pass (final output)
+    prev_f1: f64,   // last unsmoothed %K on ccis (for zero-range fallback)
+    pf_smooth: f64, // smoothed %K (first pass)
+    out_prev: f64,  // smoothed %K of second pass (final output)
 
     // gating
     warmup_after: usize, // conservative: length*4 (matches batch)
@@ -942,8 +940,8 @@ impl CciCycleStream {
         // coefficients and constants (compute once)
         let inv_len = 1.0 / (length as f64);
         let inv_smma_p = 1.0 / (smma_p as f64);
-        let alpha_s = 2.0 / (half as f64 + 1.0);    // EMA α = 2/(n+1)
-        let alpha_l = 2.0 / (length as f64 + 1.0);  // EMA α = 2/(n+1)
+        let alpha_s = 2.0 / (half as f64 + 1.0); // EMA α = 2/(n+1)
+        let alpha_l = 2.0 / (length as f64 + 1.0); // EMA α = 2/(n+1)
         let cci_scale = 1.0 / 0.015;
 
         Ok(Self {
@@ -993,14 +991,20 @@ impl CciCycleStream {
 
     #[inline]
     fn clear_deques(&mut self) {
-        self.q_min_cc.head = 0; self.q_min_cc.tail = 0;
-        self.q_max_cc.head = 0; self.q_max_cc.tail = 0;
-        self.q_min_pf.head = 0; self.q_min_pf.tail = 0;
-        self.q_max_pf.head = 0; self.q_max_pf.tail = 0;
+        self.q_min_cc.head = 0;
+        self.q_min_cc.tail = 0;
+        self.q_max_cc.head = 0;
+        self.q_max_cc.tail = 0;
+        self.q_min_pf.head = 0;
+        self.q_min_pf.tail = 0;
+        self.q_max_pf.head = 0;
+        self.q_max_pf.tail = 0;
     }
 
     #[inline(always)]
-    fn ring_idx(&self, i: usize) -> usize { i & (self.length - 1) /* if pow2 */ }
+    fn ring_idx(&self, i: usize) -> usize {
+        i & (self.length - 1) /* if pow2 */
+    }
 
     #[inline(always)]
     fn rb_pos(&self, i: usize) -> usize {
@@ -1117,7 +1121,11 @@ impl CciCycleStream {
                 // SMMA recurrence: prev + (x - prev)/p  (Wilder RMA)
                 self.smma = fmadd(de - self.smma, self.inv_smma_p, self.smma);
             }
-            ccis = if self.smma_inited { self.smma } else { f64::NAN };
+            ccis = if self.smma_inited {
+                self.smma
+            } else {
+                f64::NAN
+            };
         }
 
         // Store ccis in ring and update deques (first stoch window)
@@ -1133,7 +1141,11 @@ impl CciCycleStream {
             while !self.q_min_cc.is_empty() {
                 let b = self.q_min_cc.back();
                 let bv = self.ccis_win[self.rb_pos(b)];
-                if ccis <= bv { self.q_min_cc.pop_back(); } else { break; }
+                if ccis <= bv {
+                    self.q_min_cc.pop_back();
+                } else {
+                    break;
+                }
             }
             self.q_min_cc.push_back(i);
 
@@ -1141,15 +1153,22 @@ impl CciCycleStream {
             while !self.q_max_cc.is_empty() {
                 let b = self.q_max_cc.back();
                 let bv = self.ccis_win[self.rb_pos(b)];
-                if ccis >= bv { self.q_max_cc.pop_back(); } else { break; }
+                if ccis >= bv {
+                    self.q_max_cc.pop_back();
+                } else {
+                    break;
+                }
             }
             self.q_max_cc.push_back(i);
         }
 
         // ---- First stochastic normalization on ccis -> %K1 (smoothed to pf_smooth) ----
         let mut pf_now = f64::NAN;
-        if i + 1 >= stoch_len && self.smma_inited && ccis.is_finite()
-            && !self.q_min_cc.is_empty() && !self.q_max_cc.is_empty()
+        if i + 1 >= stoch_len
+            && self.smma_inited
+            && ccis.is_finite()
+            && !self.q_min_cc.is_empty()
+            && !self.q_max_cc.is_empty()
         {
             let mn = self.ccis_win[self.rb_pos(self.q_min_cc.front())];
             let mx = self.ccis_win[self.rb_pos(self.q_max_cc.front())];
@@ -1160,7 +1179,11 @@ impl CciCycleStream {
                     let inv_range = 1.0 / range;
                     f1 = (ccis - mn) * inv_range * 100.0;
                 } else {
-                    f1 = if self.prev_f1.is_nan() { 50.0 } else { self.prev_f1 };
+                    f1 = if self.prev_f1.is_nan() {
+                        50.0
+                    } else {
+                        self.prev_f1
+                    };
                 }
             }
             if !f1.is_nan() {
@@ -1186,14 +1209,22 @@ impl CciCycleStream {
             while !self.q_min_pf.is_empty() {
                 let b = self.q_min_pf.back();
                 let bv = self.pf_win[self.rb_pos(b)];
-                if pf_now <= bv { self.q_min_pf.pop_back(); } else { break; }
+                if pf_now <= bv {
+                    self.q_min_pf.pop_back();
+                } else {
+                    break;
+                }
             }
             self.q_min_pf.push_back(i);
 
             while !self.q_max_pf.is_empty() {
                 let b = self.q_max_pf.back();
                 let bv = self.pf_win[self.rb_pos(b)];
-                if pf_now >= bv { self.q_max_pf.pop_back(); } else { break; }
+                if pf_now >= bv {
+                    self.q_max_pf.pop_back();
+                } else {
+                    break;
+                }
             }
             self.q_max_pf.push_back(i);
         }
@@ -1216,7 +1247,11 @@ impl CciCycleStream {
                     out_now = self.out_prev;
                 } else {
                     // flat window: hold previous
-                    out_now = if self.out_prev.is_nan() { 50.0 } else { self.out_prev };
+                    out_now = if self.out_prev.is_nan() {
+                        50.0
+                    } else {
+                        self.out_prev
+                    };
                     self.out_prev = out_now;
                 }
             }
@@ -2173,8 +2208,6 @@ mod tests {
         check_cci_cycle_nan_handling,
         check_cci_cycle_streaming
     );
-
-    
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);

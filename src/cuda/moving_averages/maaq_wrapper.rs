@@ -48,11 +48,15 @@ pub enum ManySeriesKernelPolicy {
 }
 
 impl Default for BatchKernelPolicy {
-    fn default() -> Self { BatchKernelPolicy::Auto }
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
 }
 
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -79,10 +83,14 @@ impl fmt::Display for CudaMaaqError {
 impl std::error::Error for CudaMaaqError {}
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaMaaq {
     module: Module,
@@ -104,15 +112,13 @@ impl CudaMaaq {
         let context = Context::new(device).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/maaq_kernel.ptx"));
-        // Prefer context-targeted JIT with moderate opt-level; fallback progressively
-        let jit_opts = &[
-            ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
-        ];
+        // Prefer context-targeted JIT; allow default optimizer (typically O4)
+        let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?
@@ -135,27 +141,43 @@ impl CudaMaaq {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaMaaqPolicy) -> Result<Self, CudaMaaqError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaMaaqPolicy,
+    ) -> Result<Self, CudaMaaqError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaMaaqPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaMaaqPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaMaaqPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaMaaqPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] MAAQ batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMaaq)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMaaq)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -163,14 +185,19 @@ impl CudaMaaq {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] MAAQ many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMaaq)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMaaq)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -186,14 +213,20 @@ impl CudaMaaq {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     #[inline]
@@ -202,6 +235,18 @@ impl CudaMaaq {
             let len = (total - start).min(chunk_max);
             (start, len)
         })
+    }
+
+    #[inline]
+    fn grid_x_limit(&self) -> usize {
+        Device::get_device(self.device_id)
+            .ok()
+            .and_then(|d| {
+                d.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+                    .ok()
+            })
+            .map(|v| v as usize)
+            .unwrap_or(65_535)
     }
 
     fn prepare_batch_inputs(
@@ -298,15 +343,18 @@ impl CudaMaaq {
 
         // Selection + record
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 1u32,
+            BatchKernelPolicy::Auto => 32u32,
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
         };
-        unsafe { (*(self as *const _ as *mut CudaMaaq)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaMaaq)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
 
-        // Launch in chunks of <= 65_535 combos
-        const MAX_CHUNK: usize = 65_535;
-        for (start, len) in Self::chunk_pairs(n_combos, MAX_CHUNK) {
+        // Launch in chunks based on actual grid.x limit
+        let max_chunk = self.grid_x_limit();
+        for (start, len) in Self::chunk_pairs(n_combos, max_chunk) {
             let grid: GridSize = (len as u32, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
@@ -321,10 +369,7 @@ impl CudaMaaq {
                 let mut n_combos_i = len as i32;
                 let mut max_period_i = max_period as i32;
                 // slice output per chunk (row-major: combos × series_len)
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .add(start * series_len)
-                    .as_raw();
+                let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut periods_ptr as *mut _ as *mut c_void,
@@ -382,8 +427,6 @@ impl CudaMaaq {
         )
     }
 
-    
-
     pub fn maaq_batch_dev(
         &self,
         data_f32: &[f32],
@@ -393,8 +436,7 @@ impl CudaMaaq {
         let n_combos = combos.len();
 
         // VRAM estimate: inputs + params + outputs
-        let bytes =
-            len * std::mem::size_of::<f32>() + // prices
+        let bytes = len * std::mem::size_of::<f32>() + // prices
             n_combos * (std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>()) + // period/fast/slow
             (n_combos * len) * std::mem::size_of::<f32>(); // out
         let headroom = 64 * 1024 * 1024; // ~64MB
@@ -417,20 +459,16 @@ impl CudaMaaq {
             slow_scs.push(2.0f32 / (slow as f32 + 1.0f32));
         }
 
-        let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_f32, &self.stream)
-                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?
-        };
+        let d_prices = self.upload_f32_large(data_f32)?;
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
-        let d_fast = DeviceBuffer::from_slice(&fast_scs)
-            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
-        let d_slow = DeviceBuffer::from_slice(&slow_scs)
-            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n_combos * len, &self.stream)
-        }
-        .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        let d_fast =
+            DeviceBuffer::from_slice(&fast_scs).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        let d_slow =
+            DeviceBuffer::from_slice(&slow_scs).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * len, &self.stream) }
+                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel_plain(
             &d_prices,
@@ -560,25 +598,29 @@ impl CudaMaaq {
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
         let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 1u32,
+            ManySeriesKernelPolicy::Auto => 32u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
         };
-        unsafe { (*(self as *const _ as *mut CudaMaaq)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaMaaq)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
-        // Launch in chunks over series to respect grid.x practical limits
-        const MAX_CHUNK: usize = 65_535; // conservative
-        for (start, len) in Self::chunk_pairs(num_series, MAX_CHUNK) {
+        // Launch in chunks over series using the actual grid.x limit
+        let max_chunk = self.grid_x_limit();
+        for (start, len) in Self::chunk_pairs(num_series, max_chunk) {
             let grid: GridSize = (len as u32, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
 
             unsafe {
-                let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
+                // IMPORTANT: base pointers are offset by start; stride remains full num_series
+                let mut prices_ptr = d_prices_tm.as_device_ptr().add(start).as_raw();
                 let mut period_i = period as i32;
                 let mut fast = fast_sc;
                 let mut slow = slow_sc;
-                let mut num_series_i = len as i32;
+                let mut num_series_i = num_series as i32; // stride (full column count)
                 let mut series_len_i = series_len as i32;
                 let mut first_ptr = d_first_valids.as_device_ptr().add(start).as_raw();
                 // time-major output; offset by start series
@@ -640,14 +682,12 @@ impl CudaMaaq {
         let (first_valids, period, fast_sc, slow_sc) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        let d_prices_tm = unsafe {
-            DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
-                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?
-        };
+        let d_prices_tm = self.upload_f32_large(data_tm_f32)?;
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -659,7 +699,9 @@ impl CudaMaaq {
             &d_first_valids,
             &mut d_out_tm,
         )?;
-        self.stream.synchronize().map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
@@ -686,14 +728,12 @@ impl CudaMaaq {
         let (first_valids, period, fast_sc, slow_sc) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        let d_prices_tm = unsafe {
-            DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
-                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?
-        };
+        let d_prices_tm = self.upload_f32_large(data_tm_f32)?;
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -705,19 +745,46 @@ impl CudaMaaq {
             &d_first_valids,
             &mut d_out_tm,
         )?;
-        // Use pinned host buffer for faster D2H
-        self.stream.synchronize().map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        // Use pinned host buffer for faster D2H (no early sync; let copy overlap)
         let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(cols * rows).map_err(|e| CudaMaaqError::Cuda(e.to_string()))?
+            LockedBuffer::uninitialized(cols * rows)
+                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?
         };
         unsafe {
             d_out_tm
                 .async_copy_to(pinned.as_mut_slice(), &self.stream)
                 .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
         }
-        self.stream.synchronize().map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
         out_tm.copy_from_slice(pinned.as_slice());
         Ok(())
+    }
+}
+
+impl CudaMaaq {
+    #[inline]
+    fn upload_f32_large(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaMaaqError> {
+        const PINNED_THRESH_BYTES: usize = 1 << 20; // 1 MiB
+        let n = src.len();
+        if n * std::mem::size_of::<f32>() >= PINNED_THRESH_BYTES {
+            // Stage in pinned memory for true async H2D and higher throughput
+            let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(n) }
+                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+            pinned.as_mut_slice().copy_from_slice(src);
+
+            let mut d = unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
+                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+            unsafe {
+                d.async_copy_from(pinned.as_slice(), &self.stream)
+                    .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
+            }
+            Ok(d)
+        } else {
+            unsafe { DeviceBuffer::from_slice_async(src, &self.stream) }
+                .map_err(|e| CudaMaaqError::Cuda(e.to_string()))
+        }
     }
 }
 
@@ -734,8 +801,16 @@ pub mod benches {
         crate::indicators::moving_averages::maaq::MaaqParams,
         maaq_batch_dev,
         maaq_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::maaq::MaaqBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), fast_period: (2, 2, 0), slow_period: (30, 30, 0) },
-        crate::indicators::moving_averages::maaq::MaaqParams { period: Some(64), fast_period: Some(2), slow_period: Some(30) },
+        crate::indicators::moving_averages::maaq::MaaqBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            fast_period: (2, 2, 0),
+            slow_period: (30, 30, 0)
+        },
+        crate::indicators::moving_averages::maaq::MaaqParams {
+            period: Some(64),
+            fast_period: Some(2),
+            slow_period: Some(30)
+        },
         "maaq",
         "maaq"
     );

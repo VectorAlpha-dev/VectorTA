@@ -48,25 +48,53 @@ impl std::error::Error for CudaSinwmaError {}
 // Kernel policy (mirrors ALMA/CWMA). We only implement 1D-plain variants,
 // but expose the enums for parity and future growth.
 #[derive(Clone, Copy, Debug)]
-pub enum BatchThreadsPerOutput { One, Two }
-
-#[derive(Clone, Copy, Debug)]
-pub enum BatchKernelPolicy { Auto, Plain { block_x: u32 }, Tiled { tile: u32, per_thread: BatchThreadsPerOutput } }
-
-#[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy { Auto, OneD { block_x: u32 }, Tiled2D { tx: u32, ty: u32 } }
-
-#[derive(Clone, Copy, Debug)]
-pub struct CudaSinwmaPolicy { pub batch: BatchKernelPolicy, pub many_series: ManySeriesKernelPolicy }
-impl Default for CudaSinwmaPolicy {
-    fn default() -> Self { Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto } }
+pub enum BatchThreadsPerOutput {
+    One,
+    Two,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain {
+        block_x: u32,
+    },
+    Tiled {
+        tile: u32,
+        per_thread: BatchThreadsPerOutput,
+    },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CudaSinwmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+impl Default for CudaSinwmaPolicy {
+    fn default() -> Self {
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaSinwma {
     module: Module,
@@ -95,7 +123,8 @@ impl CudaSinwma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
@@ -118,28 +147,48 @@ impl CudaSinwma {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaSinwmaPolicy) -> Result<Self, CudaSinwmaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaSinwmaPolicy,
+    ) -> Result<Self, CudaSinwmaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaSinwmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaSinwmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
-    pub fn synchronize(&self) -> Result<(), CudaSinwmaError> { self.stream.synchronize().map_err(|e| CudaSinwmaError::Cuda(e.to_string())) }
+    pub fn set_policy(&mut self, policy: CudaSinwmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaSinwmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
+    pub fn synchronize(&self) -> Result<(), CudaSinwmaError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] SINWMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaSinwma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaSinwma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -147,14 +196,19 @@ impl CudaSinwma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] SINWMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaSinwma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaSinwma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -166,7 +220,9 @@ impl CudaSinwma {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
@@ -240,12 +296,10 @@ impl CudaSinwma {
     #[inline]
     fn grid_y_chunks(n_combos: usize) -> impl Iterator<Item = (usize, usize)> {
         const MAX_GRID_Y: usize = 65_535;
-        (0..n_combos)
-            .step_by(MAX_GRID_Y)
-            .map(move |start| {
-                let len = (n_combos - start).min(MAX_GRID_Y);
-                (start, len)
-            })
+        (0..n_combos).step_by(MAX_GRID_Y).map(move |start| {
+            let len = (n_combos - start).min(MAX_GRID_Y);
+            (start, len)
+        })
     }
 
     fn launch_batch_kernel(
@@ -306,7 +360,10 @@ impl CudaSinwma {
                     .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
             }
         }
-        unsafe { (*(self as *const _ as *mut CudaSinwma)).last_batch = Some(BatchKernelSelected::Plain { block_x: BLOCK_X }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaSinwma)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x: BLOCK_X });
+        }
         self.maybe_log_batch_debug();
         Ok(())
     }
@@ -332,8 +389,8 @@ impl CudaSinwma {
             )));
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
         let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
@@ -520,7 +577,10 @@ impl CudaSinwma {
                 .launch(&func, grid, block, shared_bytes as u32, args)
                 .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
         }
-        unsafe { (*(self as *const _ as *mut CudaSinwma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x: BLOCK_X }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaSinwma)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x: BLOCK_X });
+        }
         self.maybe_log_many_debug();
         Ok(())
     }
@@ -637,7 +697,9 @@ pub mod benches {
         crate::indicators::moving_averages::sinwma::SinWmaParams,
         sinwma_batch_dev,
         sinwma_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::sinwma::SinWmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::sinwma::SinWmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::sinwma::SinWmaParams { period: Some(64) },
         "sinwma",
         "sinwma"

@@ -1,3 +1,4 @@
+// Drop-in optimized rewrite for CUDA 13 / sm_89+
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -5,11 +6,37 @@
 #include <cuda_runtime.h>
 #include <limits.h>
 
-// CUDA kernel for VWAP batch processing. Each thread handles one parameter
-// combination and walks the time series sequentially (dependencies across time
-// prevent straightforward intra-row parallelism). The kernel expects column-major
-// output layout: rows correspond to parameter combinations and columns to time
-// indices.
+// ---------- helpers ----------
+#if __CUDACC_VER_MAJOR__ >= 9
+// Read-only cached load. On modern GPUs this maps to the read-only path and is
+// effective for broadcast/warp-uniform loads. Fallback to plain load if arch<3.5.
+template <typename T>
+__device__ __forceinline__ T ld_ro(const T* p) {
+#if __CUDA_ARCH__ >= 350
+    return __ldg(p);
+#else
+    return *p;
+#endif
+}
+#else
+template <typename T>
+__device__ __forceinline__ T ld_ro(const T* p) { return *p; }
+#endif
+
+// Optional L2 prefetch (disabled by default).
+#ifndef VWAP_PREFETCH_DISTANCE
+#define VWAP_PREFETCH_DISTANCE 0
+#endif
+
+#if (VWAP_PREFETCH_DISTANCE > 0)
+__device__ __forceinline__ void prefetch_l2(const void* ptr) {
+#if __CUDA_ARCH__ >= 800
+    asm volatile("prefetch.global.L2 [%0];" :: "l"(ptr));
+#endif
+}
+#endif
+
+// ---------- Kernel 1: many-params × one time series (column-major output) ----------
 extern "C" __global__
 void vwap_batch_f32(const long long* __restrict__ timestamps,
                     const float* __restrict__ volumes,
@@ -21,75 +48,122 @@ void vwap_batch_f32(const long long* __restrict__ timestamps,
                     const int* __restrict__ month_ids,
                     int series_len,
                     int n_combos,
-                    float* __restrict__ out) {
+                    float* __restrict__ out)
+{
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
 
     const int count = counts[combo];
-    const int unit = unit_codes[combo];
+    const int unit  = unit_codes[combo];         // 0=m,1=h,2=d,3=M
     long long divisor = divisors[combo];
-    const int warm_raw = first_valids[combo];
+    int warm = first_valids[combo];
 
     const int base = combo * series_len;
-    const float nan = __int_as_float(0x7fffffff);
+    const float nan = __int_as_float(0x7fffffff); // canonical qNaN
 
     if (count <= 0 || series_len <= 0) {
-        for (int t = 0; t < series_len; ++t) {
-            out[base + t] = nan;
-        }
+        for (int t = 0; t < series_len; ++t) out[base + t] = nan;
         return;
     }
+    if (unit != 3 && divisor <= 0) divisor = 1;
 
-    if (unit != 3 && divisor <= 0) {
-        divisor = 1;  // defensive: avoid division by zero
-    }
-
-    int warm = warm_raw;
     if (warm < 0) warm = 0;
     if (warm > series_len) warm = series_len;
 
-    for (int t = 0; t < warm; ++t) {
-        out[base + t] = nan;
-    }
+    // Warm-up region as NaN
+    for (int t = 0; t < warm; ++t) out[base + t] = nan;
 
-    long long current_gid = LLONG_MIN;
-    float volume_sum = 0.0f;
+    float volume_sum    = 0.0f;
     float vol_price_sum = 0.0f;
+
+    // Group tracking state
+    long long current_gid = LLONG_MIN;
+    long long next_boundary_ll = LLONG_MIN;  // for unit!=3
+    int       next_boundary_i  = INT_MIN;    // for unit==3
 
     const int month_div = (unit == 3 && divisor > 0) ? static_cast<int>(divisor) : 1;
 
+    // For the monotonic fast-path on timestamps
+    long long last_ts = LLONG_MIN;
+    bool monotonic_ts = true;
+
+#pragma unroll 1
     for (int t = warm; t < series_len; ++t) {
-        long long gid;
+
+#if (VWAP_PREFETCH_DISTANCE > 0)
+        const int tp = t + VWAP_PREFETCH_DISTANCE;
+        if (tp < series_len) {
+            prefetch_l2(&volumes[tp]);
+            prefetch_l2(&prices[tp]);
+            prefetch_l2(&timestamps[tp]);
+            if (unit == 3 && month_ids) prefetch_l2(&month_ids[tp]);
+        }
+#endif
+
+        // Detect or advance group without doing a divide most of the time
         if (unit == 3) {
-            const int month_val = month_ids ? month_ids[t] : 0;
-            gid = static_cast<long long>(month_val / (month_div > 0 ? month_div : 1));
+            const int mid = month_ids ? ld_ro(&month_ids[t]) : 0;
+            if (t == warm) {
+                const int md = (month_div > 0 ? month_div : 1);
+                current_gid = static_cast<long long>(mid / md);
+                next_boundary_i = (static_cast<int>(current_gid) + 1) * md;
+                volume_sum = 0.0f; vol_price_sum = 0.0f;
+            } else {
+                if (mid >= next_boundary_i) {
+                    const int md = (month_div > 0 ? month_div : 1);
+                    // may skip multiple groups if there are gaps
+                    const int adv = ((mid - next_boundary_i) / md) + 1;
+                    current_gid  += adv;
+                    next_boundary_i += adv * md;
+                    volume_sum = 0.0f; vol_price_sum = 0.0f;
+                }
+            }
         } else {
-            const long long ts = timestamps[t];
-            gid = ts / divisor;
+            const long long ts = ld_ro(&timestamps[t]);
+            const long long div = (divisor > 0 ? divisor : 1);
+
+            if (t == warm) {
+                current_gid = ts / div; // one divide at start
+                // Avoid overflow: compute (gid+1)*div as ts - (ts % div) + div
+                const long long rem = ts - (current_gid * div);
+                next_boundary_ll = ts - rem + div;
+                last_ts = ts;
+                volume_sum = 0.0f; vol_price_sum = 0.0f;
+            } else {
+                if (monotonic_ts && ts >= last_ts) {
+                    if (ts >= next_boundary_ll) {
+                        const long long adv = ((ts - next_boundary_ll) / div) + 1;
+                        current_gid     += adv;
+                        next_boundary_ll += adv * div;
+                        volume_sum = 0.0f; vol_price_sum = 0.0f;
+                    }
+                } else {
+                    // Fallback if timestamps go backward: compute gid directly
+                    const long long gid = ts / div;
+                    if (gid != current_gid) {
+                        current_gid = gid;
+                        const long long rem = ts - (gid * div);
+                        next_boundary_ll = ts - rem + div;
+                        volume_sum = 0.0f; vol_price_sum = 0.0f;
+                    }
+                    if (ts < last_ts) monotonic_ts = false;
+                }
+                last_ts = ts;
+            }
         }
 
-        if (gid != current_gid) {
-            current_gid = gid;
-            volume_sum = 0.0f;
-            vol_price_sum = 0.0f;
-        }
+        // Accumulate and write
+        const float vol   = ld_ro(&volumes[t]);
+        const float price = ld_ro(&prices[t]);
 
-        const float vol = volumes[t];
-        const float price = prices[t];
-        volume_sum += vol;
-        vol_price_sum += vol * price;
+        volume_sum    += vol;
+        vol_price_sum  = fmaf(vol, price, vol_price_sum);  // fused multiply-add
 
-        if (volume_sum > 0.0f) {
-            out[base + t] = vol_price_sum / volume_sum;
-        } else {
-            out[base + t] = nan;
-        }
+        out[base + t] = (volume_sum > 0.0f) ? (vol_price_sum / volume_sum) : nan;
     }
 }
 
-// Many-series × one-param (time-major)
-// Each thread handles one series (column) and scans time sequentially.
-// Inputs are time-major: index = t * num_series + series_idx
+// ---------- Kernel 2: many series × one param (time-major I/O) ----------
 extern "C" __global__
 void vwap_multi_series_one_param_f32(const long long* __restrict__ timestamps,
                                      const float* __restrict__ volumes_tm,
@@ -101,7 +175,8 @@ void vwap_multi_series_one_param_f32(const long long* __restrict__ timestamps,
                                      const int* __restrict__ month_ids,    // per time (rows), if unit_code==3
                                      int num_series,
                                      int series_len,
-                                     float* __restrict__ out_tm) {
+                                     float* __restrict__ out_tm)
+{
     const int series_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (series_idx >= num_series) return;
 
@@ -110,48 +185,89 @@ void vwap_multi_series_one_param_f32(const long long* __restrict__ timestamps,
     if (warm < 0) warm = 0;
     if (warm > series_len) warm = series_len;
 
-    const float nan = __int_as_float(0x7fffffff);
+    const float nan = __int_as_float(0x7fffffff); // canonical qNaN
 
-    // Write warmup as NaN
-    for (int t = 0; t < warm; ++t) {
-        const int out_idx = t * num_series + series_idx;
-        out_tm[out_idx] = nan;
-    }
+    // Warmup NaNs
+    for (int t = 0; t < warm; ++t)
+        out_tm[t * num_series + series_idx] = nan;
 
-    long long current_gid = LLONG_MIN;
-    float volume_sum = 0.0f;
+    float volume_sum    = 0.0f;
     float vol_price_sum = 0.0f;
 
-    const int month_div = (unit_code == 3 && count > 0) ? count : 1;
+    const int  month_div = (unit_code == 3 && count > 0) ? count : 1;
+    const long long div  = (unit_code != 3 && divisor > 0) ? divisor : 1;
 
+    long long current_gid = LLONG_MIN;
+    long long next_boundary_ll = LLONG_MIN; // for ts path
+    int       next_boundary_i  = INT_MIN;   // for month path
+
+    long long last_ts = LLONG_MIN;
+    bool monotonic_ts = true;
+
+#pragma unroll 1
     for (int t = warm; t < series_len; ++t) {
-        long long gid;
+
+#if (VWAP_PREFETCH_DISTANCE > 0)
+        const int tp = t + VWAP_PREFETCH_DISTANCE;
+        if (tp < series_len) {
+            const int next_idx = tp * num_series + series_idx;
+            prefetch_l2(&volumes_tm[next_idx]);
+            prefetch_l2(&prices_tm[next_idx]);
+            prefetch_l2(&timestamps[tp]);
+            if (unit_code == 3 && month_ids) prefetch_l2(&month_ids[tp]);
+        }
+#endif
+
         if (unit_code == 3) {
-            const int mid = month_ids ? month_ids[t] : 0;
-            gid = (long long)(mid / (month_div > 0 ? month_div : 1));
+            const int mid = month_ids ? ld_ro(&month_ids[t]) : 0;
+            if (t == warm) {
+                current_gid = static_cast<long long>(mid / (month_div > 0 ? month_div : 1));
+                next_boundary_i = (static_cast<int>(current_gid) + 1) * (month_div > 0 ? month_div : 1);
+                volume_sum = 0.0f; vol_price_sum = 0.0f;
+            } else if (mid >= next_boundary_i) {
+                const int md = (month_div > 0 ? month_div : 1);
+                const int adv = ((mid - next_boundary_i) / md) + 1;
+                current_gid  += adv;
+                next_boundary_i += adv * md;
+                volume_sum = 0.0f; vol_price_sum = 0.0f;
+            }
         } else {
-            const long long ts = timestamps[t];
-            const long long div = (divisor > 0 ? divisor : 1);
-            gid = ts / div;
+            const long long ts = ld_ro(&timestamps[t]);
+            if (t == warm) {
+                current_gid = ts / div;
+                const long long rem = ts - (current_gid * div);
+                next_boundary_ll = ts - rem + div;
+                last_ts = ts;
+                volume_sum = 0.0f; vol_price_sum = 0.0f;
+            } else {
+                if (monotonic_ts && ts >= last_ts) {
+                    if (ts >= next_boundary_ll) {
+                        const long long adv = ((ts - next_boundary_ll) / div) + 1;
+                        current_gid      += adv;
+                        next_boundary_ll += adv * div;
+                        volume_sum = 0.0f; vol_price_sum = 0.0f;
+                    }
+                } else {
+                    const long long gid = ts / div;
+                    if (gid != current_gid) {
+                        current_gid = gid;
+                        const long long rem = ts - (gid * div);
+                        next_boundary_ll = ts - rem + div;
+                        volume_sum = 0.0f; vol_price_sum = 0.0f;
+                    }
+                    if (ts < last_ts) monotonic_ts = false;
+                }
+                last_ts = ts;
+            }
         }
 
-        if (gid != current_gid) {
-            current_gid = gid;
-            volume_sum = 0.0f;
-            vol_price_sum = 0.0f;
-        }
+        const int idx   = t * num_series + series_idx;
+        const float vol = ld_ro(&volumes_tm[idx]);
+        const float pr  = ld_ro(&prices_tm[idx]);
 
-        const int idx = t * num_series + series_idx;
-        const float vol = volumes_tm[idx];
-        const float price = prices_tm[idx];
-        volume_sum += vol;
-        vol_price_sum += vol * price;
+        volume_sum    += vol;
+        vol_price_sum  = fmaf(vol, pr, vol_price_sum); // fused multiply-add
 
-        const int out_idx = idx;
-        if (volume_sum > 0.0f) {
-            out_tm[out_idx] = vol_price_sum / volume_sum;
-        } else {
-            out_tm[out_idx] = nan;
-        }
+        out_tm[idx] = (volume_sum > 0.0f) ? (vol_price_sum / volume_sum) : nan;
     }
 }

@@ -66,7 +66,9 @@ use thiserror::Error;
 use wasm_bindgen::prelude::*;
 
 #[inline(always)]
-fn cube(x: f64) -> f64 { x * x * x }
+fn cube(x: f64) -> f64 {
+    x * x * x
+}
 
 impl<'a> AsRef<[f64]> for CwmaInput<'a> {
     #[inline(always)]
@@ -810,17 +812,17 @@ pub unsafe fn cwma_avx512_long(
 #[derive(Debug, Clone)]
 pub struct CwmaStream {
     // Public API invariants
-    period: usize,        // user period (>= 2)
-    inv_norm: f64,        // 1 / sum(weights) with weights = p^3, (p-1)^3, ..., 2^3
+    period: usize, // user period (>= 2)
+    inv_norm: f64, // 1 / sum(weights) with weights = p^3, (p-1)^3, ..., 2^3
 
     // Internal window length actually used by kernels (N = period - 1)
     n: usize,
 
     // Ring buffer of last N values (newest is at (head + N - 1) % N)
     ring: Vec<f64>,
-    head: usize,          // next write position in [0, N)
-    filled: usize,        // how many items have been written since first non-NaN (cap N)
-    nan_count: usize,     // number of NaNs currently inside the active window
+    head: usize,      // next write position in [0, N)
+    filled: usize,    // how many items have been written since first non-NaN (cap N)
+    nan_count: usize, // number of NaNs currently inside the active window
 
     // First-non-NaN tracking to mirror warmup behavior
     total_count: usize,
@@ -863,7 +865,10 @@ impl CwmaStream {
     pub fn try_new(params: CwmaParams) -> Result<Self, CwmaError> {
         let period = params.period.unwrap_or(14);
         if period <= 1 {
-            return Err(CwmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(CwmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         // Effective window length used by kernels is N = period - 1
@@ -887,7 +892,7 @@ impl CwmaStream {
         let a = (n + 2) as f64;
 
         let w1 = n_p1 * n_p1 * n_p1; // (N+1)^3
-        let wn = 8.0;                // 2^3
+        let wn = 8.0; // 2^3
 
         // Δw_{s+1} = (A-(s+1))^3 - (A-s)^3
         //          = (-3*A^2 + 3*A - 1) + (6*A - 3)*s - 3*s^2
@@ -1087,7 +1092,9 @@ impl CwmaStream {
         // Compute S = sum_{r=1..N} (A - r)^3 * x_{t+1-r} using the ring order
         let mut s = 0.0;
         let a = self.a;
-        if self.n == 0 { return 0.0; }
+        if self.n == 0 {
+            return 0.0;
+        }
         for r in 1..=self.n {
             let idx = (self.head + self.n - r) % self.n;
             let v = self.ring[idx];

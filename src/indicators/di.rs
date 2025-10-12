@@ -604,7 +604,10 @@ impl DiStream {
     pub fn try_new(params: DiParams) -> Result<Self, DiError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(DiError::InvalidPeriod { period, data_len: 0 });
+            return Err(DiError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let pf = period as f64;
         Ok(Self {
@@ -705,7 +708,11 @@ impl DiStream {
             self.cur_tr = self.warm_tr;
             self.warmed = true;
 
-            let scale = if self.cur_tr == 0.0 { 0.0 } else { 100.0 / self.cur_tr };
+            let scale = if self.cur_tr == 0.0 {
+                0.0
+            } else {
+                100.0 / self.cur_tr
+            };
             return Some((self.cur_plus * scale, self.cur_minus * scale));
         }
 
@@ -714,7 +721,11 @@ impl DiStream {
         self.cur_minus = self.cur_minus.mul_add(self.keep, inc_m);
         self.cur_tr = self.cur_tr.mul_add(self.keep, tr);
 
-        let scale = if self.cur_tr == 0.0 { 0.0 } else { 100.0 / self.cur_tr };
+        let scale = if self.cur_tr == 0.0 {
+            0.0
+        } else {
+            100.0 / self.cur_tr
+        };
         Some((self.cur_plus * scale, self.cur_minus * scale))
     }
 }

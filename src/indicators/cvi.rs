@@ -262,9 +262,8 @@ pub fn cvi_scalar(
     let alpha = 2.0 / (period as f64 + 1.0);
 
     // Initial EMA seed from the first valid range
-    let mut val = unsafe {
-        *high.get_unchecked(first_valid_idx) - *low.get_unchecked(first_valid_idx)
-    };
+    let mut val =
+        unsafe { *high.get_unchecked(first_valid_idx) - *low.get_unchecked(first_valid_idx) };
 
     // Ring buffer for EMA lag (t - period). Avoid zero-init; set_len + write-before-read.
     let mut lag = AVec::<f64>::with_capacity(CACHELINE_ALIGN, period);
@@ -482,12 +481,7 @@ pub fn cvi_row_scalar(
 }
 
 #[inline(always)]
-fn cvi_scalar_from_range(
-    range: &[f64],
-    period: usize,
-    first_valid_idx: usize,
-    out: &mut [f64],
-) {
+fn cvi_scalar_from_range(range: &[f64], period: usize, first_valid_idx: usize, out: &mut [f64]) {
     let alpha = 2.0 / (period as f64 + 1.0);
 
     let mut val = unsafe { *range.get_unchecked(first_valid_idx) };
@@ -945,7 +939,7 @@ pub struct CviStream {
     lag_buffer: Vec<f64>, // ring of last `period` EMA values
     head: usize,          // next slot to write [0..period-1]
     warmup_remaining: usize,
-    state_val: f64,       // EMA(H-L)
+    state_val: f64, // EMA(H-L)
 }
 
 impl CviStream {
@@ -957,7 +951,10 @@ impl CviStream {
     ) -> Result<Self, CviError> {
         let period = params.period.unwrap_or(10);
         if period == 0 {
-            return Err(CviError::InvalidPeriod { period, data_len: 0 });
+            return Err(CviError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         // alpha = 2/(n+1)

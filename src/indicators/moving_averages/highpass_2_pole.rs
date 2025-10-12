@@ -465,10 +465,7 @@ pub unsafe fn highpass_2_pole_scalar_(
         let xi = *src;
         let y = two_1m.mul_add(
             y_im1,
-            neg_oma_sq.mul_add(
-                y_im2,
-                c.mul_add(x_im2, cm2.mul_add(x_im1, c * xi)),
-            ),
+            neg_oma_sq.mul_add(y_im2, c.mul_add(x_im2, cm2.mul_add(x_im1, c * xi))),
         );
         *dst = y;
 
@@ -577,10 +574,7 @@ pub unsafe fn highpass_2_pole_avx2(
         let xi = *src;
         let y = two_1m.mul_add(
             y_im1,
-            neg_oma_sq.mul_add(
-                y_im2,
-                c.mul_add(x_im2, cm2.mul_add(x_im1, c * xi)),
-            ),
+            neg_oma_sq.mul_add(y_im2, c.mul_add(x_im2, cm2.mul_add(x_im1, c * xi))),
         );
         *dst = y;
 
@@ -626,7 +620,10 @@ impl HighPass2Stream {
         let k = params.k.unwrap_or(0.707);
 
         if period < 2 {
-            return Err(HighPass2Error::InvalidPeriod { period, data_len: 0 });
+            return Err(HighPass2Error::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         if !(k > 0.0) || !k.is_finite() {
             return Err(HighPass2Error::InvalidK { k });
@@ -641,7 +638,11 @@ impl HighPass2Stream {
         let (s, c0) = theta.sin_cos();
 
         // Guard against cos≈0 producing INF alpha for pathological parameter choices.
-        let cos_guard = if c0.abs() < 1.0e-12 { c0.signum() * 1.0e-12 } else { c0 };
+        let cos_guard = if c0.abs() < 1.0e-12 {
+            c0.signum() * 1.0e-12
+        } else {
+            c0
+        };
 
         // α = 1 + (sinθ - 1)/cosθ  ==  (cosθ + sinθ − 1)/cosθ
         let invc = 1.0 / cos_guard;
@@ -725,7 +726,11 @@ impl HighPass2Stream {
         self.seen += 1;
 
         // Suppress outputs until "warmup_end" = period-1 samples observed
-        if self.seen >= self.period { Some(y_i) } else { None }
+        if self.seen >= self.period {
+            Some(y_i)
+        } else {
+            None
+        }
     }
 
     /// How many samples remain before `update()` starts returning `Some(..)`.

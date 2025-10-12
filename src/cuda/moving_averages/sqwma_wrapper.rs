@@ -55,16 +55,19 @@ impl CudaSqwma {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sqwma_kernel.ptx"));
         let module = match Module::from_ptx(
             ptx,
-            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)],
+            &[
+                ModuleJitOption::DetermineTargetFromContext,
+                ModuleJitOption::OptLevel(OptLevel::O2),
+            ],
         ) {
             Ok(m) => m,
             Err(_) => {
                 // Retry with simpler options for better driver/toolkit compatibility
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -539,8 +542,8 @@ impl CudaSqwma {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;

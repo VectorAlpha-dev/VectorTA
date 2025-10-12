@@ -31,14 +31,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub enum BatchKernelPolicy {
     Auto,
     /// 1D launch, `block_x` threads per block
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
     /// 1D launch across series, `block_x` threads per block
-    OneD { block_x: u32 },
+    OneD {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -49,15 +53,22 @@ pub struct CudaLinregPolicy {
 
 impl Default for CudaLinregPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaLinregError {
@@ -98,13 +109,17 @@ impl CudaLinreg {
         // Match ALMA-style JIT preference: O2 + DetermineTargetFromContext with fallbacks.
         let module = match Module::from_ptx(
             ptx,
-            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)],
+            &[
+                ModuleJitOption::DetermineTargetFromContext,
+                ModuleJitOption::OptLevel(OptLevel::O2),
+            ],
         ) {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaLinregError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaLinregError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -123,20 +138,31 @@ impl CudaLinreg {
     }
 
     /// Create with explicit policy.
-    pub fn new_with_policy(device_id: usize, policy: CudaLinregPolicy) -> Result<Self, CudaLinregError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaLinregPolicy,
+    ) -> Result<Self, CudaLinregError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
 
     #[inline]
-    pub fn set_policy(&mut self, policy: CudaLinregPolicy) { self.policy = policy; }
+    pub fn set_policy(&mut self, policy: CudaLinregPolicy) {
+        self.policy = policy;
+    }
     #[inline]
-    pub fn policy(&self) -> &CudaLinregPolicy { &self.policy }
+    pub fn policy(&self) -> &CudaLinregPolicy {
+        &self.policy
+    }
     #[inline]
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
     #[inline]
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     /// Optional synchronizer for benches/tests.
     pub fn synchronize(&self) -> Result<(), CudaLinregError> {
@@ -148,14 +174,19 @@ impl CudaLinreg {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] LINREG batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaLinreg)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaLinreg)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -163,14 +194,19 @@ impl CudaLinreg {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] LINREG many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaLinreg)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaLinreg)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -184,13 +220,19 @@ impl CudaLinreg {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { cust::memory::mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        cust::memory::mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     #[allow(clippy::type_complexity)]
@@ -301,7 +343,10 @@ impl CudaLinreg {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        unsafe { (*(self as *const _ as *mut CudaLinreg)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaLinreg)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
 
         unsafe {
@@ -348,9 +393,8 @@ impl CudaLinreg {
     ) -> Result<DeviceArrayF32, CudaLinregError> {
         // VRAM estimate and early check
         let prices_bytes = len * std::mem::size_of::<f32>();
-        let params_bytes = combos_len
-            * (std::mem::size_of::<i32>()
-                + std::mem::size_of::<f32>() * 3);
+        let params_bytes =
+            combos_len * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>() * 3);
         let out_bytes = combos_len * len * std::mem::size_of::<f32>();
         let required = prices_bytes + params_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024; // 64MB safety margin
@@ -549,7 +593,10 @@ impl CudaLinreg {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        unsafe { (*(self as *const _ as *mut CudaLinreg)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaLinreg)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         unsafe {
@@ -696,7 +743,9 @@ pub mod benches {
         crate::indicators::moving_averages::linreg::LinRegParams,
         linreg_batch_dev,
         linreg_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::linreg::LinRegBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::linreg::LinRegBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::linreg::LinRegParams { period: Some(64) },
         "linreg",
         "linreg"

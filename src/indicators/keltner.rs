@@ -845,7 +845,9 @@ pub fn keltner_scalar(
             };
             let ema_input = EmaInput {
                 data: EmaData::Slice(source),
-                params: EmaParams { period: Some(period) },
+                params: EmaParams {
+                    period: Some(period),
+                },
             };
             let _ = ema_into_slice(&mut ma_values, &ema_input, Kernel::Auto);
         }
@@ -855,7 +857,9 @@ pub fn keltner_scalar(
             };
             let sma_input = SmaInput {
                 data: SmaData::Slice(source),
-                params: SmaParams { period: Some(period) },
+                params: SmaParams {
+                    period: Some(period),
+                },
             };
             let _ = sma_into_slice(&mut ma_values, &sma_input, Kernel::Auto);
         }
@@ -1557,8 +1561,8 @@ pub struct KeltnerStream {
     ma_impl: MaImpl,
 
     // ATR (Wilder RMA)
-    atr: f64,     // valid after seeding
-    atr_sum: f64, // used only during warmup seeding
+    atr: f64,       // valid after seeding
+    atr_sum: f64,   // used only during warmup seeding
     rma_alpha: f64, // 1 / period
 
     // book-keeping
@@ -1593,7 +1597,10 @@ impl KeltnerStream {
             .to_lowercase();
 
         if period == 0 {
-            return Err(KeltnerError::KeltnerInvalidPeriod { period, data_len: 0 });
+            return Err(KeltnerError::KeltnerInvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         let pf = period as f64;

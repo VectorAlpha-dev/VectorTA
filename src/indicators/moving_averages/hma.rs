@@ -706,17 +706,17 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
 #[derive(Debug, Clone)]
 struct LinWma {
     period: usize,
-    inv_norm: f64,        // 1.0 / (1 + 2 + ... + n) = 2 / (n*(n+1))
-    buffer: Vec<f64>,     // circular buffer (oldest at head)
-    head: usize,          // next position to overwrite (oldest element)
-    filled: bool,         // true once we've pushed >= period samples
-    count: usize,         // samples seen so far (<= period during warmup)
+    inv_norm: f64,    // 1.0 / (1 + 2 + ... + n) = 2 / (n*(n+1))
+    buffer: Vec<f64>, // circular buffer (oldest at head)
+    head: usize,      // next position to overwrite (oldest element)
+    filled: bool,     // true once we've pushed >= period samples
+    count: usize,     // samples seen so far (<= period during warmup)
 
     // O(1) state
-    sum: f64,             // simple sum over the window
-    wsum: f64,            // weighted numerator: Σ_{i=1..n} i * x_{oldest+i-1}
-    nan_count: usize,     // number of NaNs currently in the window
-    dirty: bool,          // sums/weights invalid due to NaN; rebuild on next clean window
+    sum: f64,         // simple sum over the window
+    wsum: f64,        // weighted numerator: Σ_{i=1..n} i * x_{oldest+i-1}
+    nan_count: usize, // number of NaNs currently in the window
+    dirty: bool,      // sums/weights invalid due to NaN; rebuild on next clean window
 }
 
 impl LinWma {
@@ -771,7 +771,11 @@ impl LinWma {
         // Insert new value, overwriting the oldest
         let old = self.buffer[self.head];
         self.buffer[self.head] = value;
-        self.head = if self.head + 1 == self.period { 0 } else { self.head + 1 };
+        self.head = if self.head + 1 == self.period {
+            0
+        } else {
+            self.head + 1
+        };
 
         // Warm-up path (filling < period)
         if !self.filled {
@@ -843,7 +847,10 @@ impl HmaStream {
     pub fn try_new(params: HmaParams) -> Result<Self, HmaError> {
         let period = params.period.unwrap_or(5);
         if period < 2 {
-            return Err(HmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(HmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let half = period / 2;
         if half == 0 {

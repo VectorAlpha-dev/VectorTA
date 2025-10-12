@@ -331,12 +331,18 @@ pub fn aroon_osc_scalar_highlow_into(
 
     #[inline(always)]
     fn dec_wrap(x: usize, cap: usize) -> usize {
-        if x == 0 { cap - 1 } else { x - 1 }
+        if x == 0 {
+            cap - 1
+        } else {
+            x - 1
+        }
     }
     #[inline(always)]
     fn inc_wrap(x: &mut usize, cap: usize) {
         *x += 1;
-        if *x == cap { *x = 0; }
+        if *x == cap {
+            *x = 0;
+        }
     }
 
     // Warm-up: seed deques with indices [first, start_i)
@@ -347,7 +353,8 @@ pub fn aroon_osc_scalar_highlow_into(
             let last = dec_wrap(hi_tail, cap);
             let last_idx = dq_hi[last];
             let last_val = high[last_idx];
-            if last_val < v_hi { // strict to preserve earliest index on ties
+            if last_val < v_hi {
+                // strict to preserve earliest index on ties
                 hi_tail = last;
                 hi_len -= 1;
             } else {
@@ -364,7 +371,8 @@ pub fn aroon_osc_scalar_highlow_into(
             let last = dec_wrap(lo_tail, cap);
             let last_idx = dq_lo[last];
             let last_val = low[last_idx];
-            if last_val > v_lo { // strict to preserve earliest index on ties
+            if last_val > v_lo {
+                // strict to preserve earliest index on ties
                 lo_tail = last;
                 lo_len -= 1;
             } else {
@@ -396,7 +404,8 @@ pub fn aroon_osc_scalar_highlow_into(
             let last = dec_wrap(hi_tail, cap);
             let last_idx = dq_hi[last];
             let last_val = high[last_idx];
-            if last_val < v_hi { // strict comparison keeps earliest index on ties
+            if last_val < v_hi {
+                // strict comparison keeps earliest index on ties
                 hi_tail = last;
                 hi_len -= 1;
             } else {
@@ -412,7 +421,8 @@ pub fn aroon_osc_scalar_highlow_into(
             let last = dec_wrap(lo_tail, cap);
             let last_idx = dq_lo[last];
             let last_val = low[last_idx];
-            if last_val > v_lo { // strict comparison keeps earliest index on ties
+            if last_val > v_lo {
+                // strict comparison keeps earliest index on ties
                 lo_tail = last;
                 lo_len -= 1;
             } else {
@@ -973,7 +983,11 @@ impl AroonOscStream {
         }
 
         // 2) Normalize NaNs so they never become extrema
-        let h = if high.is_finite() { high } else { f64::NEG_INFINITY };
+        let h = if high.is_finite() {
+            high
+        } else {
+            f64::NEG_INFINITY
+        };
         let l = if low.is_finite() { low } else { f64::INFINITY };
 
         // 3) Push new high into a strictly decreasing deque (preserves earliest index on ties)
@@ -1027,11 +1041,19 @@ impl AroonOscStream {
     #[inline(always)]
     fn inc_wrap(&self, x: usize) -> usize {
         let y = x + 1;
-        if y == self.cap { 0 } else { y }
+        if y == self.cap {
+            0
+        } else {
+            y
+        }
     }
     #[inline(always)]
     fn dec_wrap(&self, x: usize) -> usize {
-        if x == 0 { self.cap - 1 } else { x - 1 }
+        if x == 0 {
+            self.cap - 1
+        } else {
+            x - 1
+        }
     }
 }
 

@@ -302,7 +302,11 @@ pub unsafe fn mfi_scalar(
     if idx0 < len {
         let total = pos_sum + neg_sum;
         // Same zero-denominator handling as before
-        let val = if total < 1e-14 { 0.0 } else { 100.0 * (pos_sum / total) };
+        let val = if total < 1e-14 {
+            0.0
+        } else {
+            100.0 * (pos_sum / total)
+        };
         *out_ptr.add(idx0) = val;
     }
 
@@ -335,7 +339,11 @@ pub unsafe fn mfi_scalar(
 
         // Write output
         let total = pos_sum + neg_sum;
-        let val = if total < 1e-14 { 0.0 } else { 100.0 * (pos_sum / total) };
+        let val = if total < 1e-14 {
+            0.0
+        } else {
+            100.0 * (pos_sum / total)
+        };
         *out_ptr.add(i) = val;
 
         // Advance ring head (branch instead of modulo to avoid div)
@@ -760,7 +768,8 @@ fn mfi_batch_inner(
     let use_prefix = rows >= 8; // tuned threshold; adjust if needed
 
     let (pos_prefix, neg_prefix) = if use_prefix {
-        let (pp, np) = unsafe { precompute_flow_prefixes_select(typical_price, volume, first, kern) };
+        let (pp, np) =
+            unsafe { precompute_flow_prefixes_select(typical_price, volume, first, kern) };
         (Some(pp), Some(np))
     } else {
         (None, None)
@@ -864,7 +873,8 @@ fn mfi_batch_inner_into(
     let rows = combos.len();
     let use_prefix = rows >= 8;
     let (pos_prefix, neg_prefix) = if use_prefix {
-        let (pp, np) = unsafe { precompute_flow_prefixes_select(typical_price, volume, first, kern) };
+        let (pp, np) =
+            unsafe { precompute_flow_prefixes_select(typical_price, volume, first, kern) };
         (Some(pp), Some(np))
     } else {
         (None, None)
@@ -971,7 +981,9 @@ unsafe fn precompute_flow_prefixes_select(
 ) -> (Vec<f64>, Vec<f64>) {
     match kern {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 | Kernel::Avx512 => precompute_flow_prefixes_avx2(typical_price, volume, first),
+        Kernel::Avx2 | Kernel::Avx512 => {
+            precompute_flow_prefixes_avx2(typical_price, volume, first)
+        }
         _ => precompute_flow_prefixes_scalar(typical_price, volume, first),
     }
 }
@@ -1090,7 +1102,11 @@ unsafe fn mfi_row_from_prefixes(
     let pos0 = pos_prefix[idx0] - pos_prefix[first];
     let neg0 = neg_prefix[idx0] - neg_prefix[first];
     let tot0 = pos0 + neg0;
-    *out.get_unchecked_mut(idx0) = if tot0 < 1e-14 { 0.0 } else { 100.0 * (pos0 / tot0) };
+    *out.get_unchecked_mut(idx0) = if tot0 < 1e-14 {
+        0.0
+    } else {
+        100.0 * (pos0 / tot0)
+    };
 
     // Subsequent values use full `period` flows: [i - period + 1 ..= i] => prefix[i] - prefix[i - period]
     let mut i = idx0 + 1;
@@ -1099,7 +1115,11 @@ unsafe fn mfi_row_from_prefixes(
         let pos_sum = pos_prefix[i] - pos_prefix[base];
         let neg_sum = neg_prefix[i] - neg_prefix[base];
         let total = pos_sum + neg_sum;
-        let val = if total < 1e-14 { 0.0 } else { 100.0 * (pos_sum / total) };
+        let val = if total < 1e-14 {
+            0.0
+        } else {
+            100.0 * (pos_sum / total)
+        };
         *out.get_unchecked_mut(i) = val;
         i += 1;
     }

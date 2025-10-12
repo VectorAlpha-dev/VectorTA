@@ -63,14 +63,21 @@ pub struct CudaHighPass2Policy {
 }
 impl Default for CudaHighPass2Policy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaHighPass2 {
     module: Module,
@@ -119,7 +126,8 @@ impl CudaHighPass2 {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])
@@ -143,17 +151,30 @@ impl CudaHighPass2 {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaHighPass2Policy) -> Result<Self, CudaHighPass2Error> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaHighPass2Policy,
+    ) -> Result<Self, CudaHighPass2Error> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaHighPass2Policy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaHighPass2Policy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaHighPass2Policy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaHighPass2Policy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaHighPass2Error> {
-        self.stream.synchronize().map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))
     }
 
     #[inline]
@@ -164,40 +185,54 @@ impl CudaHighPass2 {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] HIGHPASS2 batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaHighPass2)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaHighPass2)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] HIGHPASS2 many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaHighPass2)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaHighPass2)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -212,8 +247,7 @@ impl CudaHighPass2 {
 
         // VRAM estimate: prices + param arrays + out
         let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
-        let params_bytes = n_combos
-            * (std::mem::size_of::<i32>() + 4 * std::mem::size_of::<f32>());
+        let params_bytes = n_combos * (std::mem::size_of::<i32>() + 4 * std::mem::size_of::<f32>());
         let out_bytes = n_combos * prepared.series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + params_bytes + out_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
@@ -484,7 +518,10 @@ impl CudaHighPass2 {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaHighPass2Error> {
-        let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 128 };
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            _ => 128,
+        };
         let block: BlockSize = (block_x, 1, 1).into();
         let grid: GridSize = (n_combos as u32, 1, 1).into();
 
@@ -520,9 +557,14 @@ impl CudaHighPass2 {
                 .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
         }
-        unsafe { (*(self as *const _ as *mut CudaHighPass2)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaHighPass2)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
-        self.stream.synchronize().map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -539,7 +581,10 @@ impl CudaHighPass2 {
         series_len: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaHighPass2Error> {
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            _ => 128,
+        };
         let block: BlockSize = (block_x, 1, 1).into();
         let grid: GridSize = (num_series as u32, 1, 1).into();
 
@@ -575,9 +620,14 @@ impl CudaHighPass2 {
                 .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
         }
-        unsafe { (*(self as *const _ as *mut CudaHighPass2)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaHighPass2)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
-        self.stream.synchronize().map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))
     }
 
     fn prepare_batch_inputs(
@@ -734,8 +784,14 @@ pub mod benches {
         crate::indicators::moving_averages::highpass_2_pole::HighPass2Params,
         highpass2_batch_dev,
         highpass2_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::highpass_2_pole::HighPass2BatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), k: (0.5, 0.5, 0.0) },
-        crate::indicators::moving_averages::highpass_2_pole::HighPass2Params { period: Some(64), k: Some(0.5) },
+        crate::indicators::moving_averages::highpass_2_pole::HighPass2BatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            k: (0.5, 0.5, 0.0)
+        },
+        crate::indicators::moving_averages::highpass_2_pole::HighPass2Params {
+            period: Some(64),
+            k: Some(0.5)
+        },
         "highpass2",
         "highpass2"
     );

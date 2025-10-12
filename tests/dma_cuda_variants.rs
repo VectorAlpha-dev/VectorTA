@@ -6,9 +6,9 @@ use my_project::indicators::moving_averages::dma::{
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
-#[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
+#[cfg(feature = "cuda")]
+use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::dma_wrapper::{
     BatchKernelPolicy, BatchThreadsPerOutput, CudaDma, CudaDmaPolicy, ManySeriesKernelPolicy,
@@ -60,9 +60,9 @@ fn compare_batch(policy: CudaDmaPolicy, series_len: usize, hull_len: usize, ema_
     let data = gen_series_f64(series_len, 5);
     // Build a moderately sized grid to force variant selection when needed.
     let sweep = DmaBatchRange {
-        hull_length: (hull_len, hull_len + 6, 3),  // 3 combos
-        ema_length: (ema_len, ema_len + 8, 4),     // 3 combos
-        ema_gain_limit: (10, 30, 10),              // 3 combos
+        hull_length: (hull_len, hull_len + 6, 3), // 3 combos
+        ema_length: (ema_len, ema_len + 8, 4),    // 3 combos
+        ema_gain_limit: (10, 30, 10),             // 3 combos
         hull_ma_type: "WMA".to_string(),
     };
 
@@ -70,7 +70,9 @@ fn compare_batch(policy: CudaDmaPolicy, series_len: usize, hull_len: usize, ema_
 
     let mut cuda = CudaDma::new_with_policy(0, policy).expect("cuda dma");
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    let dev = cuda.dma_batch_dev(&data_f32, &sweep).expect("gpu dma batch");
+    let dev = cuda
+        .dma_batch_dev(&data_f32, &sweep)
+        .expect("gpu dma batch");
 
     assert_eq!(cpu.rows, dev.rows);
     assert_eq!(cpu.cols, dev.cols);
@@ -83,12 +85,24 @@ fn compare_batch(policy: CudaDmaPolicy, series_len: usize, hull_len: usize, ema_
     for i in 0..host.len() {
         let a = cpu.values[i];
         let b = host[i] as f64;
-        assert!(approx_eq(a, b, atol, rtol), "batch mismatch at {}: {} vs {}", i, a, b);
+        assert!(
+            approx_eq(a, b, atol, rtol),
+            "batch mismatch at {}: {} vs {}",
+            i,
+            a,
+            b
+        );
     }
 }
 
 #[cfg(feature = "cuda")]
-fn compare_many_series(policy: CudaDmaPolicy, cols: usize, rows: usize, hull_len: usize, ema_len: usize) {
+fn compare_many_series(
+    policy: CudaDmaPolicy,
+    cols: usize,
+    rows: usize,
+    hull_len: usize,
+    ema_len: usize,
+) {
     if !cuda_available() {
         eprintln!("[dma.compare_many_series] skipped - no CUDA device");
         return;
@@ -106,7 +120,9 @@ fn compare_many_series(policy: CudaDmaPolicy, cols: usize, rows: usize, hull_len
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for j in 0..cols {
         let mut s = vec![f64::NAN; rows];
-        for t in 0..rows { s[t] = tm[t * cols + j]; }
+        for t in 0..rows {
+            s[t] = tm[t * cols + j];
+        }
         let out = DmaBuilder::new()
             .hull_length(hull_len)
             .ema_length(ema_len)
@@ -114,7 +130,9 @@ fn compare_many_series(policy: CudaDmaPolicy, cols: usize, rows: usize, hull_len
             .hull_ma_type("WMA".to_string())
             .apply_slice(&s)
             .expect("cpu dma series");
-        for t in 0..rows { cpu_tm[t * cols + j] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + j] = out.values[t];
+        }
     }
 
     let mut cuda = CudaDma::new_with_policy(0, policy).expect("cuda dma");
@@ -131,7 +149,13 @@ fn compare_many_series(policy: CudaDmaPolicy, cols: usize, rows: usize, hull_len
     for i in 0..host.len() {
         let a = cpu_tm[i];
         let b = host[i] as f64;
-        assert!(approx_eq(a, b, atol, rtol), "many-series mismatch at {}: {} vs {}", i, a, b);
+        assert!(
+            approx_eq(a, b, atol, rtol),
+            "many-series mismatch at {}: {} vs {}",
+            i,
+            a,
+            b
+        );
     }
 }
 
@@ -140,7 +164,10 @@ fn compare_many_series(policy: CudaDmaPolicy, cols: usize, rows: usize, hull_len
 #[cfg(feature = "cuda")]
 #[test]
 fn dma_batch_plain_matches_cpu() {
-    let policy = CudaDmaPolicy { batch: BatchKernelPolicy::Plain { block_x: 256 }, many_series: ManySeriesKernelPolicy::Auto };
+    let policy = CudaDmaPolicy {
+        batch: BatchKernelPolicy::Plain { block_x: 256 },
+        many_series: ManySeriesKernelPolicy::Auto,
+    };
     // small combos to steer into plain kernel easily
     compare_batch(policy, 32768, 12, 16);
 }
@@ -148,7 +175,13 @@ fn dma_batch_plain_matches_cpu() {
 #[cfg(feature = "cuda")]
 #[test]
 fn dma_batch_tiled_matches_cpu() {
-    let policy = CudaDmaPolicy { batch: BatchKernelPolicy::Tiled { tile: 128, per_thread: BatchThreadsPerOutput::One }, many_series: ManySeriesKernelPolicy::Auto };
+    let policy = CudaDmaPolicy {
+        batch: BatchKernelPolicy::Tiled {
+            tile: 128,
+            per_thread: BatchThreadsPerOutput::One,
+        },
+        many_series: ManySeriesKernelPolicy::Auto,
+    };
     // larger combos steer into tiled path
     compare_batch(policy, 131072, 12, 24);
 }
@@ -156,20 +189,29 @@ fn dma_batch_tiled_matches_cpu() {
 #[cfg(feature = "cuda")]
 #[test]
 fn dma_many_series_1d_matches_cpu() {
-    let policy = CudaDmaPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::OneD { block_x: 128 } };
+    let policy = CudaDmaPolicy {
+        batch: BatchKernelPolicy::Auto,
+        many_series: ManySeriesKernelPolicy::OneD { block_x: 128 },
+    };
     compare_many_series(policy, 8, 16384, 21, 34);
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 fn dma_many_series_2d_ty4_matches_cpu() {
-    let policy = CudaDmaPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Tiled2D { tx: 1, ty: 4 } };
+    let policy = CudaDmaPolicy {
+        batch: BatchKernelPolicy::Auto,
+        many_series: ManySeriesKernelPolicy::Tiled2D { tx: 1, ty: 4 },
+    };
     compare_many_series(policy, 32, 32768, 21, 34);
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 fn dma_many_series_2d_ty2_matches_cpu() {
-    let policy = CudaDmaPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Tiled2D { tx: 1, ty: 2 } };
+    let policy = CudaDmaPolicy {
+        batch: BatchKernelPolicy::Auto,
+        many_series: ManySeriesKernelPolicy::Tiled2D { tx: 1, ty: 2 },
+    };
     compare_many_series(policy, 18, 32768, 21, 34);
 }

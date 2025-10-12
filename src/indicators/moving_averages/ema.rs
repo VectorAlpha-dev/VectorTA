@@ -442,7 +442,10 @@ impl EmaStream {
     pub fn try_new(params: EmaParams) -> Result<Self, EmaError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(EmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(EmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         // α = 2/(period+1), β = 1 - α
         let alpha = 2.0 / (period as f64 + 1.0);
@@ -492,7 +495,11 @@ impl EmaStream {
         if !self.filled && c >= self.period {
             self.filled = true;
         }
-        if self.filled { Some(self.mean) } else { None }
+        if self.filled {
+            Some(self.mean)
+        } else {
+            None
+        }
     }
 }
 

@@ -693,7 +693,9 @@ fn ift_rsi_batch_inner(
         let rsi_p = combos[row].rsi_period.unwrap();
         let wma_p = combos[row].wma_period.unwrap();
         match kern {
-            Kernel::Scalar => ift_rsi_row_scalar_precomputed_ps(&gains, &losses, &pg, &pl, rsi_p, wma_p, first, out_row),
+            Kernel::Scalar => ift_rsi_row_scalar_precomputed_ps(
+                &gains, &losses, &pg, &pl, rsi_p, wma_p, first, out_row,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => ift_rsi_row_avx2(data, first, rsi_p, wma_p, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -812,7 +814,9 @@ fn ift_rsi_batch_inner_into(
         let rsi_p = combos[row].rsi_period.unwrap();
         let wma_p = combos[row].wma_period.unwrap();
         match kern {
-            Kernel::Scalar => ift_rsi_row_scalar_precomputed_ps(&gains, &losses, &pg, &pl, rsi_p, wma_p, first, out_row),
+            Kernel::Scalar => ift_rsi_row_scalar_precomputed_ps(
+                &gains, &losses, &pg, &pl, rsi_p, wma_p, first, out_row,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => ift_rsi_row_avx2(data, first, rsi_p, wma_p, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -855,7 +859,9 @@ unsafe fn ift_rsi_row_scalar(
     // Fallback to precomputed path by computing diffs locally
     let sliced = &data[first..];
     let n = sliced.len();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
     let mut gains = Vec::with_capacity(n.saturating_sub(1));
     let mut losses = Vec::with_capacity(n.saturating_sub(1));
     for i in 1..n {
@@ -881,8 +887,12 @@ unsafe fn ift_rsi_row_scalar_precomputed(
     out: &mut [f64],
 ) {
     let n1 = gains.len(); // equals losses.len(), and equals sliced.len() - 1
-    if rsi_period == 0 || wma_period == 0 { return; }
-    if rsi_period + wma_period - 1 >= n1 + 1 { return; }
+    if rsi_period == 0 || wma_period == 0 {
+        return;
+    }
+    if rsi_period + wma_period - 1 >= n1 + 1 {
+        return;
+    }
 
     // Seed Wilder averages
     let mut avg_gain = 0.0f64;
@@ -910,7 +920,8 @@ unsafe fn ift_rsi_row_scalar_precomputed(
 
     // Iterate timesteps i over RSI indices (0-based on sliced): i=rsi_period..n-1
     let mut i = rsi_period;
-    while i <= n1 { // since gains/losses are indexed by diff at t, RSI index i uses diff i (for i>rp)
+    while i <= n1 {
+        // since gains/losses are indexed by diff at t, RSI index i uses diff i (for i>rp)
         if i > rsi_period {
             let g = *gains.get_unchecked(i - 1); // diff at (i-1)
             let l = *losses.get_unchecked(i - 1);
@@ -918,7 +929,11 @@ unsafe fn ift_rsi_row_scalar_precomputed(
             avg_loss = f64::mul_add(avg_loss, beta, alpha * l);
         }
 
-        let rs = if avg_loss != 0.0 { avg_gain / avg_loss } else { 100.0 };
+        let rs = if avg_loss != 0.0 {
+            avg_gain / avg_loss
+        } else {
+            100.0
+        };
         let rsi = 100.0 - 100.0 / (1.0 + rs);
         let x = 0.1f64 * (rsi - 50.0);
 
@@ -927,7 +942,9 @@ unsafe fn ift_rsi_row_scalar_precomputed(
             num = f64::mul_add((filled as f64) + 1.0, x, num);
             *buf.get_unchecked_mut(head) = x;
             head += 1;
-            if head == wp { head = 0; }
+            if head == wp {
+                head = 0;
+            }
             filled += 1;
             if filled == wp {
                 let wma = num * denom_rcp;
@@ -937,7 +954,9 @@ unsafe fn ift_rsi_row_scalar_precomputed(
             let x_old = *buf.get_unchecked(head);
             *buf.get_unchecked_mut(head) = x;
             head += 1;
-            if head == wp { head = 0; }
+            if head == wp {
+                head = 0;
+            }
             let sum_t = sum;
             num = f64::mul_add(wp_f, x, num) - sum_t;
             sum = sum_t + x - x_old;
@@ -946,7 +965,9 @@ unsafe fn ift_rsi_row_scalar_precomputed(
         }
 
         i += 1;
-        if i > n1 { break; }
+        if i > n1 {
+            break;
+        }
     }
 }
 
@@ -962,8 +983,12 @@ unsafe fn ift_rsi_row_scalar_precomputed_ps(
     out: &mut [f64],
 ) {
     let n1 = gains.len();
-    if rsi_period == 0 || wma_period == 0 { return; }
-    if rsi_period + wma_period - 1 >= n1 + 1 { return; }
+    if rsi_period == 0 || wma_period == 0 {
+        return;
+    }
+    if rsi_period + wma_period - 1 >= n1 + 1 {
+        return;
+    }
 
     // Seed with prefix sums: avg over gains[0..rsi_period-1], losses[0..rsi_period-1]
     let sum_gain = *pg.get_unchecked(rsi_period) - *pg.get_unchecked(0);
@@ -994,7 +1019,11 @@ unsafe fn ift_rsi_row_scalar_precomputed_ps(
             avg_loss = f64::mul_add(avg_loss, beta, alpha * l);
         }
 
-        let rs = if avg_loss != 0.0 { avg_gain / avg_loss } else { 100.0 };
+        let rs = if avg_loss != 0.0 {
+            avg_gain / avg_loss
+        } else {
+            100.0
+        };
         let rsi = 100.0 - 100.0 / (1.0 + rs);
         let x = 0.1f64 * (rsi - 50.0);
 
@@ -1003,7 +1032,9 @@ unsafe fn ift_rsi_row_scalar_precomputed_ps(
             num = f64::mul_add((filled as f64) + 1.0, x, num);
             *buf.get_unchecked_mut(head) = x;
             head += 1;
-            if head == wp { head = 0; }
+            if head == wp {
+                head = 0;
+            }
             filled += 1;
             if filled == wp {
                 let wma = num * denom_rcp;
@@ -1013,7 +1044,9 @@ unsafe fn ift_rsi_row_scalar_precomputed_ps(
             let x_old = *buf.get_unchecked(head);
             *buf.get_unchecked_mut(head) = x;
             head += 1;
-            if head == wp { head = 0; }
+            if head == wp {
+                head = 0;
+            }
             let sum_t = sum;
             num = f64::mul_add(wp_f, x, num) - sum_t;
             sum = sum_t + x - x_old;
@@ -1022,7 +1055,9 @@ unsafe fn ift_rsi_row_scalar_precomputed_ps(
         }
 
         i += 1;
-        if i > n1 { break; }
+        if i > n1 {
+            break;
+        }
     }
 }
 
@@ -1188,7 +1223,11 @@ impl IftRsiStream {
         }
 
         // --- Transform RSI -> x = 0.1 * (RSI - 50) ---
-        let rs = if self.avg_loss != 0.0 { self.avg_gain / self.avg_loss } else { 100.0 };
+        let rs = if self.avg_loss != 0.0 {
+            self.avg_gain / self.avg_loss
+        } else {
+            100.0
+        };
         let rsi = 100.0 - 100.0 / (1.0 + rs);
         let x = 0.1 * (rsi - 50.0);
 
@@ -1334,7 +1373,11 @@ pub unsafe fn ift_rsi_scalar_classic(
         }
 
         // Compute transformed RSI value x = 0.1*(RSI-50)
-        let rs = if avg_loss != 0.0 { avg_gain / avg_loss } else { 100.0 };
+        let rs = if avg_loss != 0.0 {
+            avg_gain / avg_loss
+        } else {
+            100.0
+        };
         let rsi = 100.0 - 100.0 / (1.0 + rs);
         let x = 0.1f64 * (rsi - 50.0);
 
@@ -1364,7 +1407,7 @@ pub unsafe fn ift_rsi_scalar_classic(
 
             let sum_t = sum;
             num = f64::mul_add(wp_f, x, num) - sum_t; // mul_add tweak
-            sum = sum_t + x - x_old;      // then update plain sum
+            sum = sum_t + x - x_old; // then update plain sum
 
             let wma = num * denom_rcp;
             *out.get_unchecked_mut(first_valid + i) = wma.tanh();

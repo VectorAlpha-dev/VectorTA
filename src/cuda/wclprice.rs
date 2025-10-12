@@ -159,8 +159,8 @@ impl CudaWclprice {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::gen_series;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
 
@@ -206,20 +206,23 @@ pub mod benches {
         let cuda = CudaWclprice::new(0).expect("cuda wclprice");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hlc_from_close(&close);
-        Box::new(WclState { cuda, high, low, close })
+        Box::new(WclState {
+            cuda,
+            high,
+            low,
+            close,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        vec![
-            CudaBenchScenario::new(
-                "wclprice",
-                "one_series",
-                "wclprice_cuda_series",
-                "1m",
-                prep_one_series,
-            )
-            .with_sample_size(10)
-            .with_mem_required(bytes_one_series()),
-        ]
+        vec![CudaBenchScenario::new(
+            "wclprice",
+            "one_series",
+            "wclprice_cuda_series",
+            "1m",
+            prep_one_series,
+        )
+        .with_sample_size(10)
+        .with_mem_required(bytes_one_series())]
     }
 }

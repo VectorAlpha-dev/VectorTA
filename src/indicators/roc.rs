@@ -26,14 +26,14 @@ use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -239,9 +239,7 @@ fn roc_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => roc_avx2(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2Batch => {
-                roc_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, out)
-            }
+            Kernel::Avx2Batch => roc_row_avx2(data, first, period, 0, std::ptr::null(), 0.0, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 => roc_avx512(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -326,7 +324,9 @@ pub unsafe fn roc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
     // Process 4 lanes at a time using AVX2
     let len = data.len();
     let start = first + period;
-    if start >= len { return; }
+    if start >= len {
+        return;
+    }
 
     let n = len - start;
     let base_curr = data.as_ptr().add(start);
@@ -361,7 +361,11 @@ pub unsafe fn roc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
     while i < n {
         let p = *base_prev.add(i);
         let c = *base_curr.add(i);
-        *base_out.add(i) = if p == 0.0 || p.is_nan() { 0.0 } else { (c / p).mul_add(100.0, -100.0) };
+        *base_out.add(i) = if p == 0.0 || p.is_nan() {
+            0.0
+        } else {
+            (c / p).mul_add(100.0, -100.0)
+        };
         i += 1;
     }
 }
@@ -372,7 +376,9 @@ pub unsafe fn roc_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
     // Process 8 lanes at a time using AVX-512
     let len = data.len();
     let start = first + period;
-    if start >= len { return; }
+    if start >= len {
+        return;
+    }
 
     let n = len - start;
     let base_curr = data.as_ptr().add(start);
@@ -407,7 +413,11 @@ pub unsafe fn roc_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
     while i < n {
         let p = *base_prev.add(i);
         let c = *base_curr.add(i);
-        *base_out.add(i) = if p == 0.0 || p.is_nan() { 0.0 } else { ((c / p) - 1.0) * 100.0 };
+        *base_out.add(i) = if p == 0.0 || p.is_nan() {
+            0.0
+        } else {
+            ((c / p) - 1.0) * 100.0
+        };
         i += 1;
     }
 }
@@ -461,10 +471,26 @@ pub unsafe fn roc_row_scalar(
         let c2 = *curr_ptr.add(i + 2);
         let c3 = *curr_ptr.add(i + 3);
 
-        *dst_ptr.add(i + 0) = if p0 == 0.0 || p0.is_nan() { 0.0 } else { (c0 / p0).mul_add(100.0, -100.0) };
-        *dst_ptr.add(i + 1) = if p1 == 0.0 || p1.is_nan() { 0.0 } else { (c1 / p1).mul_add(100.0, -100.0) };
-        *dst_ptr.add(i + 2) = if p2 == 0.0 || p2.is_nan() { 0.0 } else { (c2 / p2).mul_add(100.0, -100.0) };
-        *dst_ptr.add(i + 3) = if p3 == 0.0 || p3.is_nan() { 0.0 } else { (c3 / p3).mul_add(100.0, -100.0) };
+        *dst_ptr.add(i + 0) = if p0 == 0.0 || p0.is_nan() {
+            0.0
+        } else {
+            (c0 / p0).mul_add(100.0, -100.0)
+        };
+        *dst_ptr.add(i + 1) = if p1 == 0.0 || p1.is_nan() {
+            0.0
+        } else {
+            (c1 / p1).mul_add(100.0, -100.0)
+        };
+        *dst_ptr.add(i + 2) = if p2 == 0.0 || p2.is_nan() {
+            0.0
+        } else {
+            (c2 / p2).mul_add(100.0, -100.0)
+        };
+        *dst_ptr.add(i + 3) = if p3 == 0.0 || p3.is_nan() {
+            0.0
+        } else {
+            (c3 / p3).mul_add(100.0, -100.0)
+        };
 
         i += 4;
     }
@@ -473,7 +499,11 @@ pub unsafe fn roc_row_scalar(
     while i < n {
         let p = *prev_ptr.add(i);
         let c = *curr_ptr.add(i);
-        *dst_ptr.add(i) = if p == 0.0 || p.is_nan() { 0.0 } else { (c / p).mul_add(100.0, -100.0) };
+        *dst_ptr.add(i) = if p == 0.0 || p.is_nan() {
+            0.0
+        } else {
+            (c / p).mul_add(100.0, -100.0)
+        };
         i += 1;
     }
 }
@@ -570,17 +600,21 @@ impl RocStream {
             self.buffer[self.head] = value;
             // wrap head without %
             self.head += 1;
-            if self.head == self.period { self.head = 0; }
+            if self.head == self.period {
+                self.head = 0;
+            }
             self.filled = true;
-            self.count = 1;            // counts samples since the first finite
-            return None;                // needs 'period' more before first output
+            self.count = 1; // counts samples since the first finite
+            return None; // needs 'period' more before first output
         }
 
         // 2) Warm up the ring with exactly 'period' values after first finite
         if self.count < self.period {
             self.buffer[self.head] = value;
             self.head += 1;
-            if self.head == self.period { self.head = 0; }
+            if self.head == self.period {
+                self.head = 0;
+            }
             self.count += 1;
             return None;
         }
@@ -590,7 +624,9 @@ impl RocStream {
         self.buffer[self.head] = value;
 
         self.head += 1;
-        if self.head == self.period { self.head = 0; }
+        if self.head == self.period {
+            self.head = 0;
+        }
 
         if old_value == 0.0 || old_value.is_nan() {
             Some(0.0)

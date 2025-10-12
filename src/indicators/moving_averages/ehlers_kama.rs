@@ -252,7 +252,11 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
     // Use max to avoid a per-iteration branch (k > first_valid is always true now).
     let mut delta_sum = 0.0;
     // Guard underflow by branching once here; avoids per-iteration checks below.
-    let delta_start = if start >= period { start - period + 1 } else { first_valid + 1 };
+    let delta_start = if start >= period {
+        start - period + 1
+    } else {
+        first_valid + 1
+    };
     for k in delta_start..=start {
         delta_sum += (data[k] - data[k - 1]).abs();
     }
@@ -264,7 +268,11 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
     // Direction uses correct lookback: start - (period - 1)
     let a0 = data[start];
     let direction = (a0 - data[start - (period - 1)]).abs();
-    let ef = if delta_sum == 0.0 { 0.0 } else { (direction / delta_sum).min(1.0) };
+    let ef = if delta_sum == 0.0 {
+        0.0
+    } else {
+        (direction / delta_sum).min(1.0)
+    };
     // s = ((0.6667 * ef) + 0.0645)^2, avoid powi and use mul_add for precision/speed
     let s_term = 0.6667f64.mul_add(ef, 0.0645);
     let mut s = s_term * s_term;
@@ -283,7 +291,11 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
 
         // Direction uses full period window
         let direction = (a - data[i - (period - 1)]).abs();
-        let ef = if delta_sum == 0.0 { 0.0 } else { (direction / delta_sum).min(1.0) };
+        let ef = if delta_sum == 0.0 {
+            0.0
+        } else {
+            (direction / delta_sum).min(1.0)
+        };
 
         // Ehlers smoothing constant
         // Original formula: s = ((0.6667 * ef) + 0.0645)^2
@@ -301,9 +313,13 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
 pub unsafe fn ehlers_kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     debug_assert_eq!(out.len(), data.len());
     let len = data.len();
-    if len == 0 { return; }
+    if len == 0 {
+        return;
+    }
     let start = first_valid + period - 1;
-    if start >= len { return; }
+    if start >= len {
+        return;
+    }
 
     use core::arch::x86_64::*;
     let d = data.as_ptr();
@@ -332,7 +348,9 @@ pub unsafe fn ehlers_kama_avx2(data: &[f64], period: usize, first_valid: usize, 
         let b = *d.add(k - 1);
         delta_sum += (a - b).abs();
         k += 1;
-        if k > end { break; }
+        if k > end {
+            break;
+        }
     }
     // Vector body
     while k + 3 <= end {
@@ -358,7 +376,11 @@ pub unsafe fn ehlers_kama_avx2(data: &[f64], period: usize, first_valid: usize, 
     let mut prev_kama = *d.add(start - 1);
     let a0 = *d.add(start);
     let dir0 = (a0 - *d.add(start - (period - 1))).abs();
-    let ef0 = if delta_sum == 0.0 { 0.0 } else { (dir0 / delta_sum).min(1.0) };
+    let ef0 = if delta_sum == 0.0 {
+        0.0
+    } else {
+        (dir0 / delta_sum).min(1.0)
+    };
     let mut s_term = 0.6667f64.mul_add(ef0, 0.0645);
     let mut s = s_term * s_term;
     prev_kama = s.mul_add(a0 - prev_kama, prev_kama);
@@ -377,7 +399,11 @@ pub unsafe fn ehlers_kama_avx2(data: &[f64], period: usize, first_valid: usize, 
         delta_sum += (a - b).abs();
 
         let dir = (a - *d.add(i - (period - 1))).abs();
-        let ef = if delta_sum == 0.0 { 0.0 } else { (dir / delta_sum).min(1.0) };
+        let ef = if delta_sum == 0.0 {
+            0.0
+        } else {
+            (dir / delta_sum).min(1.0)
+        };
 
         s_term = 0.6667f64.mul_add(ef, 0.0645);
         s = s_term * s_term;
@@ -394,9 +420,13 @@ pub unsafe fn ehlers_kama_avx2(data: &[f64], period: usize, first_valid: usize, 
 pub unsafe fn ehlers_kama_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     debug_assert_eq!(out.len(), data.len());
     let len = data.len();
-    if len == 0 { return; }
+    if len == 0 {
+        return;
+    }
     let start = first_valid + period - 1;
-    if start >= len { return; }
+    if start >= len {
+        return;
+    }
 
     use core::arch::x86_64::*;
     let d = data.as_ptr();
@@ -430,7 +460,9 @@ pub unsafe fn ehlers_kama_avx512(data: &[f64], period: usize, first_valid: usize
         let b = *d.add(k - 1);
         delta_sum += (a - b).abs();
         k += 1;
-        if k > end { break; }
+        if k > end {
+            break;
+        }
     }
     // Vector body (8-wide)
     while k + 7 <= end {
@@ -456,7 +488,11 @@ pub unsafe fn ehlers_kama_avx512(data: &[f64], period: usize, first_valid: usize
     let mut prev_kama = *d.add(start - 1);
     let a0 = *d.add(start);
     let dir0 = (a0 - *d.add(start - (period - 1))).abs();
-    let ef0 = if delta_sum == 0.0 { 0.0 } else { (dir0 / delta_sum).min(1.0) };
+    let ef0 = if delta_sum == 0.0 {
+        0.0
+    } else {
+        (dir0 / delta_sum).min(1.0)
+    };
     let mut s_term = 0.6667f64.mul_add(ef0, 0.0645);
     let mut s = s_term * s_term;
     prev_kama = s.mul_add(a0 - prev_kama, prev_kama);
@@ -475,7 +511,11 @@ pub unsafe fn ehlers_kama_avx512(data: &[f64], period: usize, first_valid: usize
         delta_sum += (a - b).abs();
 
         let dir = (a - *d.add(i - (period - 1))).abs();
-        let ef = if delta_sum == 0.0 { 0.0 } else { (dir / delta_sum).min(1.0) };
+        let ef = if delta_sum == 0.0 {
+            0.0
+        } else {
+            (dir / delta_sum).min(1.0)
+        };
 
         s_term = 0.6667f64.mul_add(ef, 0.0645);
         s = s_term * s_term;
@@ -567,19 +607,19 @@ pub struct EhlersKamaStream {
 
     // --- O(1) state ---
     // Rolling sum of absolute differences over the last `period` diffs.
-    diffs: Vec<f64>,   // capacity = period
-    d_head: usize,     // next write index
-    d_len: usize,      // <= period
-    delta_sum: f64,    // Σ |Δ|
+    diffs: Vec<f64>, // capacity = period
+    d_head: usize,   // next write index
+    d_len: usize,    // <= period
+    delta_sum: f64,  // Σ |Δ|
 
     // Last (period-1) prior prices to fetch price_{t-(period-1)} in O(1).
-    lag: Vec<f64>,     // capacity = period.saturating_sub(1)
-    l_head: usize,     // next write index
-    l_len: usize,      // <= period-1
+    lag: Vec<f64>, // capacity = period.saturating_sub(1)
+    l_head: usize, // next write index
+    l_len: usize,  // <= period-1
 
-    prev_price: f64,   // last observed price
-    have_prev: bool,   // have we seen at least one sample?
-    prev_kama: f64,    // Pine-style seed; set to previous price at first compute
+    prev_price: f64, // last observed price
+    have_prev: bool, // have we seen at least one sample?
+    prev_kama: f64,  // Pine-style seed; set to previous price at first compute
 }
 
 impl EhlersKamaStream {
@@ -603,7 +643,11 @@ impl EhlersKamaStream {
             d_len: 0,
             delta_sum: 0.0,
 
-            lag: if lag_cap > 0 { vec![0.0; lag_cap] } else { Vec::new() },
+            lag: if lag_cap > 0 {
+                vec![0.0; lag_cap]
+            } else {
+                Vec::new()
+            },
             l_head: 0,
             l_len: 0,
 
@@ -627,7 +671,9 @@ impl EhlersKamaStream {
             if !self.lag.is_empty() {
                 self.lag[self.l_head] = value;
                 self.l_head = (self.l_head + 1) % self.lag.len();
-                if self.l_len < self.lag.len() { self.l_len += 1; }
+                if self.l_len < self.lag.len() {
+                    self.l_len += 1;
+                }
             }
             return None;
         }
@@ -651,7 +697,9 @@ impl EhlersKamaStream {
             if !self.lag.is_empty() {
                 self.lag[self.l_head] = value;
                 self.l_head = (self.l_head + 1) % self.lag.len();
-                if self.l_len < self.lag.len() { self.l_len += 1; }
+                if self.l_len < self.lag.len() {
+                    self.l_len += 1;
+                }
             }
             self.prev_price = value;
             return None;
@@ -668,7 +716,11 @@ impl EhlersKamaStream {
         let direction = (value - direction_ref).abs();
 
         // Handle zero volatility carefully to avoid NaN/Inf (match batch semantics).
-        let ef = if self.delta_sum == 0.0 { 0.0 } else { clamp01(direction / self.delta_sum) };
+        let ef = if self.delta_sum == 0.0 {
+            0.0
+        } else {
+            clamp01(direction / self.delta_sum)
+        };
 
         // Ehlers/Kaufman smoothing constant: s = (0.6667*ef + 0.0645)^2 (use mul_add, avoid powi)
         let s = smooth_const_from_ef(ef);
@@ -686,7 +738,9 @@ impl EhlersKamaStream {
         if !self.lag.is_empty() {
             self.lag[self.l_head] = value;
             self.l_head = (self.l_head + 1) % self.lag.len();
-            if self.l_len < self.lag.len() { self.l_len += 1; }
+            if self.l_len < self.lag.len() {
+                self.l_len += 1;
+            }
         }
 
         // 5) Advance prev price
@@ -704,7 +758,9 @@ fn smooth_const_from_ef(ef: f64) -> f64 {
 }
 
 #[inline(always)]
-fn clamp01(x: f64) -> f64 { x.max(0.0).min(1.0) }
+fn clamp01(x: f64) -> f64 {
+    x.max(0.0).min(1.0)
+}
 
 // Batch processing support
 #[derive(Clone, Debug)]
@@ -949,14 +1005,20 @@ fn ehlers_kama_batch_inner_into(
     // ps[k] = sum_{t=1..k} |data[t]-data[t-1]|, with diffs only when t > first
     let mut ps = vec![0.0f64; len];
     for k in 1..len {
-        let ad = if k > first { (data[k] - data[k - 1]).abs() } else { 0.0 };
+        let ad = if k > first {
+            (data[k] - data[k - 1]).abs()
+        } else {
+            0.0
+        };
         ps[k] = ps[k - 1] + ad;
     }
 
     let do_row = |row: usize, dst_row: &mut [f64]| {
         let p = periods[row];
         let start = first + p - 1;
-        if start >= len { return; }
+        if start >= len {
+            return;
+        }
 
         // Seed using ps in O(1)
         let mut prev_kama = data[start - 1];
@@ -964,7 +1026,11 @@ fn ehlers_kama_batch_inner_into(
         // Initial denominator over PERIOD consecutive diffs: ps[start] - ps[first]
         let mut delta_sum = ps[start] - ps[first];
         let dir0 = (a0 - data[start - (p - 1)]).abs();
-        let ef0 = if delta_sum == 0.0 { 0.0 } else { (dir0 / delta_sum).min(1.0) };
+        let ef0 = if delta_sum == 0.0 {
+            0.0
+        } else {
+            (dir0 / delta_sum).min(1.0)
+        };
         let mut s_term = 0.6667f64.mul_add(ef0, 0.0645);
         let mut s = s_term * s_term;
         prev_kama = s.mul_add(a0 - prev_kama, prev_kama);
@@ -975,7 +1041,11 @@ fn ehlers_kama_batch_inner_into(
             delta_sum = ps[i] - ps[i - p];
             let a = data[i];
             let dir = (a - data[i - (p - 1)]).abs();
-            let ef = if delta_sum == 0.0 { 0.0 } else { (dir / delta_sum).min(1.0) };
+            let ef = if delta_sum == 0.0 {
+                0.0
+            } else {
+                (dir / delta_sum).min(1.0)
+            };
             s_term = 0.6667f64.mul_add(ef, 0.0645);
             s = s_term * s_term;
             prev_kama = s.mul_add(a - prev_kama, prev_kama);

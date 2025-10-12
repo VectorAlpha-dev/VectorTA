@@ -67,17 +67,24 @@ pub struct CudaSamaPolicy {
 
 impl Default for CudaSamaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum SamaBatchKernelSelected { Plain { block_x: u32 } }
+pub enum SamaBatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum SamaManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum SamaManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 struct PreparedSamaBatch {
     combos: Vec<SamaParams>,
@@ -99,8 +106,8 @@ struct PreparedSamaManySeries {
 impl CudaSama {
     pub fn new(device_id: usize) -> Result<Self, CudaSamaError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sama_kernel.ptx"));
@@ -112,7 +119,8 @@ impl CudaSama {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaSamaError::Cuda(e.to_string()))?
@@ -137,20 +145,31 @@ impl CudaSama {
     }
 
     /// Create with an explicit policy (mirrors ALMA/CWMA convenience).
-    pub fn new_with_policy(device_id: usize, policy: CudaSamaPolicy) -> Result<Self, CudaSamaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaSamaPolicy,
+    ) -> Result<Self, CudaSamaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
 
     #[inline]
-    pub fn set_policy(&mut self, policy: CudaSamaPolicy) { self.policy = policy; }
+    pub fn set_policy(&mut self, policy: CudaSamaPolicy) {
+        self.policy = policy;
+    }
     #[inline]
-    pub fn policy(&self) -> &CudaSamaPolicy { &self.policy }
+    pub fn policy(&self) -> &CudaSamaPolicy {
+        &self.policy
+    }
     #[inline]
-    pub fn selected_batch_kernel(&self) -> Option<SamaBatchKernelSelected> { self.last_batch }
+    pub fn selected_batch_kernel(&self) -> Option<SamaBatchKernelSelected> {
+        self.last_batch
+    }
     #[inline]
-    pub fn selected_many_series_kernel(&self) -> Option<SamaManySeriesKernelSelected> { self.last_many }
+    pub fn selected_many_series_kernel(&self) -> Option<SamaManySeriesKernelSelected> {
+        self.last_many
+    }
 
     pub fn sama_batch_dev(
         &self,
@@ -176,8 +195,8 @@ impl CudaSama {
             )));
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
         let d_lengths = DeviceBuffer::from_slice(&prepared.lengths_i32)
             .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
         let d_min = DeviceBuffer::from_slice(&prepared.min_alphas)
@@ -202,7 +221,11 @@ impl CudaSama {
             &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: prepared.series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: prepared.series_len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -285,7 +308,8 @@ impl CudaSama {
         series_len: usize,
         params: &SamaParams,
     ) -> Result<DeviceArrayF32, CudaSamaError> {
-        let prepared = Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
+        let prepared =
+            Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
         // VRAM estimate (prices + first_valids + out)
         let prices_bytes = num_series * series_len * std::mem::size_of::<f32>();
@@ -320,7 +344,11 @@ impl CudaSama {
             &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: series_len, cols: num_series })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: series_len,
+            cols: num_series,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -408,15 +436,22 @@ impl CudaSama {
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSamaError> {
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto | BatchKernelPolicy::Plain { .. } | BatchKernelPolicy::Tiled { .. } => 256u32,
+            BatchKernelPolicy::Auto
+            | BatchKernelPolicy::Plain { .. }
+            | BatchKernelPolicy::Tiled { .. } => 256u32,
         };
         let block: BlockSize = (block_x, 1, 1).into();
 
-        let func = self.module.get_function("sama_batch_f32")
+        let func = self
+            .module
+            .get_function("sama_batch_f32")
             .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
 
         // Select kernel once for introspection/debugging
-        unsafe { (*(self as *const _ as *mut CudaSama)).last_batch = Some(SamaBatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaSama)).last_batch =
+                Some(SamaBatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
 
         // Chunk across combos to keep launch sizes manageable (<= 65_535 per slice)
@@ -451,7 +486,9 @@ impl CudaSama {
             start += len;
         }
 
-        self.stream.synchronize().map_err(|e| CudaSamaError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaSamaError::Cuda(e.to_string()))
     }
 
     fn launch_many_series_kernel(
@@ -466,16 +503,23 @@ impl CudaSama {
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSamaError> {
         let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto | ManySeriesKernelPolicy::OneD { .. } | ManySeriesKernelPolicy::Tiled2D { .. } => 256u32,
+            ManySeriesKernelPolicy::Auto
+            | ManySeriesKernelPolicy::OneD { .. }
+            | ManySeriesKernelPolicy::Tiled2D { .. } => 256u32,
         };
         let block: BlockSize = (block_x, 1, 1).into();
         let grid: GridSize = (num_series as u32, 1, 1).into();
 
-        let func = self.module.get_function("sama_many_series_one_param_f32")
+        let func = self
+            .module
+            .get_function("sama_many_series_one_param_f32")
             .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
 
         // Introspection for benches/debug
-        unsafe { (*(self as *const _ as *mut CudaSama)).last_many = Some(SamaManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaSama)).last_many =
+                Some(SamaManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         unsafe {
@@ -502,7 +546,9 @@ impl CudaSama {
                 .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
         }
 
-        self.stream.synchronize().map_err(|e| CudaSamaError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaSamaError::Cuda(e.to_string()))
     }
 
     fn prepare_batch_inputs(
@@ -648,11 +694,15 @@ impl CudaSama {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else {
@@ -663,14 +713,19 @@ impl CudaSama {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] SAMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaSama)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaSama)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -678,14 +733,19 @@ impl CudaSama {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] SAMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaSama)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaSama)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -704,8 +764,16 @@ pub mod benches {
         crate::indicators::moving_averages::sama::SamaParams,
         sama_batch_dev,
         sama_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::sama::SamaBatchRange { length: (64, 64 + PARAM_SWEEP - 1, 1), maj_length: (14, 14, 0), min_length: (6, 6, 0) },
-        crate::indicators::moving_averages::sama::SamaParams { length: Some(64), maj_length: Some(14), min_length: Some(6) },
+        crate::indicators::moving_averages::sama::SamaBatchRange {
+            length: (64, 64 + PARAM_SWEEP - 1, 1),
+            maj_length: (14, 14, 0),
+            min_length: (6, 6, 0)
+        },
+        crate::indicators::moving_averages::sama::SamaParams {
+            length: Some(64),
+            maj_length: Some(14),
+            min_length: Some(6)
+        },
         "sama",
         "sama"
     );

@@ -675,17 +675,29 @@ unsafe fn chande_fast_unchecked(
                 let hc = (hi - prev_close).abs();
                 let lc = (lo - prev_close).abs();
                 let t = if hl >= hc { hl } else { hc };
-                if t >= lc { t } else { lc }
+                if t >= lc {
+                    t
+                } else {
+                    lc
+                }
             };
 
             if i >= warmup {
                 let window_start = i + 1 - period;
                 while let Some(&j) = dq.front() {
-                    if j < window_start { dq.pop_front(); } else { break; }
+                    if j < window_start {
+                        dq.pop_front();
+                    } else {
+                        break;
+                    }
                 }
             }
             while let Some(&j) = dq.back() {
-                if *hp.add(j) <= hi { dq.pop_back(); } else { break; }
+                if *hp.add(j) <= hi {
+                    dq.pop_back();
+                } else {
+                    break;
+                }
             }
             dq.push_back(i);
 
@@ -715,17 +727,29 @@ unsafe fn chande_fast_unchecked(
                 let hc = (hi - prev_close).abs();
                 let lc = (lo - prev_close).abs();
                 let t = if hl >= hc { hl } else { hc };
-                if t >= lc { t } else { lc }
+                if t >= lc {
+                    t
+                } else {
+                    lc
+                }
             };
 
             if i >= warmup {
                 let window_start = i + 1 - period;
                 while let Some(&j) = dq.front() {
-                    if j < window_start { dq.pop_front(); } else { break; }
+                    if j < window_start {
+                        dq.pop_front();
+                    } else {
+                        break;
+                    }
                 }
             }
             while let Some(&j) = dq.back() {
-                if *lp.add(j) >= lo { dq.pop_back(); } else { break; }
+                if *lp.add(j) >= lo {
+                    dq.pop_back();
+                } else {
+                    break;
+                }
             }
             dq.push_back(i);
 
@@ -863,8 +887,16 @@ impl ChandeStream {
         if self.warm == 0 {
             high - low
         } else {
-            let max_h = if high > self.close_prev { high } else { self.close_prev };
-            let min_l = if low < self.close_prev { low } else { self.close_prev };
+            let max_h = if high > self.close_prev {
+                high
+            } else {
+                self.close_prev
+            };
+            let min_l = if low < self.close_prev {
+                low
+            } else {
+                self.close_prev
+            };
             max_h - min_l
         }
     }

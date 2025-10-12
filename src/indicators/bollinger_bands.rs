@@ -788,8 +788,7 @@ unsafe fn bb_row_avx2(
         },
     );
     let middle = ma(matype, ma_data, period).expect("MA computation failed in bb_row_avx2");
-    let dev_values =
-        deviation(&dev_input).expect("Deviation computation failed in bb_row_avx2");
+    let dev_values = deviation(&dev_input).expect("Deviation computation failed in bb_row_avx2");
 
     let du = unsafe { _mm256_set1_pd(devup) };
     let dd = unsafe { _mm256_set1_pd(devdn) };
@@ -875,8 +874,7 @@ unsafe fn bb_row_avx512(
         },
     );
     let middle = ma(matype, ma_data, period).expect("MA computation failed in bb_row_avx512");
-    let dev_values =
-        deviation(&dev_input).expect("Deviation computation failed in bb_row_avx512");
+    let dev_values = deviation(&dev_input).expect("Deviation computation failed in bb_row_avx512");
 
     let du = unsafe { _mm512_set1_pd(devup) };
     let dd = unsafe { _mm512_set1_pd(devdn) };
@@ -932,15 +930,15 @@ pub struct BollingerBandsStream {
     pub devtype: usize,
 
     // --- internal state for O(1) fast paths ---
-    buf: Vec<f64>,   // ring buffer capacity == period
-    idx: usize,      // write index (oldest element position)
-    len: usize,      // number of valid samples in buf (<= period)
-    sum: f64,        // Σ x
-    sum_sq: f64,     // Σ x^2
-    inv_n: f64,      // 1.0 / period (cached)
+    buf: Vec<f64>, // ring buffer capacity == period
+    idx: usize,    // write index (oldest element position)
+    len: usize,    // number of valid samples in buf (<= period)
+    sum: f64,      // Σ x
+    sum_sq: f64,   // Σ x^2
+    inv_n: f64,    // 1.0 / period (cached)
 
     // EMA state (only used when matype == "ema")
-    alpha: f64,      // 2.0 / (period + 1.0)
+    alpha: f64, // 2.0 / (period + 1.0)
     ema: f64,
     ema_seeded: bool,
 
@@ -952,13 +950,20 @@ pub struct BollingerBandsStream {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum FastPath { SmaStddev, EmaStddev, Generic }
+enum FastPath {
+    SmaStddev,
+    EmaStddev,
+    Generic,
+}
 
 impl BollingerBandsStream {
     pub fn try_new(params: BollingerBandsParams) -> Result<Self, BollingerBandsError> {
         let period = params.period.unwrap_or(20);
         if period == 0 {
-            return Err(BollingerBandsError::InvalidPeriod { period, data_len: 0 });
+            return Err(BollingerBandsError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let devup = params.devup.unwrap_or(2.0);
         let devdn = params.devdn.unwrap_or(2.0);
@@ -1044,7 +1049,9 @@ impl BollingerBandsStream {
         if self.len < self.period {
             self.buf[self.idx] = x;
             self.idx += 1;
-            if self.idx == self.period { self.idx = 0; }
+            if self.idx == self.period {
+                self.idx = 0;
+            }
             self.len += 1;
             self.sum += x;
             self.sum_sq = x.mul_add(x, self.sum_sq); // sum_sq += x*x
@@ -1054,7 +1061,9 @@ impl BollingerBandsStream {
             let old = self.buf[self.idx];
             self.buf[self.idx] = x;
             self.idx += 1;
-            if self.idx == self.period { self.idx = 0; }
+            if self.idx == self.period {
+                self.idx = 0;
+            }
 
             // O(1) rolling updates
             self.sum += x - old;
@@ -1125,12 +1134,15 @@ impl BollingerBandsStream {
 
                 // deviation (devtype may be mean_ad or median_ad)
                 let dev = deviation(&DevInput::from_slice(
-                        win,
-                        DevParams { period: Some(period), devtype: Some(devtype) },
-                    ))
-                    .ok()
-                    .and_then(|v| v.values.last().copied())
-                    .unwrap_or(f64::NAN);
+                    win,
+                    DevParams {
+                        period: Some(period),
+                        devtype: Some(devtype),
+                    },
+                ))
+                .ok()
+                .and_then(|v| v.values.last().copied())
+                .unwrap_or(f64::NAN);
 
                 let up = devup.mul_add(dev, mid);
                 let lo = (-devdn).mul_add(dev, mid);

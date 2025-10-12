@@ -860,10 +860,18 @@ impl MonoDeque {
     #[inline(always)]
     fn push(&mut self, idx: usize, value: f64) {
         while self.len > 0 {
-            let back_pos = if self.tail == 0 { self.cap - 1 } else { self.tail - 1 };
+            let back_pos = if self.tail == 0 {
+                self.cap - 1
+            } else {
+                self.tail - 1
+            };
             let back_val = self.val[back_pos];
             // For max: keep strictly decreasing; for min: keep strictly increasing
-            let ok = if self.is_max { back_val >= value } else { back_val <= value };
+            let ok = if self.is_max {
+                back_val >= value
+            } else {
+                back_val <= value
+            };
             if ok {
                 break;
             }
@@ -998,7 +1006,11 @@ impl TtmSqueezeStream {
                 let hc = (high - pc).abs();
                 let lc = (low - pc).abs();
                 if hl >= hc {
-                    if hl >= lc { hl } else { lc }
+                    if hl >= lc {
+                        hl
+                    } else {
+                        lc
+                    }
                 } else if hc >= lc {
                     hc
                 } else {
@@ -1226,7 +1238,19 @@ pub unsafe fn ttm_squeeze_scalar_classic(
                 let hl = *high.get_unchecked(i) - *low.get_unchecked(i);
                 let hc = (*high.get_unchecked(i) - pc).abs();
                 let lc = (*low.get_unchecked(i) - pc).abs();
-                if hl >= hc { if hl >= lc { hl } else { lc } } else { if hc >= lc { hc } else { lc } }
+                if hl >= hc {
+                    if hl >= lc {
+                        hl
+                    } else {
+                        lc
+                    }
+                } else {
+                    if hc >= lc {
+                        hc
+                    } else {
+                        lc
+                    }
+                }
             };
             *trbuf.get_unchecked_mut(trpos) = tr_val;
             tr_sum += tr_val;
@@ -1235,28 +1259,44 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             while max_len > 0 {
                 let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
                 let back_idx = *max_q.get_unchecked(back_pos);
-                if *high.get_unchecked(i) <= *high.get_unchecked(back_idx) { break; }
+                if *high.get_unchecked(i) <= *high.get_unchecked(back_idx) {
+                    break;
+                }
                 max_tail = back_pos;
                 max_len -= 1;
             }
             *max_q.get_unchecked_mut(max_tail) = i;
-            max_tail += 1; if max_tail == cap { max_tail = 0; }
+            max_tail += 1;
+            if max_tail == cap {
+                max_tail = 0;
+            }
             max_len += 1;
 
             // Push into min deque (lows)
             while min_len > 0 {
                 let back_pos = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
                 let back_idx = *min_q.get_unchecked(back_pos);
-                if *low.get_unchecked(i) >= *low.get_unchecked(back_idx) { break; }
+                if *low.get_unchecked(i) >= *low.get_unchecked(back_idx) {
+                    break;
+                }
                 min_tail = back_pos;
                 min_len -= 1;
             }
             *min_q.get_unchecked_mut(min_tail) = i;
-            min_tail += 1; if min_tail == cap { min_tail = 0; }
+            min_tail += 1;
+            if min_tail == cap {
+                min_tail = 0;
+            }
             min_len += 1;
 
-            cpos += 1; if cpos == length { cpos = 0; }
-            trpos += 1; if trpos == length { trpos = 0; }
+            cpos += 1;
+            if cpos == length {
+                cpos = 0;
+            }
+            trpos += 1;
+            if trpos == length {
+                trpos = 0;
+            }
             r += 1;
             i += 1;
         }
@@ -1290,12 +1330,12 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         let hi_idx = *max_q.get_unchecked(max_head);
         let lo_idx = *min_q.get_unchecked(min_head);
         let highest = *high.get_unchecked(hi_idx);
-        let lowest  = *low.get_unchecked(lo_idx);
+        let lowest = *low.get_unchecked(lo_idx);
 
         // Momentum via closed-form linear regression
         let midpoint = 0.5 * (highest + lowest);
         let avg = 0.5 * (midpoint + m);
-        let sy  = sum0 - avg * n;
+        let sy = sum0 - avg * n;
         let sxy = sum1 - avg * sx;
         let slope = n.mul_add(sxy, -(sx * sy)) * inv_den;
         *momentum.get_unchecked_mut(warmup) = sy * inv_n + slope * half_nm1;
@@ -1309,14 +1349,24 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         // Evict expired indices from deques
         while max_len > 0 {
             let front_idx = *max_q.get_unchecked(max_head);
-            if front_idx >= start_idx { break; }
-            max_head += 1; if max_head == cap { max_head = 0; }
+            if front_idx >= start_idx {
+                break;
+            }
+            max_head += 1;
+            if max_head == cap {
+                max_head = 0;
+            }
             max_len -= 1;
         }
         while min_len > 0 {
             let front_idx = *min_q.get_unchecked(min_head);
-            if front_idx >= start_idx { break; }
-            min_head += 1; if min_head == cap { min_head = 0; }
+            if front_idx >= start_idx {
+                break;
+            }
+            min_head += 1;
+            if min_head == cap {
+                min_head = 0;
+            }
             min_len -= 1;
         }
 
@@ -1324,21 +1374,33 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         while max_len > 0 {
             let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
             let back_idx = *max_q.get_unchecked(back_pos);
-            if *high.get_unchecked(i) <= *high.get_unchecked(back_idx) { break; }
-            max_tail = back_pos; max_len -= 1;
+            if *high.get_unchecked(i) <= *high.get_unchecked(back_idx) {
+                break;
+            }
+            max_tail = back_pos;
+            max_len -= 1;
         }
         *max_q.get_unchecked_mut(max_tail) = i;
-        max_tail += 1; if max_tail == cap { max_tail = 0; }
+        max_tail += 1;
+        if max_tail == cap {
+            max_tail = 0;
+        }
         max_len += 1;
 
         while min_len > 0 {
             let back_pos = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
             let back_idx = *min_q.get_unchecked(back_pos);
-            if *low.get_unchecked(i) >= *low.get_unchecked(back_idx) { break; }
-            min_tail = back_pos; min_len -= 1;
+            if *low.get_unchecked(i) >= *low.get_unchecked(back_idx) {
+                break;
+            }
+            min_tail = back_pos;
+            min_len -= 1;
         }
         *min_q.get_unchecked_mut(min_tail) = i;
-        min_tail += 1; if min_tail == cap { min_tail = 0; }
+        min_tail += 1;
+        if min_tail == cap {
+            min_tail = 0;
+        }
         min_len += 1;
 
         // Rolling updates for close sums
@@ -1349,7 +1411,10 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         sumsq = new.mul_add(new, sumsq - old * old);
         sum1 = sum1 - sum0_old + old + (n - 1.0) * new;
         *cbuf.get_unchecked_mut(cpos) = new;
-        cpos += 1; if cpos == length { cpos = 0; }
+        cpos += 1;
+        if cpos == length {
+            cpos = 0;
+        }
 
         // Rolling update for TR SMA
         let old_tr = *trbuf.get_unchecked(trpos);
@@ -1362,7 +1427,10 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         let tr_new = hl.max(hc).max(lc);
         tr_sum += tr_new - old_tr;
         *trbuf.get_unchecked_mut(trpos) = tr_new;
-        trpos += 1; if trpos == length { trpos = 0; }
+        trpos += 1;
+        if trpos == length {
+            trpos = 0;
+        }
 
         // BB/KC
         let m = sum0 * inv_n;
@@ -1388,12 +1456,12 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         let hi_idx = *max_q.get_unchecked(max_head);
         let lo_idx = *min_q.get_unchecked(min_head);
         let highest = *high.get_unchecked(hi_idx);
-        let lowest  = *low.get_unchecked(lo_idx);
+        let lowest = *low.get_unchecked(lo_idx);
 
         // LinReg on (close - avg(avg(highest, lowest), m))
         let midpoint = 0.5 * (highest + lowest);
         let avg = 0.5 * (midpoint + m);
-        let sy  = sum0 - avg * n;
+        let sy = sum0 - avg * n;
         let sxy = sum1 - avg * sx;
         let slope = n.mul_add(sxy, -(sx * sy)) * inv_den;
         *momentum.get_unchecked_mut(i) = sy * inv_n + slope * half_nm1;
@@ -1922,10 +1990,18 @@ pub fn ttm_squeeze_batch_with_kernel(
         }
 
         for l in lengths {
-            if l < 2 || first + l > cols { continue; }
+            if l < 2 || first + l > cols {
+                continue;
+            }
 
             // Gather rows for this length and precompute squared multipliers
-            struct RowCfg { row: usize, bb_sq: f64, kc_low_sq: f64, kc_mid_sq: f64, kc_high_sq: f64 }
+            struct RowCfg {
+                row: usize,
+                bb_sq: f64,
+                kc_low_sq: f64,
+                kc_mid_sq: f64,
+                kc_high_sq: f64,
+            }
             let mut group: Vec<RowCfg> = Vec::new();
             for (idx, p) in combos.iter().enumerate() {
                 if p.length.unwrap_or(20) == l {
@@ -1933,13 +2009,21 @@ pub fn ttm_squeeze_batch_with_kernel(
                     let kh = p.kc_mult_high.unwrap_or(1.0);
                     let km = p.kc_mult_mid.unwrap_or(1.5);
                     let kl = p.kc_mult_low.unwrap_or(2.0);
-                    group.push(RowCfg { row: idx, bb_sq: bb*bb, kc_low_sq: kl*kl, kc_mid_sq: km*km, kc_high_sq: kh*kh });
+                    group.push(RowCfg {
+                        row: idx,
+                        bb_sq: bb * bb,
+                        kc_low_sq: kl * kl,
+                        kc_mid_sq: km * km,
+                        kc_high_sq: kh * kh,
+                    });
                 }
             }
-            if group.is_empty() { continue; }
+            if group.is_empty() {
+                continue;
+            }
 
             let n = l as f64;
-            let sx  = 0.5 * n * (n - 1.0);
+            let sx = 0.5 * n * (n - 1.0);
             let sx2 = (n - 1.0) * n * (2.0 * n - 1.0) / 6.0;
             let den = n * sx2 - sx * sx;
             let inv_den = 1.0 / den;
@@ -1991,27 +2075,46 @@ pub fn ttm_squeeze_batch_with_kernel(
                 while max_len > 0 {
                     let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
                     let back_idx = max_q[back_pos];
-                    if high[i] <= high[back_idx] { break; }
-                    max_tail = back_pos; max_len -= 1;
+                    if high[i] <= high[back_idx] {
+                        break;
+                    }
+                    max_tail = back_pos;
+                    max_len -= 1;
                 }
                 max_q[max_tail] = i;
-                max_tail += 1; if max_tail == cap { max_tail = 0; }
+                max_tail += 1;
+                if max_tail == cap {
+                    max_tail = 0;
+                }
                 max_len += 1;
 
                 // min deque
                 while min_len > 0 {
                     let back_pos = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
                     let back_idx = min_q[back_pos];
-                    if low[i] >= low[back_idx] { break; }
-                    min_tail = back_pos; min_len -= 1;
+                    if low[i] >= low[back_idx] {
+                        break;
+                    }
+                    min_tail = back_pos;
+                    min_len -= 1;
                 }
                 min_q[min_tail] = i;
-                min_tail += 1; if min_tail == cap { min_tail = 0; }
+                min_tail += 1;
+                if min_tail == cap {
+                    min_tail = 0;
+                }
                 min_len += 1;
 
-                cpos += 1; if cpos == l { cpos = 0; }
-                trpos += 1; if trpos == l { trpos = 0; }
-                r += 1; i += 1;
+                cpos += 1;
+                if cpos == l {
+                    cpos = 0;
+                }
+                trpos += 1;
+                if trpos == l {
+                    trpos = 0;
+                }
+                r += 1;
+                i += 1;
             }
 
             // Emit at warmup
@@ -2028,7 +2131,7 @@ pub fn ttm_squeeze_batch_with_kernel(
             let lowest = low[lo_idx];
             let midpoint = 0.5 * (highest + lowest);
             let avg = 0.5 * (midpoint + m);
-            let sy  = sum0 - avg * n;
+            let sy = sum0 - avg * n;
             let sxy = sum1 - avg * sx;
             let slope = n.mul_add(sxy, -(sx * sy)) * inv_den;
             let mom_val = sy * inv_n + slope * half_nm1;
@@ -2039,7 +2142,15 @@ pub fn ttm_squeeze_batch_with_kernel(
                 let t_low = rc.kc_low_sq * dkc2;
                 let t_mid = rc.kc_mid_sq * dkc2;
                 let t_high = rc.kc_high_sq * dkc2;
-                let sqz = if bbv > t_low { 0.0 } else if bbv <= t_high { 3.0 } else if bbv <= t_mid { 2.0 } else { 1.0 };
+                let sqz = if bbv > t_low {
+                    0.0
+                } else if bbv <= t_high {
+                    3.0
+                } else if bbv <= t_mid {
+                    2.0
+                } else {
+                    1.0
+                };
                 let s_off = rc.row * cols + warm;
                 let m_off = rc.row * cols + warm;
                 sqz_slice[s_off] = sqz;
@@ -2053,14 +2164,24 @@ pub fn ttm_squeeze_batch_with_kernel(
                 // Evict expired
                 while max_len > 0 {
                     let front_idx = max_q[max_head];
-                    if front_idx >= start_idx { break; }
-                    max_head += 1; if max_head == cap { max_head = 0; }
+                    if front_idx >= start_idx {
+                        break;
+                    }
+                    max_head += 1;
+                    if max_head == cap {
+                        max_head = 0;
+                    }
                     max_len -= 1;
                 }
                 while min_len > 0 {
                     let front_idx = min_q[min_head];
-                    if front_idx >= start_idx { break; }
-                    min_head += 1; if min_head == cap { min_head = 0; }
+                    if front_idx >= start_idx {
+                        break;
+                    }
+                    min_head += 1;
+                    if min_head == cap {
+                        min_head = 0;
+                    }
                     min_len -= 1;
                 }
 
@@ -2068,21 +2189,33 @@ pub fn ttm_squeeze_batch_with_kernel(
                 while max_len > 0 {
                     let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
                     let back_idx = max_q[back_pos];
-                    if high[i] <= high[back_idx] { break; }
-                    max_tail = back_pos; max_len -= 1;
+                    if high[i] <= high[back_idx] {
+                        break;
+                    }
+                    max_tail = back_pos;
+                    max_len -= 1;
                 }
                 max_q[max_tail] = i;
-                max_tail += 1; if max_tail == cap { max_tail = 0; }
+                max_tail += 1;
+                if max_tail == cap {
+                    max_tail = 0;
+                }
                 max_len += 1;
 
                 while min_len > 0 {
                     let back_pos = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
                     let back_idx = min_q[back_pos];
-                    if low[i] >= low[back_idx] { break; }
-                    min_tail = back_pos; min_len -= 1;
+                    if low[i] >= low[back_idx] {
+                        break;
+                    }
+                    min_tail = back_pos;
+                    min_len -= 1;
                 }
                 min_q[min_tail] = i;
-                min_tail += 1; if min_tail == cap { min_tail = 0; }
+                min_tail += 1;
+                if min_tail == cap {
+                    min_tail = 0;
+                }
                 min_len += 1;
 
                 // Rolling sums
@@ -2093,7 +2226,10 @@ pub fn ttm_squeeze_batch_with_kernel(
                 sumsq = new.mul_add(new, sumsq - old * old);
                 sum1 = sum1 - sum0_old + old + (n - 1.0) * new;
                 cbuf[cpos] = new;
-                cpos += 1; if cpos == l { cpos = 0; }
+                cpos += 1;
+                if cpos == l {
+                    cpos = 0;
+                }
 
                 // TR rolling
                 let old_tr = trbuf[trpos];
@@ -2106,7 +2242,10 @@ pub fn ttm_squeeze_batch_with_kernel(
                 let tr_new = hl.max(hc).max(lc);
                 tr_sum += tr_new - old_tr;
                 trbuf[trpos] = tr_new;
-                trpos += 1; if trpos == l { trpos = 0; }
+                trpos += 1;
+                if trpos == l {
+                    trpos = 0;
+                }
 
                 // Shared metrics
                 let m = sum0 * inv_n;
@@ -2122,7 +2261,7 @@ pub fn ttm_squeeze_batch_with_kernel(
                 let lowest = low[lo_idx];
                 let midpoint = 0.5 * (highest + lowest);
                 let avg = 0.5 * (midpoint + m);
-                let sy  = sum0 - avg * n;
+                let sy = sum0 - avg * n;
                 let sxy = sum1 - avg * sx;
                 let slope = n.mul_add(sxy, -(sx * sy)) * inv_den;
                 let mom_val = sy * inv_n + slope * half_nm1;
@@ -2132,7 +2271,15 @@ pub fn ttm_squeeze_batch_with_kernel(
                     let t_low = rc.kc_low_sq * dkc2;
                     let t_mid = rc.kc_mid_sq * dkc2;
                     let t_high = rc.kc_high_sq * dkc2;
-                    let sqz = if bbv > t_low { 0.0 } else if bbv <= t_high { 3.0 } else if bbv <= t_mid { 2.0 } else { 1.0 };
+                    let sqz = if bbv > t_low {
+                        0.0
+                    } else if bbv <= t_high {
+                        3.0
+                    } else if bbv <= t_mid {
+                        2.0
+                    } else {
+                        1.0
+                    };
                     let s_off = rc.row * cols + i;
                     let m_off = rc.row * cols + i;
                     sqz_slice[s_off] = sqz;

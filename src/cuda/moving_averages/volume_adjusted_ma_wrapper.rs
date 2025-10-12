@@ -78,8 +78,7 @@ impl CudaVama {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaVamaError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -97,13 +96,20 @@ impl CudaVama {
     }
 
     /// Create using an explicit policy.
-    pub fn new_with_policy(device_id: usize, policy: CudaVamaPolicy) -> Result<Self, CudaVamaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaVamaPolicy,
+    ) -> Result<Self, CudaVamaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaVamaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaVamaPolicy { &self.policy }
+    pub fn set_policy(&mut self, policy: CudaVamaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaVamaPolicy {
+        &self.policy
+    }
 
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -351,10 +357,7 @@ impl CudaVama {
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = len as i32;
                 let mut first_valid_i = first_valid as i32;
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .add(launched * series_len)
-                    .as_raw();
+                let mut out_ptr = d_out.as_device_ptr().add(launched * series_len).as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut volumes_ptr as *mut _ as *mut c_void,
@@ -844,8 +847,8 @@ impl CudaVama {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices, gen_time_major_volumes};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;
@@ -883,7 +886,13 @@ pub mod benches {
         let price = gen_series(ONE_SERIES_LEN);
         let volume = gen_series(ONE_SERIES_LEN)
             .into_iter()
-            .map(|v| if v.is_nan() { v } else { (v.abs() + 1.0) * 700.0 })
+            .map(|v| {
+                if v.is_nan() {
+                    v
+                } else {
+                    (v.abs() + 1.0) * 700.0
+                }
+            })
             .collect::<Vec<f32>>();
         let sweep = VolumeAdjustedMaBatchRange {
             length: (16, 16 + PARAM_SWEEP - 1, 1),
@@ -976,7 +985,10 @@ pub struct CudaVamaPolicy {
 }
 impl Default for CudaVamaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -996,7 +1008,8 @@ impl CudaVama {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] VAMA batch selected kernel: {:?}", sel);
                 }
@@ -1008,7 +1021,8 @@ impl CudaVama {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] VAMA many-series selected kernel: {:?}", sel);
                 }

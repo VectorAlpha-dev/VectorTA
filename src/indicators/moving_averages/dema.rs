@@ -243,13 +243,11 @@ fn dema_prepare<'a>(
     // SIMD selection: AVX512 shows solid wins; AVX2 underperforms on typical targets.
     // Auto keeps AVX512 when available; otherwise short-circuits to Scalar (skip AVX2).
     let chosen = match kernel {
-        Kernel::Auto => {
-            match detect_best_kernel() {
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 => Kernel::Avx512,
-                _ => Kernel::Scalar,
-            }
-        }
+        Kernel::Auto => match detect_best_kernel() {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => Kernel::Avx512,
+            _ => Kernel::Scalar,
+        },
         other => other,
     };
 
@@ -337,7 +335,10 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
     while i <= limit {
         // Prefetch upcoming cachelines (guarded)
         if i + 32 < n {
-            core::arch::x86_64::_mm_prefetch(p.add(32) as *const i8, core::arch::x86_64::_MM_HINT_T0);
+            core::arch::x86_64::_mm_prefetch(
+                p.add(32) as *const i8,
+                core::arch::x86_64::_MM_HINT_T0,
+            );
         }
 
         // step 0
@@ -722,7 +723,11 @@ impl DemaStream {
             self.ema2 = value;
             self.filled = 1;
             // For period==1, return immediately; otherwise warmup with None.
-            return if self.nan_fill == 0 { Some(value) } else { None };
+            return if self.nan_fill == 0 {
+                Some(value)
+            } else {
+                None
+            };
         }
 
         // Lift constants into registers
@@ -742,7 +747,11 @@ impl DemaStream {
         self.filled = self.filled.saturating_add(1);
 
         // Warm‑up policy unchanged: emit only after period−1
-        if self.filled > self.nan_fill { Some(y) } else { None }
+        if self.filled > self.nan_fill {
+            Some(y)
+        } else {
+            None
+        }
     }
 
     #[inline(always)]
@@ -2032,7 +2041,9 @@ pub fn dema_cuda_many_series_one_param_dev_py(
     let shape = data_tm_f32.shape();
     let series_len = shape[0];
     let num_series = shape[1];
-    let params = DemaParams { period: Some(period) };
+    let params = DemaParams {
+        period: Some(period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaDema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.dema_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)

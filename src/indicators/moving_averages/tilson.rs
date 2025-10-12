@@ -478,7 +478,16 @@ pub unsafe fn tilson_avx512(
     use core::arch::x86_64::*;
 
     #[inline(always)]
-    unsafe fn dot4_avx512(e3: f64, e4: f64, e5: f64, e6: f64, c4: f64, c3: f64, c2: f64, c1: f64) -> f64 {
+    unsafe fn dot4_avx512(
+        e3: f64,
+        e4: f64,
+        e5: f64,
+        e6: f64,
+        c4: f64,
+        c3: f64,
+        c2: f64,
+        c1: f64,
+    ) -> f64 {
         let ve = _mm512_setr_pd(e3, e4, e5, e6, 0.0, 0.0, 0.0, 0.0);
         let vc = _mm512_setr_pd(c4, c3, c2, c1, 0.0, 0.0, 0.0, 0.0);
         let prod = _mm512_mul_pd(ve, vc);
@@ -492,7 +501,10 @@ pub unsafe fn tilson_avx512(
         return Err(TilsonError::EmptyInputData);
     }
     if period == 0 || len.saturating_sub(first_valid) < period {
-        return Err(TilsonError::InvalidPeriod { period, data_len: len });
+        return Err(TilsonError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if v_factor.is_nan() || v_factor.is_infinite() {
         return Err(TilsonError::InvalidVolumeFactor { v_factor });
@@ -654,7 +666,16 @@ pub unsafe fn tilson_avx2(
     use core::arch::x86_64::*;
 
     #[inline(always)]
-    unsafe fn dot4_avx2(e3: f64, e4: f64, e5: f64, e6: f64, c4: f64, c3: f64, c2: f64, c1: f64) -> f64 {
+    unsafe fn dot4_avx2(
+        e3: f64,
+        e4: f64,
+        e5: f64,
+        e6: f64,
+        c4: f64,
+        c3: f64,
+        c2: f64,
+        c1: f64,
+    ) -> f64 {
         let ve = _mm256_setr_pd(e3, e4, e5, e6);
         let vc = _mm256_setr_pd(c4, c3, c2, c1);
         let prod = _mm256_mul_pd(ve, vc);
@@ -673,7 +694,10 @@ pub unsafe fn tilson_avx2(
         return Err(TilsonError::EmptyInputData);
     }
     if period == 0 || len.saturating_sub(first_valid) < period {
-        return Err(TilsonError::InvalidPeriod { period, data_len: len });
+        return Err(TilsonError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if v_factor.is_nan() || v_factor.is_infinite() {
         return Err(TilsonError::InvalidVolumeFactor { v_factor });
@@ -1201,8 +1225,8 @@ pub struct TilsonStream {
     // phase = 6 -> steady RUN: update e1..e6 each tick and output
     phase: u8,
     in_phase_count: usize,
-    sum_e1: f64,  // accumulates SMA for e1 during phase 0
-    acc: f64,     // generic accumulator used in phases 1..5
+    sum_e1: f64, // accumulates SMA for e1 during phase 0
+    acc: f64,    // generic accumulator used in phases 1..5
 
     // Exposed/diagnostic (kept for parity with your tests & metrics)
     lookback_total: usize, // = 6 * (period - 1)
@@ -1215,7 +1239,10 @@ impl TilsonStream {
         let v_factor = params.volume_factor.unwrap_or(0.0);
 
         if period == 0 {
-            return Err(TilsonError::InvalidPeriod { period, data_len: 0 });
+            return Err(TilsonError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         if v_factor.is_nan() || v_factor.is_infinite() {
             return Err(TilsonError::InvalidVolumeFactor { v_factor });
@@ -1236,11 +1263,19 @@ impl TilsonStream {
         Ok(Self {
             period,
             v_factor,
-            e1: 0.0, e2: 0.0, e3: 0.0, e4: 0.0, e5: 0.0, e6: 0.0,
+            e1: 0.0,
+            e2: 0.0,
+            e3: 0.0,
+            e4: 0.0,
+            e5: 0.0,
+            e6: 0.0,
             k,
             one_minus_k,
             inv_p,
-            c1, c2, c3, c4,
+            c1,
+            c2,
+            c3,
+            c4,
             phase: 0,
             in_phase_count: 0,
             sum_e1: 0.0,
@@ -1270,7 +1305,11 @@ impl TilsonStream {
                     // Fast path for period == 1: all remaining warmup stages are zero-length.
                     if self.period == 1 {
                         // e2..e6 become equal to e1 immediately
-                        self.e2 = self.e1; self.e3 = self.e2; self.e4 = self.e3; self.e5 = self.e4; self.e6 = self.e5;
+                        self.e2 = self.e1;
+                        self.e3 = self.e2;
+                        self.e4 = self.e3;
+                        self.e5 = self.e4;
+                        self.e6 = self.e5;
                         self.phase = 6; // RUN
                         return Some(self.combine_exact());
                     }
@@ -1372,23 +1411,33 @@ impl TilsonStream {
 
         // e1
         self.e1 = k * x + omk * self.e1;
-        if upto == 1 { return; }
+        if upto == 1 {
+            return;
+        }
 
         // e2
         self.e2 = k * self.e1 + omk * self.e2;
-        if upto == 2 { return; }
+        if upto == 2 {
+            return;
+        }
 
         // e3
         self.e3 = k * self.e2 + omk * self.e3;
-        if upto == 3 { return; }
+        if upto == 3 {
+            return;
+        }
 
         // e4
         self.e4 = k * self.e3 + omk * self.e4;
-        if upto == 4 { return; }
+        if upto == 4 {
+            return;
+        }
 
         // e5
         self.e5 = k * self.e4 + omk * self.e5;
-        if upto == 5 { return; }
+        if upto == 5 {
+            return;
+        }
 
         // e6
         self.e6 = k * self.e5 + omk * self.e6;
@@ -2180,7 +2229,9 @@ fn tilson_compute_into(
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => tilson_scalar(data, period, v_factor, first, out)?,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => tilson_scalar(data, period, v_factor, first, out)?,
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                tilson_scalar(data, period, v_factor, first, out)?
+            }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 // Fallback to scalar when AVX is not available

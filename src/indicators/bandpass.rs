@@ -716,7 +716,9 @@ impl BandPassStream {
         // Steady‑state recurrence (FMA‑friendly):
         // y = c2*y[n-2] + c1*y[n-1] + c0*(hp - hp[n-2])
         let delta = hp - self.hp_z2;
-        let y = self.c2.mul_add(self.y_z2, self.c1.mul_add(self.y_z1, self.c0 * delta));
+        let y = self
+            .c2
+            .mul_add(self.y_z2, self.c1.mul_add(self.y_z1, self.c0 * delta));
 
         // rotate delays
         self.hp_z2 = self.hp_z1;

@@ -41,55 +41,239 @@ fn compile_cuda_kernels() {
 
     // Additional kernels required by wrappers under feature `cuda`
     // Moving averages (broad set)
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/buff_averages_kernel.cu", "buff_averages_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/dema_kernel.cu", "dema_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/dma_kernel.cu", "dma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/edcf_kernel.cu", "edcf_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/ehlers_itrend_kernel.cu", "ehlers_itrend_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/ehlers_kama_kernel.cu", "ehlers_kama_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/ehlers_pma_kernel.cu", "ehlers_pma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/ehma_kernel.cu", "ehma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/ema_kernel.cu", "ema_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/frama_kernel.cu", "frama_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/fwma_kernel.cu", "fwma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/gaussian_kernel.cu", "gaussian_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/highpass2_kernel.cu", "highpass2_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/hma_kernel.cu", "hma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/hwma_kernel.cu", "hwma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/jma_kernel.cu", "jma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/jsa_kernel.cu", "jsa_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/linreg_kernel.cu", "linreg_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/maaq_kernel.cu", "maaq_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/mama_kernel.cu", "mama_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/mwdx_kernel.cu", "mwdx_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/nma_kernel.cu", "nma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/pwma_kernel.cu", "pwma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/reflex_kernel.cu", "reflex_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/sama_kernel.cu", "sama_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/sma_kernel.cu", "sma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/smma_kernel.cu", "smma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/sqwma_kernel.cu", "sqwma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/srwma_kernel.cu", "srwma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/supersmoother_kernel.cu", "supersmoother_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/swma_kernel.cu", "swma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/tema_kernel.cu", "tema_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/tilson_kernel.cu", "tilson_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/trendflex_kernel.cu", "trendflex_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/trima_kernel.cu", "trima_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/uma_kernel.cu", "uma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/vama_kernel.cu", "vama_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/vpwma_kernel.cu", "vpwma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/vwap_kernel.cu", "vwap_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/vwma_kernel.cu", "vwma_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/wilders_kernel.cu", "wilders_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/moving_averages/zlema_kernel.cu", "zlema_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/buff_averages_kernel.cu",
+        "buff_averages_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/dema_kernel.cu",
+        "dema_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/dma_kernel.cu",
+        "dma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/edcf_kernel.cu",
+        "edcf_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/ehlers_itrend_kernel.cu",
+        "ehlers_itrend_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/ehlers_kama_kernel.cu",
+        "ehlers_kama_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/ehlers_pma_kernel.cu",
+        "ehlers_pma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/ehma_kernel.cu",
+        "ehma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/ema_kernel.cu",
+        "ema_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/frama_kernel.cu",
+        "frama_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/fwma_kernel.cu",
+        "fwma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/gaussian_kernel.cu",
+        "gaussian_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/highpass2_kernel.cu",
+        "highpass2_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/hma_kernel.cu",
+        "hma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/hwma_kernel.cu",
+        "hwma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/jma_kernel.cu",
+        "jma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/jsa_kernel.cu",
+        "jsa_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/linreg_kernel.cu",
+        "linreg_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/maaq_kernel.cu",
+        "maaq_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/mama_kernel.cu",
+        "mama_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/mwdx_kernel.cu",
+        "mwdx_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/nma_kernel.cu",
+        "nma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/pwma_kernel.cu",
+        "pwma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/reflex_kernel.cu",
+        "reflex_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/sama_kernel.cu",
+        "sama_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/sma_kernel.cu",
+        "sma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/smma_kernel.cu",
+        "smma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/sqwma_kernel.cu",
+        "sqwma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/srwma_kernel.cu",
+        "srwma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/supersmoother_kernel.cu",
+        "supersmoother_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/swma_kernel.cu",
+        "swma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/tema_kernel.cu",
+        "tema_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/tilson_kernel.cu",
+        "tilson_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/trendflex_kernel.cu",
+        "trendflex_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/trima_kernel.cu",
+        "trima_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/uma_kernel.cu",
+        "uma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/vama_kernel.cu",
+        "vama_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/vpwma_kernel.cu",
+        "vpwma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/vwap_kernel.cu",
+        "vwap_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/vwma_kernel.cu",
+        "vwma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/wilders_kernel.cu",
+        "wilders_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/zlema_kernel.cu",
+        "zlema_kernel.ptx",
+    );
 
     // Non-MA
     compile_kernel(&cuda_path, "kernels/cuda/wad_kernel.cu", "wad_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/oscillators/willr_kernel.cu", "willr_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/wavetrend_kernel.cu", "wavetrend_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/wclprice_kernel.cu", "wclprice_kernel.ptx");
-    compile_kernel(&cuda_path, "kernels/cuda/zscore_kernel.cu", "zscore_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/willr_kernel.cu",
+        "willr_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/wavetrend_kernel.cu",
+        "wavetrend_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/wclprice_kernel.cu",
+        "wclprice_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/zscore_kernel.cu",
+        "zscore_kernel.ptx",
+    );
 }
 
 #[cfg(feature = "cuda")]
@@ -109,7 +293,8 @@ fn find_cuda_path() -> String {
                             if let Some(stripped) = name.strip_prefix('v') {
                                 let mut it = stripped.split('.');
                                 let major = it.next().and_then(|s| s.parse::<u32>().ok());
-                                let minor = it.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                                let minor =
+                                    it.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
                                 if let Some(maj) = major {
                                     let cand = (maj, minor, format!("{base}/{}", name));
                                     if let Some(cur) = &best {
@@ -273,9 +458,15 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         let mut any = false;
         for tok in filt.split(|c: char| c == ',' || c.is_ascii_whitespace()) {
             let t = tok.trim();
-            if !t.is_empty() && rel_src.contains(t) { any = true; break; }
+            if !t.is_empty() && rel_src.contains(t) {
+                any = true;
+                break;
+            }
         }
-        if !any { eprintln!("Skipping {} due to CUDA_FILTER", rel_src); return; }
+        if !any {
+            eprintln!("Skipping {} due to CUDA_FILTER", rel_src);
+            return;
+        }
     }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
@@ -302,13 +493,17 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
     // Arch selection: first non-empty from CUDA_ARCHS, else CUDA_ARCH, else default compute_89
     fn normalize_arch(s: &str) -> String {
         let t = s.trim();
-        if t.is_empty() { return String::new(); }
+        if t.is_empty() {
+            return String::new();
+        }
         // Accept forms: 89, 8.9, sm_89, compute_89
         if t.starts_with("sm_") {
             // Prefer compute_XX for -ptx
             return t.replacen("sm_", "compute_", 1);
         }
-        if t.starts_with("compute_") { return t.to_string(); }
+        if t.starts_with("compute_") {
+            return t.to_string();
+        }
         let digits: String = t.chars().filter(|c| c.is_ascii_digit()).collect();
         if digits.len() >= 2 {
             return format!("compute_{}{}", &digits[0..1], &digits[1..2]);
@@ -319,24 +514,39 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
 
     let arch = {
         if let Ok(list) = env::var("CUDA_ARCHS") {
-            let first = list.split(|c: char| c == ',' || c.is_ascii_whitespace())
-                            .find(|t| !t.trim().is_empty())
-                            .map(|s| normalize_arch(s));
-            first.filter(|s| !s.is_empty()).unwrap_or_else(|| "compute_89".to_string())
+            let first = list
+                .split(|c: char| c == ',' || c.is_ascii_whitespace())
+                .find(|t| !t.trim().is_empty())
+                .map(|s| normalize_arch(s));
+            first
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "compute_89".to_string())
         } else if let Ok(a) = env::var("CUDA_ARCH") {
             let n = normalize_arch(&a);
-            if n.is_empty() { "compute_89".to_string() } else { n }
+            if n.is_empty() {
+                "compute_89".to_string()
+            } else {
+                n
+            }
         } else {
             "compute_89".to_string()
         }
     };
 
-    cmd.args(&["-std=c++17", "--expt-relaxed-constexpr", "--extended-lambda", "-ptx", "-O3"]);
+    cmd.args(&[
+        "-std=c++17",
+        "--expt-relaxed-constexpr",
+        "--extended-lambda",
+        "-ptx",
+        "-O3",
+    ]);
 
     // CUDA_FAST_MATH=1 adds fast math; =0 disables
     match env::var("CUDA_FAST_MATH").as_deref() {
-        Ok("0") => {},
-        _ => { cmd.arg("--use_fast_math"); }
+        Ok("0") => {}
+        _ => {
+            cmd.arg("--use_fast_math");
+        }
     }
 
     // Debug line info when requested
@@ -344,12 +554,20 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         cmd.arg("-lineinfo");
     }
 
-    cmd.args(&["-arch", &arch, "-o", ptx_path.to_str().expect("ptx path"), &src_path]);
+    cmd.args(&[
+        "-arch",
+        &arch,
+        "-o",
+        ptx_path.to_str().expect("ptx path"),
+        &src_path,
+    ]);
 
     // Extra NVCC_ARGS passthrough
     if let Ok(extra) = env::var("NVCC_ARGS") {
         for tok in extra.split_whitespace() {
-            if !tok.is_empty() { cmd.arg(tok); }
+            if !tok.is_empty() {
+                cmd.arg(tok);
+            }
         }
     }
 
@@ -375,17 +593,44 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
             || out_s.contains("unsupported gpu architecture");
 
         if arch != "compute_80" && maybe_arch_fail {
-            eprintln!("Falling back to -arch=compute_80 for {rel_src} (nvcc doesn't support {})", arch);
+            eprintln!(
+                "Falling back to -arch=compute_80 for {rel_src} (nvcc doesn't support {})",
+                arch
+            );
             let mut cmd2 = Command::new(&nvcc);
-            cmd2.args(&["-std=c++17", "--expt-relaxed-constexpr", "--extended-lambda", "-ptx", "-O3"]);
-            if env::var("CUDA_FAST_MATH").ok().as_deref() != Some("0") { cmd2.arg("--use_fast_math"); }
-            if env::var("CUDA_DEBUG").ok().as_deref() == Some("1") { cmd2.arg("-lineinfo"); }
-            cmd2.args(&["-arch", "compute_80", "-o", ptx_path.to_str().expect("ptx path"), &src_path]);
-            if let Ok(extra) = env::var("NVCC_ARGS") { for tok in extra.split_whitespace() { if !tok.is_empty() { cmd2.arg(tok); } } }
+            cmd2.args(&[
+                "-std=c++17",
+                "--expt-relaxed-constexpr",
+                "--extended-lambda",
+                "-ptx",
+                "-O3",
+            ]);
+            if env::var("CUDA_FAST_MATH").ok().as_deref() != Some("0") {
+                cmd2.arg("--use_fast_math");
+            }
+            if env::var("CUDA_DEBUG").ok().as_deref() == Some("1") {
+                cmd2.arg("-lineinfo");
+            }
+            cmd2.args(&[
+                "-arch",
+                "compute_80",
+                "-o",
+                ptx_path.to_str().expect("ptx path"),
+                &src_path,
+            ]);
+            if let Ok(extra) = env::var("NVCC_ARGS") {
+                for tok in extra.split_whitespace() {
+                    if !tok.is_empty() {
+                        cmd2.arg(tok);
+                    }
+                }
+            }
             if cfg!(target_os = "windows") {
                 cmd2.arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
                 cmd2.arg("-allow-unsupported-compiler");
-                if let Ok(vs_path) = find_vs_installation() { cmd2.arg("-ccbin").arg(vs_path); }
+                if let Ok(vs_path) = find_vs_installation() {
+                    cmd2.arg("-ccbin").arg(vs_path);
+                }
             }
             eprintln!("Running nvcc command: {:?}", cmd2);
             output = cmd2.output().expect("Failed to execute nvcc (fallback)");
@@ -407,7 +652,10 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
 "#;
             if std::fs::write(&ptx_path, placeholder).is_ok() {
                 eprintln!("Emitted placeholder PTX at {} (runtime loads will fail if kernels are missing)", ptx_path.display());
-                println!("Successfully compiled {rel_src} to {} (placeholder)", ptx_path.display());
+                println!(
+                    "Successfully compiled {rel_src} to {} (placeholder)",
+                    ptx_path.display()
+                );
                 return;
             }
         }
@@ -424,7 +672,11 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         panic!("nvcc compilation failed");
     }
 
-    println!("Successfully compiled {} to {}", src_path, ptx_path.display());
+    println!(
+        "Successfully compiled {} to {}",
+        src_path,
+        ptx_path.display()
+    );
 }
 
 #[cfg(all(feature = "cuda", target_os = "windows"))]

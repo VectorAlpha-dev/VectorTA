@@ -348,7 +348,7 @@ fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     // ---- main rolling loop -----------------------------------------------------------------
     let len = data.len();
     let mut idx = first + period - 1; // index of *last* element in the current window
-    let mut old_idx = first;          // index of the oldest element in the current window
+    let mut old_idx = first; // index of the oldest element in the current window
     while idx < len {
         let new_val = data[idx];
         y_sum += new_val; // include newest sample

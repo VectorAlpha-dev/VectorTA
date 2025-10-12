@@ -675,9 +675,7 @@ pub fn bop_batch_with_kernel(
                 bop_scalar_from(open, high, low, close, first, out_f64)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                bop_avx512(open, high, low, close, out_f64)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => bop_avx512(open, high, low, close, out_f64),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 bop_scalar_from(open, high, low, close, first, out_f64)
@@ -1622,7 +1620,9 @@ pub fn bop_into_slice(
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => bop_avx512(open, high, low, close, dst),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx512 | Kernel::Avx512Batch => bop_scalar_from(open, high, low, close, first, dst),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                bop_scalar_from(open, high, low, close, first, dst)
+            }
             _ => unreachable!(),
         }
     }

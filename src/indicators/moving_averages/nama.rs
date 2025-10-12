@@ -286,10 +286,14 @@ pub fn nama_avx2(
     }
 
     let n = data.len();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
     let first = first_val;
     let i0 = first + period - 1;
-    if i0 >= n { return; }
+    if i0 >= n {
+        return;
+    }
 
     // Precompute TR across the entire series
     let mut tr = vec![0.0f64; n];
@@ -367,10 +371,14 @@ pub fn nama_avx512(
     }
 
     let n = data.len();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
     let first = first_val;
     let i0 = first + period - 1;
-    if i0 >= n { return; }
+    if i0 >= n {
+        return;
+    }
 
     let mut tr = vec![0.0f64; n];
     unsafe {
@@ -507,7 +515,11 @@ fn nama_compute_into(
             {
                 let hi = src[*dq_max.front().unwrap()];
                 let lo = src[*dq_min.front().unwrap()];
-                let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+                let alpha = if eff_sum != 0.0 {
+                    (hi - lo) / eff_sum
+                } else {
+                    0.0
+                };
                 out[i0] = alpha * src[i0];
             }
 
@@ -530,11 +542,17 @@ fn nama_compute_into(
                 eff_sum = eff_sum + add - old;
                 tr_ring[wr] = add;
                 wr += 1;
-                if wr == period { wr = 0; }
+                if wr == period {
+                    wr = 0;
+                }
 
                 let hi = src[*dq_max.front().unwrap()];
                 let lo = src[*dq_min.front().unwrap()];
-                let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+                let alpha = if eff_sum != 0.0 {
+                    (hi - lo) / eff_sum
+                } else {
+                    0.0
+                };
                 let prev_y = out[i - 1];
                 out[i] = (src[j] - prev_y).mul_add(alpha, prev_y);
                 i += 1;
@@ -545,7 +563,11 @@ fn nama_compute_into(
             for j in first..=i0 {
                 push_max(&mut dq_max, src, j);
                 push_min(&mut dq_min, src, j);
-                let trj = if j == first { 0.0 } else { (src[j] - src[j - 1]).abs() };
+                let trj = if j == first {
+                    0.0
+                } else {
+                    (src[j] - src[j - 1]).abs()
+                };
                 tr_ring[wr] = trj;
                 wr += 1;
                 eff_sum += trj;
@@ -556,7 +578,11 @@ fn nama_compute_into(
             {
                 let hi = src[*dq_max.front().unwrap()];
                 let lo = src[*dq_min.front().unwrap()];
-                let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+                let alpha = if eff_sum != 0.0 {
+                    (hi - lo) / eff_sum
+                } else {
+                    0.0
+                };
                 out[i0] = alpha * src[i0];
             }
 
@@ -575,11 +601,17 @@ fn nama_compute_into(
                 eff_sum = eff_sum + add - old;
                 tr_ring[wr] = add;
                 wr += 1;
-                if wr == period { wr = 0; }
+                if wr == period {
+                    wr = 0;
+                }
 
                 let hi = src[*dq_max.front().unwrap()];
                 let lo = src[*dq_min.front().unwrap()];
-                let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+                let alpha = if eff_sum != 0.0 {
+                    (hi - lo) / eff_sum
+                } else {
+                    0.0
+                };
                 let prev_y = out[i - 1];
                 out[i] = (src[j] - prev_y).mul_add(alpha, prev_y);
                 i += 1;
@@ -591,16 +623,12 @@ fn nama_compute_into(
 /// Shared scalar core that consumes precomputed TR values and writes outputs.
 /// Assumes `out[..first+period-1]` is already NaN (alloc/init step handles warmup prefix).
 #[inline(always)]
-fn nama_core_with_tr(
-    src: &[f64],
-    period: usize,
-    first: usize,
-    tr: &[f64],
-    out: &mut [f64],
-) {
+fn nama_core_with_tr(src: &[f64], period: usize, first: usize, tr: &[f64], out: &mut [f64]) {
     let n = src.len();
     let i0 = first + period - 1;
-    if i0 >= n { return; }
+    if i0 >= n {
+        return;
+    }
 
     // Monotone deques for max/min
     let mut dq_max: VecDeque<usize> = VecDeque::with_capacity(period);
@@ -609,21 +637,33 @@ fn nama_core_with_tr(
     #[inline(always)]
     fn push_max(dq: &mut VecDeque<usize>, a: &[f64], j: usize) {
         while let Some(&k) = dq.back() {
-            if a[k] <= a[j] { dq.pop_back(); } else { break; }
+            if a[k] <= a[j] {
+                dq.pop_back();
+            } else {
+                break;
+            }
         }
         dq.push_back(j);
     }
     #[inline(always)]
     fn push_min(dq: &mut VecDeque<usize>, a: &[f64], j: usize) {
         while let Some(&k) = dq.back() {
-            if a[k] >= a[j] { dq.pop_back(); } else { break; }
+            if a[k] >= a[j] {
+                dq.pop_back();
+            } else {
+                break;
+            }
         }
         dq.push_back(j);
     }
     #[inline(always)]
     fn pop_old(dq: &mut VecDeque<usize>, win_start: usize) {
         while let Some(&k) = dq.front() {
-            if k < win_start { dq.pop_front(); } else { break; }
+            if k < win_start {
+                dq.pop_front();
+            } else {
+                break;
+            }
         }
     }
 
@@ -647,7 +687,11 @@ fn nama_core_with_tr(
     {
         let hi = src[*dq_max.front().unwrap()];
         let lo = src[*dq_min.front().unwrap()];
-        let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+        let alpha = if eff_sum != 0.0 {
+            (hi - lo) / eff_sum
+        } else {
+            0.0
+        };
         out[i0] = alpha * src[i0];
     }
 
@@ -666,11 +710,17 @@ fn nama_core_with_tr(
         eff_sum = eff_sum + add - old;
         ring[wr] = add;
         wr += 1;
-        if wr == period { wr = 0; }
+        if wr == period {
+            wr = 0;
+        }
 
         let hi = src[*dq_max.front().unwrap()];
         let lo = src[*dq_min.front().unwrap()];
-        let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+        let alpha = if eff_sum != 0.0 {
+            (hi - lo) / eff_sum
+        } else {
+            0.0
+        };
         let prev_y = out[i - 1];
         out[i] = (src[j] - prev_y).mul_add(alpha, prev_y);
         i += 1;
@@ -728,7 +778,7 @@ pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<
 #[derive(Debug, Clone)]
 pub struct NamaStream {
     period: usize,
-    
+
     // Rings to overwrite oldest slot each tick
     buf_src: Vec<f64>,
     buf_tr: Vec<f64>,
@@ -792,21 +842,33 @@ impl NamaStream {
     #[inline(always)]
     fn dq_push_max(dq: &mut VecDeque<(usize, f64)>, idx: usize, v: f64) {
         while let Some(&(_, back_v)) = dq.back() {
-            if back_v <= v { dq.pop_back(); } else { break; }
+            if back_v <= v {
+                dq.pop_back();
+            } else {
+                break;
+            }
         }
         dq.push_back((idx, v));
     }
     #[inline(always)]
     fn dq_push_min(dq: &mut VecDeque<(usize, f64)>, idx: usize, v: f64) {
         while let Some(&(_, back_v)) = dq.back() {
-            if back_v >= v { dq.pop_back(); } else { break; }
+            if back_v >= v {
+                dq.pop_back();
+            } else {
+                break;
+            }
         }
         dq.push_back((idx, v));
     }
     #[inline(always)]
     fn dq_pop_old(dq: &mut VecDeque<(usize, f64)>, win_start: usize) {
         while let Some(&(k, _)) = dq.front() {
-            if k < win_start { dq.pop_front(); } else { break; }
+            if k < win_start {
+                dq.pop_front();
+            } else {
+                break;
+            }
         }
     }
 
@@ -814,7 +876,11 @@ impl NamaStream {
     #[inline]
     pub fn update_source(&mut self, s: f64) -> Option<f64> {
         // new TR uses previous source; first TR is NaN (ignored in sum) to match batch semantics
-        let tr_new = if self.last_src.is_nan() { f64::NAN } else { (s - self.last_src).abs() };
+        let tr_new = if self.last_src.is_nan() {
+            f64::NAN
+        } else {
+            (s - self.last_src).abs()
+        };
 
         // outgoing TR (oldest slot to be overwritten)
         let tr_old = self.buf_tr[self.head];
@@ -839,8 +905,12 @@ impl NamaStream {
         }
 
         // O(1) rolling sum of TRs (ignore NaN just like the batch warmup)
-        if tr_old.is_finite() { self.eff_sum -= tr_old; }
-        if tr_new.is_finite() { self.eff_sum += tr_new; }
+        if tr_old.is_finite() {
+            self.eff_sum -= tr_old;
+        }
+        if tr_new.is_finite() {
+            self.eff_sum += tr_new;
+        }
 
         // finalize position / warmup detection
         self.advance();
@@ -856,7 +926,9 @@ impl NamaStream {
             // micro-opt: avoid divide in hot path
             let inv = self.eff_sum.recip();
             range * inv
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         let y = if self.have_out {
             // y = prev_y + alpha * (x - prev_y)
@@ -915,8 +987,12 @@ impl NamaStream {
             Self::dq_pop_old(&mut self.dq_min, win_start);
         }
 
-        if tr_old.is_finite() { self.eff_sum -= tr_old; }
-        if tr_new.is_finite() { self.eff_sum += tr_new; }
+        if tr_old.is_finite() {
+            self.eff_sum -= tr_old;
+        }
+        if tr_new.is_finite() {
+            self.eff_sum += tr_new;
+        }
 
         self.advance();
         if !self.filled {
@@ -929,7 +1005,9 @@ impl NamaStream {
         let alpha = if self.eff_sum != 0.0 {
             let inv = self.eff_sum.recip();
             range * inv
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         let y = if self.have_out {
             (src - self.last_out).mul_add(alpha, self.last_out)
@@ -1083,7 +1161,8 @@ fn nama_batch_inner(
 
     // Precompute degenerate TR once for the slice (no OHLC in batch slice API)
     let mut tr = vec![0.0f64; cols];
-    if cols > first { // first < cols guaranteed earlier
+    if cols > first {
+        // first < cols guaranteed earlier
         tr[first] = 0.0;
         for j in (first + 1)..cols {
             tr[j] = (data[j] - data[j - 1]).abs();

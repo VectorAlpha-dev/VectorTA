@@ -194,7 +194,10 @@ pub fn obv_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [
     let tail_volume = &volume[first_valid + 1..];
     let tail_out = &mut out[first_valid + 1..];
 
-    for (dst, (&c, &v)) in tail_out.iter_mut().zip(tail_close.iter().zip(tail_volume.iter())) {
+    for (dst, (&c, &v)) in tail_out
+        .iter_mut()
+        .zip(tail_close.iter().zip(tail_volume.iter()))
+    {
         // sign in {-1.0, 0.0, +1.0}; NaNs yield 0 (no change)
         let s = ((c > prev_close) as i32 - (c < prev_close) as i32) as f64;
         prev_obv = v.mul_add(s, prev_obv);
@@ -413,7 +416,11 @@ impl ObvStream {
     /// Retrieve last computed OBV without mutating the stream.
     #[inline(always)]
     pub fn last(&self) -> Option<f64> {
-        if self.initialized { Some(self.prev_obv) } else { None }
+        if self.initialized {
+            Some(self.prev_obv)
+        } else {
+            None
+        }
     }
 
     /// Reset the streaming state.

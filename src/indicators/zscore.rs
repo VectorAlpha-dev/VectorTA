@@ -386,7 +386,11 @@ pub unsafe fn zscore_scalar_classic_sma(
     if variance < 0.0 {
         variance = 0.0;
     }
-    let mut stddev = if variance == 0.0 { 0.0 } else { variance.sqrt() * nbdev };
+    let mut stddev = if variance == 0.0 {
+        0.0
+    } else {
+        variance.sqrt() * nbdev
+    };
 
     // First valid value
     let xw = *data.get_unchecked(warmup_end);
@@ -414,7 +418,11 @@ pub unsafe fn zscore_scalar_classic_sma(
         if variance < 0.0 {
             variance = 0.0;
         }
-        stddev = if variance == 0.0 { 0.0 } else { variance.sqrt() * nbdev };
+        stddev = if variance == 0.0 {
+            0.0
+        } else {
+            variance.sqrt() * nbdev
+        };
 
         // Calculate z-score
         *out.get_unchecked_mut(i) = if stddev == 0.0 || stddev.is_nan() {
@@ -620,7 +628,10 @@ impl ZscoreStream {
     pub fn try_new(params: ZscoreParams) -> Result<Self, ZscoreError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(ZscoreError::InvalidPeriod { period, data_len: 0 });
+            return Err(ZscoreError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let ma_type = params.ma_type.unwrap_or_else(|| "sma".to_string());
         let nbdev = params.nbdev.unwrap_or(1.0);
@@ -635,7 +646,11 @@ impl ZscoreStream {
 
         let n = period as f64;
         let wden = n * (n + 1.0) * 0.5;
-        let inv_nbdev = if nbdev != 0.0 { 1.0 / nbdev } else { f64::INFINITY };
+        let inv_nbdev = if nbdev != 0.0 {
+            1.0 / nbdev
+        } else {
+            f64::INFINITY
+        };
 
         Ok(Self {
             period,
@@ -737,10 +752,18 @@ impl ZscoreStream {
 
             let var = if self.kind == MaKind::Sma {
                 let v = ex2 - mean * mean;
-                if v < 0.0 { 0.0 } else { v }
+                if v < 0.0 {
+                    0.0
+                } else {
+                    v
+                }
             } else {
                 let v = ex2 - 2.0 * mean * ex + mean * mean;
-                if v < 0.0 { 0.0 } else { v }
+                if v < 0.0 {
+                    0.0
+                } else {
+                    v
+                }
             };
 
             let sd = var.sqrt();
@@ -749,7 +772,11 @@ impl ZscoreStream {
             }
 
             // latest value is the one just written (at head-1)
-            let last_idx = if self.head == 0 { self.period - 1 } else { self.head - 1 };
+            let last_idx = if self.head == 0 {
+                self.period - 1
+            } else {
+                self.head - 1
+            };
             let last = self.buffer[last_idx];
             let z = (last - mean) / (sd * self.nbdev);
             return Some(z);

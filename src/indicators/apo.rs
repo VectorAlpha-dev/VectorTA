@@ -1138,10 +1138,8 @@ fn apo_batch_inner_into(
             let do_block = |b: usize, blk_mu: &mut [MaybeUninit<f64>]| unsafe {
                 let start_row = b * LANES;
                 let end_row = usize::min(start_row + LANES, rows);
-                let blk: &mut [f64] = core::slice::from_raw_parts_mut(
-                    blk_mu.as_mut_ptr() as *mut f64,
-                    blk_mu.len(),
-                );
+                let blk: &mut [f64] =
+                    core::slice::from_raw_parts_mut(blk_mu.as_mut_ptr() as *mut f64, blk_mu.len());
                 apo_batch_rows_avx2(data, first, cols, &combos[start_row..end_row], blk);
             };
             if parallel {
@@ -1166,10 +1164,8 @@ fn apo_batch_inner_into(
             let do_block = |b: usize, blk_mu: &mut [MaybeUninit<f64>]| unsafe {
                 let start_row = b * LANES;
                 let end_row = usize::min(start_row + LANES, rows);
-                let blk: &mut [f64] = core::slice::from_raw_parts_mut(
-                    blk_mu.as_mut_ptr() as *mut f64,
-                    blk_mu.len(),
-                );
+                let blk: &mut [f64] =
+                    core::slice::from_raw_parts_mut(blk_mu.as_mut_ptr() as *mut f64, blk_mu.len());
                 apo_batch_rows_avx512(data, first, cols, &combos[start_row..end_row], blk);
             };
             if parallel {
@@ -1263,7 +1259,7 @@ unsafe fn apo_batch_rows_avx2(
     cols: usize,
     combos_block: &[ApoParams],
     out_block: &mut [f64],
-){
+) {
     use core::arch::x86_64::*;
     let lanes = 4usize;
     let l = combos_block.len();
@@ -1325,7 +1321,7 @@ unsafe fn apo_batch_rows_avx512(
     cols: usize,
     combos_block: &[ApoParams],
     out_block: &mut [f64],
-){
+) {
     use core::arch::x86_64::*;
     let lanes = 8usize;
     let l = combos_block.len();

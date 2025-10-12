@@ -548,7 +548,9 @@ pub unsafe fn wilders_avx512_short(
     let mut sum = _mm_cvtsd_f64(v1);
 
     match period - (chunks8 * 8) {
-        7 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4) + *p.add(5) + *p.add(6),
+        7 => {
+            sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4) + *p.add(5) + *p.add(6)
+        }
         6 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4) + *p.add(5),
         5 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4),
         4 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3),
@@ -646,7 +648,9 @@ pub unsafe fn wilders_avx512_long(
     let mut sum = _mm_cvtsd_f64(v1);
 
     match period - (chunks16 * 16) - (rem / 8) * 8 {
-        7 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4) + *p.add(5) + *p.add(6),
+        7 => {
+            sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4) + *p.add(5) + *p.add(6)
+        }
         6 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4) + *p.add(5),
         5 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3) + *p.add(4),
         4 => sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3),
@@ -713,7 +717,10 @@ impl WildersStream {
     pub fn try_new(params: WildersParams) -> Result<Self, WildersError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(WildersError::InvalidPeriod { period, data_len: 0 });
+            return Err(WildersError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let alpha = 1.0 / (period as f64);
         Ok(Self {
@@ -2071,16 +2078,20 @@ pub fn wilders_cuda_many_series_one_param_dev_py(
     period: usize,
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    use numpy::PyUntypedArrayMethods;
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaWilders;
+    use numpy::PyUntypedArrayMethods;
 
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
 
     let flat_in = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = WildersParams { period: Some(period) };
+    let params = WildersParams {
+        period: Some(period),
+    };
 
     let inner = py.allow_threads(|| {
         let cuda = CudaWilders::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;

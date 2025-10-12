@@ -607,8 +607,8 @@ pub struct VwapStream {
     unit_char: char,
 
     // fast path for linear-time anchors (m/h/d)
-    bucket_ms: i64,    // 0 for 'M' anchors
-    next_cutoff: i64,  // absolute timestamp (ms) of the next bucket boundary
+    bucket_ms: i64,   // 0 for 'M' anchors
+    next_cutoff: i64, // absolute timestamp (ms) of the next bucket boundary
     current_group_id: i64,
 
     // accumulators
@@ -667,9 +667,7 @@ impl VwapStream {
         let gid = ts / self.bucket_ms;
         self.current_group_id = gid;
         // next_cutoff = start_of_window + bucket_ms = (gid + 1) * bucket_ms
-        self.next_cutoff = gid
-            .saturating_add(1)
-            .saturating_mul(self.bucket_ms);
+        self.next_cutoff = gid.saturating_add(1).saturating_mul(self.bucket_ms);
         self.volume_sum = 0.0;
         self.vol_price_sum = 0.0;
     }
@@ -726,9 +724,7 @@ impl VwapStream {
         let gid = total_months / (self.count as i64);
 
         // Compute next bucket's first day 00:00:00 as ms since epoch.
-        let next_bucket_months = gid
-            .saturating_add(1)
-            .saturating_mul(self.count as i64);
+        let next_bucket_months = gid.saturating_add(1).saturating_mul(self.count as i64);
 
         let next_year = 1970 + next_bucket_months.div_euclid(12);
         let next_month0 = next_bucket_months.rem_euclid(12); // 0..=11
@@ -1257,7 +1253,11 @@ unsafe fn vwap_row_scalar_pv(
         const MINUTE_MS: i64 = 60_000;
         const HOUR_MS: i64 = 3_600_000;
         const DAY_MS: i64 = 86_400_000;
-        let unit_ms: i64 = match unit_char { 'm' => MINUTE_MS, 'h' => HOUR_MS, _ => DAY_MS };
+        let unit_ms: i64 = match unit_char {
+            'm' => MINUTE_MS,
+            'h' => HOUR_MS,
+            _ => DAY_MS,
+        };
         let bucket_ms: i64 = (count as i64) * unit_ms;
 
         let mut i: usize = 0;
@@ -1274,7 +1274,11 @@ unsafe fn vwap_row_scalar_pv(
             let pv0 = *pv_ptr.add(i);
             volume_sum += v0;
             vol_price_sum += pv0;
-            *out_ptr.add(i) = if volume_sum > 0.0 { vol_price_sum / volume_sum } else { f64::NAN };
+            *out_ptr.add(i) = if volume_sum > 0.0 {
+                vol_price_sum / volume_sum
+            } else {
+                f64::NAN
+            };
 
             let idx1 = i + 1;
             let ts1 = *ts_ptr.add(idx1);
@@ -1288,7 +1292,11 @@ unsafe fn vwap_row_scalar_pv(
             let pv1 = *pv_ptr.add(idx1);
             volume_sum += v1;
             vol_price_sum += pv1;
-            *out_ptr.add(idx1) = if volume_sum > 0.0 { vol_price_sum / volume_sum } else { f64::NAN };
+            *out_ptr.add(idx1) = if volume_sum > 0.0 {
+                vol_price_sum / volume_sum
+            } else {
+                f64::NAN
+            };
 
             i += 2;
         }
@@ -1304,7 +1312,11 @@ unsafe fn vwap_row_scalar_pv(
             let pvx = *pv_ptr.add(unroll_end);
             volume_sum += v;
             vol_price_sum += pvx;
-            *out_ptr.add(unroll_end) = if volume_sum > 0.0 { vol_price_sum / volume_sum } else { f64::NAN };
+            *out_ptr.add(unroll_end) = if volume_sum > 0.0 {
+                vol_price_sum / volume_sum
+            } else {
+                f64::NAN
+            };
         }
         return;
     }
@@ -1313,7 +1325,10 @@ unsafe fn vwap_row_scalar_pv(
         let mut i: usize = 0;
         while i < n {
             let ts = *ts_ptr.add(i);
-            let gid = match floor_to_month(ts, count) { Ok(g) => g, Err(_) => return };
+            let gid = match floor_to_month(ts, count) {
+                Ok(g) => g,
+                Err(_) => return,
+            };
             if gid != current_group_id {
                 current_group_id = gid;
                 volume_sum = 0.0;
@@ -1323,7 +1338,11 @@ unsafe fn vwap_row_scalar_pv(
             let pvx = *pv_ptr.add(i);
             volume_sum += v;
             vol_price_sum += pvx;
-            *out_ptr.add(i) = if volume_sum > 0.0 { vol_price_sum / volume_sum } else { f64::NAN };
+            *out_ptr.add(i) = if volume_sum > 0.0 {
+                vol_price_sum / volume_sum
+            } else {
+                f64::NAN
+            };
             i += 1;
         }
         return;
@@ -2331,10 +2350,9 @@ pub fn vwap_cuda_many_series_one_param_dev_py(
     volumes_tm: numpy::PyReadonlyArray2<'_, f64>,
     anchor: String,
     device_id: usize,
-    
 ) -> PyResult<DeviceArrayF32Py> {
-    use numpy::PyUntypedArrayMethods;
     use numpy::PyArrayMethods;
+    use numpy::PyUntypedArrayMethods;
 
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2344,28 +2362,31 @@ pub fn vwap_cuda_many_series_one_param_dev_py(
     let p_shape = prices_tm.shape();
     let v_shape = volumes_tm.shape();
     if p_shape != v_shape {
-        return Err(PyValueError::new_err("prices_tm and volumes_tm shapes must match"));
+        return Err(PyValueError::new_err(
+            "prices_tm and volumes_tm shapes must match",
+        ));
     }
     let rows = p_shape[0];
     let cols = p_shape[1];
     if ts_slice.len() != rows {
-        return Err(PyValueError::new_err("timestamps length must equal rows of matrices"));
+        return Err(PyValueError::new_err(
+            "timestamps length must equal rows of matrices",
+        ));
     }
     let prices_flat = prices_tm.as_slice()?;
     let volumes_flat = volumes_tm.as_slice()?;
 
     let inner = py.allow_threads(|| {
         let cuda = CudaVwap::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .vwap_many_series_one_param_time_major_dev(
-                ts_slice,
-                volumes_flat,
-                prices_flat,
-                cols,
-                rows,
-                &anchor,
-            )
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.vwap_many_series_one_param_time_major_dev(
+            ts_slice,
+            volumes_flat,
+            prices_flat,
+            cols,
+            rows,
+            &anchor,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     Ok(DeviceArrayF32Py { inner })

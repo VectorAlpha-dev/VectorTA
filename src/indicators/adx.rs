@@ -1276,7 +1276,8 @@ fn adx_batch_inner_into(
         // Per-row smoother over shared streams (enabled for large row sweeps)
         let do_row_shared = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
             let p = combos[row].period.unwrap();
-            let row_f64 = core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len());
+            let row_f64 =
+                core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len());
             let dst_tail = &mut row_f64[first..];
 
             let pf = p as f64;
@@ -1353,7 +1354,9 @@ fn adx_batch_inner_into(
         let rows_iter = (0..rows).zip(out_mu2.chunks_mut(cols));
         if parallel {
             #[cfg(not(target_arch = "wasm32"))]
-            rows_iter.par_bridge().for_each(|(r, s)| do_row_shared(r, s));
+            rows_iter
+                .par_bridge()
+                .for_each(|(r, s)| do_row_shared(r, s));
             #[cfg(target_arch = "wasm32")]
             for (r, s) in rows_iter {
                 do_row_shared(r, s);
@@ -1615,18 +1618,27 @@ fn adx_batch_inner(
         let pm1 = pf - 1.0;
         let dst_tail = &mut out_row[first..];
         match kern {
-            Kernel::Scalar => adx_row_scalar(&high[first..], &low[first..], &close[first..], p, dst_tail),
+            Kernel::Scalar => {
+                adx_row_scalar(&high[first..], &low[first..], &close[first..], p, dst_tail)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => adx_row_avx2(&high[first..], &low[first..], &close[first..], p, dst_tail),
+            Kernel::Avx2 => {
+                adx_row_avx2(&high[first..], &low[first..], &close[first..], p, dst_tail)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => adx_row_avx512(&high[first..], &low[first..], &close[first..], p, dst_tail),
+            Kernel::Avx512 => {
+                adx_row_avx512(&high[first..], &low[first..], &close[first..], p, dst_tail)
+            }
             _ => adx_row_scalar(&high[first..], &low[first..], &close[first..], p, dst_tail),
         }
     };
 
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
-        values.par_chunks_mut(cols).enumerate().for_each(|(r, s)| do_row(r, s));
+        values
+            .par_chunks_mut(cols)
+            .enumerate()
+            .for_each(|(r, s)| do_row(r, s));
         #[cfg(target_arch = "wasm32")]
         for (r, s) in values.chunks_mut(cols).enumerate() {
             do_row(r, s);
@@ -1765,8 +1777,16 @@ impl AdxStream {
         // Directional movement gating (Wilder)
         let up_move = high - self.prev_high;
         let down_move = self.prev_low - low;
-        let plus_dm = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
-        let minus_dm = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
+        let plus_dm = if up_move > down_move && up_move > 0.0 {
+            up_move
+        } else {
+            0.0
+        };
+        let minus_dm = if down_move > up_move && down_move > 0.0 {
+            down_move
+        } else {
+            0.0
+        };
 
         self.count += 1;
 
@@ -1778,7 +1798,11 @@ impl AdxStream {
 
             if self.count == self.period + 1 {
                 // DI via single reciprocal to avoid two divisions
-                let inv_atr100 = if self.atr != 0.0 { 100.0 / self.atr } else { 0.0 };
+                let inv_atr100 = if self.atr != 0.0 {
+                    100.0 / self.atr
+                } else {
+                    0.0
+                };
                 let plus_di = self.plus_dm_smooth * inv_atr100;
                 let minus_di = self.minus_dm_smooth * inv_atr100;
                 let sum_di = plus_di + minus_di;
@@ -1809,7 +1833,11 @@ impl AdxStream {
         self.minus_dm_smooth = self.minus_dm_smooth * one_minus_rp + minus_dm;
 
         // One division to compute both DI's
-        let inv_atr100 = if self.atr != 0.0 { 100.0 / self.atr } else { 0.0 };
+        let inv_atr100 = if self.atr != 0.0 {
+            100.0 / self.atr
+        } else {
+            0.0
+        };
         let plus_di = self.plus_dm_smooth * inv_atr100;
         let minus_di = self.minus_dm_smooth * inv_atr100;
         let sum_di = plus_di + minus_di;

@@ -29,8 +29,8 @@ macro_rules! define_ma_period_benches {
     ) => {
         pub mod $modname {
             use super::*;
-            use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
             use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+            use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
             const ONE_SERIES_LEN: usize = 1_000_000;
             const PARAM_SWEEP: usize = 250;
@@ -56,7 +56,10 @@ macro_rules! define_ma_period_benches {
             }
             impl CudaBenchState for BatchState {
                 fn launch(&mut self) {
-                    let _ = self.cuda.$batch_fn(&self.price, &self.sweep).expect("batch launch");
+                    let _ = self
+                        .cuda
+                        .$batch_fn(&self.price, &self.sweep)
+                        .expect("batch launch");
                 }
             }
             fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -137,8 +140,8 @@ macro_rules! define_ma_period_benches_batch_only {
     ) => {
         pub mod $modname {
             use super::*;
-            use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
             use crate::cuda::bench::helpers::gen_series;
+            use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
             const ONE_SERIES_LEN: usize = 1_000_000;
             const PARAM_SWEEP: usize = 250;
@@ -156,7 +159,10 @@ macro_rules! define_ma_period_benches_batch_only {
             }
             impl CudaBenchState for BatchState {
                 fn launch(&mut self) {
-                    let _ = self.cuda.$batch_fn(&self.price, &self.sweep).expect("batch launch");
+                    let _ = self
+                        .cuda
+                        .$batch_fn(&self.price, &self.sweep)
+                        .expect("batch launch");
                 }
             }
             fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -167,19 +173,16 @@ macro_rules! define_ma_period_benches_batch_only {
             }
 
             pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-                vec![
-                    CudaBenchScenario::new(
-                        $indicator,
-                        "one_series_many_params",
-                        concat!($group_base, "_cuda_batch_dev"),
-                        "1m_x_250",
-                        prep_one_series_many_params,
-                    )
-                    .with_sample_size(10)
-                    .with_mem_required(bytes_one_series_many_params()),
-                ]
+                vec![CudaBenchScenario::new(
+                    $indicator,
+                    "one_series_many_params",
+                    concat!($group_base, "_cuda_batch_dev"),
+                    "1m_x_250",
+                    prep_one_series_many_params,
+                )
+                .with_sample_size(10)
+                .with_mem_required(bytes_one_series_many_params())]
             }
         }
     };
 }
-

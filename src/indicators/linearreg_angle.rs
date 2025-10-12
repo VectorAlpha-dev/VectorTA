@@ -299,10 +299,7 @@ pub fn linearreg_angle_scalar(data: &[f64], period: usize, first_valid: usize, o
 
             sum_y += y0 + y1 + y2 + y3;
             let jf = j as f64;
-            sum_kd += jf * y0
-                + (jf + 1.0) * y1
-                + (jf + 2.0) * y2
-                + (jf + 3.0) * y3;
+            sum_kd += jf * y0 + (jf + 1.0) * y1 + (jf + 2.0) * y2 + (jf + 3.0) * y3;
 
             j += 4;
         }
@@ -323,7 +320,9 @@ pub fn linearreg_angle_scalar(data: &[f64], period: usize, first_valid: usize, o
                 *out.get_unchecked_mut(i) = slope.atan() * rad2deg;
 
                 i += 1;
-                if i >= n { break; }
+                if i >= n {
+                    break;
+                }
 
                 let enter = *data.get_unchecked(i);
                 let leave = *data.get_unchecked(start);
@@ -342,7 +341,9 @@ pub fn linearreg_angle_scalar(data: &[f64], period: usize, first_valid: usize, o
                 *out.get_unchecked_mut(i) = slope.atan() * rad2deg;
 
                 i += 1;
-                if i >= n { break; }
+                if i >= n {
+                    break;
+                }
 
                 let enter = *data.get_unchecked(i);
                 let leave = *data.get_unchecked(start);
@@ -362,10 +363,7 @@ pub fn linearreg_angle_scalar(data: &[f64], period: usize, first_valid: usize, o
 
                         sum_y += y0 + y1 + y2 + y3;
                         let jf = jj as f64;
-                        sum_kd += jf * y0
-                            + (jf + 1.0) * y1
-                            + (jf + 2.0) * y2
-                            + (jf + 3.0) * y3;
+                        sum_kd += jf * y0 + (jf + 1.0) * y1 + (jf + 2.0) * y2 + (jf + 3.0) * y3;
                         jj += 4;
                     }
                     while jj < ee {
@@ -465,23 +463,37 @@ unsafe fn linearreg_angle_avx512_impl(
         let y2 = *data.get_unchecked(idx + 2);
         let y3 = *data.get_unchecked(idx + 3);
 
-        acc_s += y0; s[idx + 1] = acc_s;  acc_k += (idx as f64) * y0;         k[idx + 1] = acc_k;
-        acc_s += y1; s[idx + 2] = acc_s;  acc_k += ((idx + 1) as f64) * y1;   k[idx + 2] = acc_k;
-        acc_s += y2; s[idx + 3] = acc_s;  acc_k += ((idx + 2) as f64) * y2;   k[idx + 3] = acc_k;
-        acc_s += y3; s[idx + 4] = acc_s;  acc_k += ((idx + 3) as f64) * y3;   k[idx + 4] = acc_k;
+        acc_s += y0;
+        s[idx + 1] = acc_s;
+        acc_k += (idx as f64) * y0;
+        k[idx + 1] = acc_k;
+        acc_s += y1;
+        s[idx + 2] = acc_s;
+        acc_k += ((idx + 1) as f64) * y1;
+        k[idx + 2] = acc_k;
+        acc_s += y2;
+        s[idx + 3] = acc_s;
+        acc_k += ((idx + 2) as f64) * y2;
+        k[idx + 3] = acc_k;
+        acc_s += y3;
+        s[idx + 4] = acc_s;
+        acc_k += ((idx + 3) as f64) * y3;
+        k[idx + 4] = acc_k;
 
         idx += 4;
     }
     while idx < n {
         let y = *data.get_unchecked(idx);
-        acc_s += y; s[idx + 1] = acc_s;
-        acc_k += (idx as f64) * y; k[idx + 1] = acc_k;
+        acc_s += y;
+        s[idx + 1] = acc_s;
+        acc_k += (idx as f64) * y;
+        k[idx + 1] = acc_k;
         idx += 1;
     }
 
     // SIMD constants
-    let v_p      = _mm512_set1_pd(p);
-    let v_nsumx  = _mm512_set1_pd(-sum_x);
+    let v_p = _mm512_set1_pd(p);
+    let v_nsumx = _mm512_set1_pd(-sum_x);
     let v_invdiv = _mm512_set1_pd(inv_div);
 
     let mut i = start_i;
@@ -499,8 +511,14 @@ unsafe fn linearreg_angle_avx512_impl(
 
         let base = i as f64;
         let v_i = _mm512_setr_pd(
-            base, base + 1.0, base + 2.0, base + 3.0,
-            base + 4.0, base + 5.0, base + 6.0, base + 7.0
+            base,
+            base + 1.0,
+            base + 2.0,
+            base + 3.0,
+            base + 4.0,
+            base + 5.0,
+            base + 6.0,
+            base + 7.0,
         );
 
         let sum_xy = _mm512_fnmadd_pd(v_i, sum_y, sum_kd);
@@ -512,7 +530,7 @@ unsafe fn linearreg_angle_avx512_impl(
         let mut tmp: [f64; 8] = core::mem::zeroed();
         _mm512_storeu_pd(tmp.as_mut_ptr(), slope);
 
-        *out.get_unchecked_mut(i)     = tmp[0].atan() * rad2deg;
+        *out.get_unchecked_mut(i) = tmp[0].atan() * rad2deg;
         *out.get_unchecked_mut(i + 1) = tmp[1].atan() * rad2deg;
         *out.get_unchecked_mut(i + 2) = tmp[2].atan() * rad2deg;
         *out.get_unchecked_mut(i + 3) = tmp[3].atan() * rad2deg;
@@ -655,7 +673,11 @@ impl Linearreg_angleStream {
 
         for j in 0..win_len {
             let pos = self.head + j;
-            let rix = if pos >= self.period { pos - self.period } else { pos };
+            let rix = if pos >= self.period {
+                pos - self.period
+            } else {
+                pos
+            };
             let y = self.ring[rix];
             let k = (start_abs + j) as f64;
             s_y += y;
@@ -875,17 +897,31 @@ fn linearreg_angle_batch_inner(
                 let y2 = *data.get_unchecked(idx + 2);
                 let y3 = *data.get_unchecked(idx + 3);
 
-                acc_s += y0; s[idx + 1] = acc_s;  acc_k += (idx as f64) * y0;         k[idx + 1] = acc_k;
-                acc_s += y1; s[idx + 2] = acc_s;  acc_k += ((idx + 1) as f64) * y1;   k[idx + 2] = acc_k;
-                acc_s += y2; s[idx + 3] = acc_s;  acc_k += ((idx + 2) as f64) * y2;   k[idx + 3] = acc_k;
-                acc_s += y3; s[idx + 4] = acc_s;  acc_k += ((idx + 3) as f64) * y3;   k[idx + 4] = acc_k;
+                acc_s += y0;
+                s[idx + 1] = acc_s;
+                acc_k += (idx as f64) * y0;
+                k[idx + 1] = acc_k;
+                acc_s += y1;
+                s[idx + 2] = acc_s;
+                acc_k += ((idx + 1) as f64) * y1;
+                k[idx + 2] = acc_k;
+                acc_s += y2;
+                s[idx + 3] = acc_s;
+                acc_k += ((idx + 2) as f64) * y2;
+                k[idx + 3] = acc_k;
+                acc_s += y3;
+                s[idx + 4] = acc_s;
+                acc_k += ((idx + 3) as f64) * y3;
+                k[idx + 4] = acc_k;
 
                 idx += 4;
             }
             while idx < n {
                 let y = *data.get_unchecked(idx);
-                acc_s += y; s[idx + 1] = acc_s;
-                acc_k += (idx as f64) * y; k[idx + 1] = acc_k;
+                acc_s += y;
+                s[idx + 1] = acc_s;
+                acc_k += (idx as f64) * y;
+                k[idx + 1] = acc_k;
                 idx += 1;
             }
         }

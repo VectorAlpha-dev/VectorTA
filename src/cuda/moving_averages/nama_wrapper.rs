@@ -30,24 +30,37 @@ use std::fmt;
 // -------- Kernel selection policy (mirror ALMA surface) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchThreadsPerOutput { One, Two }
+pub enum BatchThreadsPerOutput {
+    One,
+    Two,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
     /// Recurrence kernels are 1D (combo-per-block). Only block_x matters.
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
     /// Tiled hint accepted for API symmetry; mapped to `Plain { block_x: tile }`.
-    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+    Tiled {
+        tile: u32,
+        per_thread: BatchThreadsPerOutput,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
     /// 1D series-per-block mapping; block_x controls warmup fill speed.
-    OneD { block_x: u32 },
+    OneD {
+        block_x: u32,
+    },
     /// 2D hint accepted for API symmetry; mapped to `OneD { block_x: tx }`.
-    Tiled2D { tx: u32, ty: u32 },
+    Tiled2D {
+        tx: u32,
+        ty: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -57,10 +70,14 @@ pub struct CudaNamaPolicy {
 }
 
 impl Default for BatchKernelPolicy {
-    fn default() -> Self { BatchKernelPolicy::Auto }
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
 }
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
 }
 
 // -------- Introspection (selected kernel) --------
@@ -106,7 +123,9 @@ pub struct CudaNama {
 
 impl CudaNama {
     #[inline]
-    fn has_function(&self, name: &str) -> bool { self.module.get_function(name).is_ok() }
+    fn has_function(&self, name: &str) -> bool {
+        self.module.get_function(name).is_ok()
+    }
     pub fn new(device_id: usize) -> Result<Self, CudaNamaError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
         let device =
@@ -116,7 +135,10 @@ impl CudaNama {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/nama_kernel.ptx"));
         let module = match Module::from_ptx(
             ptx,
-            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)],
+            &[
+                ModuleJitOption::DetermineTargetFromContext,
+                ModuleJitOption::OptLevel(OptLevel::O2),
+            ],
         ) {
             Ok(m) => m,
             Err(_) => Module::from_ptx(ptx, &[]).map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
@@ -129,7 +151,10 @@ impl CudaNama {
             stream,
             _context: context,
             device_id: device_id as u32,
-            policy: CudaNamaPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto },
+            policy: CudaNamaPolicy {
+                batch: BatchKernelPolicy::Auto,
+                many_series: ManySeriesKernelPolicy::Auto,
+            },
             last_batch: None,
             last_many: None,
             debug_batch_logged: false,
@@ -138,28 +163,44 @@ impl CudaNama {
     }
 
     /// Create with explicit policy.
-    pub fn new_with_policy(device_id: usize, policy: CudaNamaPolicy) -> Result<Self, CudaNamaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaNamaPolicy,
+    ) -> Result<Self, CudaNamaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaNamaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaNamaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaNamaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaNamaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] NAMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaNama)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaNama)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -168,14 +209,19 @@ impl CudaNama {
     fn maybe_log_many_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] NAMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaNama)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaNama)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -187,7 +233,9 @@ impl CudaNama {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
@@ -315,8 +363,12 @@ impl CudaNama {
         let mut block_x: u32 = 128;
         match self.policy.batch {
             BatchKernelPolicy::Auto => {}
-            BatchKernelPolicy::Plain { block_x: bx } => { block_x = bx.max(32); }
-            BatchKernelPolicy::Tiled { tile, .. } => { block_x = tile.max(32); }
+            BatchKernelPolicy::Plain { block_x: bx } => {
+                block_x = bx.max(32);
+            }
+            BatchKernelPolicy::Tiled { tile, .. } => {
+                block_x = tile.max(32);
+            }
         }
         let grid: GridSize = (n_chunk as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -469,13 +521,20 @@ impl CudaNama {
             for i in 1..series_len {
                 let cur = prices[i];
                 let prev = prices[i - 1];
-                let diff = if cur.is_nan() || prev.is_nan() { 0.0f32 } else { (cur - prev).abs() };
+                let diff = if cur.is_nan() || prev.is_nan() {
+                    0.0f32
+                } else {
+                    (cur - prev).abs()
+                };
                 acc += diff;
                 prefix.push(acc);
             }
             // pad to series_len + 1
             prefix.push(acc);
-            Some(DeviceBuffer::from_slice(&prefix).map_err(|e| CudaNamaError::Cuda(e.to_string()))?)
+            Some(
+                DeviceBuffer::from_slice(&prefix)
+                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
+            )
         } else {
             None
         };
@@ -507,7 +566,10 @@ impl CudaNama {
         if launched_any {
             unsafe {
                 let this = self as *const _ as *mut CudaNama;
-                let bx = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 128 };
+                let bx = match self.policy.batch {
+                    BatchKernelPolicy::Plain { block_x } => block_x,
+                    _ => 128,
+                };
                 (*this).last_batch = Some(BatchKernelSelected::Plain { block_x: bx });
             }
             self.maybe_log_batch_debug();
@@ -970,7 +1032,9 @@ pub mod benches {
         crate::indicators::moving_averages::nama::NamaParams,
         nama_batch_dev,
         nama_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::nama::NamaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::nama::NamaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::nama::NamaParams { period: Some(64) },
         "nama",
         "nama"

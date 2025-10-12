@@ -51,7 +51,9 @@ pub enum BatchKernelPolicy {
 }
 
 impl Default for BatchKernelPolicy {
-    fn default() -> Self { BatchKernelPolicy::Auto }
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -61,7 +63,9 @@ pub enum ManySeriesKernelPolicy {
 }
 
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -129,17 +133,30 @@ impl CudaTradjema {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaTradjemaPolicy) -> Result<Self, CudaTradjemaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaTradjemaPolicy,
+    ) -> Result<Self, CudaTradjemaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaTradjemaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaTradjemaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaTradjemaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaTradjemaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaTradjemaError> {
-        self.stream.synchronize().map_err(|e| CudaTradjemaError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))
     }
 
     fn mem_check_enabled() -> bool {
@@ -150,7 +167,9 @@ impl CudaTradjema {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
@@ -270,28 +289,36 @@ impl CudaTradjema {
 
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_s = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_s || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TRADJEMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTradjema)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTradjema)).debug_batch_logged = true;
+                }
             }
         }
     }
 
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per_s = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_s || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TRADJEMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTradjema)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTradjema)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -343,7 +370,10 @@ impl CudaTradjema {
 
         let block_x = self.choose_batch_block_x();
         // Record selection for introspection/logging
-        unsafe { (*(self as *const _ as *mut CudaTradjema)).last_batch = Some(BatchKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaTradjema)).last_batch =
+                Some(BatchKernelSelected::OneD { block_x });
+        }
         self.maybe_log_batch_debug();
 
         let grid: GridSize = (n_combos as u32, 1, 1).into();
@@ -626,7 +656,10 @@ impl CudaTradjema {
         }
 
         let block_x = self.choose_many_block_x();
-        unsafe { (*(self as *const _ as *mut CudaTradjema)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaTradjema)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         let grid: GridSize = (cols as u32, 1, 1).into();
@@ -814,8 +847,8 @@ impl CudaTradjema {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;
@@ -840,7 +873,9 @@ pub mod benches {
         let mut low = close.to_vec();
         for i in 0..close.len() {
             let v = close[i];
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let x = i as f32 * 0.0025;
             let off = (0.003 * x.cos()).abs() + 0.11;
             high[i] = v + off;
@@ -849,14 +884,20 @@ pub mod benches {
         (high, low)
     }
 
-    fn synth_hlc_time_major_from_close(close_tm: &[f32], cols: usize, rows: usize) -> (Vec<f32>, Vec<f32>) {
+    fn synth_hlc_time_major_from_close(
+        close_tm: &[f32],
+        cols: usize,
+        rows: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
         let mut high = close_tm.to_vec();
         let mut low = close_tm.to_vec();
         for t in 0..rows {
             for s in 0..cols {
                 let idx = t * cols + s;
                 let v = close_tm[idx];
-                if v.is_nan() { continue; }
+                if v.is_nan() {
+                    continue;
+                }
                 let x = (t as f32) * 0.0023 + (s as f32) * 0.11;
                 let off = (0.0029 * x.sin()).abs() + 0.1;
                 high[idx] = v + off;
@@ -889,7 +930,13 @@ pub mod benches {
             length: (16, 16 + PARAM_SWEEP - 1, 1),
             mult: (8.0, 8.0, 0.0),
         };
-        Box::new(BatchState { cuda, high, low, close, sweep })
+        Box::new(BatchState {
+            cuda,
+            high,
+            low,
+            close,
+            sweep,
+        })
     }
 
     struct ManyState {
@@ -922,8 +969,19 @@ pub mod benches {
         let rows = MANY_SERIES_LEN;
         let close_tm = gen_time_major_prices(cols, rows);
         let (high_tm, low_tm) = synth_hlc_time_major_from_close(&close_tm, cols, rows);
-        let params = TradjemaParams { length: Some(64), mult: Some(8.0) };
-        Box::new(ManyState { cuda, high_tm, low_tm, close_tm, cols, rows, params })
+        let params = TradjemaParams {
+            length: Some(64),
+            mult: Some(8.0),
+        };
+        Box::new(ManyState {
+            cuda,
+            high_tm,
+            low_tm,
+            close_tm,
+            cols,
+            rows,
+            params,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

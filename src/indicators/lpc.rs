@@ -1347,8 +1347,11 @@ struct DomCycleState {
     count: usize,
 
     // InPhase/Quadrature short histories for recursion/EMA
-    ip_l1: f64, ip_l2: f64, ip_l3: f64,   // need i-1 and i-3
-    q_l1: f64,  q_l2: f64,                // need i-1 and i-2
+    ip_l1: f64,
+    ip_l2: f64,
+    ip_l3: f64, // need i-1 and i-3
+    q_l1: f64,
+    q_l2: f64, // need i-1 and i-2
 
     real_prev: f64,
     imag_prev: f64,
@@ -1368,8 +1371,11 @@ impl Default for DomCycleState {
             buf: [0.0; 12],
             idx: 0,
             count: 0,
-            ip_l1: 0.0, ip_l2: 0.0, ip_l3: 0.0,
-            q_l1: 0.0, q_l2: 0.0,
+            ip_l1: 0.0,
+            ip_l2: 0.0,
+            ip_l3: 0.0,
+            q_l1: 0.0,
+            q_l2: 0.0,
             real_prev: 0.0,
             imag_prev: 0.0,
             phase_accum: 0.0,
@@ -1405,16 +1411,16 @@ impl DomCycleState {
         }
 
         // Short-hands for lags used by Ehlers' 7-bar Hilbert implementation
-        let v0  = self.at(0);
-        let v2  = self.at(2);
-        let v4  = self.at(4);
-        let v7  = self.at(7);
-        let v9  = self.at(9);
+        let v0 = self.at(0);
+        let v2 = self.at(2);
+        let v4 = self.at(4);
+        let v7 = self.at(7);
+        let v9 = self.at(9);
         let v11 = self.at(11);
 
         // Keep previous for real/imag EMA cross-terms
         let ip_prev = self.ip_l1;
-        let q_prev  = self.q_l1;
+        let q_prev = self.q_l1;
 
         // Ehlers coefficients (same as batch):
         // InPhase[i] = 1.25*((src[i-4]-src[i-11]) - 0.635*(src[i-2]-src[i-9])) + 0.635*InPhase[i-3]
@@ -1425,10 +1431,14 @@ impl DomCycleState {
 
         // Real/Imag parts (EMA 0.2 / 0.8) as in batch
         let real_cur = 0.2 * (ip_cur * ip_prev + q_cur * q_prev) + 0.8 * self.real_prev;
-        let imag_cur = 0.2 * (ip_cur * q_prev  - ip_prev * q_cur) + 0.8 * self.imag_prev;
+        let imag_cur = 0.2 * (ip_cur * q_prev - ip_prev * q_cur) + 0.8 * self.imag_prev;
 
         // Delta phase: match batch (atan(imag/real)) for parity
-        let delta = if real_cur != 0.0 { (imag_cur / real_cur).atan() } else { 0.0 };
+        let delta = if real_cur != 0.0 {
+            (imag_cur / real_cur).atan()
+        } else {
+            0.0
+        };
 
         // Accumulate phase until > 2π; count bars since last crossing.
         const TAU: f64 = std::f64::consts::PI * 2.0;
@@ -1472,7 +1482,10 @@ impl LpcStream {
 
         let fixed_period = params.fixed_period.unwrap_or(20);
         if fixed_period == 0 {
-            return Err(LpcError::InvalidPeriod { period: 0, data_len: 0 });
+            return Err(LpcError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            });
         }
 
         let mut s = Self {
@@ -1506,13 +1519,20 @@ impl LpcStream {
 
     #[inline(always)]
     fn set_alpha(&mut self, p: usize) {
-        if p == self.last_p { return; }
+        if p == self.last_p {
+            return;
+        }
         // α(n) = (1 - sin(ω)) / cos(ω), ω = 2π / n ; guard cos ≈ 0
         let omega = 2.0 * std::f64::consts::PI / (p as f64);
         let (s, c) = omega.sin_cos();
-        let a = if c.abs() < 1e-12 { // avoid blowup at n ≈ 4
+        let a = if c.abs() < 1e-12 {
+            // avoid blowup at n ≈ 4
             // fall back to previous α; if uninitialized, use EMA α as a sane default
-            if self.last_p == 0 { 2.0 / (p as f64 + 1.0) } else { self.alpha }
+            if self.last_p == 0 {
+                2.0 / (p as f64 + 1.0)
+            } else {
+                self.alpha
+            }
         } else {
             (1.0 - s) / c
         };
@@ -1538,7 +1558,11 @@ impl LpcStream {
             if let Some(dom) = self.dc.update_ifm() {
                 // Same rounding as batch: >= 3 bars, and respect a practical top cap
                 let p = (dom * self.cycle_mult).round().max(3.0) as usize;
-                period = if self.max_cycle_limit > 0 { p.min(self.max_cycle_limit) } else { p };
+                period = if self.max_cycle_limit > 0 {
+                    p.min(self.max_cycle_limit)
+                } else {
+                    p
+                };
             }
         }
         self.set_alpha(period);
@@ -1547,7 +1571,10 @@ impl LpcStream {
         let filt = if self.prev_filter.is_nan() || self.prev_src.is_nan() {
             src
         } else {
-            self.alpha.mul_add(self.prev_filter, 0.5 * self.one_minus_alpha * (src + self.prev_src))
+            self.alpha.mul_add(
+                self.prev_filter,
+                0.5 * self.one_minus_alpha * (src + self.prev_src),
+            )
         };
 
         // Wilder TR with previous high/low (correct formula matching batch)
@@ -1555,7 +1582,7 @@ impl LpcStream {
             (high - low).abs()
         } else {
             let hl = high - low;
-            let c_low1  = (close - self.prev_low).abs();
+            let c_low1 = (close - self.prev_low).abs();
             let c_high1 = (close - self.prev_high).abs();
             hl.max(c_low1).max(c_high1)
         };
@@ -1564,21 +1591,24 @@ impl LpcStream {
         let ftr = if self.prev_ftr.is_nan() || self.prev_tr.is_nan() {
             tr
         } else {
-            self.alpha.mul_add(self.prev_ftr, 0.5 * self.one_minus_alpha * (tr + self.prev_tr))
+            self.alpha.mul_add(
+                self.prev_ftr,
+                0.5 * self.one_minus_alpha * (tr + self.prev_tr),
+            )
         };
 
         let band_high = filt + ftr * self.tr_mult;
-        let band_low  = filt - ftr * self.tr_mult;
+        let band_low = filt - ftr * self.tr_mult;
 
         // Roll state
-        self.prev_src   = src;
-        self.prev_high  = high;
-        self.prev_low   = low;
+        self.prev_src = src;
+        self.prev_high = high;
+        self.prev_low = low;
         self.prev_close = close;
 
-        self.prev_tr     = tr;
+        self.prev_tr = tr;
         self.prev_filter = filt;
-        self.prev_ftr    = ftr;
+        self.prev_ftr = ftr;
 
         Some((filt, band_high, band_low))
     }

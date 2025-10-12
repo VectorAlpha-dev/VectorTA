@@ -9,10 +9,10 @@
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::smma::{expand_grid, SmmaBatchRange, SmmaParams};
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -40,24 +40,42 @@ impl std::error::Error for CudaSmmaError {}
 // -------- Kernel selection policy (mirrors ALMA/CWMA shape) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelPolicy { Auto, Plain { block_x: u32 } }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy { Auto, OneD { block_x: u32 } }
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub struct CudaSmmaPolicy { pub batch: BatchKernelPolicy, pub many_series: ManySeriesKernelPolicy }
+pub struct CudaSmmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
 impl Default for CudaSmmaPolicy {
-    fn default() -> Self { Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto } }
+    fn default() -> Self {
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
+    }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { OneD { block_x: u32 } }
+pub enum BatchKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaSmma {
     module: Module,
@@ -78,15 +96,16 @@ impl CudaSmma {
         let context = Context::new(device).map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/smma_kernel.ptx"));
-        // Prefer context-targeted JIT with moderate optimization, fallback progressively
+        // Prefer context-targeted JIT with highest optimization, fallback progressively
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaSmmaError::Cuda(e.to_string()))?
@@ -111,14 +130,19 @@ impl CudaSmma {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] SMMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaSmma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaSmma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -126,22 +150,35 @@ impl CudaSmma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] SMMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaSmma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaSmma)).debug_many_logged = true;
+                }
             }
         }
     }
 
-    pub fn set_policy(&mut self, policy: CudaSmmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaSmmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaSmmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaSmmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -211,16 +248,36 @@ impl CudaSmma {
             ));
         }
 
-        let func = self
+        let mut func = self
             .module
             .get_function("smma_batch_f32")
             .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
 
-        let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x, _ => 128 };
+        // Prefer L1 for this memory-bound kernel (no dynamic shared memory)
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+        // Occupancy-guided block size suggestion from the driver
+        let (_, suggested_block) = func
+            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        let default_block = 128u32;
+        let auto_block_x = if suggested_block == 0 {
+            default_block
+        } else {
+            suggested_block
+        };
+
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
+            _ => auto_block_x.clamp(64, 1024),
+        };
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        unsafe { (*(self as *const _ as *mut CudaSmma)).last_batch = Some(BatchKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaSmma)).last_batch =
+                Some(BatchKernelSelected::OneD { block_x });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -277,12 +334,25 @@ impl CudaSmma {
         let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        // Basic VRAM check (prices + periods + warms + output) with ~64MB headroom
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let warms_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + warms_bytes + out_bytes;
+        // Basic VRAM check (prices + periods + warms + output) with ~64MB headroom, overflow-safe
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
+        let warms_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
+        let out_bytes = n_combos
+            .checked_mul(series_len)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
+        let required = prices_bytes
+            .checked_add(periods_bytes)
+            .and_then(|x| x.checked_add(warms_bytes))
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
         if let Ok((free, _total)) = mem_get_info() {
             let headroom = 64usize * 1024 * 1024;
             if required.saturating_add(headroom) > free {
@@ -426,16 +496,34 @@ impl CudaSmma {
             ));
         }
 
-        let func = self
+        let mut func = self
             .module
             .get_function("smma_multi_series_one_param_f32")
             .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
 
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x, _ => 128 };
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+        let (_, suggested_block) = func
+            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        let default_block = 128u32;
+        let auto_block_x = if suggested_block == 0 {
+            default_block
+        } else {
+            suggested_block
+        };
+
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
+            _ => auto_block_x.clamp(64, 1024),
+        };
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        unsafe { (*(self as *const _ as *mut CudaSmma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaSmma)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -495,11 +583,22 @@ impl CudaSmma {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // Basic VRAM check (input + first_valids + output) with ~64MB headroom
-        let input_bytes = cols * rows * std::mem::size_of::<f32>();
-        let fv_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
-        let required = input_bytes + fv_bytes + out_bytes;
+        // Basic VRAM check (input + first_valids + output) with ~64MB headroom (overflow-safe)
+        let input_bytes = cols
+            .checked_mul(rows)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
+        let fv_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
+        let out_bytes = cols
+            .checked_mul(rows)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
+        let required = input_bytes
+            .checked_add(fv_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
         if let Ok((free, _total)) = mem_get_info() {
             let headroom = 64usize * 1024 * 1024;
             if required.saturating_add(headroom) > free {
@@ -578,6 +677,91 @@ impl CudaSmma {
             .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
         Ok(())
     }
+
+    /// Like `smma_multi_series_one_param_time_major_into_host_f32`, but returns
+    /// a page-locked host buffer to avoid pageable staging on D2H.
+    pub fn smma_multi_series_one_param_time_major_into_locked(
+        &self,
+        data_tm_f32: &[f32],
+        cols: usize,
+        rows: usize,
+        params: &SmmaParams,
+    ) -> Result<LockedBuffer<f32>, CudaSmmaError> {
+        let (first_valids, period) =
+            Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
+
+        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
+            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+
+        self.launch_many_series_kernel(
+            &d_prices_tm,
+            period,
+            cols,
+            rows,
+            &d_first_valids,
+            &mut d_out_tm,
+        )?;
+
+        // Allocate pinned host buffer and perform async D2H
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        unsafe {
+            d_out_tm
+                .async_copy_to(pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        Ok(pinned)
+    }
+
+    /// Variant that accepts time-major prices in page-locked memory and returns
+    /// a page-locked result, enabling true async paths end-to-end.
+    pub fn smma_multi_series_one_param_time_major_from_locked_to_locked(
+        &self,
+        data_tm_locked: &LockedBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        params: &SmmaParams,
+    ) -> Result<LockedBuffer<f32>, CudaSmmaError> {
+        let (first_valids, period) =
+            Self::prepare_many_series_inputs(data_tm_locked.as_slice(), cols, rows, params)?;
+
+        // H2D from pinned host memory (async)
+        let d_prices_tm =
+            unsafe { DeviceBuffer::from_slice_async(data_tm_locked.as_slice(), &self.stream) }
+                .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+
+        self.launch_many_series_kernel(
+            &d_prices_tm,
+            period,
+            cols,
+            rows,
+            &d_first_valids,
+            &mut d_out_tm,
+        )?;
+
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        unsafe {
+            d_out_tm
+                .async_copy_to(pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
+        Ok(pinned)
+    }
 }
 
 // ---------- Bench profiles ----------
@@ -593,7 +777,9 @@ pub mod benches {
         crate::indicators::moving_averages::smma::SmmaParams,
         smma_batch_dev,
         smma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::smma::SmmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::smma::SmmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::smma::SmmaParams { period: Some(64) },
         "smma",
         "smma"

@@ -690,11 +690,11 @@ pub struct JmaStream {
     // Derived constants
     alpha: f64,
     beta: f64,
-    phase_ratio: f64,      // ∈ [0.5, 2.5]
+    phase_ratio: f64, // ∈ [0.5, 2.5]
     one_minus_alpha: f64,
     one_minus_beta: f64,
     alpha_sq: f64,
-    oma_sq: f64,           // (1 - alpha)^2
+    oma_sq: f64, // (1 - alpha)^2
 
     // State
     initialized: bool,
@@ -727,7 +727,11 @@ impl JmaStream {
         // β = 0.45*(period-1) / (0.45*(period-1) + 2)
         let numerator = 0.45 * (period as f64 - 1.0);
         let denominator = numerator + 2.0;
-        let beta = if denominator.abs() < f64::EPSILON { 0.0 } else { numerator / denominator };
+        let beta = if denominator.abs() < f64::EPSILON {
+            0.0
+        } else {
+            numerator / denominator
+        };
 
         // α = β^power  (power is integer)
         let alpha = pow_u32(beta, power);

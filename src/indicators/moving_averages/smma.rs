@@ -511,7 +511,10 @@ impl SmmaStream {
     pub fn try_new(params: SmmaParams) -> Result<Self, SmmaError> {
         let period = params.period.unwrap_or(7);
         if period == 0 {
-            return Err(SmmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(SmmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let pf64 = period as f64;
         Ok(Self {
@@ -1246,7 +1249,11 @@ mod tests {
                     let ulp_diff = test_bits.abs_diff(ref_bits);
 
                     // SMMA uses simple arithmetic; allow up to 10/20 ULPs or abs < 1e-7
-                    let max_ulps = if matches!(kernel, Kernel::Avx512 | Kernel::Avx512Batch) { 20 } else { 10 };
+                    let max_ulps = if matches!(kernel, Kernel::Avx512 | Kernel::Avx512Batch) {
+                        20
+                    } else {
+                        10
+                    };
 
                     prop_assert!(
 						ulp_diff <= max_ulps || (test_val - ref_val).abs() < 1e-7,

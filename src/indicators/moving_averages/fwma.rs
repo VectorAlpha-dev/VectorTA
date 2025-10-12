@@ -757,11 +757,11 @@ pub struct FwmaStream {
     period: usize,
 
     // Normalized weights (only used to build the initial accumulators)
-    w: Vec<f64>,      // w[0..p-1], oldest -> newest
-    w0: f64,          // w[0]
-    w_last: f64,      // w[p-1]
-    w_prev: f64,      // w[p-2] (0.0 when period == 1)
-    w_next: f64,      // w[p] = w[p-1] + w[p-2]
+    w: Vec<f64>, // w[0..p-1], oldest -> newest
+    w0: f64,     // w[0]
+    w_last: f64, // w[p-1]
+    w_prev: f64, // w[p-2] (0.0 when period == 1)
+    w_next: f64, // w[p] = w[p-1] + w[p-2]
 
     // Ring buffer
     buffer: Vec<f64>, // length = period
@@ -782,7 +782,10 @@ impl FwmaStream {
     pub fn try_new(params: FwmaParams) -> Result<Self, FwmaError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(FwmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(FwmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         // Build Fibonacci weights with convention: 1, 1, 2, 3, 5, ...
@@ -893,7 +896,11 @@ impl FwmaStream {
         self.acc_d = d_prime;
 
         // Return exact dot over the ring to match batch outputs within strict tolerance.
-        Some(if self.nan_count == 0 { self.dot_ring() } else { f64::NAN })
+        Some(if self.nan_count == 0 {
+            self.dot_ring()
+        } else {
+            f64::NAN
+        })
     }
 }
 

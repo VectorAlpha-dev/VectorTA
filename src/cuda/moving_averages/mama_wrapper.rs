@@ -20,8 +20,8 @@ use crate::indicators::moving_averages::mama::{expand_grid, MamaBatchRange, Mama
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::memory::AsyncCopyDestination;
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -36,14 +36,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub enum BatchKernelPolicy {
     Auto,
     /// One combo per block, sequential scan over time.
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
     /// One series per block, sequential scan over time.
-    OneD { block_x: u32 },
+    OneD {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -54,7 +58,10 @@ pub struct CudaMamaPolicy {
 
 impl Default for CudaMamaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -137,8 +144,7 @@ impl CudaMama {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -158,29 +164,45 @@ impl CudaMama {
     }
 
     /// Create using an explicit policy.
-    pub fn new_with_policy(device_id: usize, policy: CudaMamaPolicy) -> Result<Self, CudaMamaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaMamaPolicy,
+    ) -> Result<Self, CudaMamaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaMamaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaMamaPolicy { &self.policy }
+    pub fn set_policy(&mut self, policy: CudaMamaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaMamaPolicy {
+        &self.policy
+    }
 
     /// Selected kernels (if any) for debugging/inspection.
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] MAMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMama)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMama)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -188,14 +210,19 @@ impl CudaMama {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] MAMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMama)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMama)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -344,13 +371,19 @@ impl CudaMama {
         };
 
         let mut h_out_m: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(rows * cols).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+            LockedBuffer::uninitialized(rows * cols)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
         };
         let mut h_out_f: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(rows * cols).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+            LockedBuffer::uninitialized(rows * cols)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
         };
-        for v in h_out_m.as_mut_slice() { *v = f32::NAN; }
-        for v in h_out_f.as_mut_slice() { *v = f32::NAN; }
+        for v in h_out_m.as_mut_slice() {
+            *v = f32::NAN;
+        }
+        for v in h_out_f.as_mut_slice() {
+            *v = f32::NAN;
+        }
 
         let d_fast = DeviceBuffer::from_slice(&[fast_limit])
             .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
@@ -367,11 +400,21 @@ impl CudaMama {
 
         let mut h_series = vec![0f32; rows];
         for j in 0..cols {
-            for t in 0..rows { h_series[t] = prices_tm_f32[t * cols + j]; }
+            for t in 0..rows {
+                h_series[t] = prices_tm_f32[t * cols + j];
+            }
             let d_series = DeviceBuffer::from_slice(&h_series)
                 .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-            let mut fv = 0usize; while fv < rows && !h_series[fv].is_finite() { fv += 1; }
-            if fv >= rows { return Err(CudaMamaError::InvalidInput(format!("series {} has all NaN values", j))); }
+            let mut fv = 0usize;
+            while fv < rows && !h_series[fv].is_finite() {
+                fv += 1;
+            }
+            if fv >= rows {
+                return Err(CudaMamaError::InvalidInput(format!(
+                    "series {} has all NaN values",
+                    j
+                )));
+            }
 
             self.launch_batch_kernel(
                 &d_series,
@@ -386,8 +429,12 @@ impl CudaMama {
 
             let mut h_m = vec![f32::NAN; rows];
             let mut h_f = vec![f32::NAN; rows];
-            d_series_out_m.copy_to(&mut h_m).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-            d_series_out_f.copy_to(&mut h_f).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            d_series_out_m
+                .copy_to(&mut h_m)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            d_series_out_f
+                .copy_to(&mut h_f)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
             for t in 0..rows {
                 let idx_tm = t * cols + j;
                 h_out_m.as_mut_slice()[idx_tm] = h_m[t];
@@ -396,14 +443,28 @@ impl CudaMama {
         }
 
         unsafe {
-            d_out_m.async_copy_from(h_out_m.as_slice(), &self.stream).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-            d_out_f.async_copy_from(h_out_f.as_slice(), &self.stream).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            d_out_m
+                .async_copy_from(h_out_m.as_slice(), &self.stream)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            d_out_f
+                .async_copy_from(h_out_f.as_slice(), &self.stream)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
         }
-        self.stream.synchronize().map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
 
         Ok(DeviceMamaPair {
-            mama: DeviceArrayF32 { buf: d_out_m, rows, cols },
-            fama: DeviceArrayF32 { buf: d_out_f, rows, cols },
+            mama: DeviceArrayF32 {
+                buf: d_out_m,
+                rows,
+                cols,
+            },
+            fama: DeviceArrayF32 {
+                buf: d_out_f,
+                rows,
+                cols,
+            },
         })
     }
 
@@ -816,8 +877,8 @@ impl CudaMama {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;

@@ -53,13 +53,13 @@ use crate::{
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::collections::VecDeque;
 use std::convert::AsRef;
 use std::error::Error;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use std::hint::unlikely;
 use std::mem::{swap, MaybeUninit};
 use thiserror::Error;
-use std::collections::VecDeque;
 
 impl<'a> AsRef<[f64]> for FramaInput<'a> {
     #[inline(always)]
@@ -1413,21 +1413,24 @@ pub struct FramaStream {
     d_prev: f64,
     alpha_prev: f64,
     // --- O(1) sliding-window state ---
-    half: usize,            // n/2 (window is evenized in try_new)
-    idx: usize,             // absolute index of the next output (starts at n when warm)
+    half: usize, // n/2 (window is evenized in try_new)
+    idx: usize,  // absolute index of the next output (starts at n when warm)
     // deques for maxima/minima
-    dq_r_max: DqMax,        // right half max(high)
-    dq_r_min: DqMin,        // right half min(low)
-    dq_l_max: DqMax,        // left  half max(high)
-    dq_l_min: DqMin,        // left  half min(low)
-    dq_w_max: DqMax,        // full  window max(high) (for N3)
-    dq_w_min: DqMin,        // full  window min(low)  (for N3)
+    dq_r_max: DqMax, // right half max(high)
+    dq_r_min: DqMin, // right half min(low)
+    dq_l_max: DqMax, // left  half max(high)
+    dq_l_min: DqMin, // left  half min(low)
+    dq_w_max: DqMax, // full  window max(high) (for N3)
+    dq_w_min: DqMin, // full  window min(low)  (for N3)
     // previous fallbacks when a deque is temporarily empty (e.g., NaN gaps)
-    pm_right: f64, pn_right: f64,
-    pm_left:  f64, pn_left:  f64,
-    pm_full:  f64, pn_full:  f64,
+    pm_right: f64,
+    pn_right: f64,
+    pm_left: f64,
+    pn_left: f64,
+    pm_full: f64,
+    pn_full: f64,
     // precomputed constants
-    sc_floor: f64,          // 2/(sc+1)
+    sc_floor: f64, // 2/(sc+1)
 }
 impl FramaStream {
     pub fn try_new(params: FramaParams) -> Result<Self, FramaError> {
@@ -1465,9 +1468,12 @@ impl FramaStream {
             dq_l_min: DqMin::default(),
             dq_w_max: DqMax::default(),
             dq_w_min: DqMin::default(),
-            pm_right: f64::NAN, pn_right: f64::NAN,
-            pm_left:  f64::NAN, pn_left:  f64::NAN,
-            pm_full:  f64::NAN, pn_full:  f64::NAN,
+            pm_right: f64::NAN,
+            pn_right: f64::NAN,
+            pm_left: f64::NAN,
+            pn_left: f64::NAN,
+            pm_full: f64::NAN,
+            pn_full: f64::NAN,
             sc_floor: 2.0 / (sc as f64 + 1.0),
         })
     }
@@ -1492,9 +1498,12 @@ impl FramaStream {
                 // left  half = [0 .. half)
                 // right half = [half .. n)
                 // full window = [0 .. n)
-                self.dq_r_max.clear(); self.dq_r_min.clear();
-                self.dq_l_max.clear(); self.dq_l_min.clear();
-                self.dq_w_max.clear(); self.dq_w_min.clear();
+                self.dq_r_max.clear();
+                self.dq_r_min.clear();
+                self.dq_l_max.clear();
+                self.dq_l_min.clear();
+                self.dq_w_max.clear();
+                self.dq_w_min.clear();
 
                 for j in 0..self.n {
                     let (h, l, _) = self.buffer[j];
@@ -1513,10 +1522,10 @@ impl FramaStream {
                 // initialize previous fallbacks
                 self.pm_right = self.dq_r_max.front_val().unwrap_or(f64::NAN);
                 self.pn_right = self.dq_r_min.front_val().unwrap_or(f64::NAN);
-                self.pm_left  = self.dq_l_max.front_val().unwrap_or(f64::NAN);
-                self.pn_left  = self.dq_l_min.front_val().unwrap_or(f64::NAN);
-                self.pm_full  = self.dq_w_max.front_val().unwrap_or(f64::NAN);
-                self.pn_full  = self.dq_w_min.front_val().unwrap_or(f64::NAN);
+                self.pm_left = self.dq_l_max.front_val().unwrap_or(f64::NAN);
+                self.pn_left = self.dq_l_min.front_val().unwrap_or(f64::NAN);
+                self.pm_full = self.dq_w_max.front_val().unwrap_or(f64::NAN);
+                self.pn_full = self.dq_w_min.front_val().unwrap_or(f64::NAN);
 
                 // next absolute output index
                 self.idx = self.n;
@@ -1537,10 +1546,13 @@ impl FramaStream {
         //    left  half: [i - n    .. i - half)
         //    full  win : [i - n    .. i)
         let right_lb = i.saturating_sub(self.half);
-        let left_lb  = i.saturating_sub(self.n);
-        self.dq_r_max.expire_lt(right_lb); self.dq_r_min.expire_lt(right_lb);
-        self.dq_l_max.expire_lt(left_lb);  self.dq_l_min.expire_lt(left_lb);
-        self.dq_w_max.expire_lt(left_lb);  self.dq_w_min.expire_lt(left_lb);
+        let left_lb = i.saturating_sub(self.n);
+        self.dq_r_max.expire_lt(right_lb);
+        self.dq_r_min.expire_lt(right_lb);
+        self.dq_l_max.expire_lt(left_lb);
+        self.dq_l_min.expire_lt(left_lb);
+        self.dq_w_max.expire_lt(left_lb);
+        self.dq_w_min.expire_lt(left_lb);
 
         // 2) Read current window extrema (fallback to previous if a deque is empty)
         let (max_r, min_r) = {
@@ -1560,13 +1572,16 @@ impl FramaStream {
         };
 
         // Cache the extrema used this tick (match 'front_or' behavior)
-        self.pm_right = max_r; self.pn_right = min_r;
-        self.pm_left  = max_l; self.pn_left  = min_l;
-        self.pm_full  = max_w; self.pn_full  = min_w;
+        self.pm_right = max_r;
+        self.pn_right = min_r;
+        self.pm_left = max_l;
+        self.pn_left = min_l;
+        self.pm_full = max_w;
+        self.pn_full = min_w;
 
         // 3) Compute fractal dimension & alpha (identical math & clamps)
         let half_f = self.half as f64;
-        let win_f  = self.n as f64;
+        let win_f = self.n as f64;
 
         // If current bar has any NaN, mirror batch: carry forward previous value.
         let output = if !(high.is_nan() || low.is_nan() || close.is_nan()) {
@@ -1583,16 +1598,24 @@ impl FramaStream {
 
             // a0 = exp(w*(d-1)) clamped to [0.1, 1.0]
             let mut a0 = (self.w * (d - 1.0)).exp();
-            if a0 < 0.1 { a0 = 0.1; }
-            if a0 > 1.0 { a0 = 1.0; }
+            if a0 < 0.1 {
+                a0 = 0.1;
+            }
+            if a0 > 1.0 {
+                a0 = 1.0;
+            }
 
             let old_n = (2.0 - a0) / a0;
             let new_n = (self.sc - self.fc) as f64 * ((old_n - 1.0) / (self.sc as f64 - 1.0))
-                        + self.fc as f64;
+                + self.fc as f64;
 
             let mut alpha = 2.0 / (new_n + 1.0);
-            if alpha < self.sc_floor { alpha = self.sc_floor; }
-            if alpha > 1.0 { alpha = 1.0; }
+            if alpha < self.sc_floor {
+                alpha = self.sc_floor;
+            }
+            if alpha > 1.0 {
+                alpha = 1.0;
+            }
             self.alpha_prev = alpha;
 
             // EMA-style update with FMA (matches your SIMD/scalar code)
@@ -1633,33 +1656,75 @@ impl FramaStream {
 
 // --- Minimal monotonic deque helpers for O(1) streaming ---
 #[derive(Default, Debug, Clone)]
-struct DqMax { q: VecDeque<(usize, f64)> }
+struct DqMax {
+    q: VecDeque<(usize, f64)>,
+}
 #[derive(Default, Debug, Clone)]
-struct DqMin { q: VecDeque<(usize, f64)> }
+struct DqMin {
+    q: VecDeque<(usize, f64)>,
+}
 
 impl DqMax {
-    #[inline(always)] fn clear(&mut self){ self.q.clear(); }
-    #[inline(always)] fn expire_lt(&mut self, bound: usize) {
-        while let Some(&(i,_)) = self.q.front() { if i < bound { self.q.pop_front(); } else { break; } }
+    #[inline(always)]
+    fn clear(&mut self) {
+        self.q.clear();
     }
-    #[inline(always)] fn push(&mut self, idx: usize, val: f64) {
+    #[inline(always)]
+    fn expire_lt(&mut self, bound: usize) {
+        while let Some(&(i, _)) = self.q.front() {
+            if i < bound {
+                self.q.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+    #[inline(always)]
+    fn push(&mut self, idx: usize, val: f64) {
         // monotone decreasing by value
-        while let Some(&(_,v)) = self.q.back() { if v >= val { break; } self.q.pop_back(); }
+        while let Some(&(_, v)) = self.q.back() {
+            if v >= val {
+                break;
+            }
+            self.q.pop_back();
+        }
         self.q.push_back((idx, val));
     }
-    #[inline(always)] fn front_val(&self) -> Option<f64> { self.q.front().map(|&(_,v)| v) }
+    #[inline(always)]
+    fn front_val(&self) -> Option<f64> {
+        self.q.front().map(|&(_, v)| v)
+    }
 }
 impl DqMin {
-    #[inline(always)] fn clear(&mut self){ self.q.clear(); }
-    #[inline(always)] fn expire_lt(&mut self, bound: usize) {
-        while let Some(&(i,_)) = self.q.front() { if i < bound { self.q.pop_front(); } else { break; } }
+    #[inline(always)]
+    fn clear(&mut self) {
+        self.q.clear();
     }
-    #[inline(always)] fn push(&mut self, idx: usize, val: f64) {
+    #[inline(always)]
+    fn expire_lt(&mut self, bound: usize) {
+        while let Some(&(i, _)) = self.q.front() {
+            if i < bound {
+                self.q.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+    #[inline(always)]
+    fn push(&mut self, idx: usize, val: f64) {
         // monotone increasing by value
-        while let Some(&(_,v)) = self.q.back() { if v <= val { break; } self.q.pop_back(); }
+        while let Some(&(_, v)) = self.q.back() {
+            if v <= val {
+                break;
+            }
+            self.q.pop_back();
+        }
         self.q.push_back((idx, val));
     }
-    #[inline(always)] fn front_val(&self) -> Option<f64> { self.q.front().map(|&(_,v)| v) }
+    #[inline(always)]
+    fn front_val(&self) -> Option<f64> {
+        self.q.front().map(|&(_, v)| v)
+    }
 }
 
 #[inline(always)]

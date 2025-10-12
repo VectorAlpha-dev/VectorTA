@@ -386,7 +386,10 @@ impl SqwmaStream {
     pub fn try_new(params: SqwmaParams) -> Result<Self, SqwmaError> {
         let period = params.period.unwrap_or(14);
         if period < 2 {
-            return Err(SqwmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(SqwmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         // Build (p-1) weights: p^2, (p-1)^2, ..., 2^2
@@ -433,7 +436,11 @@ impl SqwmaStream {
         } else {
             let x_out = self.ring[self.tail];
             self.ring[self.tail] = x;
-            self.tail = if self.tail + 1 == self.period { 0 } else { self.tail + 1 };
+            self.tail = if self.tail + 1 == self.period {
+                0
+            } else {
+                self.tail + 1
+            };
             Some(x_out)
         }
     }
@@ -516,10 +523,10 @@ impl SqwmaStream {
         // which is exactly x_out needed by the recurrence.
         let x_out = self.ring[self.tail];
         let mut r = self.r_acc;
-        r = self.p2.mul_add(value, r);      // + p^2 * x_in
-        r = (2.0_f64).mul_add(self.b_sum, r);   // + 2 * B_prev
+        r = self.p2.mul_add(value, r); // + p^2 * x_in
+        r = (2.0_f64).mul_add(self.b_sum, r); // + 2 * B_prev
         r = self.c1.mul_add(self.a_sum, r); // + (1 - 2p) * A_prev
-        r -= x_out;                         // - x_out
+        r -= x_out; // - x_out
         self.r_acc = r;
 
         // Update A and B

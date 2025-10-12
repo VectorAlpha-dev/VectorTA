@@ -72,8 +72,9 @@ impl CudaWilders {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaWildersError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaWildersError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -212,7 +213,9 @@ impl CudaWilders {
         }
         let period = params.period.unwrap_or(0) as i32;
         if period <= 0 {
-            return Err(CudaWildersError::InvalidInput("period must be positive".into()));
+            return Err(CudaWildersError::InvalidInput(
+                "period must be positive".into(),
+            ));
         }
         if period as usize > rows {
             return Err(CudaWildersError::InvalidInput(format!(
@@ -336,7 +339,10 @@ impl CudaWilders {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
             BatchKernelPolicy::Auto => 256,
         };
-        unsafe { (*(self as *const _ as *mut CudaWilders)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaWilders)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
 
         let grid: GridSize = (n_combos as u32, 1, 1).into();
@@ -389,7 +395,10 @@ impl CudaWilders {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
             ManySeriesKernelPolicy::Auto => 128,
         };
-        unsafe { (*(self as *const _ as *mut CudaWilders)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaWilders)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         let block: BlockSize = (block_x, 1, 1).into();
@@ -464,7 +473,11 @@ impl CudaWilders {
             .synchronize()
             .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -483,7 +496,8 @@ impl CudaWilders {
                 "num_series and series_len must be positive".into(),
             ));
         }
-        if d_prices_tm.len() != num_series * series_len || d_out_tm.len() != num_series * series_len {
+        if d_prices_tm.len() != num_series * series_len || d_out_tm.len() != num_series * series_len
+        {
             return Err(CudaWildersError::InvalidInput(
                 "time-major buffer length mismatch".into(),
             ));
@@ -515,28 +529,36 @@ impl CudaWilders {
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 static ONCE: AtomicBool = AtomicBool::new(false);
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] WILDERS batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaWilders)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaWilders)).debug_batch_logged = true;
+                }
             }
         }
     }
 
     #[inline]
     fn maybe_log_many_debug(&self) {
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 static ONCE: AtomicBool = AtomicBool::new(false);
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] WILDERS many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaWilders)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaWilders)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -555,7 +577,9 @@ pub mod benches {
         crate::indicators::moving_averages::wilders::WildersParams,
         wilders_batch_dev,
         wilders_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::wilders::WildersBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::wilders::WildersBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::wilders::WildersParams { period: Some(64) },
         "wilders",
         "wilders"
@@ -585,18 +609,39 @@ fn expand_periods(range: &WildersBatchRange) -> Vec<WildersParams> {
 // --- Simple policy types (parity with ALMA/CWMA style) ---
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelPolicy { Auto, Plain { block_x: u32 } }
-impl Default for BatchKernelPolicy { fn default() -> Self { Self::Auto } }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+impl Default for BatchKernelPolicy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy { Auto, OneD { block_x: u32 } }
-impl Default for ManySeriesKernelPolicy { fn default() -> Self { Self::Auto } }
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct CudaWildersPolicy { pub batch: BatchKernelPolicy, pub many_series: ManySeriesKernelPolicy }
+pub struct CudaWildersPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}

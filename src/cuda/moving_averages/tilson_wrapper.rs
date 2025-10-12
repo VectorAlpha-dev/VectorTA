@@ -132,11 +132,11 @@ impl CudaTilson {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaTilsonError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -155,27 +155,43 @@ impl CudaTilson {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaTilsonPolicy) -> Result<Self, CudaTilsonError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaTilsonPolicy,
+    ) -> Result<Self, CudaTilsonError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaTilsonPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaTilsonPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaTilsonPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaTilsonPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] Tilson batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTilson)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTilson)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -183,14 +199,19 @@ impl CudaTilson {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] Tilson many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTilson)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTilson)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -205,21 +226,27 @@ impl CudaTilson {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn headroom_bytes() -> usize {
         // 64 MiB default headroom like ALMA
         const DEFAULT_MB: usize = 64;
         if let Ok(v) = std::env::var("CUDA_MEM_HEADROOM_MB") {
-            if let Ok(mb) = v.parse::<usize>() { return mb.saturating_mul(1024 * 1024); }
+            if let Ok(mb) = v.parse::<usize>() {
+                return mb.saturating_mul(1024 * 1024);
+            }
         }
         DEFAULT_MB * 1024 * 1024
     }
 
     #[inline]
     fn will_fit(required_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(Self::headroom_bytes()) <= free
         } else {
@@ -235,8 +262,8 @@ impl CudaTilson {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
         let d_periods = DeviceBuffer::from_slice(&prepared.periods_i32)
             .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
         let d_ks = DeviceBuffer::from_slice(&prepared.ks_f32)
@@ -257,10 +284,7 @@ impl CudaTilson {
         };
 
         // Chunk by VRAM and grid dimension limits.
-        let combos_per_launch = self.suggest_combos_per_launch(
-            prepared.series_len,
-            n_combos,
-        );
+        let combos_per_launch = self.suggest_combos_per_launch(prepared.series_len, n_combos);
         let mut launched = 0usize;
         while launched < n_combos {
             let this = (n_combos - launched).min(combos_per_launch);
@@ -287,7 +311,11 @@ impl CudaTilson {
             .synchronize()
             .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: prepared.series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: prepared.series_len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -406,7 +434,11 @@ impl CudaTilson {
             .synchronize()
             .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: series_len, cols: num_series })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: series_len,
+            cols: num_series,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -492,25 +524,36 @@ impl CudaTilson {
         let block: BlockSize = (block_x, 1, 1).into();
 
         // Record selection and maybe log once
-        unsafe { (*(self as *const _ as *mut CudaTilson)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaTilson)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
             // offset parameter buffers and output pointer by combos_offset
             let combos_off_i = combos_offset as u64;
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<i32>() as u64;
-            let mut ks_ptr = d_ks.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
-            let mut c1_ptr = d_c1.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
-            let mut c2_ptr = d_c2.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
-            let mut c3_ptr = d_c3.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
-            let mut c4_ptr = d_c4.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
-            let mut lookbacks_ptr = d_lookbacks.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<i32>() as u64;
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw()
+                + combos_off_i * std::mem::size_of::<i32>() as u64;
+            let mut ks_ptr =
+                d_ks.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
+            let mut c1_ptr =
+                d_c1.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
+            let mut c2_ptr =
+                d_c2.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
+            let mut c3_ptr =
+                d_c3.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
+            let mut c4_ptr =
+                d_c4.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
+            let mut lookbacks_ptr = d_lookbacks.as_device_ptr().as_raw()
+                + combos_off_i * std::mem::size_of::<i32>() as u64;
             let mut series_len_i = series_len as i32;
             let mut first_valid_i = first_valid as i32;
             let mut combos_i = n_combos as i32;
             let out_elem_off = (combos_offset * series_len) as u64;
-            let mut out_ptr = d_out.as_device_ptr().as_raw() + out_elem_off * std::mem::size_of::<f32>() as u64;
+            let mut out_ptr =
+                d_out.as_device_ptr().as_raw() + out_elem_off * std::mem::size_of::<f32>() as u64;
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
                 &mut periods_ptr as *mut _ as *mut c_void,
@@ -565,7 +608,10 @@ impl CudaTilson {
         let grid: GridSize = (1, num_series as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        unsafe { (*(self as *const _ as *mut CudaTilson)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaTilson)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         unsafe {
@@ -820,8 +866,14 @@ pub mod benches {
         crate::indicators::moving_averages::tilson::TilsonParams,
         tilson_batch_dev,
         tilson_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::tilson::TilsonBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), volume_factor: (0.0, 0.0, 0.0) },
-        crate::indicators::moving_averages::tilson::TilsonParams { period: Some(64), volume_factor: Some(0.0) },
+        crate::indicators::moving_averages::tilson::TilsonBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            volume_factor: (0.0, 0.0, 0.0)
+        },
+        crate::indicators::moving_averages::tilson::TilsonParams {
+            period: Some(64),
+            volume_factor: Some(0.0)
+        },
         "tilson",
         "tilson"
     );
@@ -877,20 +929,28 @@ impl CudaTilson {
     fn suggest_combos_per_launch(&self, series_len: usize, total_combos: usize) -> usize {
         const MAX_GRID_DIM: usize = 65_535; // keep parity with ALMA guidance
         let by_dim = total_combos.min(MAX_GRID_DIM);
-        if !Self::mem_check_enabled() { return by_dim.max(1); }
+        if !Self::mem_check_enabled() {
+            return by_dim.max(1);
+        }
 
         let input_bytes = series_len.saturating_mul(std::mem::size_of::<f32>());
         let params_per_combo = (
             std::mem::size_of::<i32>()  // periods
             + std::mem::size_of::<f32>() * 5 // k + c1..c4
-            + std::mem::size_of::<i32>()     // lookbacks
+            + std::mem::size_of::<i32>()
+            // lookbacks
         );
         let out_per_combo = series_len.saturating_mul(std::mem::size_of::<f32>());
 
-        let free = match Self::device_mem_info() { Some((f, _)) => f, None => return by_dim.max(1) };
+        let free = match Self::device_mem_info() {
+            Some((f, _)) => f,
+            None => return by_dim.max(1),
+        };
         let headroom = Self::headroom_bytes();
         let usable = free.saturating_sub(headroom);
-        if usable <= input_bytes { return 1.min(by_dim).max(1); }
+        if usable <= input_bytes {
+            return 1.min(by_dim).max(1);
+        }
         let rem = usable - input_bytes;
         // combos <= rem / (out + params)
         let denom = out_per_combo.saturating_add(params_per_combo.max(1));

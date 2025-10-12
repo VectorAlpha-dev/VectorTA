@@ -524,7 +524,9 @@ pub fn donchian_scalar(
             }
 
             let i = j + period - 1;
-            if i >= n || i < warmup { continue; }
+            if i >= n || i < warmup {
+                continue;
+            }
 
             // All-valid window check in O(1)
             let all_valid = {
@@ -1061,8 +1063,12 @@ unsafe fn donchian_row_scalar(
                     has_nan = true;
                     break;
                 }
-                if h > maxv { maxv = h; }
-                if l < minv { minv = l; }
+                if h > maxv {
+                    maxv = h;
+                }
+                if l < minv {
+                    minv = l;
+                }
             }
             if has_nan {
                 *up.add(i) = f64::NAN;
@@ -1114,7 +1120,9 @@ unsafe fn donchian_row_scalar(
         *gp_max.add(i) = acc_max;
         *gp_min.add(i) = acc_min;
         k += 1;
-        if k == period { k = 0; }
+        if k == period {
+            k = 0;
+        }
     }
 
     // Backward suffix with rolling validity; produce outputs
@@ -1140,8 +1148,12 @@ unsafe fn donchian_row_scalar(
             acc_max = hv;
             acc_min = lv;
         } else {
-            if hv > acc_max { acc_max = hv; }
-            if lv < acc_min { acc_min = lv; }
+            if hv > acc_max {
+                acc_max = hv;
+            }
+            if lv < acc_min {
+                acc_min = lv;
+            }
         }
 
         let i = j + period - 1;
@@ -1149,7 +1161,9 @@ unsafe fn donchian_row_scalar(
             if !have_vcnt {
                 let start = i + 1 - period;
                 let mut sum: u32 = 0;
-                for t in start..=i { sum += *vp.add(t) as u32; }
+                for t in start..=i {
+                    sum += *vp.add(t) as u32;
+                }
                 vcnt = sum;
                 have_vcnt = true;
             } else {
@@ -1159,7 +1173,9 @@ unsafe fn donchian_row_scalar(
             }
         }
 
-        if i >= n || i < warmup { continue; }
+        if i >= n || i < warmup {
+            continue;
+        }
 
         let all_valid = vcnt == period as u32;
         if all_valid {
@@ -1175,7 +1191,6 @@ unsafe fn donchian_row_scalar(
             *lw.add(i) = f64::NAN;
             *mp.add(i) = f64::NAN;
         }
-
     }
 }
 
@@ -1260,7 +1275,10 @@ impl DonchianStream {
     pub fn try_new(params: DonchianParams) -> Result<Self, DonchianError> {
         let period = params.period.unwrap_or(20);
         if period == 0 {
-            return Err(DonchianError::InvalidPeriod { period, data_len: 0 });
+            return Err(DonchianError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         Ok(Self {
             period,

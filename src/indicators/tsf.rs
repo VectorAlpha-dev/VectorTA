@@ -706,14 +706,14 @@ pub struct TsfStream {
     filled: bool,
 
     // precomputed invariants for x = 0..p-1
-    pf: f64,       // p as f64
-    sum_x: f64,    // ∑ x
+    pf: f64,    // p as f64
+    sum_x: f64, // ∑ x
     sum_x_sqr: f64,
-    divisor: f64,  // p*∑x² - (∑x)²
+    divisor: f64, // p*∑x² - (∑x)²
 
     // sliding accumulators (when window is clean)
-    s0: f64,       // ∑ y
-    s1: f64,       // ∑ (j*y)
+    s0: f64, // ∑ y
+    s1: f64, // ∑ (j*y)
 
     // counts NaNs currently inside the window (valid only after filled==true)
     nan_count: usize,

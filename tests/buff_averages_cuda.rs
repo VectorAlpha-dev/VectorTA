@@ -1,8 +1,8 @@
 // Integration tests for CUDA Buff Averages kernels
 
 use my_project::indicators::moving_averages::buff_averages::{
-    buff_averages_batch_with_kernel, buff_averages_with_kernel, BuffAveragesBatchRange, BuffAveragesInput,
-    BuffAveragesParams,
+    buff_averages_batch_with_kernel, buff_averages_with_kernel, BuffAveragesBatchRange,
+    BuffAveragesInput, BuffAveragesParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -14,7 +14,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::moving_averages::CudaBuffAverages;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -42,7 +44,10 @@ fn buff_averages_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Erro
         price[i] = (x * 0.00123).sin() + 0.00017 * x;
         volume[i] = (x * 0.00077).cos().abs() + 0.5;
     }
-    let sweep = BuffAveragesBatchRange { fast_period: (4, 28, 4), slow_period: (32, 128, 16) };
+    let sweep = BuffAveragesBatchRange {
+        fast_period: (4, 28, 4),
+        slow_period: (32, 128, 16),
+    };
 
     let cpu = buff_averages_batch_with_kernel(&price, &volume, &sweep, Kernel::ScalarBatch)?;
 
@@ -69,8 +74,20 @@ fn buff_averages_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Erro
         let g_fast = fast_host[idx] as f64;
         let c_slow = cpu.slow[idx];
         let g_slow = slow_host[idx] as f64;
-        assert!(approx_eq(c_fast, g_fast, tol), "fast mismatch at {}: cpu={} gpu={}", idx, c_fast, g_fast);
-        assert!(approx_eq(c_slow, g_slow, tol), "slow mismatch at {}: cpu={} gpu={}", idx, c_slow, g_slow);
+        assert!(
+            approx_eq(c_fast, g_fast, tol),
+            "fast mismatch at {}: cpu={} gpu={}",
+            idx,
+            c_fast,
+            g_fast
+        );
+        assert!(
+            approx_eq(c_slow, g_slow, tol),
+            "slow mismatch at {}: cpu={} gpu={}",
+            idx,
+            c_slow,
+            g_slow
+        );
     }
 
     Ok(())
@@ -78,9 +95,12 @@ fn buff_averages_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Erro
 
 #[cfg(feature = "cuda")]
 #[test]
-fn buff_averages_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+fn buff_averages_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
+{
     if !cuda_available() {
-        eprintln!("[buff_averages_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        eprintln!(
+            "[buff_averages_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
+        );
         return Ok(());
     }
 
@@ -109,8 +129,17 @@ fn buff_averages_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn 
             p[t] = price_tm[t * cols + s];
             v[t] = volume_tm[t * cols + s];
         }
-        let params = BuffAveragesParams { fast_period: Some(fast), slow_period: Some(slow) };
-        let input = BuffAveragesInput { data: my_project::indicators::moving_averages::buff_averages::BuffAveragesData::Slice(&p), volume: Some(&v), params };
+        let params = BuffAveragesParams {
+            fast_period: Some(fast),
+            slow_period: Some(slow),
+        };
+        let input = BuffAveragesInput {
+            data: my_project::indicators::moving_averages::buff_averages::BuffAveragesData::Slice(
+                &p,
+            ),
+            volume: Some(&v),
+            params,
+        };
         let out = buff_averages_with_kernel(&input, Kernel::Scalar)?;
         for t in 0..rows {
             cpu_fast_tm[t * cols + s] = out.fast_buff[t];
@@ -144,8 +173,16 @@ fn buff_averages_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn 
 
     let tol = 1e-4;
     for idx in 0..g_fast_tm.len() {
-        assert!(approx_eq(cpu_fast_tm[idx], g_fast_tm[idx] as f64, tol), "fast mismatch at {}", idx);
-        assert!(approx_eq(cpu_slow_tm[idx], g_slow_tm[idx] as f64, tol), "slow mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_fast_tm[idx], g_fast_tm[idx] as f64, tol),
+            "fast mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu_slow_tm[idx], g_slow_tm[idx] as f64, tol),
+            "slow mismatch at {}",
+            idx
+        );
     }
 
     Ok(())

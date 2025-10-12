@@ -6,16 +6,19 @@ use my_project::indicators::moving_averages::ehlers_pma::{
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
-#[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
+use my_project::cuda::cuda_available;
+#[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::ehlers_pma_wrapper::{
-    BatchKernelPolicy, BatchThreadsPerOutput, CudaEhlersPma, CudaEhlersPmaPolicy, ManySeriesKernelPolicy,
+    BatchKernelPolicy, BatchThreadsPerOutput, CudaEhlersPma, CudaEhlersPmaPolicy,
+    ManySeriesKernelPolicy,
 };
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     let diff = (a - b).abs();
     diff <= atol + rtol * a.abs().max(b.abs())
 }
@@ -80,10 +83,20 @@ fn compare_batch(policy: CudaEhlersPmaPolicy, series_len: usize, combos: usize) 
         for idx in 0..series_len {
             let a = cpu.predict[idx];
             let b = gpu_predict[combo * series_len + idx] as f64;
-            assert!(approx_eq(a, b, atol, rtol), "predict mismatch at ({},{})", combo, idx);
+            assert!(
+                approx_eq(a, b, atol, rtol),
+                "predict mismatch at ({},{})",
+                combo,
+                idx
+            );
             let a2 = cpu.trigger[idx];
             let b2 = gpu_trigger[combo * series_len + idx] as f64;
-            assert!(approx_eq(a2, b2, atol, rtol), "trigger mismatch at ({},{})", combo, idx);
+            assert!(
+                approx_eq(a2, b2, atol, rtol),
+                "trigger mismatch at ({},{})",
+                combo,
+                idx
+            );
         }
     }
 }
@@ -100,10 +113,15 @@ fn compare_many_series(policy: CudaEhlersPmaPolicy, cols: usize, rows: usize) {
     let mut cpu_trigger_tm = vec![f64::NAN; cols * rows];
     for j in 0..cols {
         let mut s = vec![f64::NAN; rows];
-        for t in 0..rows { s[t] = tm[t * cols + j]; }
+        for t in 0..rows {
+            s[t] = tm[t * cols + j];
+        }
         let input = EhlersPmaInput::from_slice(&s, EhlersPmaParams);
         let out = ehlers_pma(&input).expect("cpu ehlers_pma per series");
-        for t in 0..rows { cpu_predict_tm[t * cols + j] = out.predict[t]; cpu_trigger_tm[t * cols + j] = out.trigger[t]; }
+        for t in 0..rows {
+            cpu_predict_tm[t * cols + j] = out.predict[t];
+            cpu_trigger_tm[t * cols + j] = out.trigger[t];
+        }
     }
 
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
@@ -122,44 +140,70 @@ fn compare_many_series(policy: CudaEhlersPmaPolicy, cols: usize, rows: usize) {
     for i in 0..gpu_predict_tm.len() {
         let a = cpu_predict_tm[i];
         let b = gpu_predict_tm[i] as f64;
-        assert!(approx_eq(a, b, atol, rtol), "many-series predict mismatch at {}", i);
+        assert!(
+            approx_eq(a, b, atol, rtol),
+            "many-series predict mismatch at {}",
+            i
+        );
         let a2 = cpu_trigger_tm[i];
         let b2 = gpu_trigger_tm[i] as f64;
-        assert!(approx_eq(a2, b2, atol, rtol), "many-series trigger mismatch at {}", i);
+        assert!(
+            approx_eq(a2, b2, atol, rtol),
+            "many-series trigger mismatch at {}",
+            i
+        );
     }
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 fn ehlers_pma_batch_plain_matches_cpu() {
-    let policy = CudaEhlersPmaPolicy { batch: BatchKernelPolicy::Plain { block_x: 256 }, many_series: ManySeriesKernelPolicy::Auto };
+    let policy = CudaEhlersPmaPolicy {
+        batch: BatchKernelPolicy::Plain { block_x: 256 },
+        many_series: ManySeriesKernelPolicy::Auto,
+    };
     compare_batch(policy, 32768, 3);
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 fn ehlers_pma_batch_tiled_matches_cpu() {
-    let policy = CudaEhlersPmaPolicy { batch: BatchKernelPolicy::Tiled { tile: 128, per_thread: BatchThreadsPerOutput::One }, many_series: ManySeriesKernelPolicy::Auto };
+    let policy = CudaEhlersPmaPolicy {
+        batch: BatchKernelPolicy::Tiled {
+            tile: 128,
+            per_thread: BatchThreadsPerOutput::One,
+        },
+        many_series: ManySeriesKernelPolicy::Auto,
+    };
     compare_batch(policy, 65536, 5);
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 fn ehlers_pma_many_series_1d_matches_cpu() {
-    let policy = CudaEhlersPmaPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::OneD { block_x: 1 } };
+    let policy = CudaEhlersPmaPolicy {
+        batch: BatchKernelPolicy::Auto,
+        many_series: ManySeriesKernelPolicy::OneD { block_x: 1 },
+    };
     compare_many_series(policy, 8, 16384);
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 fn ehlers_pma_many_series_2d_ty4_matches_cpu() {
-    let policy = CudaEhlersPmaPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Tiled2D { tx: 1, ty: 4 } };
+    let policy = CudaEhlersPmaPolicy {
+        batch: BatchKernelPolicy::Auto,
+        many_series: ManySeriesKernelPolicy::Tiled2D { tx: 1, ty: 4 },
+    };
     compare_many_series(policy, 32, 4096);
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 fn ehlers_pma_many_series_2d_ty2_matches_cpu() {
-    let policy = CudaEhlersPmaPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Tiled2D { tx: 1, ty: 2 } };
+    let policy = CudaEhlersPmaPolicy {
+        batch: BatchKernelPolicy::Auto,
+        many_series: ManySeriesKernelPolicy::Tiled2D { tx: 1, ty: 2 },
+    };
     compare_many_series(policy, 18, 4096);
 }

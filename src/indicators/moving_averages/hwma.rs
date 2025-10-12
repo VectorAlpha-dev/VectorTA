@@ -717,7 +717,9 @@ impl HwmaStream {
         let v_new = self.nb.mul_add(f_new - self.last_f, self.one_m_nb * sum_va);
 
         // a' = nc*(v' - v) + (1-nc)*a
-        let a_new = self.nc.mul_add(v_new - self.last_v, self.one_m_nc * self.last_a);
+        let a_new = self
+            .nc
+            .mul_add(v_new - self.last_v, self.one_m_nc * self.last_a);
 
         // s_new = f' + v' + 0.5*a'   (use FMA for the 0.5*a' term)
         let s_new = 0.5f64.mul_add(a_new, f_new + v_new);
@@ -751,7 +753,9 @@ impl HwmaStream {
         let f_new = self.one_m_na.mul_add(self.last_s, self.na * value);
         let sum_va = self.last_v + self.last_a;
         let v_new = self.nb.mul_add(f_new - self.last_f, self.one_m_nb * sum_va);
-        let a_new = self.nc.mul_add(v_new - self.last_v, self.one_m_nc * self.last_a);
+        let a_new = self
+            .nc
+            .mul_add(v_new - self.last_v, self.one_m_nc * self.last_a);
         let s_new = 0.5f64.mul_add(a_new, f_new + v_new);
         self.last_f = f_new;
         self.last_v = v_new;
@@ -767,9 +771,10 @@ impl HwmaStream {
             return x;
         }
         let f_new = self.one_m_na.mul_add(self.last_s, self.na * x);
-        let v_new = self
-            .nb
-            .mul_add(f_new - self.last_f, self.one_m_nb * (self.last_v + self.last_a));
+        let v_new = self.nb.mul_add(
+            f_new - self.last_f,
+            self.one_m_nb * (self.last_v + self.last_a),
+        );
         let a_new = self
             .nc
             .mul_add(v_new - self.last_v, self.one_m_nc * self.last_a);
@@ -1526,7 +1531,14 @@ unsafe fn hwma_batch_rows_avx512(
     while r < rows {
         let prm = &combos[r];
         let row_slice = core::slice::from_raw_parts_mut(out.as_mut_ptr().add(r * cols), cols);
-        hwma_scalar(data, prm.na.unwrap(), prm.nb.unwrap(), prm.nc.unwrap(), first, row_slice);
+        hwma_scalar(
+            data,
+            prm.na.unwrap(),
+            prm.nb.unwrap(),
+            prm.nc.unwrap(),
+            first,
+            row_slice,
+        );
         r += 1;
     }
 }

@@ -31,13 +31,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // -------- Kernel selection policy (mirrors ALMA; only Plain used here) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchThreadsPerOutput { One, Two }
+pub enum BatchThreadsPerOutput {
+    One,
+    Two,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    Plain { block_x: u32 },
-    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+    Plain {
+        block_x: u32,
+    },
+    Tiled {
+        tile: u32,
+        per_thread: BatchThreadsPerOutput,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -55,17 +63,24 @@ pub struct CudaJsaPolicy {
 
 impl Default for CudaJsaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaJsaError {
@@ -127,11 +142,11 @@ impl CudaJsa {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaJsaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaJsaError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -156,12 +171,27 @@ impl CudaJsa {
         s.policy = policy;
         Ok(s)
     }
-    #[inline] pub fn set_policy(&mut self, policy: CudaJsaPolicy) { self.policy = policy; }
-    #[inline] pub fn policy(&self) -> &CudaJsaPolicy { &self.policy }
-    #[inline] pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    #[inline] pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
-    #[inline] pub fn synchronize(&self) -> Result<(), CudaJsaError> {
-        self.stream.synchronize().map_err(|e| CudaJsaError::Cuda(e.to_string()))
+    #[inline]
+    pub fn set_policy(&mut self, policy: CudaJsaPolicy) {
+        self.policy = policy;
+    }
+    #[inline]
+    pub fn policy(&self) -> &CudaJsaPolicy {
+        &self.policy
+    }
+    #[inline]
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    #[inline]
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaJsaError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaJsaError::Cuda(e.to_string()))
     }
 
     // ---------- VRAM helpers ----------
@@ -173,41 +203,57 @@ impl CudaJsa {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     // ---------- Debug logging (once per scenario when BENCH_DEBUG=1) ----------
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] JSA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaJsa)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaJsa)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] JSA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaJsa)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaJsa)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -521,7 +567,9 @@ impl CudaJsa {
         }
         self.maybe_log_batch_debug();
 
-        self.stream.synchronize().map_err(|e| CudaJsaError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaJsaError::Cuda(e.to_string()))
     }
 
     fn launch_many_series_kernel(
@@ -575,7 +623,9 @@ impl CudaJsa {
         }
         self.maybe_log_many_debug();
 
-        self.stream.synchronize().map_err(|e| CudaJsaError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaJsaError::Cuda(e.to_string()))
     }
 
     fn prepare_batch_inputs(
@@ -708,7 +758,9 @@ pub mod benches {
         crate::indicators::moving_averages::jsa::JsaParams,
         jsa_batch_dev,
         jsa_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::jsa::JsaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::jsa::JsaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::jsa::JsaParams { period: Some(64) },
         "jsa",
         "jsa"

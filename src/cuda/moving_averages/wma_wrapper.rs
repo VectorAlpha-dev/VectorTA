@@ -43,14 +43,22 @@ impl std::error::Error for CudaWmaError {}
 // -------- Kernel selection policy (parity with ALMA/CWMA subset) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum WmaBatchThreadsPerOutput { One, Two }
+pub enum WmaBatchThreadsPerOutput {
+    One,
+    Two,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum WmaBatchKernelPolicy {
     Auto,
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
     // Reserved for future: tiled WMA kernels are not implemented today
-    Tiled { tile: u32, per_thread: WmaBatchThreadsPerOutput },
+    Tiled {
+        tile: u32,
+        per_thread: WmaBatchThreadsPerOutput,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -69,17 +77,27 @@ pub struct CudaWmaPolicy {
 
 impl Default for CudaWmaPolicy {
     fn default() -> Self {
-        Self { batch: WmaBatchKernelPolicy::Auto, many_series: WmaManySeriesKernelPolicy::Auto }
+        Self {
+            batch: WmaBatchKernelPolicy::Auto,
+            many_series: WmaManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum WmaBatchKernelSelected { Plain { block_x: u32 }, Tiled1x { tile: u32 }, Tiled2x { tile: u32 } }
+pub enum WmaBatchKernelSelected {
+    Plain { block_x: u32 },
+    Tiled1x { tile: u32 },
+    Tiled2x { tile: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum WmaManySeriesKernelSelected { OneD { block_x: u32 }, Tiled2D { tx: u32, ty: u32 } }
+pub enum WmaManySeriesKernelSelected {
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
 
 pub struct CudaWma {
     module: Module,
@@ -108,7 +126,8 @@ impl CudaWma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaWmaError::Cuda(e.to_string()))?
@@ -136,12 +155,22 @@ impl CudaWma {
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaWmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaWmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<WmaBatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<WmaManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaWmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaWmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<WmaBatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<WmaManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaWmaError> {
-        self.stream.synchronize().map_err(|e| CudaWmaError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaWmaError::Cuda(e.to_string()))
     }
 
     fn mem_check_enabled() -> bool {
@@ -151,7 +180,9 @@ impl CudaWma {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
@@ -176,14 +207,19 @@ impl CudaWma {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] WMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaWma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaWma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -191,14 +227,19 @@ impl CudaWma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] WMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaWma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaWma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -294,7 +335,8 @@ impl CudaWma {
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let shared_bytes = max_period
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaWmaError::InvalidInput("shared memory size overflow".into()))? as u32;
+            .ok_or_else(|| CudaWmaError::InvalidInput("shared memory size overflow".into()))?
+            as u32;
         if (shared_bytes as usize) > 96 * 1024 {
             return Err(CudaWmaError::InvalidInput(format!(
                 "period {} requires {} bytes shared memory (exceeds limit)",
@@ -356,8 +398,8 @@ impl CudaWma {
             )));
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaWmaError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaWmaError::Cuda(e.to_string()))?;
         let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaWmaError::Cuda(e.to_string()))?;
@@ -377,10 +419,10 @@ impl CudaWma {
                 pref_a[i + 1] = pref_a[i] + x;
                 pref_b[i + 1] = pref_b[i] + (i as f32) * x;
             }
-            let d_pref_a = DeviceBuffer::from_slice(&pref_a)
-                .map_err(|e| CudaWmaError::Cuda(e.to_string()))?;
-            let d_pref_b = DeviceBuffer::from_slice(&pref_b)
-                .map_err(|e| CudaWmaError::Cuda(e.to_string()))?;
+            let d_pref_a =
+                DeviceBuffer::from_slice(&pref_a).map_err(|e| CudaWmaError::Cuda(e.to_string()))?;
+            let d_pref_b =
+                DeviceBuffer::from_slice(&pref_b).map_err(|e| CudaWmaError::Cuda(e.to_string()))?;
 
             self.launch_batch_kernel_prefix(
                 &d_pref_a,
@@ -752,7 +794,9 @@ pub mod benches {
         crate::indicators::moving_averages::wma::WmaParams,
         wma_batch_dev,
         wma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::wma::WmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::wma::WmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::wma::WmaParams { period: Some(64) },
         "wma",
         "wma"

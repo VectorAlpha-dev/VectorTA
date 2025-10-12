@@ -42,8 +42,8 @@ use pyo3::prelude::*;
 use rayon::prelude::*;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
-use std::convert::AsRef;
 use std::collections::HashMap;
+use std::convert::AsRef;
 use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
@@ -817,7 +817,9 @@ impl SuperTrendStream {
     pub fn try_new(params: SuperTrendParams) -> Result<Self, SuperTrendError> {
         let period = params.period.unwrap_or(10);
         let factor = params.factor.unwrap_or(3.0);
-        let atr_stream = crate::indicators::atr::AtrStream::try_new(AtrParams { length: Some(period) })?;
+        let atr_stream = crate::indicators::atr::AtrStream::try_new(AtrParams {
+            length: Some(period),
+        })?;
         Ok(Self {
             period,
             factor,
@@ -852,7 +854,11 @@ impl SuperTrendStream {
             self.prev_upper_band = upper_basic;
             self.prev_lower_band = lower_basic;
             self.upper_state = close <= self.prev_upper_band;
-            let trend = if self.upper_state { self.prev_upper_band } else { self.prev_lower_band };
+            let trend = if self.upper_state {
+                self.prev_upper_band
+            } else {
+                self.prev_lower_band
+            };
             self.prev_close = close;
             self.warmed = true;
             return Some((trend, 0.0));

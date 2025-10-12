@@ -324,7 +324,11 @@ pub fn er_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let mut i = warm;
     while i < n {
         let delta = (data[i] - data[start]).abs();
-        out[i] = if roll > 0.0 { (delta / roll).min(1.0) } else { 0.0 };
+        out[i] = if roll > 0.0 {
+            (delta / roll).min(1.0)
+        } else {
+            0.0
+        };
 
         // Prepare for next i (i+1): update rolling sum and advance window start
         if i + 1 == n {
@@ -397,7 +401,11 @@ pub unsafe fn er_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]
     let mut i = warm;
     while i < n {
         let delta = (data[i] - data[start]).abs();
-        out[i] = if roll > 0.0 { (delta / roll).min(1.0) } else { 0.0 };
+        out[i] = if roll > 0.0 {
+            (delta / roll).min(1.0)
+        } else {
+            0.0
+        };
         if i + 1 == n {
             break;
         }
@@ -458,7 +466,11 @@ pub unsafe fn er_avx512_short(data: &[f64], period: usize, first: usize, out: &m
     let mut i = warm;
     while i < n {
         let delta = (data[i] - data[start]).abs();
-        out[i] = if roll > 0.0 { (delta / roll).min(1.0) } else { 0.0 };
+        out[i] = if roll > 0.0 {
+            (delta / roll).min(1.0)
+        } else {
+            0.0
+        };
         if i + 1 == n {
             break;
         }
@@ -492,7 +504,10 @@ impl ErStream {
     pub fn try_new(params: ErParams) -> Result<Self, ErError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(ErError::InvalidPeriod { period, data_len: 0 });
+            return Err(ErError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         Ok(Self {
             period,
@@ -513,7 +528,7 @@ impl ErStream {
         // Fast path for period == 1: window has no internal diffs => denom == 0 => ER = 0.
         if self.period == 1 {
             self.buffer[0] = value;
-            self.head = 0;       // oldest == newest
+            self.head = 0; // oldest == newest
             self.filled = true;
             self.len = 1;
             self.denom = 0.0;
@@ -530,7 +545,11 @@ impl ErStream {
                 return None;
             } else {
                 // Add the new |Δ| against the previously inserted sample.
-                let prev_idx = if self.head == 0 { self.period - 1 } else { self.head - 1 };
+                let prev_idx = if self.head == 0 {
+                    self.period - 1
+                } else {
+                    self.head - 1
+                };
                 self.denom += (value - self.buffer[prev_idx]).abs();
 
                 self.buffer[self.head] = value;
@@ -546,13 +565,21 @@ impl ErStream {
 
                 // Compute first ER for the fully formed window.
                 let start = self.head; // oldest after the insertion above
-                let end = if start == 0 { self.period - 1 } else { start - 1 };
+                let end = if start == 0 {
+                    self.period - 1
+                } else {
+                    start - 1
+                };
                 debug_assert!(self.len == self.period);
 
                 let delta = (self.buffer[end] - self.buffer[start]).abs();
                 if self.denom > 0.0 {
                     // Saturate to 1.0 without a divide when possible (cheaper than min()).
-                    return Some(if delta >= self.denom { 1.0 } else { delta / self.denom });
+                    return Some(if delta >= self.denom {
+                        1.0
+                    } else {
+                        delta / self.denom
+                    });
                 } else {
                     return Some(0.0);
                 }
@@ -561,9 +588,17 @@ impl ErStream {
 
         // --- Phase 2: steady-state streaming (len == period) -----------------
         // Current ring layout in order: [oldest=head, ..., newest=head+period-1]
-        let start = self.head;                                // oldest (to be overwritten)
-        let second = if start + 1 == self.period { 0 } else { start + 1 };
-        let end_prev = if start == 0 { self.period - 1 } else { start - 1 }; // current newest
+        let start = self.head; // oldest (to be overwritten)
+        let second = if start + 1 == self.period {
+            0
+        } else {
+            start + 1
+        };
+        let end_prev = if start == 0 {
+            self.period - 1
+        } else {
+            start - 1
+        }; // current newest
 
         // Update the rolling denominator in O(1):
         // Remove the outgoing edge (oldest -> second_oldest), add the incoming edge (newest -> new).
@@ -581,7 +616,11 @@ impl ErStream {
         self.head = second; // advance oldest pointer
 
         if self.denom > 0.0 {
-            Some(if delta >= self.denom { 1.0 } else { delta / self.denom })
+            Some(if delta >= self.denom {
+                1.0
+            } else {
+                delta / self.denom
+            })
         } else {
             Some(0.0)
         }
@@ -929,7 +968,11 @@ fn er_row_scalar_with_prefix(
         let start = i + 1 - period;
         let delta = (data[i] - data[start]).abs();
         let denom = prefix[i] - prefix[start];
-        out[i] = if denom > 0.0 { (delta / denom).min(1.0) } else { 0.0 };
+        out[i] = if denom > 0.0 {
+            (delta / denom).min(1.0)
+        } else {
+            0.0
+        };
         i += 1;
     }
 }

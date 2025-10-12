@@ -77,8 +77,7 @@ impl CudaReflex {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaReflexError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaReflexError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -99,20 +98,31 @@ impl CudaReflex {
     }
 
     /// Create with explicit kernel selection policy (test/bench control).
-    pub fn new_with_policy(device_id: usize, policy: CudaReflexPolicy) -> Result<Self, CudaReflexError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaReflexPolicy,
+    ) -> Result<Self, CudaReflexError> {
         let mut me = Self::new(device_id)?;
         me.policy = policy;
         Ok(me)
     }
 
     #[inline]
-    pub fn set_policy(&mut self, policy: CudaReflexPolicy) { self.policy = policy; }
+    pub fn set_policy(&mut self, policy: CudaReflexPolicy) {
+        self.policy = policy;
+    }
     #[inline]
-    pub fn policy(&self) -> &CudaReflexPolicy { &self.policy }
+    pub fn policy(&self) -> &CudaReflexPolicy {
+        &self.policy
+    }
     #[inline]
-    pub fn selected_batch_kernel(&self) -> Option<ReflexBatchKernelSelected> { self.last_batch }
+    pub fn selected_batch_kernel(&self) -> Option<ReflexBatchKernelSelected> {
+        self.last_batch
+    }
     #[inline]
-    pub fn selected_many_series_kernel(&self) -> Option<ReflexManySeriesKernelSelected> { self.last_many }
+    pub fn selected_many_series_kernel(&self) -> Option<ReflexManySeriesKernelSelected> {
+        self.last_many
+    }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaReflexError> {
         self.stream
@@ -129,7 +139,9 @@ impl CudaReflex {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -415,10 +427,7 @@ impl CudaReflex {
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = len as i32;
                 let mut first_valid_i = first_valid as i32;
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .add(start * series_len)
-                    .as_raw();
+                let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut periods_ptr as *mut _ as *mut c_void,
@@ -603,7 +612,9 @@ pub mod benches {
         CudaReflex,
         crate::indicators::moving_averages::reflex::ReflexBatchRange,
         reflex_batch_dev,
-        crate::indicators::moving_averages::reflex::ReflexBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::reflex::ReflexBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         "reflex",
         "reflex"
     );
@@ -644,7 +655,10 @@ pub struct CudaReflexPolicy {
 }
 impl Default for CudaReflexPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -663,7 +677,9 @@ pub enum ReflexManySeriesKernelSelected {
 #[inline]
 fn maybe_log_once(flag: &mut bool, msg: String) {
     static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-    if *flag { return; }
+    if *flag {
+        return;
+    }
     if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
         let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
         if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
@@ -679,14 +695,24 @@ impl CudaReflex {
         if let Some(sel) = self.last_batch {
             let msg = format!("[DEBUG] Reflex batch selected kernel: {:?}", sel);
             // Safety: only toggles a bool; avoid &mut self requirement
-            unsafe { maybe_log_once(&mut (*(self as *const _ as *mut CudaReflex)).debug_batch_logged, msg); }
+            unsafe {
+                maybe_log_once(
+                    &mut (*(self as *const _ as *mut CudaReflex)).debug_batch_logged,
+                    msg,
+                );
+            }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         if let Some(sel) = self.last_many {
             let msg = format!("[DEBUG] Reflex many-series selected kernel: {:?}", sel);
-            unsafe { maybe_log_once(&mut (*(self as *const _ as *mut CudaReflex)).debug_many_logged, msg); }
+            unsafe {
+                maybe_log_once(
+                    &mut (*(self as *const _ as *mut CudaReflex)).debug_many_logged,
+                    msg,
+                );
+            }
         }
     }
 }

@@ -257,8 +257,8 @@ pub struct MacdStream {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MaKind {
-    Ema,     // α = 2/(n+1); seeded with SMA
-    Rma,     // Wilders: α = 1/n; seeded with SMA
+    Ema, // α = 2/(n+1); seeded with SMA
+    Rma, // Wilders: α = 1/n; seeded with SMA
     Sma,
     Wma,     // Linear weights 1..n (aka LWMA)
     Unknown, // Fallback
@@ -292,8 +292,8 @@ enum StreamImpl {
 #[derive(Debug, Clone)]
 struct EmaState {
     // constants
-    af: f64,   // 2/(fast+1) or 1/fast (RMA)
-    omf: f64,  // 1 - af
+    af: f64,  // 2/(fast+1) or 1/fast (RMA)
+    omf: f64, // 1 - af
     aslow: f64,
     oms: f64,
     asig: f64,
@@ -322,14 +322,14 @@ struct EmaState {
 struct SmaState {
     fast: RollingSma,
     slow: RollingSma,
-    sig:  RollingSma,
+    sig: RollingSma,
 }
 
 #[derive(Debug, Clone)]
 struct WmaState {
     fast: RollingWma,
     slow: RollingWma,
-    sig:  RollingWma,
+    sig: RollingWma,
 }
 
 // ---------- Rolling helpers (alloc once, O(1) updates) ----------
@@ -347,17 +347,30 @@ struct RollingSma {
 impl RollingSma {
     #[inline]
     fn new(n: usize) -> Self {
-        Self { n, inv_n: 1.0 / n as f64, buf: vec![0.0; n], sum: 0.0, idx: 0, cnt: 0 }
+        Self {
+            n,
+            inv_n: 1.0 / n as f64,
+            buf: vec![0.0; n],
+            sum: 0.0,
+            idx: 0,
+            cnt: 0,
+        }
     }
     #[inline]
     fn push(&mut self, x: f64) -> Option<f64> {
-        if !x.is_finite() { return None; } // ignore NaNs/Infs in stream
+        if !x.is_finite() {
+            return None;
+        } // ignore NaNs/Infs in stream
         if self.cnt < self.n {
             self.sum += x;
             self.buf[self.idx] = x;
             self.idx = (self.idx + 1) % self.n;
             self.cnt += 1;
-            if self.cnt == self.n { Some(self.sum * self.inv_n) } else { None }
+            if self.cnt == self.n {
+                Some(self.sum * self.inv_n)
+            } else {
+                None
+            }
         } else {
             let old = self.buf[self.idx];
             self.buf[self.idx] = x;
@@ -375,19 +388,29 @@ struct RollingWma {
     buf: Vec<f64>,
     idx: usize,
     cnt: usize,
-    sum: f64,   // S = sum of window
-    wsum: f64,  // W = sum_{k=1..n} k*x
+    sum: f64,  // S = sum of window
+    wsum: f64, // W = sum_{k=1..n} k*x
 }
 
 impl RollingWma {
     #[inline]
     fn new(n: usize) -> Self {
         let denom = (n as f64) * (n as f64 + 1.0) * 0.5;
-        Self { n, inv_denom: 1.0 / denom, buf: vec![0.0; n], idx: 0, cnt: 0, sum: 0.0, wsum: 0.0 }
+        Self {
+            n,
+            inv_denom: 1.0 / denom,
+            buf: vec![0.0; n],
+            idx: 0,
+            cnt: 0,
+            sum: 0.0,
+            wsum: 0.0,
+        }
     }
     #[inline]
     fn push(&mut self, x: f64) -> Option<f64> {
-        if !x.is_finite() { return None; }
+        if !x.is_finite() {
+            return None;
+        }
         if self.cnt < self.n {
             // Build initial window: W += (cnt+1)*x
             self.cnt += 1;
@@ -395,7 +418,11 @@ impl RollingWma {
             self.wsum += (self.cnt as f64) * x;
             self.buf[self.idx] = x;
             self.idx = (self.idx + 1) % self.n;
-            if self.cnt == self.n { Some(self.wsum * self.inv_denom) } else { None }
+            if self.cnt == self.n {
+                Some(self.wsum * self.inv_denom)
+            } else {
+                None
+            }
         } else {
             // Use O(1) recurrence: W' = W + n*x_new - S_prev, then update S
             let s_prev = self.sum;
@@ -404,7 +431,7 @@ impl RollingWma {
             self.idx = (self.idx + 1) % self.n;
 
             self.wsum = self.wsum + (self.n as f64) * x - s_prev;
-            self.sum  = s_prev + x - old;
+            self.sum = s_prev + x - old;
             Some(self.wsum * self.inv_denom)
         }
     }
@@ -418,10 +445,7 @@ impl MacdStream {
         let inner = match kind {
             MaKind::Ema | MaKind::Rma => {
                 let (af, aslow) = match kind {
-                    MaKind::Ema => (
-                        2.0 / (fast as f64 + 1.0),
-                        2.0 / (slow as f64 + 1.0),
-                    ),
+                    MaKind::Ema => (2.0 / (fast as f64 + 1.0), 2.0 / (slow as f64 + 1.0)),
                     MaKind::Rma => (
                         1.0 / fast as f64, // Wilders
                         1.0 / slow as f64,
@@ -434,37 +458,54 @@ impl MacdStream {
                     _ => unreachable!(),
                 };
                 StreamImpl::Ema(EmaState {
-                    af, omf: 1.0 - af,
-                    aslow, oms: 1.0 - aslow,
-                    asig, omsi: 1.0 - asig,
+                    af,
+                    omf: 1.0 - af,
+                    aslow,
+                    oms: 1.0 - aslow,
+                    asig,
+                    omsi: 1.0 - asig,
                     inv_fast: 1.0 / fast as f64,
                     inv_slow: 1.0 / slow as f64,
                     inv_sig: 1.0 / signal as f64,
-                    fsum: 0.0, ssum: 0.0, fcnt: 0, scnt: 0,
-                    fast_ema: None, slow_ema: None,
-                    sig_accum: 0.0, sig_cnt: 0, sig_ema: None,
+                    fsum: 0.0,
+                    ssum: 0.0,
+                    fcnt: 0,
+                    scnt: 0,
+                    fast_ema: None,
+                    slow_ema: None,
+                    sig_accum: 0.0,
+                    sig_cnt: 0,
+                    sig_ema: None,
                 })
             }
             MaKind::Sma => StreamImpl::Sma(SmaState {
                 fast: RollingSma::new(fast),
                 slow: RollingSma::new(slow),
-                sig:  RollingSma::new(signal),
+                sig: RollingSma::new(signal),
             }),
             MaKind::Wma => StreamImpl::Wma(WmaState {
                 fast: RollingWma::new(fast),
                 slow: RollingWma::new(slow),
-                sig:  RollingWma::new(signal),
+                sig: RollingWma::new(signal),
             }),
             MaKind::Unknown => StreamImpl::Unsupported,
         };
 
-        Self { fast, slow, signal, kind, inner }
+        Self {
+            fast,
+            slow,
+            signal,
+            kind,
+            inner,
+        }
     }
 
     /// Update with the next value. Returns (macd, signal, hist) once warmed up; otherwise None.
     /// NaN/Inf inputs are ignored (no state change; returns None).
     pub fn update(&mut self, x: f64) -> Option<(f64, f64, f64)> {
-        if !x.is_finite() { return None; }
+        if !x.is_finite() {
+            return None;
+        }
 
         match &mut self.inner {
             StreamImpl::Ema(st) => {
@@ -852,7 +893,7 @@ pub fn macd_with_kernel(input: &MacdInput, kernel: Kernel) -> Result<MacdOutput,
     let (data, fast, slow, signal, ma_type, macd_warmup, signal_warmup, chosen) =
         macd_prepare(input, kernel)?;
     let len = data.len();
-    
+
     // EMA path can leverage kernel selection; others use scalar fallback
     if ma_type.eq_ignore_ascii_case("ema") {
         let first = macd_warmup + 1 - slow;
@@ -895,7 +936,11 @@ pub fn macd_with_kernel(input: &MacdInput, kernel: Kernel) -> Result<MacdOutput,
         &mut signal_vec,
         &mut hist,
     )?;
-    Ok(MacdOutput { macd, signal: signal_vec, hist })
+    Ok(MacdOutput {
+        macd,
+        signal: signal_vec,
+        hist,
+    })
 }
 
 #[inline(always)]
@@ -1102,7 +1147,11 @@ pub unsafe fn macd_avx2(
         i += 1;
     }
 
-    Ok(MacdOutput { macd, signal: signal_vec, hist })
+    Ok(MacdOutput {
+        macd,
+        signal: signal_vec,
+        hist,
+    })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1217,7 +1266,11 @@ pub unsafe fn macd_avx512(
         i += 1;
     }
 
-    Ok(MacdOutput { macd, signal: signal_vec, hist })
+    Ok(MacdOutput {
+        macd,
+        signal: signal_vec,
+        hist,
+    })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

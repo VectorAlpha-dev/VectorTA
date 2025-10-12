@@ -573,8 +573,12 @@ pub fn nadaraya_watson_envelope_with_kernel(
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     unsafe {
         match chosen {
-            Kernel::Avx512 => nadaraya_watson_envelope_into_slices_avx512(input, &mut upper, &mut lower)?,
-            Kernel::Avx2 => nadaraya_watson_envelope_into_slices_avx2(input, &mut upper, &mut lower)?,
+            Kernel::Avx512 => {
+                nadaraya_watson_envelope_into_slices_avx512(input, &mut upper, &mut lower)?
+            }
+            Kernel::Avx2 => {
+                nadaraya_watson_envelope_into_slices_avx2(input, &mut upper, &mut lower)?
+            }
             _ => nadaraya_watson_envelope_into_slices(input, &mut upper, &mut lower)?,
         }
     }
@@ -676,7 +680,11 @@ pub unsafe fn nadaraya_watson_envelope_into_slices_avx2(
         let y = if any_nan { f64::NAN } else { num / den };
 
         let xt = *dptr.add(t);
-        let resid = if xt == xt && y == y { (xt - y).abs() } else { f64::NAN };
+        let resid = if xt == xt && y == y {
+            (xt - y).abs()
+        } else {
+            f64::NAN
+        };
 
         let old = *rbuf.get_unchecked(rhead);
         if old == old {
@@ -803,7 +811,11 @@ pub unsafe fn nadaraya_watson_envelope_into_slices_avx512(
         let y = if any_nan { f64::NAN } else { num / den };
 
         let xt = *dptr.add(t);
-        let resid = if xt == xt && y == y { (xt - y).abs() } else { f64::NAN };
+        let resid = if xt == xt && y == y {
+            (xt - y).abs()
+        } else {
+            f64::NAN
+        };
 
         let old = *rbuf.get_unchecked(rhead);
         if old == old {
@@ -948,7 +960,7 @@ impl NweStream {
         // Endpoint regression when filled
         let y = if self.filled {
             let slice = &self.ring2[self.head..self.head + self.lookback]; // oldest..newest
-            let w = &self.w_rev;                                           // reversed weights
+            let w = &self.w_rev; // reversed weights
 
             let mut acc = 0.0;
             let mut any_nan = false;
@@ -960,13 +972,21 @@ impl NweStream {
                 }
                 acc = x.mul_add(w[i], acc);
             }
-            if any_nan { f64::NAN } else { acc * self.inv_den }
+            if any_nan {
+                f64::NAN
+            } else {
+                acc * self.inv_den
+            }
         } else {
             f64::NAN
         };
 
         // Update residual ring for MAE(499)
-        let resid = if !value.is_nan() && !y.is_nan() { (value - y).abs() } else { f64::NAN };
+        let resid = if !value.is_nan() && !y.is_nan() {
+            (value - y).abs()
+        } else {
+            f64::NAN
+        };
 
         // Remove old at head
         let old = self.resid_ring[self.resid_head];

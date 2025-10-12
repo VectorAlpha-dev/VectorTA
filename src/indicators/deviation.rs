@@ -489,17 +489,29 @@ pub fn deviation_avx2(data: &[f64], period: usize, first: usize, devtype: usize,
         } else {
             let mean = sum / n;
             let mut var = (sumsq / n) - mean * mean;
-            if var < 0.0 { var = 0.0; }
+            if var < 0.0 {
+                var = 0.0;
+            }
             out[warm] = var.sqrt();
         }
 
         // ---- Scalar O(1) slide
         let mut i = warm + 1;
         while i < data.len() {
-            let v_in  = *data.get_unchecked(i);
+            let v_in = *data.get_unchecked(i);
             let v_out = *data.get_unchecked(i - period);
-            if !v_in.is_finite()  { bad += 1;  } else { sum += v_in;  sumsq = v_in.mul_add(v_in, sumsq); }
-            if !v_out.is_finite() { bad = bad.saturating_sub(1); } else { sum -= v_out; sumsq -= v_out * v_out; }
+            if !v_in.is_finite() {
+                bad += 1;
+            } else {
+                sum += v_in;
+                sumsq = v_in.mul_add(v_in, sumsq);
+            }
+            if !v_out.is_finite() {
+                bad = bad.saturating_sub(1);
+            } else {
+                sum -= v_out;
+                sumsq -= v_out * v_out;
+            }
 
             if bad > 0 || !sum.is_finite() || !sumsq.is_finite() {
                 // Recompute from scratch when window is finite but accumulators are not
@@ -517,7 +529,9 @@ pub fn deviation_avx2(data: &[f64], period: usize, first: usize, devtype: usize,
                     if s.is_finite() && s2.is_finite() {
                         let mean = s / n;
                         let mut var = (s2 / n) - mean * mean;
-                        if var < 0.0 { var = 0.0; }
+                        if var < 0.0 {
+                            var = 0.0;
+                        }
                         out[i] = var.sqrt();
                     } else {
                         out[i] = f64::NAN;
@@ -528,7 +542,9 @@ pub fn deviation_avx2(data: &[f64], period: usize, first: usize, devtype: usize,
             } else {
                 let mean = sum / n;
                 let mut var = (sumsq / n) - mean * mean;
-                if var < 0.0 { var = 0.0; }
+                if var < 0.0 {
+                    var = 0.0;
+                }
                 out[i] = var.sqrt();
             }
             i += 1;
@@ -610,17 +626,29 @@ pub fn deviation_avx512(
         } else {
             let mean = sum / n;
             let mut var = (sumsq / n) - mean * mean;
-            if var < 0.0 { var = 0.0; }
+            if var < 0.0 {
+                var = 0.0;
+            }
             out[warm] = var.sqrt();
         }
 
         // scalar O(1) slide for the rest
         let mut i = warm + 1;
         while i < data.len() {
-            let v_in  = *data.get_unchecked(i);
+            let v_in = *data.get_unchecked(i);
             let v_out = *data.get_unchecked(i - period);
-            if !v_in.is_finite()  { bad += 1; } else { sum += v_in;  sumsq = v_in.mul_add(v_in, sumsq); }
-            if !v_out.is_finite() { bad = bad.saturating_sub(1); } else { sum -= v_out; sumsq -= v_out * v_out; }
+            if !v_in.is_finite() {
+                bad += 1;
+            } else {
+                sum += v_in;
+                sumsq = v_in.mul_add(v_in, sumsq);
+            }
+            if !v_out.is_finite() {
+                bad = bad.saturating_sub(1);
+            } else {
+                sum -= v_out;
+                sumsq -= v_out * v_out;
+            }
 
             if bad > 0 || !sum.is_finite() || !sumsq.is_finite() {
                 if bad == 0 {
@@ -637,7 +665,9 @@ pub fn deviation_avx512(
                     if s.is_finite() && s2.is_finite() {
                         let mean = s / n;
                         let mut var = (s2 / n) - mean * mean;
-                        if var < 0.0 { var = 0.0; }
+                        if var < 0.0 {
+                            var = 0.0;
+                        }
                         out[i] = var.sqrt();
                     } else {
                         out[i] = f64::NAN;
@@ -648,7 +678,9 @@ pub fn deviation_avx512(
             } else {
                 let mean = sum / n;
                 let mut var = (sumsq / n) - mean * mean;
-                if var < 0.0 { var = 0.0; }
+                if var < 0.0 {
+                    var = 0.0;
+                }
                 out[i] = var.sqrt();
             }
             i += 1;
@@ -899,7 +931,10 @@ fn deviation_batch_inner_into(
     let mut ps: Vec<f64> = Vec::new();
     let mut ps2: Vec<f64> = Vec::new();
     let mut pc: Vec<usize> = Vec::new();
-    if combos.iter().any(|c| matches!(c.devtype, Some(0) | Some(3))) {
+    if combos
+        .iter()
+        .any(|c| matches!(c.devtype, Some(0) | Some(3)))
+    {
         ps.resize(cols + 1, 0.0);
         ps2.resize(cols + 1, 0.0);
         pc.resize(cols + 1, 0);
@@ -907,7 +942,11 @@ fn deviation_batch_inner_into(
         while i < cols {
             let v = unsafe { *data.get_unchecked(i) };
             ps[i + 1] = if v.is_finite() { ps[i] + v } else { ps[i] };
-            ps2[i + 1] = if v.is_finite() { v.mul_add(v, ps2[i]) } else { ps2[i] };
+            ps2[i + 1] = if v.is_finite() {
+                v.mul_add(v, ps2[i])
+            } else {
+                ps2[i]
+            };
             pc[i + 1] = pc[i] + if v.is_finite() { 0 } else { 1 };
             i += 1;
         }
@@ -936,7 +975,9 @@ fn deviation_batch_inner_into(
                     let sumsq = ps2[r + 1] - ps2[l];
                     let mean = sum / n;
                     let mut var = (sumsq / n) - mean * mean;
-                    if var < 0.0 { var = 0.0; }
+                    if var < 0.0 {
+                        var = 0.0;
+                    }
                     dst[i] = var.sqrt();
                 }
                 i += 1;
@@ -1149,7 +1190,9 @@ fn standard_deviation_rolling_into(
                         }
                         var = v2 / n;
                     }
-                    if var < 0.0 { var = 0.0; }
+                    if var < 0.0 {
+                        var = 0.0;
+                    }
                     out[i] = var.sqrt();
                 } else {
                     out[i] = f64::NAN;
@@ -1257,7 +1300,10 @@ fn mean_absolute_deviation_rolling_into(
     out: &mut [f64],
 ) -> Result<(), DeviationError> {
     if data.len() - first < period {
-        return Err(DeviationError::NotEnoughValidData { needed: period, valid: data.len() - first });
+        return Err(DeviationError::NotEnoughValidData {
+            needed: period,
+            valid: data.len() - first,
+        });
     }
 
     let n = period as f64;
@@ -1273,7 +1319,11 @@ fn mean_absolute_deviation_rolling_into(
     let end0 = first + period;
     while j < end0 {
         let v = unsafe { *data.get_unchecked(j) };
-        if !v.is_finite() { bad += 1; } else { sum += v; }
+        if !v.is_finite() {
+            bad += 1;
+        } else {
+            sum += v;
+        }
         j += 1;
     }
 
@@ -1296,7 +1346,7 @@ fn mean_absolute_deviation_rolling_into(
         let mut k2 = start;
         let stop = k2 + (period & !3);
         while k2 < stop {
-            let a0 = unsafe { *data.get_unchecked(k2)     };
+            let a0 = unsafe { *data.get_unchecked(k2) };
             let a1 = unsafe { *data.get_unchecked(k2 + 1) };
             let a2 = unsafe { *data.get_unchecked(k2 + 2) };
             let a3 = unsafe { *data.get_unchecked(k2 + 3) };
@@ -1317,11 +1367,19 @@ fn mean_absolute_deviation_rolling_into(
     // slide
     let mut i = warm + 1;
     while i < data.len() {
-        let v_in  = unsafe { *data.get_unchecked(i) };
+        let v_in = unsafe { *data.get_unchecked(i) };
         let v_out = unsafe { *data.get_unchecked(i - period) };
 
-        if !v_in.is_finite()  { bad += 1; } else { sum += v_in;  }
-        if !v_out.is_finite() { bad = bad.saturating_sub(1); } else { sum -= v_out; }
+        if !v_in.is_finite() {
+            bad += 1;
+        } else {
+            sum += v_in;
+        }
+        if !v_out.is_finite() {
+            bad = bad.saturating_sub(1);
+        } else {
+            sum -= v_out;
+        }
 
         if bad > 0 {
             out[i] = f64::NAN;
@@ -1344,7 +1402,7 @@ fn mean_absolute_deviation_rolling_into(
             let mut abs_sum = 0.0f64;
             let stop = k + (period & !3);
             while k < stop {
-                let a0 = unsafe { *data.get_unchecked(k)     };
+                let a0 = unsafe { *data.get_unchecked(k) };
                 let a1 = unsafe { *data.get_unchecked(k + 1) };
                 let a2 = unsafe { *data.get_unchecked(k + 2) };
                 let a3 = unsafe { *data.get_unchecked(k + 3) };
@@ -1413,12 +1471,19 @@ fn median_absolute_deviation_rolling_into(
     out: &mut [f64],
 ) -> Result<(), DeviationError> {
     if data.len() - first < period {
-        return Err(DeviationError::NotEnoughValidData { needed: period, valid: data.len() - first });
+        return Err(DeviationError::NotEnoughValidData {
+            needed: period,
+            valid: data.len() - first,
+        });
     }
 
     const STACK_SIZE: usize = 256;
     let mut stack: [f64; STACK_SIZE] = [0.0; STACK_SIZE];
-    let mut heap: Vec<f64> = if period > STACK_SIZE { vec![0.0; period] } else { Vec::new() };
+    let mut heap: Vec<f64> = if period > STACK_SIZE {
+        vec![0.0; period]
+    } else {
+        Vec::new()
+    };
 
     let warm = first + period - 1;
     let mut bad = 0usize;
@@ -1431,11 +1496,14 @@ fn median_absolute_deviation_rolling_into(
             let (_, m, _) = buf.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
             *m
         } else {
-            let (left, m, _right) = buf.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
+            let (left, m, _right) =
+                buf.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
             let hi = *m;
             let mut lo = left[0];
             for &v in &left[1..] {
-                if v > lo { lo = v; }
+                if v > lo {
+                    lo = v;
+                }
             }
             0.5 * (lo + hi)
         }
@@ -1446,7 +1514,9 @@ fn median_absolute_deviation_rolling_into(
         let start = warm + 1 - period;
         let mut j = start;
         while j <= warm {
-            if !unsafe { *data.get_unchecked(j) }.is_finite() { bad += 1; }
+            if !unsafe { *data.get_unchecked(j) }.is_finite() {
+                bad += 1;
+            }
             j += 1;
         }
         if bad > 0 {
@@ -1482,10 +1552,14 @@ fn median_absolute_deviation_rolling_into(
     // Slide window
     let mut i = warm + 1;
     while i < data.len() {
-        let v_in  = unsafe { *data.get_unchecked(i) };
+        let v_in = unsafe { *data.get_unchecked(i) };
         let v_out = unsafe { *data.get_unchecked(i - period) };
-        if !v_in.is_finite()  { bad += 1; }
-        if !v_out.is_finite() { bad = bad.saturating_sub(1); }
+        if !v_in.is_finite() {
+            bad += 1;
+        }
+        if !v_out.is_finite() {
+            bad = bad.saturating_sub(1);
+        }
 
         if bad > 0 {
             out[i] = f64::NAN;
@@ -1608,7 +1682,9 @@ fn mode_deviation_rolling(
 #[inline]
 fn find_median(slice: &[f64]) -> f64 {
     // Used by streaming path as well. Keep semantics: return NaN for empty.
-    if slice.is_empty() { return f64::NAN; }
+    if slice.is_empty() {
+        return f64::NAN;
+    }
 
     const STACK_SIZE: usize = 256;
     // Copy to small stack buffer when possible (no alloc), otherwise heap.
@@ -1620,13 +1696,17 @@ fn find_median(slice: &[f64]) -> f64 {
 
         let mid = n >> 1;
         if (n & 1) == 1 {
-            let (_, m, _) = b.select_nth_unstable_by(mid, |a,b| a.partial_cmp(b).unwrap());
+            let (_, m, _) = b.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
             *m
         } else {
-            let (left, m, _right) = b.select_nth_unstable_by(mid, |a,b| a.partial_cmp(b).unwrap());
+            let (left, m, _right) = b.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
             let hi = *m;
             let mut lo = left[0];
-            for &v in &left[1..] { if v > lo { lo = v; } }
+            for &v in &left[1..] {
+                if v > lo {
+                    lo = v;
+                }
+            }
             0.5 * (lo + hi)
         }
     } else {
@@ -1634,13 +1714,17 @@ fn find_median(slice: &[f64]) -> f64 {
         let n = v.len();
         let mid = n >> 1;
         if (n & 1) == 1 {
-            let (_, m, _) = v.select_nth_unstable_by(mid, |a,b| a.partial_cmp(b).unwrap());
+            let (_, m, _) = v.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
             *m
         } else {
-            let (left, m, _right) = v.select_nth_unstable_by(mid, |a,b| a.partial_cmp(b).unwrap());
+            let (left, m, _right) = v.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
             let hi = *m;
             let mut lo = left[0];
-            for &x in &left[1..] { if x > lo { lo = x; } }
+            for &x in &left[1..] {
+                if x > lo {
+                    lo = x;
+                }
+            }
             0.5 * (lo + hi)
         }
     }
@@ -1694,7 +1778,9 @@ impl DeviationStream {
 
     #[cfg(not(feature = "wasm"))]
     #[inline(always)]
-    pub fn update(&mut self, value: f64) -> Option<f64> { self.update_impl(value) }
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.update_impl(value)
+    }
 
     #[cfg(not(feature = "wasm"))]
     #[inline(always)]
@@ -1777,23 +1863,33 @@ impl DeviationStream {
         self.head += 1;
         if self.head == self.period {
             self.head = 0;
-            if !self.filled { self.filled = true; }
+            if !self.filled {
+                self.filled = true;
+            }
         }
     }
 
     #[inline(always)]
     fn stddev_o1(&self) -> f64 {
-        if !self.filled || self.count < self.period { return f64::NAN; }
-        if self.period == 1 { return 0.0; }
+        if !self.filled || self.count < self.period {
+            return f64::NAN;
+        }
+        if self.period == 1 {
+            return 0.0;
+        }
         let mean = self.sum * self.inv_n;
         let mut var = (self.sum_sq * self.inv_n) - mean * mean;
-        if var < 0.0 { var = 0.0; }
+        if var < 0.0 {
+            var = 0.0;
+        }
         sqrt_fast(var)
     }
 
     #[inline(always)]
     fn mad_log_n(&self) -> f64 {
-        if !self.filled || self.count < self.period { return f64::NAN; }
+        if !self.filled || self.count < self.period {
+            return f64::NAN;
+        }
         let n = self.period as i64;
         let m = self.sum * self.inv_n;
         let k_le = self.tree.count_leq(m) as i64;
@@ -1805,7 +1901,9 @@ impl DeviationStream {
 
     #[inline(always)]
     fn medad_log_n(&self) -> f64 {
-        if !self.filled || self.count < self.period { return f64::NAN; }
+        if !self.filled || self.count < self.period {
+            return f64::NAN;
+        }
         let n = self.period;
         let med = if (n & 1) == 1 {
             self.tree.kth((n / 2 + 1) as u32)
@@ -1841,13 +1939,27 @@ impl DeviationStream {
         let mut lo = k.saturating_sub(n_r);
         let mut hi = k.min(n_l);
         while lo <= hi {
-            let i = (lo + hi) >> 1; let j = k - i;
-            let a_left  = if i == 0   { f64::NEG_INFINITY } else { left_at(i - 1) };
-            let a_right = if i == n_l { f64::INFINITY     } else { left_at(i)     };
-            let b_left  = if j == 0   { f64::NEG_INFINITY } else { right_at(j - 1)};
-            let b_right = if j == n_r { f64::INFINITY     } else { right_at(j)    };
-            if a_left <= b_right && b_left <= a_right { return a_left.max(b_left); }
-            else if a_left > b_right { hi = i - 1; } else { lo = i + 1; }
+            let i = (lo + hi) >> 1;
+            let j = k - i;
+            let a_left = if i == 0 {
+                f64::NEG_INFINITY
+            } else {
+                left_at(i - 1)
+            };
+            let a_right = if i == n_l { f64::INFINITY } else { left_at(i) };
+            let b_left = if j == 0 {
+                f64::NEG_INFINITY
+            } else {
+                right_at(j - 1)
+            };
+            let b_right = if j == n_r { f64::INFINITY } else { right_at(j) };
+            if a_left <= b_right && b_left <= a_right {
+                return a_left.max(b_left);
+            } else if a_left > b_right {
+                hi = i - 1;
+            } else {
+                lo = i + 1;
+            }
         }
         0.0
     }
@@ -1855,7 +1967,9 @@ impl DeviationStream {
     #[inline(always)]
     fn update_impl(&mut self, value: f64) -> Option<f64> {
         self.push_pop(value);
-        if !self.filled { return None; }
+        if !self.filled {
+            return None;
+        }
         Some(match self.devtype {
             0 => self.stddev_o1(),
             1 => self.mad_log_n(),
@@ -1867,45 +1981,157 @@ impl DeviationStream {
 }
 
 #[inline(always)]
-fn norm(x: f64) -> f64 { if x == 0.0 { 0.0 } else { x } }
+fn norm(x: f64) -> f64 {
+    if x == 0.0 {
+        0.0
+    } else {
+        x
+    }
+}
 
 #[inline(always)]
-fn sqrt_fast(x: f64) -> f64 { x.sqrt() }
+fn sqrt_fast(x: f64) -> f64 {
+    x.sqrt()
+}
 
 // Order-statistics treap: supports insert/erase, count/rank, and prefix sums.
 #[derive(Debug, Clone, Default)]
-struct OstTreap { root: Link, rng: u64 }
+struct OstTreap {
+    root: Link,
+    rng: u64,
+}
 type Link = Option<Box<Node>>;
 #[derive(Debug, Clone)]
-struct Node { key: f64, pri: u64, cnt: u32, size: u32, sum: f64, l: Link, r: Link }
+struct Node {
+    key: f64,
+    pri: u64,
+    cnt: u32,
+    size: u32,
+    sum: f64,
+    l: Link,
+    r: Link,
+}
 
 impl OstTreap {
-    #[inline(always)] fn new() -> Self { Self { root: None, rng: 0x9E3779B97F4A7C15 } }
+    #[inline(always)]
+    fn new() -> Self {
+        Self {
+            root: None,
+            rng: 0x9E3779B97F4A7C15,
+        }
+    }
 
-    #[inline(always)] fn insert(&mut self, x: f64) { debug_assert!(x.is_finite()); self.root = Self::ins(self.root.take(), norm(x), self.next()); }
-    #[inline(always)] fn erase(&mut self, x: f64) { debug_assert!(x.is_finite()); self.root = Self::del(self.root.take(), norm(x)); }
-    #[inline(always)] fn count_lt(&self, x: f64) -> usize { Self::cnt_lt(&self.root, x) as usize }
-    #[inline(always)] fn count_leq(&self, x: f64) -> usize { Self::cnt_leq(&self.root, x) as usize }
-    #[inline(always)] fn sum_leq(&self, x: f64) -> f64 { Self::sum_leq_impl(&self.root, x) }
-    #[inline(always)] fn sum_all(&self) -> f64 { Self::sum(&self.root) }
-    #[inline(always)] fn kth(&self, k: u32) -> f64 { debug_assert!(k >= 1 && k <= Self::sz(&self.root)); Self::kth_impl(&self.root, k) }
+    #[inline(always)]
+    fn insert(&mut self, x: f64) {
+        debug_assert!(x.is_finite());
+        self.root = Self::ins(self.root.take(), norm(x), self.next());
+    }
+    #[inline(always)]
+    fn erase(&mut self, x: f64) {
+        debug_assert!(x.is_finite());
+        self.root = Self::del(self.root.take(), norm(x));
+    }
+    #[inline(always)]
+    fn count_lt(&self, x: f64) -> usize {
+        Self::cnt_lt(&self.root, x) as usize
+    }
+    #[inline(always)]
+    fn count_leq(&self, x: f64) -> usize {
+        Self::cnt_leq(&self.root, x) as usize
+    }
+    #[inline(always)]
+    fn sum_leq(&self, x: f64) -> f64 {
+        Self::sum_leq_impl(&self.root, x)
+    }
+    #[inline(always)]
+    fn sum_all(&self) -> f64 {
+        Self::sum(&self.root)
+    }
+    #[inline(always)]
+    fn kth(&self, k: u32) -> f64 {
+        debug_assert!(k >= 1 && k <= Self::sz(&self.root));
+        Self::kth_impl(&self.root, k)
+    }
 
-    #[inline(always)] fn next(&mut self) -> u64 { let mut x = self.rng; x ^= x << 13; x ^= x >> 7; x ^= x << 17; self.rng = x; x }
-    #[inline(always)] fn sz(n: &Link) -> u32 { n.as_ref().map(|p| p.size).unwrap_or(0) }
-    #[inline(always)] fn sum(n: &Link) -> f64 { n.as_ref().map(|p| p.sum).unwrap_or(0.0) }
-    #[inline(always)] fn pull(n: &mut Box<Node>) { n.size = n.cnt + Self::sz(&n.l) + Self::sz(&n.r); n.sum = n.cnt as f64 * n.key + Self::sum(&n.l) + Self::sum(&n.r); }
+    #[inline(always)]
+    fn next(&mut self) -> u64 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng = x;
+        x
+    }
+    #[inline(always)]
+    fn sz(n: &Link) -> u32 {
+        n.as_ref().map(|p| p.size).unwrap_or(0)
+    }
+    #[inline(always)]
+    fn sum(n: &Link) -> f64 {
+        n.as_ref().map(|p| p.sum).unwrap_or(0.0)
+    }
+    #[inline(always)]
+    fn pull(n: &mut Box<Node>) {
+        n.size = n.cnt + Self::sz(&n.l) + Self::sz(&n.r);
+        n.sum = n.cnt as f64 * n.key + Self::sum(&n.l) + Self::sum(&n.r);
+    }
 
-    #[inline(always)] fn rot_right(mut y: Box<Node>) -> Box<Node> { let mut x = y.l.take().expect("rotate right"); y.l = x.r.take(); Self::pull(&mut y); x.r = Some(y); Self::pull(&mut x); x }
-    #[inline(always)] fn rot_left(mut x: Box<Node>) -> Box<Node> { let mut y = x.r.take().expect("rotate left"); x.r = y.l.take(); Self::pull(&mut x); y.l = Some(x); Self::pull(&mut y); y }
+    #[inline(always)]
+    fn rot_right(mut y: Box<Node>) -> Box<Node> {
+        let mut x = y.l.take().expect("rotate right");
+        y.l = x.r.take();
+        Self::pull(&mut y);
+        x.r = Some(y);
+        Self::pull(&mut x);
+        x
+    }
+    #[inline(always)]
+    fn rot_left(mut x: Box<Node>) -> Box<Node> {
+        let mut y = x.r.take().expect("rotate left");
+        x.r = y.l.take();
+        Self::pull(&mut x);
+        y.l = Some(x);
+        Self::pull(&mut y);
+        y
+    }
 
     fn ins(t: Link, key: f64, pri: u64) -> Link {
         match t {
-            None => Some(Box::new(Node { key, pri, cnt: 1, size: 1, sum: key, l: None, r: None })),
+            None => Some(Box::new(Node {
+                key,
+                pri,
+                cnt: 1,
+                size: 1,
+                sum: key,
+                l: None,
+                r: None,
+            })),
             Some(mut n) => match key.total_cmp(&n.key) {
-                core::cmp::Ordering::Equal => { n.cnt += 1; n.size += 1; n.sum += key; Some(n) }
-                core::cmp::Ordering::Less => { n.l = Self::ins(n.l.take(), key, pri); if n.l.as_ref().unwrap().pri > n.pri { n = Self::rot_right(n); } else { Self::pull(&mut n); } Some(n) }
-                core::cmp::Ordering::Greater => { n.r = Self::ins(n.r.take(), key, pri); if n.r.as_ref().unwrap().pri > n.pri { n = Self::rot_left(n); } else { Self::pull(&mut n); } Some(n) }
-            }
+                core::cmp::Ordering::Equal => {
+                    n.cnt += 1;
+                    n.size += 1;
+                    n.sum += key;
+                    Some(n)
+                }
+                core::cmp::Ordering::Less => {
+                    n.l = Self::ins(n.l.take(), key, pri);
+                    if n.l.as_ref().unwrap().pri > n.pri {
+                        n = Self::rot_right(n);
+                    } else {
+                        Self::pull(&mut n);
+                    }
+                    Some(n)
+                }
+                core::cmp::Ordering::Greater => {
+                    n.r = Self::ins(n.r.take(), key, pri);
+                    if n.r.as_ref().unwrap().pri > n.pri {
+                        n = Self::rot_left(n);
+                    } else {
+                        Self::pull(&mut n);
+                    }
+                    Some(n)
+                }
+            },
         }
     }
 
@@ -1914,34 +2140,66 @@ impl OstTreap {
             None => None,
             Some(mut n) => match key.total_cmp(&n.key) {
                 core::cmp::Ordering::Equal => {
-                    if n.cnt > 1 { n.cnt -= 1; n.size -= 1; n.sum -= key; Some(n) } else {
+                    if n.cnt > 1 {
+                        n.cnt -= 1;
+                        n.size -= 1;
+                        n.sum -= key;
+                        Some(n)
+                    } else {
                         match (n.l.take(), n.r.take()) {
                             (None, None) => None,
                             (Some(l), None) => Some(l),
                             (None, Some(r)) => Some(r),
                             (Some(l), Some(r)) => {
                                 if l.pri > r.pri {
-                                    let mut new = Self::rot_right(Box::new(Node { l: Some(l), r: Some(r), ..*n }));
-                                    new.r = Self::del(new.r.take(), key); Self::pull(&mut new); Some(new)
+                                    let mut new = Self::rot_right(Box::new(Node {
+                                        l: Some(l),
+                                        r: Some(r),
+                                        ..*n
+                                    }));
+                                    new.r = Self::del(new.r.take(), key);
+                                    Self::pull(&mut new);
+                                    Some(new)
                                 } else {
-                                    let mut new = Self::rot_left(Box::new(Node { l: Some(l), r: Some(r), ..*n }));
-                                    new.l = Self::del(new.l.take(), key); Self::pull(&mut new); Some(new)
+                                    let mut new = Self::rot_left(Box::new(Node {
+                                        l: Some(l),
+                                        r: Some(r),
+                                        ..*n
+                                    }));
+                                    new.l = Self::del(new.l.take(), key);
+                                    Self::pull(&mut new);
+                                    Some(new)
                                 }
                             }
                         }
                     }
                 }
-                core::cmp::Ordering::Less => { n.l = Self::del(n.l.take(), key); Self::pull(&mut n); Some(n) }
-                core::cmp::Ordering::Greater => { n.r = Self::del(n.r.take(), key); Self::pull(&mut n); Some(n) }
-            }
+                core::cmp::Ordering::Less => {
+                    n.l = Self::del(n.l.take(), key);
+                    Self::pull(&mut n);
+                    Some(n)
+                }
+                core::cmp::Ordering::Greater => {
+                    n.r = Self::del(n.r.take(), key);
+                    Self::pull(&mut n);
+                    Some(n)
+                }
+            },
         }
     }
 
     fn kth_impl(t: &Link, mut k: u32) -> f64 {
-        let n = t.as_ref().unwrap(); let ls = Self::sz(&n.l);
-        if k <= ls { return Self::kth_impl(&n.l, k); }
-        k -= ls; if k <= n.cnt { return n.key; }
-        k -= n.cnt; Self::kth_impl(&n.r, k)
+        let n = t.as_ref().unwrap();
+        let ls = Self::sz(&n.l);
+        if k <= ls {
+            return Self::kth_impl(&n.l, k);
+        }
+        k -= ls;
+        if k <= n.cnt {
+            return n.key;
+        }
+        k -= n.cnt;
+        Self::kth_impl(&n.r, k)
     }
 
     fn cnt_leq(t: &Link, x: f64) -> u32 {
@@ -1951,7 +2209,7 @@ impl OstTreap {
                 core::cmp::Ordering::Less => Self::cnt_leq(&n.l, x),
                 core::cmp::Ordering::Equal => Self::sz(&n.l) + n.cnt,
                 core::cmp::Ordering::Greater => Self::sz(&n.l) + n.cnt + Self::cnt_leq(&n.r, x),
-            }
+            },
         }
     }
 
@@ -1962,7 +2220,7 @@ impl OstTreap {
                 core::cmp::Ordering::Less => Self::cnt_lt(&n.l, x),
                 core::cmp::Ordering::Equal => Self::sz(&n.l),
                 core::cmp::Ordering::Greater => Self::sz(&n.l) + n.cnt + Self::cnt_lt(&n.r, x),
-            }
+            },
         }
     }
 
@@ -1972,8 +2230,10 @@ impl OstTreap {
             Some(n) => match x.total_cmp(&n.key) {
                 core::cmp::Ordering::Less => Self::sum_leq_impl(&n.l, x),
                 core::cmp::Ordering::Equal => Self::sum(&n.l) + n.cnt as f64 * n.key,
-                core::cmp::Ordering::Greater => Self::sum(&n.l) + n.cnt as f64 * n.key + Self::sum_leq_impl(&n.r, x),
-            }
+                core::cmp::Ordering::Greater => {
+                    Self::sum(&n.l) + n.cnt as f64 * n.key + Self::sum_leq_impl(&n.r, x)
+                }
+            },
         }
     }
 }
@@ -1983,12 +2243,17 @@ impl OstTreap {
 impl DeviationStream {
     #[wasm_bindgen(constructor)]
     pub fn new(period: usize, devtype: usize) -> Result<DeviationStream, JsValue> {
-        let params = DeviationParams { period: Some(period), devtype: Some(devtype) };
+        let params = DeviationParams {
+            period: Some(period),
+            devtype: Some(devtype),
+        };
         DeviationStream::try_new(params).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     #[wasm_bindgen]
-    pub fn update(&mut self, value: f64) -> Option<f64> { self.update_impl(value) }
+    pub fn update(&mut self, value: f64) -> Option<f64> {
+        self.update_impl(value)
+    }
 
     #[inline(always)]
     fn std_dev_ring_o1(&self) -> f64 {

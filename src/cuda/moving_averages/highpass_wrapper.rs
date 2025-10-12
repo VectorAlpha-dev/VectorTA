@@ -46,7 +46,9 @@ pub enum BatchKernelPolicy {
     Plain { block_x: u32 },
 }
 impl Default for BatchKernelPolicy {
-    fn default() -> Self { BatchKernelPolicy::Auto }
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -55,7 +57,9 @@ pub enum ManySeriesKernelPolicy {
     OneD { block_x: u32 },
 }
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -130,10 +134,18 @@ impl CudaHighpass {
             .map_err(|e| CudaHighpassError::Cuda(e.to_string()))
     }
 
-    pub fn set_policy(&mut self, policy: CudaHighpassPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaHighpassPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaHighpassPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaHighpassPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -173,14 +185,19 @@ impl CudaHighpass {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] highpass batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaHighpass)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaHighpass)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -188,14 +205,19 @@ impl CudaHighpass {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] highpass many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaHighpass)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaHighpass)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -281,7 +303,10 @@ impl CudaHighpass {
             BatchKernelPolicy::Auto => 1u32,
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
         };
-        unsafe { (*(self as *const _ as *mut CudaHighpass)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaHighpass)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
 
         const MAX_ROWS_PER_LAUNCH: usize = 65_535; // grid.x chunking (matching ALMA grid.y policy)
         let mut launched = 0usize;
@@ -520,7 +545,10 @@ impl CudaHighpass {
             ManySeriesKernelPolicy::Auto => 1u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
         };
-        unsafe { (*(self as *const _ as *mut CudaHighpass)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaHighpass)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
 
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -619,7 +647,9 @@ pub mod benches {
         crate::indicators::moving_averages::highpass::HighPassParams,
         highpass_batch_dev,
         highpass_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::highpass::HighPassBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::highpass::HighPassBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::highpass::HighPassParams { period: Some(64) },
         "highpass",
         "highpass"

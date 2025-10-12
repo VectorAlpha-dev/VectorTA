@@ -324,13 +324,21 @@ impl UmaStream {
             return Err(UmaError::InvalidMinLength { min_length });
         }
         if max_length == 0 {
-            return Err(UmaError::InvalidMaxLength { max_length, data_len: 0 });
+            return Err(UmaError::InvalidMaxLength {
+                max_length,
+                data_len: 0,
+            });
         }
         if smooth_len == 0 {
-            return Err(UmaError::InvalidSmoothLength { smooth_length: smooth_len });
+            return Err(UmaError::InvalidSmoothLength {
+                smooth_length: smooth_len,
+            });
         }
         if min_length > max_length {
-            return Err(UmaError::MinLengthGreaterThanMaxLength { min_length, max_length });
+            return Err(UmaError::MinLengthGreaterThanMaxLength {
+                min_length,
+                max_length,
+            });
         }
         if accelerator < 1.0 {
             return Err(UmaError::InvalidAccelerator { accelerator });
@@ -477,7 +485,11 @@ impl UmaStream {
             let up_sum = self.upvol_cum[cur] - self.upvol_cum[prev];
             let dn_sum = self.dnvol_cum[cur] - self.dnvol_cum[prev];
             let tot = up_sum + dn_sum;
-            if tot > 0.0 { 100.0 * up_sum / tot } else { 50.0 }
+            if tot > 0.0 {
+                100.0 * up_sum / tot
+            } else {
+                50.0
+            }
         } else {
             // Wilder RSI with variable alpha = 1/len_r
             if self.diff_step > 0 {
@@ -497,7 +509,11 @@ impl UmaStream {
                 100.0
             } else {
                 let s = self.rsi_avg_up + self.rsi_avg_dn;
-                if s == 0.0 { 50.0 } else { 100.0 * self.rsi_avg_up / s }
+                if s == 0.0 {
+                    50.0
+                } else {
+                    100.0 * self.rsi_avg_up / s
+                }
             }
         };
 
@@ -701,14 +717,19 @@ fn uma_core_into(
     // ------- Precompute mean/std at fixed max_length (keeps UMA band logic identical) -------
     let mean = sma(&SmaInput::from_slice(
         data,
-        SmaParams { period: Some(max_length) },
+        SmaParams {
+            period: Some(max_length),
+        },
     ))
     .map_err(|e| UmaError::DependencyError(e.to_string()))?
     .values;
 
     let std_dev = deviation(&DeviationInput::from_slice(
         data,
-        DeviationParams { period: Some(max_length), devtype: Some(0) },
+        DeviationParams {
+            period: Some(max_length),
+            devtype: Some(0),
+        },
     ))
     .map_err(|e| UmaError::DependencyError(e.to_string()))?
     .values;
@@ -848,9 +869,7 @@ fn uma_core_into(
             dyn_len -= 1.0;
         }
 
-        dyn_len = dyn_len
-            .max(min_length as f64)
-            .min(max_length as f64);
+        dyn_len = dyn_len.max(min_length as f64).min(max_length as f64);
         let len_r = dyn_len.round() as usize;
         if i + 1 < len_r {
             continue;
@@ -863,7 +882,11 @@ fn uma_core_into(
                 if v_i == 0.0 || v_i.is_nan() {
                     // RSI fallback over a 2*len_r sized slice
                     let end = i;
-                    let start = if end + 1 >= 2 * len_r { end + 1 - 2 * len_r } else { 0 };
+                    let start = if end + 1 >= 2 * len_r {
+                        end + 1 - 2 * len_r
+                    } else {
+                        0
+                    };
                     rsi_wilder_last(data, start, end, len_r)
                 } else {
                     let start = i + 1 - len_r;
@@ -888,12 +911,20 @@ fn uma_core_into(
                     prev = cur;
                 }
                 let tot = up_vol + dn_vol;
-                if tot > 0.0 { 100.0 * up_vol / tot } else { 50.0 }
+                if tot > 0.0 {
+                    100.0 * up_vol / tot
+                } else {
+                    50.0
+                }
             }
             _ => {
                 // No volume -> RSI fallback over a 2*len_r window
                 let end = i;
-                let start = if end + 1 >= 2 * len_r { end + 1 - 2 * len_r } else { 0 };
+                let start = if end + 1 >= 2 * len_r {
+                    end + 1 - 2 * len_r
+                } else {
+                    0
+                };
                 rsi_wilder_last(data, start, end, len_r)
             }
         };
@@ -982,13 +1013,17 @@ fn uma_core_into(
 }
 
 // ====== Optional AVX2/AVX512 accumulation kernels ======
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(all(
+    feature = "nightly-avx",
+    target_arch = "x86_64",
+    target_feature = "avx2"
+))]
 #[inline(always)]
 unsafe fn uma_weighted_accumulate_avx2(
-    data: *const f64,         // &data[start] pointer
-    ln_lut: *const f64,       // &ln_lut[0]
-    len_r: usize,             // window length
-    p: f64,                   // exponent
+    data: *const f64,   // &data[start] pointer
+    ln_lut: *const f64, // &ln_lut[0]
+    len_r: usize,       // window length
+    p: f64,             // exponent
 ) -> (f64, f64) {
     use core::arch::x86_64::*;
     let mut sum_v = _mm256_setzero_pd();
@@ -1001,10 +1036,10 @@ unsafe fn uma_weighted_accumulate_avx2(
         let k2 = k1 - 1;
         let k3 = k2 - 1;
 
-    let w0 = exp_kernel(p * *ln_lut.add(k0));
-    let w1 = exp_kernel(p * *ln_lut.add(k1));
-    let w2 = exp_kernel(p * *ln_lut.add(k2));
-    let w3 = exp_kernel(p * *ln_lut.add(k3));
+        let w0 = exp_kernel(p * *ln_lut.add(k0));
+        let w1 = exp_kernel(p * *ln_lut.add(k1));
+        let w2 = exp_kernel(p * *ln_lut.add(k2));
+        let w3 = exp_kernel(p * *ln_lut.add(k3));
         let wv = _mm256_setr_pd(w0, w1, w2, w3);
 
         let xv = _mm256_loadu_pd(data.add(j));
@@ -1042,7 +1077,11 @@ unsafe fn uma_weighted_accumulate_avx2(
     (xws, wsum)
 }
 
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx512f"))]
+#[cfg(all(
+    feature = "nightly-avx",
+    target_arch = "x86_64",
+    target_feature = "avx512f"
+))]
 #[inline(always)]
 unsafe fn uma_weighted_accumulate_avx512(
     data: *const f64,   // &data[start]

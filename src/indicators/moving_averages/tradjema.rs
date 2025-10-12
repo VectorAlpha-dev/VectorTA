@@ -449,7 +449,11 @@ fn tradjema_compute_into_scalar(
     #[inline(always)]
     fn max3(a: f64, b: f64, c: f64) -> f64 {
         let m = if a > b { a } else { b };
-        if m > c { m } else { c }
+        if m > c {
+            m
+        } else {
+            c
+        }
     }
 
     // --- Seed window: [first .. warm] ---
@@ -507,7 +511,11 @@ fn tradjema_compute_into_scalar(
     let tr_low = min_vals[min_head];
     let tr_high = max_vals[max_head];
     let denom = tr_high - tr_low;
-    let tr_adj0 = if denom != 0.0 { (last_tr - tr_low) / denom } else { 0.0 };
+    let tr_adj0 = if denom != 0.0 {
+        (last_tr - tr_low) / denom
+    } else {
+        0.0
+    };
     let a0 = alpha * (1.0 + tr_adj0 * mult);
     let src0 = close[warm - 1]; // 1-bar lag
     let mut y = src0.mul_add(a0, 0.0); // Pine seed (0 + a0*(src0-0))
@@ -642,15 +650,15 @@ pub struct TradjemaStream {
     filled: bool,
 
     // EMA state
-    prev_close: f64,   // src is lagged: close[i-1]
-    tradjema: f64,     // last EMA value (y)
+    prev_close: f64, // src is lagged: close[i-1]
+    tradjema: f64,   // last EMA value (y)
 
     // Monotonic deques for TR window [i-length+1 .. i]
     // We use ring buffers identical in behavior to the scalar path.
     min_vals: Vec<f64>,
-    min_idx:  Vec<usize>,
+    min_idx: Vec<usize>,
     max_vals: Vec<f64>,
-    max_idx:  Vec<usize>,
+    max_idx: Vec<usize>,
     min_head: usize,
     min_tail: usize,
     max_head: usize,
@@ -663,7 +671,10 @@ impl TradjemaStream {
         let mult = params.mult.unwrap_or(10.0);
 
         if length < 2 {
-            return Err(TradjemaError::InvalidLength { length, data_len: 0 });
+            return Err(TradjemaError::InvalidLength {
+                length,
+                data_len: 0,
+            });
         }
         if mult <= 0.0 || !mult.is_finite() {
             return Err(TradjemaError::InvalidMult { mult });
@@ -682,9 +693,9 @@ impl TradjemaStream {
             tradjema: f64::NAN,
 
             min_vals: vec![0.0; cap],
-            min_idx:  vec![0;   cap],
+            min_idx: vec![0; cap],
             max_vals: vec![0.0; cap],
-            max_idx:  vec![0;   cap],
+            max_idx: vec![0; cap],
             min_head: 0,
             min_tail: 0,
             max_head: 0,
@@ -695,11 +706,17 @@ impl TradjemaStream {
     #[inline(always)]
     fn inc(i: &mut usize, cap: usize) {
         *i += 1;
-        if *i == cap { *i = 0; }
+        if *i == cap {
+            *i = 0;
+        }
     }
     #[inline(always)]
     fn dec(i: usize, cap: usize) -> usize {
-        if i == 0 { cap - 1 } else { i - 1 }
+        if i == 0 {
+            cap - 1
+        } else {
+            i - 1
+        }
     }
     #[inline(always)]
     fn minq_push(&mut self, v: f64, idx: usize) {
@@ -711,7 +728,7 @@ impl TradjemaStream {
             back = Self::dec(self.min_tail, cap);
         }
         self.min_vals[self.min_tail] = v;
-        self.min_idx[self.min_tail]  = idx;
+        self.min_idx[self.min_tail] = idx;
         Self::inc(&mut self.min_tail, cap);
     }
     #[inline(always)]
@@ -724,11 +741,18 @@ impl TradjemaStream {
             back = Self::dec(self.max_tail, cap);
         }
         self.max_vals[self.max_tail] = v;
-        self.max_idx[self.max_tail]  = idx;
+        self.max_idx[self.max_tail] = idx;
         Self::inc(&mut self.max_tail, cap);
     }
     #[inline(always)]
-    fn q_expire(head: &mut usize, tail: &mut usize, id: &mut [usize], cur: usize, len: usize, cap: usize) {
+    fn q_expire(
+        head: &mut usize,
+        tail: &mut usize,
+        id: &mut [usize],
+        cur: usize,
+        len: usize,
+        cap: usize,
+    ) {
         // Drop anything with index <= cur - len  (window is [cur-len+1 .. cur])
         let lim = cur.saturating_sub(len);
         while *head != *tail && id[*head] <= lim {
@@ -739,7 +763,11 @@ impl TradjemaStream {
     #[inline(always)]
     fn max3(a: f64, b: f64, c: f64) -> f64 {
         let m = if a > b { a } else { b };
-        if m > c { m } else { c }
+        if m > c {
+            m
+        } else {
+            c
+        }
     }
 
     /// Stream one OHLC bar. Returns `Some(value)` once the window is full,
@@ -752,7 +780,7 @@ impl TradjemaStream {
         } else {
             let hl = high - low;
             let hc = (high - self.prev_close).abs();
-            let lc = (low  - self.prev_close).abs();
+            let lc = (low - self.prev_close).abs();
             Self::max3(hl, hc, lc)
         };
 
@@ -788,8 +816,22 @@ impl TradjemaStream {
         // --- Steady-state (window already full) ---
         // 1) expire elements that just left the window (do this *before* push)
         let cap = self.length;
-        Self::q_expire(&mut self.min_head, &mut self.min_tail, &mut self.min_idx, self.i, self.length, cap);
-        Self::q_expire(&mut self.max_head, &mut self.max_tail, &mut self.max_idx, self.i, self.length, cap);
+        Self::q_expire(
+            &mut self.min_head,
+            &mut self.min_tail,
+            &mut self.min_idx,
+            self.i,
+            self.length,
+            cap,
+        );
+        Self::q_expire(
+            &mut self.max_head,
+            &mut self.max_tail,
+            &mut self.max_idx,
+            self.i,
+            self.length,
+            cap,
+        );
 
         // 2) push TR for the current index
         self.minq_push(tr, self.i);
@@ -1534,7 +1576,11 @@ fn tradjema_batch_inner_into(
         }
         #[inline(always)]
         fn dec(i: usize, cap: usize) -> usize {
-            if i == 0 { cap - 1 } else { i - 1 }
+            if i == 0 {
+                cap - 1
+            } else {
+                i - 1
+            }
         }
         #[inline(always)]
         fn minq_push(
@@ -1575,7 +1621,14 @@ fn tradjema_batch_inner_into(
             inc(tail, cap);
         }
         #[inline(always)]
-        fn q_expire(cur: usize, len: usize, id: &mut [usize], head: &mut usize, tail: &mut usize, cap: usize) {
+        fn q_expire(
+            cur: usize,
+            len: usize,
+            id: &mut [usize],
+            head: &mut usize,
+            tail: &mut usize,
+            cap: usize,
+        ) {
             let lim = cur.saturating_sub(len);
             while *head != *tail && id[*head] <= lim {
                 inc(head, cap);
@@ -1586,8 +1639,24 @@ fn tradjema_batch_inner_into(
         let mut i = first;
         while i <= warm {
             let v = tr[i];
-            minq_push(v, i, &mut min_vals, &mut min_idx, &mut min_head, &mut min_tail, cap);
-            maxq_push(v, i, &mut max_vals, &mut max_idx, &mut max_head, &mut max_tail, cap);
+            minq_push(
+                v,
+                i,
+                &mut min_vals,
+                &mut min_idx,
+                &mut min_head,
+                &mut min_tail,
+                cap,
+            );
+            maxq_push(
+                v,
+                i,
+                &mut max_vals,
+                &mut max_idx,
+                &mut max_head,
+                &mut max_tail,
+                cap,
+            );
             i += 1;
         }
         let lo = min_vals[min_head];
@@ -1606,8 +1675,24 @@ fn tradjema_batch_inner_into(
             q_expire(i, length, &mut max_idx, &mut max_head, &mut max_tail, cap);
 
             let v = tr[i];
-            minq_push(v, i, &mut min_vals, &mut min_idx, &mut min_head, &mut min_tail, cap);
-            maxq_push(v, i, &mut max_vals, &mut max_idx, &mut max_head, &mut max_tail, cap);
+            minq_push(
+                v,
+                i,
+                &mut min_vals,
+                &mut min_idx,
+                &mut min_head,
+                &mut min_tail,
+                cap,
+            );
+            maxq_push(
+                v,
+                i,
+                &mut max_vals,
+                &mut max_idx,
+                &mut max_head,
+                &mut max_tail,
+                cap,
+            );
 
             let lo = min_vals[min_head];
             let hi = max_vals[max_head];

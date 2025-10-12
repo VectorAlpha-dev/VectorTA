@@ -544,7 +544,11 @@ fn kdj_compute_into_scalar(
             }
 
             if i >= k_warm {
-                let k_val = if cnt_k > 0 { sum_k / (cnt_k as f64) } else { f64::NAN };
+                let k_val = if cnt_k > 0 {
+                    sum_k / (cnt_k as f64)
+                } else {
+                    f64::NAN
+                };
                 unsafe { *k_out.get_unchecked_mut(i) = k_val };
 
                 // feed D SMA
@@ -561,7 +565,11 @@ fn kdj_compute_into_scalar(
                 }
 
                 if i >= d_warm {
-                    let d_val = if cnt_d > 0 { sum_d / (cnt_d as f64) } else { f64::NAN };
+                    let d_val = if cnt_d > 0 {
+                        sum_d / (cnt_d as f64)
+                    } else {
+                        f64::NAN
+                    };
                     unsafe {
                         *d_out.get_unchecked_mut(i) = d_val;
                         *j_out.get_unchecked_mut(i) = if k_val.is_nan() || d_val.is_nan() {
@@ -660,7 +668,11 @@ fn kdj_compute_into_scalar(
                     cnt_init_k += 1;
                 }
                 if i == k_warm {
-                    ema_kv = if cnt_init_k > 0 { sum_init_k / (cnt_init_k as f64) } else { f64::NAN };
+                    ema_kv = if cnt_init_k > 0 {
+                        sum_init_k / (cnt_init_k as f64)
+                    } else {
+                        f64::NAN
+                    };
                     unsafe { *k_out.get_unchecked_mut(i) = ema_kv };
                     if !ema_kv.is_nan() {
                         sum_init_d += ema_kv;
@@ -684,7 +696,11 @@ fn kdj_compute_into_scalar(
                     cnt_init_d += 1;
                 }
                 if i == d_warm {
-                    ema_dv = if cnt_init_d > 0 { sum_init_d / (cnt_init_d as f64) } else { f64::NAN };
+                    ema_dv = if cnt_init_d > 0 {
+                        sum_init_d / (cnt_init_d as f64)
+                    } else {
+                        f64::NAN
+                    };
                     unsafe {
                         *d_out.get_unchecked_mut(i) = ema_dv;
                         *j_out.get_unchecked_mut(i) = if ema_kv.is_nan() || ema_dv.is_nan() {
@@ -1075,7 +1091,7 @@ pub struct KdjStream {
     d_is_ema: bool,
 
     // --- sliding window for HH/LL via monotonic deques (amortized O(1)) ---
-    i: usize,                    // monotonically increasing update index
+    i: usize,                      // monotonically increasing update index
     maxdq: VecDeque<(usize, f64)>, // (idx, high) non-increasing
     mindq: VecDeque<(usize, f64)>, // (idx, low) non-decreasing
 
@@ -1123,13 +1139,9 @@ impl KdjStream {
     pub fn try_new(params: KdjParams) -> Result<Self, KdjError> {
         let fast_k_period = params.fast_k_period.unwrap_or(9);
         let slow_k_period = params.slow_k_period.unwrap_or(3);
-        let slow_k_ma_type = params
-            .slow_k_ma_type
-            .unwrap_or_else(|| "sma".to_string());
+        let slow_k_ma_type = params.slow_k_ma_type.unwrap_or_else(|| "sma".to_string());
         let slow_d_period = params.slow_d_period.unwrap_or(3);
-        let slow_d_ma_type = params
-            .slow_d_ma_type
-            .unwrap_or_else(|| "sma".to_string());
+        let slow_d_ma_type = params.slow_d_ma_type.unwrap_or_else(|| "sma".to_string());
 
         if fast_k_period == 0 {
             return Err(KdjError::InvalidPeriod {
@@ -1720,14 +1732,13 @@ fn kdj_batch_inner(
     };
 
     // If multiple rows share the same fast_k, precompute stochastic once per unique fast_k and reuse
-    let unique_fast: std::collections::BTreeSet<usize> = combos
-        .iter()
-        .map(|c| c.fast_k_period.unwrap())
-        .collect();
+    let unique_fast: std::collections::BTreeSet<usize> =
+        combos.iter().map(|c| c.fast_k_period.unwrap()).collect();
 
     // Build a cache when reuse exists; otherwise fall back to per-row compute
     let use_stoch_cache = unique_fast.len() < combos.len();
-    let mut stoch_cache: std::collections::HashMap<usize, Vec<f64>> = std::collections::HashMap::new();
+    let mut stoch_cache: std::collections::HashMap<usize, Vec<f64>> =
+        std::collections::HashMap::new();
     if use_stoch_cache {
         use std::collections::VecDeque;
         for &fk in &unique_fast {
@@ -1789,7 +1800,11 @@ fn kdj_batch_inner(
         }
     }
 
-    let do_row = |row: usize, out_k: &mut [f64], out_d: &mut [f64], out_j: &mut [f64]| -> Result<(), KdjError> {
+    let do_row = |row: usize,
+                  out_k: &mut [f64],
+                  out_d: &mut [f64],
+                  out_j: &mut [f64]|
+     -> Result<(), KdjError> {
         let prm = &combos[row];
         let fast_k = prm.fast_k_period.unwrap();
         let slow_k = prm.slow_k_period.unwrap();
@@ -1798,7 +1813,9 @@ fn kdj_batch_inner(
         let slow_d_ma = prm.slow_d_ma_type.as_deref().unwrap_or("sma");
 
         if use_stoch_cache {
-            let stoch = stoch_cache.get(&fast_k).expect("stoch cache missing fast_k");
+            let stoch = stoch_cache
+                .get(&fast_k)
+                .expect("stoch cache missing fast_k");
             let stoch_warm = first + fast_k - 1;
             // Prefer classic kernels for common types
             if slow_k_ma.eq_ignore_ascii_case("sma") && slow_d_ma.eq_ignore_ascii_case("sma") {
@@ -1831,22 +1848,26 @@ fn kdj_batch_inner(
         // Fall back to original per-row kernel selection
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => kdj_row_scalar(
-                high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j,
+                high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k,
+                out_d, out_j,
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
                 kdj_row_avx2(
-                    high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j,
+                    high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k,
+                    out_d, out_j,
                 )
             },
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
                 kdj_row_avx512(
-                    high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j,
+                    high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k,
+                    out_d, out_j,
                 )
             },
             _ => kdj_row_scalar(
-                high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k, out_d, out_j,
+                high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k,
+                out_d, out_j,
             ),
         }
     };

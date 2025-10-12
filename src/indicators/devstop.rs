@@ -607,7 +607,9 @@ pub fn devstop_avx2(
     let mult = input.get_mult();
     let ma_type = input.get_ma_type();
     unsafe {
-        if devtype == 0 && (ma_type.eq_ignore_ascii_case("sma") || ma_type.eq_ignore_ascii_case("ema")) {
+        if devtype == 0
+            && (ma_type.eq_ignore_ascii_case("sma") || ma_type.eq_ignore_ascii_case("ema"))
+        {
             let _ = if ma_type.eq_ignore_ascii_case("sma") {
                 devstop_scalar_classic_sma(high, low, period, mult, is_long, first, out)
             } else {
@@ -634,7 +636,9 @@ pub fn devstop_avx512(
     let mult = input.get_mult();
     let ma_type = input.get_ma_type();
     unsafe {
-        if devtype == 0 && (ma_type.eq_ignore_ascii_case("sma") || ma_type.eq_ignore_ascii_case("ema")) {
+        if devtype == 0
+            && (ma_type.eq_ignore_ascii_case("sma") || ma_type.eq_ignore_ascii_case("ema"))
+        {
             let _ = if ma_type.eq_ignore_ascii_case("sma") {
                 devstop_scalar_classic_sma(high, low, period, mult, is_long, first, out)
             } else {
@@ -943,11 +947,7 @@ fn devstop_batch_inner(
     // Row-specific optimized batch for classic stddev + SMA/EMA
     let all_classic = combos.iter().all(|c| {
         let dt = c.devtype.unwrap_or(0);
-        let mt = c
-            .ma_type
-            .as_ref()
-            .map(|s| s.as_str())
-            .unwrap_or("sma");
+        let mt = c.ma_type.as_ref().map(|s| s.as_str()).unwrap_or("sma");
         dt == 0 && (mt.eq_ignore_ascii_case("sma") || mt.eq_ignore_ascii_case("ema"))
     });
 
@@ -996,11 +996,7 @@ fn devstop_batch_inner(
                 .map(|d| d.as_str())
                 .unwrap_or("long")
                 .eq_ignore_ascii_case("long");
-            let ma_type = prm
-                .ma_type
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("sma");
+            let ma_type = prm.ma_type.as_ref().map(|s| s.as_str()).unwrap_or("sma");
 
             let start_base = first + period;
             if start_base >= len {
@@ -1042,13 +1038,26 @@ fn devstop_batch_inner(
                 unsafe { *buf.get_unchecked((head + len - 1) % cap) }
             }
             #[inline(always)]
-            fn dq_pop_back(len: &mut usize) { *len -= 1; }
+            fn dq_pop_back(len: &mut usize) {
+                *len -= 1;
+            }
             #[inline(always)]
-            fn dq_pop_front(head: &mut usize, len: &mut usize, cap: usize) { *head = (*head + 1) % cap; *len -= 1; }
+            fn dq_pop_front(head: &mut usize, len: &mut usize, cap: usize) {
+                *head = (*head + 1) % cap;
+                *len -= 1;
+            }
             #[inline(always)]
-            fn dq_push_back(buf: &mut [usize], head: usize, len: &mut usize, cap: usize, value: usize) {
+            fn dq_push_back(
+                buf: &mut [usize],
+                head: usize,
+                len: &mut usize,
+                cap: usize,
+                value: usize,
+            ) {
                 let pos = (head + *len) % cap;
-                unsafe { *buf.get_unchecked_mut(pos) = value; }
+                unsafe {
+                    *buf.get_unchecked_mut(pos) = value;
+                }
                 *len += 1;
             }
 
@@ -1079,9 +1088,17 @@ fn devstop_batch_inner(
                 let h = high[i];
                 let l = low[i];
                 let base = if is_long {
-                    if h.is_nan() || avtr.is_nan() || sigma.is_nan() { f64::NAN } else { h - avtr - mult * sigma }
+                    if h.is_nan() || avtr.is_nan() || sigma.is_nan() {
+                        f64::NAN
+                    } else {
+                        h - avtr - mult * sigma
+                    }
                 } else {
-                    if l.is_nan() || avtr.is_nan() || sigma.is_nan() { f64::NAN } else { l + avtr + mult * sigma }
+                    if l.is_nan() || avtr.is_nan() || sigma.is_nan() {
+                        f64::NAN
+                    } else {
+                        l + avtr + mult * sigma
+                    }
                 };
 
                 let slot = i % period;
@@ -1090,13 +1107,21 @@ fn devstop_batch_inner(
                     while dq_len > 0 {
                         let j = dq_back_idx(&dq_buf, dq_head, dq_len, period);
                         let bj = base_ring[j % period];
-                        if bj.is_nan() || bj <= base { dq_pop_back(&mut dq_len); } else { break; }
+                        if bj.is_nan() || bj <= base {
+                            dq_pop_back(&mut dq_len);
+                        } else {
+                            break;
+                        }
                     }
                 } else {
                     while dq_len > 0 {
                         let j = dq_back_idx(&dq_buf, dq_head, dq_len, period);
                         let bj = base_ring[j % period];
-                        if bj.is_nan() || bj >= base { dq_pop_back(&mut dq_len); } else { break; }
+                        if bj.is_nan() || bj >= base {
+                            dq_pop_back(&mut dq_len);
+                        } else {
+                            break;
+                        }
                     }
                 }
                 dq_push_back(&mut dq_buf, dq_head, &mut dq_len, period, i);
@@ -1110,7 +1135,9 @@ fn devstop_batch_inner(
                     let out_val = if dq_len > 0 {
                         let j = dq_idx_at(&dq_buf, dq_head, period, 0);
                         base_ring[j % period]
-                    } else { f64::NAN };
+                    } else {
+                        f64::NAN
+                    };
                     dst_row_mu[i] = out_val;
                 }
             }
@@ -1138,10 +1165,19 @@ fn devstop_batch_inner(
         }
 
         let values = unsafe {
-            Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity())
+            Vec::from_raw_parts(
+                guard.as_mut_ptr() as *mut f64,
+                guard.len(),
+                guard.capacity(),
+            )
         };
         core::mem::forget(guard);
-        return Ok(DevStopBatchOutput { values, combos, rows, cols });
+        return Ok(DevStopBatchOutput {
+            values,
+            combos,
+            rows,
+            cols,
+        });
     }
 
     let do_row = |row: usize, dst_row_mu: &mut [f64]| -> Result<(), DevStopError> {
@@ -1266,9 +1302,9 @@ pub struct DevStopStream {
     // params
     period: usize,
     mult: f64,
-    devtype: u8,       // 0=stddev, 1=mean abs (approx), 2=median abs (approx)
-    is_long: bool,     // direction
-    is_ema: bool,      // MA kind
+    devtype: u8,   // 0=stddev, 1=mean abs (approx), 2=median abs (approx)
+    is_long: bool, // direction
+    is_ema: bool,  // MA kind
 
     // 2-bar range state
     prev_h: f64,
@@ -1277,17 +1313,17 @@ pub struct DevStopStream {
 
     // sliding window over range r_t = max(h_t,h_{t-1}) - min(l_t,l_{t-1})
     r_ring: Box<[f64]>, // len = period
-    r_head: usize,       // next position to overwrite
+    r_head: usize,      // next position to overwrite
     r_filled: bool,
-    sum: f64,            // Σ r (finite only)
-    sum2: f64,           // Σ r^2
-    cnt: usize,          // #finite r in window
+    sum: f64,   // Σ r (finite only)
+    sum2: f64,  // Σ r^2
+    cnt: usize, // #finite r in window
 
     // EMA over r (boot with SMA of available prefill to match classic)
     ema: f64,
     ema_booted: bool,
     alpha: f64, // 2/(period+1)
-    beta:  f64, // 1 - alpha
+    beta: f64,  // 1 - alpha
 
     // base window + monotonic deque for rolling extrema over base (period)
     base_ring: Box<[f64]>, // len = period
@@ -1303,7 +1339,10 @@ impl DevStopStream {
     pub fn try_new(params: DevStopParams) -> Result<Self, DevStopError> {
         let period = params.period.unwrap_or(20);
         if period == 0 {
-            return Err(DevStopError::InvalidPeriod { period, data_len: 0 });
+            return Err(DevStopError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let mult = params.mult.unwrap_or(0.0);
         let devtype = params.devtype.unwrap_or(0) as u8;
@@ -1318,7 +1357,11 @@ impl DevStopStream {
             .unwrap_or("sma")
             .eq_ignore_ascii_case("ema");
 
-        let alpha = if is_ema { 2.0 / (period as f64 + 1.0) } else { 0.0 };
+        let alpha = if is_ema {
+            2.0 / (period as f64 + 1.0)
+        } else {
+            0.0
+        };
 
         Ok(Self {
             period,
@@ -1359,7 +1402,11 @@ impl DevStopStream {
             && self.prev_h.is_finite()
             && self.prev_l.is_finite()
         {
-            let hi2 = if high > self.prev_h { high } else { self.prev_h };
+            let hi2 = if high > self.prev_h {
+                high
+            } else {
+                self.prev_h
+            };
             let lo2 = if low < self.prev_l { low } else { self.prev_l };
             r_new = hi2 - lo2;
         }
@@ -1392,7 +1439,11 @@ impl DevStopStream {
         if self.is_ema {
             if !self.ema_booted {
                 if self.t + 1 >= self.period {
-                    self.ema = if self.cnt > 0 { self.sum / self.cnt as f64 } else { f64::NAN };
+                    self.ema = if self.cnt > 0 {
+                        self.sum / self.cnt as f64
+                    } else {
+                        f64::NAN
+                    };
                     self.ema_booted = true;
                 }
             } else if r_new.is_finite() {
@@ -1419,9 +1470,9 @@ impl DevStopStream {
             };
 
             let dev = match self.devtype {
-                0 => sigma,                                                // stddev (exact)
-                1 => sigma * fast_mean_abs_ratio(),                        // ≈ mean |r - mean|
-                2 => sigma * fast_mad_ratio(),                             // ≈ MAD
+                0 => sigma,                         // stddev (exact)
+                1 => sigma * fast_mean_abs_ratio(), // ≈ mean |r - mean|
+                2 => sigma * fast_mad_ratio(),      // ≈ MAD
                 _ => sigma,
             };
 
@@ -1972,11 +2023,19 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
 
     // EMA state (initialized with SMA of available prefill; matches classic_ema boot)
     let mut ema = if EMA {
-        if cnt > 0 { sum / (cnt as f64) } else { f64::NAN }
+        if cnt > 0 {
+            sum / (cnt as f64)
+        } else {
+            f64::NAN
+        }
     } else {
         0.0
     };
-    let alpha = if EMA { 2.0 / (period as f64 + 1.0) } else { 0.0 };
+    let alpha = if EMA {
+        2.0 / (period as f64 + 1.0)
+    } else {
+        0.0
+    };
     let beta = if EMA { 1.0 - alpha } else { 0.0 };
 
     // Monotonic deque for rolling extrema over `base`
@@ -2005,7 +2064,9 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
     #[inline(always)]
     fn dq_push_back(buf: &mut [usize], head: usize, len: &mut usize, cap: usize, value: usize) {
         let pos = (head + *len) % cap;
-        unsafe { *buf.get_unchecked_mut(pos) = value; }
+        unsafe {
+            *buf.get_unchecked_mut(pos) = value;
+        }
         *len += 1;
     }
 

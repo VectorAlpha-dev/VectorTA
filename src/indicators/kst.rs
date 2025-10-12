@@ -450,17 +450,57 @@ fn kst_compute_into(
 
     // Select ring buffers (stack or heap) for SMA(ROC) and signal
     let (b1, b2, b3, b4, sbuf): (&mut [f64], &mut [f64], &mut [f64], &mut [f64], &mut [f64]) = {
-        v1_heap = if s1 > STACK { vec![0.0; s1] } else { Vec::new() };
-        v2_heap = if s2 > STACK { vec![0.0; s2] } else { Vec::new() };
-        v3_heap = if s3 > STACK { vec![0.0; s3] } else { Vec::new() };
-        v4_heap = if s4 > STACK { vec![0.0; s4] } else { Vec::new() };
-        vs_heap = if sig > STACK { vec![0.0; sig] } else { Vec::new() };
+        v1_heap = if s1 > STACK {
+            vec![0.0; s1]
+        } else {
+            Vec::new()
+        };
+        v2_heap = if s2 > STACK {
+            vec![0.0; s2]
+        } else {
+            Vec::new()
+        };
+        v3_heap = if s3 > STACK {
+            vec![0.0; s3]
+        } else {
+            Vec::new()
+        };
+        v4_heap = if s4 > STACK {
+            vec![0.0; s4]
+        } else {
+            Vec::new()
+        };
+        vs_heap = if sig > STACK {
+            vec![0.0; sig]
+        } else {
+            Vec::new()
+        };
 
-        let b1 = if s1 <= STACK { &mut sb1[..s1] } else { v1_heap.as_mut_slice() };
-        let b2 = if s2 <= STACK { &mut sb2[..s2] } else { v2_heap.as_mut_slice() };
-        let b3 = if s3 <= STACK { &mut sb3[..s3] } else { v3_heap.as_mut_slice() };
-        let b4 = if s4 <= STACK { &mut sb4[..s4] } else { v4_heap.as_mut_slice() };
-        let sbuf = if sig <= STACK { &mut sbs[..sig] } else { vs_heap.as_mut_slice() };
+        let b1 = if s1 <= STACK {
+            &mut sb1[..s1]
+        } else {
+            v1_heap.as_mut_slice()
+        };
+        let b2 = if s2 <= STACK {
+            &mut sb2[..s2]
+        } else {
+            v2_heap.as_mut_slice()
+        };
+        let b3 = if s3 <= STACK {
+            &mut sb3[..s3]
+        } else {
+            v3_heap.as_mut_slice()
+        };
+        let b4 = if s4 <= STACK {
+            &mut sb4[..s4]
+        } else {
+            v4_heap.as_mut_slice()
+        };
+        let sbuf = if sig <= STACK {
+            &mut sbs[..sig]
+        } else {
+            vs_heap.as_mut_slice()
+        };
         (b1, b2, b3, b4, sbuf)
     };
 
@@ -479,9 +519,9 @@ fn kst_compute_into(
     let inv2 = 1.0 / (s2 as f64);
     let inv3 = 1.0 / (s3 as f64);
     let inv4 = 1.0 / (s4 as f64);
-    let w2 = inv2 + inv2;                    // 2*inv2
-    let w3 = inv3 + inv3 + inv3;             // 3*inv3
-    let w4 = (4.0f64) * inv4;                // 4*inv4
+    let w2 = inv2 + inv2; // 2*inv2
+    let w3 = inv3 + inv3 + inv3; // 3*inv3
+    let w4 = (4.0f64) * inv4; // 4*inv4
 
     // Absolute indices where each ROC becomes available
     let start1 = first + r1;
@@ -490,8 +530,8 @@ fn kst_compute_into(
     let start4 = first + r4;
 
     // Absolute warmups for line/signal
-    let start_line = first + warm_line;     // first index allowed to write KST line
-    let warm_sig_abs = first + warm_sig;    // first index allowed to write signal
+    let start_line = first + warm_line; // first index allowed to write KST line
+    let warm_sig_abs = first + warm_sig; // first index allowed to write signal
 
     // Signal ring state (built up as soon as line starts)
     let mut sidx = 0usize;
@@ -512,8 +552,8 @@ fn kst_compute_into(
     // Hot loop
     unsafe {
         let out_line_ptr = out_line.as_mut_ptr();
-        let out_sig_ptr  = out_sig.as_mut_ptr();
-        let data_ptr     = data.as_ptr();
+        let out_sig_ptr = out_sig.as_mut_ptr();
+        let data_ptr = data.as_ptr();
 
         let b1_ptr = b1.as_mut_ptr();
         let b2_ptr = b2.as_mut_ptr();
@@ -528,7 +568,9 @@ fn kst_compute_into(
             *sum = (*sum) + (v - old);
             *buf.add(*idx) = v;
             *idx += 1;
-            if *idx == cap { *idx = 0; }
+            if *idx == cap {
+                *idx = 0;
+            }
         }
 
         for i in first..len {
@@ -574,7 +616,9 @@ fn kst_compute_into(
                 ssum += kst - old;
                 *sb_ptr.add(sidx) = kst;
                 sidx += 1;
-                if sidx == sig { sidx = 0; }
+                if sidx == sig {
+                    sidx = 0;
+                }
                 sbuilt += 1;
 
                 if i >= warm_sig_abs {
@@ -585,7 +629,9 @@ fn kst_compute_into(
                 ssum += kst - old;
                 *sb_ptr.add(sidx) = kst;
                 sidx += 1;
-                if sidx == sig { sidx = 0; }
+                if sidx == sig {
+                    sidx = 0;
+                }
                 *out_sig_ptr.add(i) = ssum / (sig as f64);
             }
         }
@@ -1181,12 +1227,20 @@ fn kst_batch_inner(
             let v4p = st.v4.as_ptr();
 
             #[inline(always)]
-            unsafe fn ring_update(buf: *mut f64, idx: &mut usize, cap: usize, sum: &mut f64, v: f64) {
+            unsafe fn ring_update(
+                buf: *mut f64,
+                idx: &mut usize,
+                cap: usize,
+                sum: &mut f64,
+                v: f64,
+            ) {
                 let old = *buf.add(*idx);
                 *sum = (*sum) + (v - old);
                 *buf.add(*idx) = v;
                 *idx += 1;
-                if *idx == cap { *idx = 0; }
+                if *idx == cap {
+                    *idx = 0;
+                }
             }
 
             for i in first..len {
@@ -1212,7 +1266,9 @@ fn kst_batch_inner(
                     ssum += kst - old;
                     *sbp.add(sidx) = kst;
                     sidx += 1;
-                    if sidx == sig { sidx = 0; }
+                    if sidx == sig {
+                        sidx = 0;
+                    }
                     sbuilt += 1;
                     if i >= warm_sig_abs {
                         *sptr.add(i) = ssum / (sig as f64);
@@ -1222,7 +1278,9 @@ fn kst_batch_inner(
                     ssum += kst - old;
                     *sbp.add(sidx) = kst;
                     sidx += 1;
-                    if sidx == sig { sidx = 0; }
+                    if sidx == sig {
+                        sidx = 0;
+                    }
                     *sptr.add(i) = ssum / (sig as f64);
                 }
             }
@@ -1483,12 +1541,20 @@ fn kst_batch_inner_into(
             let v4p = st.v4.as_ptr();
 
             #[inline(always)]
-            unsafe fn ring_update(buf: *mut f64, idx: &mut usize, cap: usize, sum: &mut f64, v: f64) {
+            unsafe fn ring_update(
+                buf: *mut f64,
+                idx: &mut usize,
+                cap: usize,
+                sum: &mut f64,
+                v: f64,
+            ) {
                 let old = *buf.add(*idx);
                 *sum = (*sum) + (v - old);
                 *buf.add(*idx) = v;
                 *idx += 1;
-                if *idx == cap { *idx = 0; }
+                if *idx == cap {
+                    *idx = 0;
+                }
             }
 
             for i in first..len {
@@ -1514,7 +1580,9 @@ fn kst_batch_inner_into(
                     ssum += kst - old;
                     *sbp.add(sidx) = kst;
                     sidx += 1;
-                    if sidx == sig { sidx = 0; }
+                    if sidx == sig {
+                        sidx = 0;
+                    }
                     sbuilt += 1;
                     if i >= warm_sig_abs {
                         *sptr.add(i) = ssum / (sig as f64);
@@ -1524,7 +1592,9 @@ fn kst_batch_inner_into(
                     ssum += kst - old;
                     *sbp.add(sidx) = kst;
                     sidx += 1;
-                    if sidx == sig { sidx = 0; }
+                    if sidx == sig {
+                        sidx = 0;
+                    }
                     *sptr.add(i) = ssum / (sig as f64);
                 }
             }
@@ -1625,7 +1695,10 @@ impl KstStream {
 
         for &p in [s1, s2, s3, s4, r1, r2, r3, r4, sig].iter() {
             if p == 0 {
-                return Err(KstError::InvalidPeriod { period: p, data_len: 0 });
+                return Err(KstError::InvalidPeriod {
+                    period: p,
+                    data_len: 0,
+                });
             }
         }
 
@@ -1764,9 +1837,11 @@ impl KstStream {
         }
 
         // KST line via FMA chain: sum1*(1/s1) + sum2*(2/s2) + sum3*(3/s3) + sum4*(4/s4)
-        let line = self
-            .sum1
-            .mul_add(self.inv1, self.sum2.mul_add(self.w2, self.sum3.mul_add(self.w3, self.sum4 * self.w4)));
+        let line = self.sum1.mul_add(
+            self.inv1,
+            self.sum2
+                .mul_add(self.w2, self.sum3.mul_add(self.w3, self.sum4 * self.w4)),
+        );
 
         self.last_line = line;
 

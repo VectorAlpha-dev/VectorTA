@@ -51,6 +51,139 @@ static __device__ __forceinline__ ff two_sum(float a, float b) {
     return res;
 }
 
+// --- Rolling LWMA helpers with compensated updates --------------------------
+// Maintains LWMA over floats with O(1) updates using S1/S2 and Kahan sums.
+struct lwma7_f32 {
+    float buf[7];
+    int   head;
+    int   count;
+    int   ticks;
+    float s1, c1;   // simple sum
+    float s2, c2;   // weighted sum (weights 1..7 oldest..newest)
+
+    __device__ __forceinline__ void init() {
+#pragma unroll
+        for (int i = 0; i < 7; ++i) buf[i] = 0.f;
+        head = 0; count = 0; ticks = 0; s1 = c1 = 0.f; s2 = c2 = 0.f;
+    }
+
+    __device__ __forceinline__ void push(float x) {
+        if (count < 7) {
+            buf[head] = x;
+            head++; if (head == 7) head = 0;
+            count++;
+            // Initial fill: first inserted becomes oldest -> weight = count
+            kahan_add(x, s1, c1);
+            kahan_add(__fmul_rn(static_cast<float>(count), x), s2, c2);
+        } else {
+            const float old = buf[head];          // oldest element
+            buf[head] = x;
+            head++; if (head == 7) head = 0;
+
+            const float s1_old = s1;              // S2' = S2 + (N*x_new - S1_old)
+            kahan_add(__fmaf_rn(7.f, x, -s1_old), s2, c2);
+
+            kahan_add(x, s1, c1);                 // S1' = S1 + x_new - x_old
+            kahan_add(-old, s1, c1);
+
+            // Periodic renormalization to curb drift on long runs
+            ticks++;
+            if ((ticks & 0x3FF) == 0) { // every 1024 updates
+                float ns1 = 0.f, nc1 = 0.f;
+                float ns2 = 0.f, nc2 = 0.f;
+#pragma unroll
+                for (int i = 0; i < 7; ++i) {
+                    const int idx = (head + i) % 7;   // oldest at i=0
+                    const float v = buf[idx];
+                    kahan_add(v, ns1, nc1);
+                    kahan_add(__fmul_rn(static_cast<float>(i + 1), v), ns2, nc2);
+                }
+                s1 = ns1; c1 = nc1; s2 = ns2; c2 = nc2;
+            }
+        }
+    }
+
+    __device__ __forceinline__ bool full() const { return count >= 7; }
+    __device__ __forceinline__ float value() const { return __fmul_rn(s2, 1.0f / 28.0f); }
+    __device__ __forceinline__ float newest() const {
+        int idx = head - 1; if (idx < 0) idx += 7; return buf[idx];
+    }
+};
+
+// 4-tap LWMA over (hi,lo) using two sets of compensated S1/S2
+struct lwma4_ff {
+    ff    buf[4];
+    int   head;
+    int   count;
+    int   ticks;
+    // hi parts
+    float s1h, c1h, s2h, c2h;
+    // low parts
+    float s1l, c1l, s2l, c2l;
+
+    __device__ __forceinline__ void init() {
+#pragma unroll
+        for (int i = 0; i < 4; ++i) { buf[i].hi = 0.f; buf[i].lo = 0.f; }
+        head = 0; count = 0; ticks = 0;
+        s1h = c1h = s2h = c2h = 0.f;
+        s1l = c1l = s2l = c2l = 0.f;
+    }
+
+    __device__ __forceinline__ void push(const ff& p) {
+        if (count < 4) {
+            buf[head] = p;
+            head++; if (head == 4) head = 0;
+            count++;
+
+            kahan_add(p.hi, s1h, c1h);
+            kahan_add(__fmul_rn(static_cast<float>(count), p.hi), s2h, c2h);
+            kahan_add(p.lo, s1l, c1l);
+            kahan_add(__fmul_rn(static_cast<float>(count), p.lo), s2l, c2l);
+        } else {
+            const ff old = buf[head];
+            buf[head] = p;
+            head++; if (head == 4) head = 0;
+
+            const float s1h_old = s1h, s1l_old = s1l;
+            // hi parts
+            kahan_add(__fmaf_rn(4.f, p.hi, -s1h_old), s2h, c2h);
+            kahan_add(p.hi, s1h, c1h);
+            kahan_add(-old.hi, s1h, c1h);
+            // low parts
+            kahan_add(__fmaf_rn(4.f, p.lo, -s1l_old), s2l, c2l);
+            kahan_add(p.lo, s1l, c1l);
+            kahan_add(-old.lo, s1l, c1l);
+
+            // Periodic renormalization to curb drift on long runs
+            ticks++;
+            if ((ticks & 0x3FF) == 0) { // every 1024 updates
+                float ns1h = 0.f, nc1h = 0.f, ns2h = 0.f, nc2h = 0.f;
+                float ns1l = 0.f, nc1l = 0.f, ns2l = 0.f, nc2l = 0.f;
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    const int idx = (head + i) % 4;   // oldest at i=0
+                    const ff v = buf[idx];
+                    const float w = static_cast<float>(i + 1);
+                    // hi
+                    kahan_add(v.hi, ns1h, nc1h);
+                    kahan_add(__fmul_rn(w, v.hi), ns2h, nc2h);
+                    // lo
+                    kahan_add(v.lo, ns1l, nc1l);
+                    kahan_add(__fmul_rn(w, v.lo), ns2l, nc2l);
+                }
+                s1h = ns1h; c1h = nc1h; s2h = ns2h; c2h = nc2h;
+                s1l = ns1l; c1l = nc1l; s2l = ns2l; c2l = nc2l;
+            }
+        }
+    }
+
+    __device__ __forceinline__ bool full() const { return count >= 4; }
+    __device__ __forceinline__ float value() const {
+        // (S2_hi + S2_lo) / (1+2+3+4) = / 10
+        return __fmul_rn(__fadd_rn(s2h, s2l), 0.1f);
+    }
+};
+
 // 7-tap LWMA from contiguous prices (weights 7..1)/28, using FP32 Kahan+FMA
 static __device__ __forceinline__ float wma7_from_prices_f32(const float* __restrict__ prices,
                                                              int idx) {
@@ -116,56 +249,80 @@ static __device__ __forceinline__ float trigger4_from_ff_ring(const ff pr[4], in
     return __fmul_rn(s, 0.1f);
 }
 
-static __device__ __forceinline__ void ehlers_pma_batch_core(const float* __restrict__ prices,
-                                                             int series_len,
-                                                             int n_combos,
-                                                             int first_valid,
-                                                             float* __restrict__ out_predict,
-                                                             float* __restrict__ out_trigger) {
+static __device__ __forceinline__ void ehlers_pma_batch_core(
+    const float* __restrict__ prices,
+    int series_len,
+    int n_combos,
+    int first_valid,
+    float* __restrict__ out_predict,
+    float* __restrict__ out_trigger)
+{
     const int combo = blockIdx.x;
     if (combo >= n_combos) return;
     if (threadIdx.x != 0) return;
 
     const float nan_f = nan32();
-    float* predict_row = out_predict + combo * series_len;
-    float* trigger_row = out_trigger + combo * series_len;
-    for (int i = 0; i < series_len; ++i) { predict_row[i] = nan_f; trigger_row[i] = nan_f; }
-
     if (series_len <= 0) return;
     if (first_valid < 0) first_valid = 0;
     if (first_valid >= series_len) return;
 
-    const int warm_wma1 = first_valid + 7;
-    const int warm_wma2 = first_valid + 13;
+    // Warmup thresholds (unchanged semantics)
+    const int warm_wma1    = first_valid + 7;
+    const int warm_wma2    = first_valid + 13;
     const int warm_trigger = warm_wma2 + 3;
+
+    float* predict_row = out_predict + combo * series_len;
+    float* trigger_row = out_trigger + combo * series_len;
+
+    // Write only the minimal NaN prefix; rest will be written when available
+    {
+        int stop = (series_len < warm_wma2) ? series_len : warm_wma2;
+        for (int i = 0; i < stop; ++i) { predict_row[i] = nan_f; }
+    }
+    {
+        int stop = (series_len < warm_trigger) ? series_len : warm_trigger;
+        for (int i = 0; i < stop; ++i) { trigger_row[i] = nan_f; }
+    }
+
+    // If we can never warm up, exit early
     if (warm_wma1 >= series_len) return;
 
-    float wma1_ring[7];
-    ff predict_ring[4];
-    for (int i = 0; i < 7; ++i) { wma1_ring[i] = nan32(); }
-    for (int i = 0; i < 4; ++i) { predict_ring[i].hi = nan32(); predict_ring[i].lo = 0.f; }
-    int ring_head = 0;
-    int predict_head = 0;
+    // Rolling LWMAs
+    lwma7_f32 price_w7;  price_w7.init();   // last 7 prices (previous bars)
+    lwma7_f32 wma1_w7;   wma1_w7.init();    // last 7 wma1 values
+    lwma4_ff  trig_w4;   trig_w4.init();    // last 4 (hi,lo) predictive values
 
+    // Walk forward. At loop entry, price_w7 holds the previous 0..7 prices (idx-1..idx-7).
     for (int idx = first_valid; idx < series_len; ++idx) {
-        float wma1_val = nan32();
-        if (idx >= warm_wma1) { wma1_val = wma7_from_prices_f32(prices, idx); }
-        wma1_ring[ring_head] = wma1_val;
-        ring_head = (ring_head + 1) % 7;
-        if (idx >= warm_wma2) {
-            const float wma2_val = wma7_from_ring_f32(wma1_ring, ring_head);
-            const float current_wma1 = wma1_ring[(ring_head + 6) % 7];
-            const float two_m = __fadd_rn(current_wma1, current_wma1);
-            const ff pred = two_sum(two_m, -wma2_val);
-            const float predict_val = __fadd_rn(pred.hi, pred.lo);
-            predict_row[idx] = predict_val;
-            predict_ring[predict_head] = pred;
-            predict_head = (predict_head + 1) % 4;
-            if (idx >= warm_trigger) {
-                const float trigger_val = trigger4_from_ff_ring(predict_ring, predict_head);
-                trigger_row[idx] = trigger_val;
+
+        // 1) wma1 from previous 7 prices (if full)
+        float wma1_val = nan_f;
+        if (price_w7.full()) {
+            wma1_val = price_w7.value();    // (weights 1..7 oldest..newest) / 28
+        }
+
+        // 2) Update WMA-of-WMA and compute predict when ready
+        if (idx >= warm_wma1) {
+            wma1_w7.push(wma1_val);
+
+            if (wma1_w7.full()) {
+                const float wma2_val = wma1_w7.value();
+                const float current_wma1 = wma1_w7.newest();
+                const float two_m = __fadd_rn(current_wma1, current_wma1);
+                const ff     pred  = two_sum(two_m, -wma2_val);
+                predict_row[idx]   = __fadd_rn(pred.hi, pred.lo);
+
+                // 3) Update trigger (4-tap LWMA of pred) and write when ready
+                trig_w4.push(pred);
+                if (trig_w4.full() && idx >= warm_trigger) {
+                    trigger_row[idx] = trig_w4.value();
+                }
             }
         }
+
+        // 4) Feed the current price so next idx sees the prior-7 window
+        const float p_new = prices[idx];
+        price_w7.push(p_new);
     }
 }
 
@@ -211,71 +368,67 @@ extern "C" __global__ void ehlers_pma_many_series_one_param_f32(
     float* __restrict__ out_predict_tm,
     float* __restrict__ out_trigger_tm) {
     const int series = blockIdx.x;
-    if (series >= num_series) {
-        return;
-    }
-    if (threadIdx.x != 0) {
-        return;
-    }
+    if (series >= num_series) { return; }
+    if (threadIdx.x != 0) { return; }
 
     const int stride = num_series;
     const float nan_f = nan32();
-    for (int row = 0; row < series_len; ++row) {
-        const int idx = row * stride + series;
-        out_predict_tm[idx] = nan_f;
-        out_trigger_tm[idx] = nan_f;
-    }
 
     int first_valid = first_valids ? first_valids[series] : 0;
-    if (first_valid < 0) {
-        first_valid = 0;
-    }
-    if (first_valid >= series_len) {
-        return;
-    }
+    if (first_valid < 0) first_valid = 0;
+    if (first_valid >= series_len) return;
 
     const int warm_wma1 = first_valid + 7;
-    const int warm_wma2 = first_valid + 13;
+    const int warm_wma2 = warm_wma1 + 6;     // == first_valid + 13
     const int warm_trigger = warm_wma2 + 3;
 
-    if (warm_wma1 >= series_len) {
-        return;
+    // Minimal NaN prefix only
+    {
+        int stop = (series_len < warm_wma2) ? series_len : warm_wma2;
+        for (int row = 0; row < stop; ++row) {
+            const int idx = row * stride + series;
+            out_predict_tm[idx] = nan_f;
+        }
+    }
+    {
+        int stop = (series_len < warm_trigger) ? series_len : warm_trigger;
+        for (int row = 0; row < stop; ++row) {
+            const int idx = row * stride + series;
+            out_trigger_tm[idx] = nan_f;
+        }
     }
 
-    float wma1_ring[7];
-    ff predict_ring[4];
-    for (int i = 0; i < 7; ++i) { wma1_ring[i] = nan32(); }
-    for (int i = 0; i < 4; ++i) { predict_ring[i].hi = nan32(); predict_ring[i].lo = 0.f; }
+    if (first_valid + 7 >= series_len) return;
 
-    int ring_head = 0;
-    int predict_head = 0;
+    lwma7_f32 price_w7; price_w7.init();
+    lwma7_f32 wma1_w7;  wma1_w7.init();
+    lwma4_ff  trig_w4;  trig_w4.init();
 
     for (int row = first_valid; row < series_len; ++row) {
-        float wma1_val = nan32();
+        float wma1_val = nan_f;
+        if (price_w7.full()) { wma1_val = price_w7.value(); }
+
         if (row >= warm_wma1) {
-            const int idx = row * stride + series;
-            wma1_val = wma7_from_prices_tm_f32(prices_tm, idx, stride);
-        }
-        wma1_ring[ring_head] = wma1_val;
-        ring_head = (ring_head + 1) % 7;
+            wma1_w7.push(wma1_val);
 
-        if (row >= warm_wma2) {
-            const float wma2_val = wma7_from_ring_f32(wma1_ring, ring_head);
-            const float current_wma1 = wma1_ring[(ring_head + 6) % 7];
-            const float two_m = __fadd_rn(current_wma1, current_wma1);
-            const ff pred = two_sum(two_m, -wma2_val);
-            const float predict_val = __fadd_rn(pred.hi, pred.lo);
-            const int idx = row * stride + series;
-            out_predict_tm[idx] = predict_val;
+            if (wma1_w7.full()) {
+                const float wma2_val = wma1_w7.value();
+                const float current_wma1 = wma1_w7.newest();
+                const float two_m = __fadd_rn(current_wma1, current_wma1);
+                const ff pred = two_sum(two_m, -wma2_val);
+                const int idx = row * stride + series;
+                out_predict_tm[idx] = __fadd_rn(pred.hi, pred.lo);
 
-            predict_ring[predict_head] = pred;
-            predict_head = (predict_head + 1) % 4;
-
-            if (row >= warm_trigger) {
-                const float trigger_val = trigger4_from_ff_ring(predict_ring, predict_head);
-                out_trigger_tm[idx] = trigger_val;
+                trig_w4.push(pred);
+                if (trig_w4.full() && row >= first_valid + 16) { // warm_trigger
+                    out_trigger_tm[idx] = trig_w4.value();
+                }
             }
         }
+
+        // push current price sample for this series
+        const int pidx = row * stride + series;
+        price_w7.push(prices_tm[pidx]);
     }
 }
 
@@ -298,54 +451,60 @@ extern "C" __global__ void ehlers_pma_ms1p_tiled_f32_tx1_ty2(
 
     const int stride = num_series;
     const float nan_f = nan32();
-    for (int row = 0; row < series_len; ++row) {
-        const int idx = row * stride + series;
-        out_predict_tm[idx] = nan_f;
-        out_trigger_tm[idx] = nan_f;
-    }
 
     int first_valid = first_valids ? first_valids[series] : 0;
     if (first_valid < 0) { first_valid = 0; }
     if (first_valid >= series_len) { return; }
 
     const int warm_wma1 = first_valid + 7;
-    const int warm_wma2 = first_valid + 13;
+    const int warm_wma2 = warm_wma1 + 6;
     const int warm_trigger = warm_wma2 + 3;
     if (warm_wma1 >= series_len) { return; }
 
-    float wma1_ring[7];
-    ff predict_ring[4];
-    for (int i = 0; i < 7; ++i) { wma1_ring[i] = nan32(); }
-    for (int i = 0; i < 4; ++i) { predict_ring[i].hi = nan32(); predict_ring[i].lo = 0.f; }
-    int ring_head = 0;
-    int predict_head = 0;
+    // Minimal NaN prefix only
+    {
+        int stop = (series_len < warm_wma2) ? series_len : warm_wma2;
+        for (int row = 0; row < stop; ++row) {
+            const int idx = row * stride + series;
+            out_predict_tm[idx] = nan_f;
+        }
+    }
+    {
+        int stop = (series_len < warm_trigger) ? series_len : warm_trigger;
+        for (int row = 0; row < stop; ++row) {
+            const int idx = row * stride + series;
+            out_trigger_tm[idx] = nan_f;
+        }
+    }
+
+    lwma7_f32 price_w7; price_w7.init();
+    lwma7_f32 wma1_w7;  wma1_w7.init();
+    lwma4_ff  trig_w4;  trig_w4.init();
 
     for (int row = first_valid; row < series_len; ++row) {
-        float wma1_val = nan32();
+        float wma1_val = nan_f;
+        if (price_w7.full()) { wma1_val = price_w7.value(); }
+
         if (row >= warm_wma1) {
-            const int idx = row * stride + series;
-            wma1_val = wma7_from_prices_tm_f32(prices_tm, idx, stride);
-        }
-        wma1_ring[ring_head] = wma1_val;
-        ring_head = (ring_head + 1) % 7;
+            wma1_w7.push(wma1_val);
 
-        if (row >= warm_wma2) {
-            const float wma2_val = wma7_from_ring_f32(wma1_ring, ring_head);
-            const float current_wma1 = wma1_ring[(ring_head + 6) % 7];
-            const float two_m = __fadd_rn(current_wma1, current_wma1);
-            const ff pred = two_sum(two_m, -wma2_val);
-            const float predict_val = __fadd_rn(pred.hi, pred.lo);
-            const int idx = row * stride + series;
-            out_predict_tm[idx] = predict_val;
+            if (wma1_w7.full()) {
+                const float wma2_val = wma1_w7.value();
+                const float current_wma1 = wma1_w7.newest();
+                const float two_m = __fadd_rn(current_wma1, current_wma1);
+                const ff pred = two_sum(two_m, -wma2_val);
+                const int idx = row * stride + series;
+                out_predict_tm[idx] = __fadd_rn(pred.hi, pred.lo);
 
-            predict_ring[predict_head] = pred;
-            predict_head = (predict_head + 1) % 4;
-
-            if (row >= warm_trigger) {
-                const float trigger_val = trigger4_from_ff_ring(predict_ring, predict_head);
-                out_trigger_tm[idx] = trigger_val;
+                trig_w4.push(pred);
+                if (trig_w4.full() && row >= first_valid + 16) {
+                    out_trigger_tm[idx] = trig_w4.value();
+                }
             }
         }
+
+        const int pidx = row * stride + series;
+        price_w7.push(prices_tm[pidx]);
     }
 }
 
@@ -364,53 +523,59 @@ extern "C" __global__ void ehlers_pma_ms1p_tiled_f32_tx1_ty4(
 
     const int stride = num_series;
     const float nan_f = nan32();
-    for (int row = 0; row < series_len; ++row) {
-        const int idx = row * stride + series;
-        out_predict_tm[idx] = nan_f;
-        out_trigger_tm[idx] = nan_f;
-    }
 
     int first_valid = first_valids ? first_valids[series] : 0;
     if (first_valid < 0) { first_valid = 0; }
     if (first_valid >= series_len) { return; }
 
     const int warm_wma1 = first_valid + 7;
-    const int warm_wma2 = first_valid + 13;
+    const int warm_wma2 = warm_wma1 + 6;
     const int warm_trigger = warm_wma2 + 3;
     if (warm_wma1 >= series_len) { return; }
 
-    float wma1_ring[7];
-    ff predict_ring[4];
-    for (int i = 0; i < 7; ++i) { wma1_ring[i] = nan32(); }
-    for (int i = 0; i < 4; ++i) { predict_ring[i].hi = nan32(); predict_ring[i].lo = 0.f; }
-    int ring_head = 0;
-    int predict_head = 0;
+    // Minimal NaN prefix only
+    {
+        int stop = (series_len < warm_wma2) ? series_len : warm_wma2;
+        for (int row = 0; row < stop; ++row) {
+            const int idx = row * stride + series;
+            out_predict_tm[idx] = nan_f;
+        }
+    }
+    {
+        int stop = (series_len < warm_trigger) ? series_len : warm_trigger;
+        for (int row = 0; row < stop; ++row) {
+            const int idx = row * stride + series;
+            out_trigger_tm[idx] = nan_f;
+        }
+    }
+
+    lwma7_f32 price_w7; price_w7.init();
+    lwma7_f32 wma1_w7;  wma1_w7.init();
+    lwma4_ff  trig_w4;  trig_w4.init();
 
     for (int row = first_valid; row < series_len; ++row) {
-        float wma1_val = nan32();
+        float wma1_val = nan_f;
+        if (price_w7.full()) { wma1_val = price_w7.value(); }
+
         if (row >= warm_wma1) {
-            const int idx = row * stride + series;
-            wma1_val = wma7_from_prices_tm_f32(prices_tm, idx, stride);
-        }
-        wma1_ring[ring_head] = wma1_val;
-        ring_head = (ring_head + 1) % 7;
+            wma1_w7.push(wma1_val);
 
-        if (row >= warm_wma2) {
-            const float wma2_val = wma7_from_ring_f32(wma1_ring, ring_head);
-            const float current_wma1 = wma1_ring[(ring_head + 6) % 7];
-            const float two_m = __fadd_rn(current_wma1, current_wma1);
-            const ff pred = two_sum(two_m, -wma2_val);
-            const float predict_val = __fadd_rn(pred.hi, pred.lo);
-            const int idx = row * stride + series;
-            out_predict_tm[idx] = predict_val;
+            if (wma1_w7.full()) {
+                const float wma2_val = wma1_w7.value();
+                const float current_wma1 = wma1_w7.newest();
+                const float two_m = __fadd_rn(current_wma1, current_wma1);
+                const ff pred = two_sum(two_m, -wma2_val);
+                const int idx = row * stride + series;
+                out_predict_tm[idx] = __fadd_rn(pred.hi, pred.lo);
 
-            predict_ring[predict_head] = pred;
-            predict_head = (predict_head + 1) % 4;
-
-            if (row >= warm_trigger) {
-                const float trigger_val = trigger4_from_ff_ring(predict_ring, predict_head);
-                out_trigger_tm[idx] = trigger_val;
+                trig_w4.push(pred);
+                if (trig_w4.full() && row >= first_valid + 16) {
+                    out_trigger_tm[idx] = trig_w4.value();
+                }
             }
         }
+
+        const int pidx = row * stride + series;
+        price_w7.push(prices_tm[pidx]);
     }
 }

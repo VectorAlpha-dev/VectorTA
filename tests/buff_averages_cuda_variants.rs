@@ -30,93 +30,166 @@ fn synth(len: usize) -> (Vec<f64>, Vec<f64>) {
     (price, volume)
 }
 
-fn to_f32(v: &[f64]) -> Vec<f32> { v.iter().map(|&x| x as f32).collect() }
+fn to_f32(v: &[f64]) -> Vec<f32> {
+    v.iter().map(|&x| x as f32).collect()
+}
 
 #[test]
 fn buff_averages_cuda_plain_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
-    if !cuda_available() { eprintln!("[buff_averages_cuda_plain_matches_cpu] skipped - no CUDA device"); return Ok(()); }
+    if !cuda_available() {
+        eprintln!("[buff_averages_cuda_plain_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
 
     let len = 12_000usize; // ensure plenty of room
     let (price, volume) = synth(len);
-    let sweep = BuffAveragesBatchRange { fast_period: (4, 20, 4), slow_period: (24, 80, 14) };
+    let sweep = BuffAveragesBatchRange {
+        fast_period: (4, 20, 4),
+        slow_period: (24, 80, 14),
+    };
     let cpu = buff_averages_batch_with_kernel(&price, &volume, &sweep, Kernel::ScalarBatch)?;
     let cpu_fast_f32: Vec<f32> = cpu.fast.iter().map(|&v| v as f32).collect();
     let cpu_slow_f32: Vec<f32> = cpu.slow.iter().map(|&v| v as f32).collect();
 
     let mut cuda = CudaBuffAverages::new(0)?;
-    cuda.set_policy(CudaBuffPolicy { batch: BatchKernelPolicy::Plain { block_x: 256 }, many_series: ManySeriesKernelPolicy::Auto });
-    let (fast_dev, slow_dev) = cuda.buff_averages_batch_dev(&to_f32(&price), &to_f32(&volume), &sweep)?;
-    assert_eq!(cpu.rows, fast_dev.rows); assert_eq!(cpu.cols, fast_dev.cols);
-    assert_eq!(fast_dev.rows, slow_dev.rows); assert_eq!(fast_dev.cols, slow_dev.cols);
+    cuda.set_policy(CudaBuffPolicy {
+        batch: BatchKernelPolicy::Plain { block_x: 256 },
+        many_series: ManySeriesKernelPolicy::Auto,
+    });
+    let (fast_dev, slow_dev) =
+        cuda.buff_averages_batch_dev(&to_f32(&price), &to_f32(&volume), &sweep)?;
+    assert_eq!(cpu.rows, fast_dev.rows);
+    assert_eq!(cpu.cols, fast_dev.cols);
+    assert_eq!(fast_dev.rows, slow_dev.rows);
+    assert_eq!(fast_dev.cols, slow_dev.cols);
 
     let mut fast_gpu = vec![0f32; fast_dev.len()];
     let mut slow_gpu = vec![0f32; slow_dev.len()];
-    fast_dev.buf.copy_to(&mut fast_gpu)?; slow_dev.buf.copy_to(&mut slow_gpu)?;
+    fast_dev.buf.copy_to(&mut fast_gpu)?;
+    slow_dev.buf.copy_to(&mut slow_gpu)?;
 
     let tol = 2e-3f32;
     for (idx, (&cf, &gf)) in cpu_fast_f32.iter().zip(fast_gpu.iter()).enumerate() {
-        assert!(approx_eq(cf, gf, tol), "plain fast mismatch at {}: cpu={} gpu={}", idx, cf, gf);
+        assert!(
+            approx_eq(cf, gf, tol),
+            "plain fast mismatch at {}: cpu={} gpu={}",
+            idx,
+            cf,
+            gf
+        );
     }
     for (idx, (&cs, &gs)) in cpu_slow_f32.iter().zip(slow_gpu.iter()).enumerate() {
-        assert!(approx_eq(cs, gs, tol), "plain slow mismatch at {}: cpu={} gpu={}", idx, cs, gs);
+        assert!(
+            approx_eq(cs, gs, tol),
+            "plain slow mismatch at {}: cpu={} gpu={}",
+            idx,
+            cs,
+            gs
+        );
     }
     Ok(())
 }
 
 #[test]
 fn buff_averages_cuda_tiled128_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
-    if !cuda_available() { eprintln!("[buff_averages_cuda_tiled128_matches_cpu] skipped - no CUDA device"); return Ok(()); }
+    if !cuda_available() {
+        eprintln!("[buff_averages_cuda_tiled128_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
 
     let len = 20_000usize;
     let (price, volume) = synth(len);
-    let sweep = BuffAveragesBatchRange { fast_period: (4, 20, 4), slow_period: (24, 80, 14) };
+    let sweep = BuffAveragesBatchRange {
+        fast_period: (4, 20, 4),
+        slow_period: (24, 80, 14),
+    };
     let cpu = buff_averages_batch_with_kernel(&price, &volume, &sweep, Kernel::ScalarBatch)?;
     let cpu_fast_f32: Vec<f32> = cpu.fast.iter().map(|&v| v as f32).collect();
     let cpu_slow_f32: Vec<f32> = cpu.slow.iter().map(|&v| v as f32).collect();
 
     let mut cuda = CudaBuffAverages::new(0)?;
-    cuda.set_policy(CudaBuffPolicy { batch: BatchKernelPolicy::Tiled { tile: 128 }, many_series: ManySeriesKernelPolicy::Auto });
-    let (fast_dev, slow_dev) = cuda.buff_averages_batch_dev(&to_f32(&price), &to_f32(&volume), &sweep)?;
+    cuda.set_policy(CudaBuffPolicy {
+        batch: BatchKernelPolicy::Tiled { tile: 128 },
+        many_series: ManySeriesKernelPolicy::Auto,
+    });
+    let (fast_dev, slow_dev) =
+        cuda.buff_averages_batch_dev(&to_f32(&price), &to_f32(&volume), &sweep)?;
 
     let mut fast_gpu = vec![0f32; fast_dev.len()];
     let mut slow_gpu = vec![0f32; slow_dev.len()];
-    fast_dev.buf.copy_to(&mut fast_gpu)?; slow_dev.buf.copy_to(&mut slow_gpu)?;
+    fast_dev.buf.copy_to(&mut fast_gpu)?;
+    slow_dev.buf.copy_to(&mut slow_gpu)?;
 
     let tol = 2e-3f32;
     for (idx, (&cf, &gf)) in cpu_fast_f32.iter().zip(fast_gpu.iter()).enumerate() {
-        assert!(approx_eq(cf, gf, tol), "tiled128 fast mismatch at {}: cpu={} gpu={}", idx, cf, gf);
+        assert!(
+            approx_eq(cf, gf, tol),
+            "tiled128 fast mismatch at {}: cpu={} gpu={}",
+            idx,
+            cf,
+            gf
+        );
     }
     for (idx, (&cs, &gs)) in cpu_slow_f32.iter().zip(slow_gpu.iter()).enumerate() {
-        assert!(approx_eq(cs, gs, tol), "tiled128 slow mismatch at {}: cpu={} gpu={}", idx, cs, gs);
+        assert!(
+            approx_eq(cs, gs, tol),
+            "tiled128 slow mismatch at {}: cpu={} gpu={}",
+            idx,
+            cs,
+            gs
+        );
     }
     Ok(())
 }
 
 #[test]
 fn buff_averages_cuda_tiled256_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
-    if !cuda_available() { eprintln!("[buff_averages_cuda_tiled256_matches_cpu] skipped - no CUDA device"); return Ok(()); }
+    if !cuda_available() {
+        eprintln!("[buff_averages_cuda_tiled256_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
 
     let len = 20_000usize;
     let (price, volume) = synth(len);
-    let sweep = BuffAveragesBatchRange { fast_period: (4, 20, 4), slow_period: (24, 80, 14) };
+    let sweep = BuffAveragesBatchRange {
+        fast_period: (4, 20, 4),
+        slow_period: (24, 80, 14),
+    };
     let cpu = buff_averages_batch_with_kernel(&price, &volume, &sweep, Kernel::ScalarBatch)?;
     let cpu_fast_f32: Vec<f32> = cpu.fast.iter().map(|&v| v as f32).collect();
     let cpu_slow_f32: Vec<f32> = cpu.slow.iter().map(|&v| v as f32).collect();
 
     let mut cuda = CudaBuffAverages::new(0)?;
-    cuda.set_policy(CudaBuffPolicy { batch: BatchKernelPolicy::Tiled { tile: 256 }, many_series: ManySeriesKernelPolicy::Auto });
-    let (fast_dev, slow_dev) = cuda.buff_averages_batch_dev(&to_f32(&price), &to_f32(&volume), &sweep)?;
+    cuda.set_policy(CudaBuffPolicy {
+        batch: BatchKernelPolicy::Tiled { tile: 256 },
+        many_series: ManySeriesKernelPolicy::Auto,
+    });
+    let (fast_dev, slow_dev) =
+        cuda.buff_averages_batch_dev(&to_f32(&price), &to_f32(&volume), &sweep)?;
 
     let mut fast_gpu = vec![0f32; fast_dev.len()];
     let mut slow_gpu = vec![0f32; slow_dev.len()];
-    fast_dev.buf.copy_to(&mut fast_gpu)?; slow_dev.buf.copy_to(&mut slow_gpu)?;
+    fast_dev.buf.copy_to(&mut fast_gpu)?;
+    slow_dev.buf.copy_to(&mut slow_gpu)?;
 
     let tol = 2e-3f32;
     for (idx, (&cf, &gf)) in cpu_fast_f32.iter().zip(fast_gpu.iter()).enumerate() {
-        assert!(approx_eq(cf, gf, tol), "tiled256 fast mismatch at {}: cpu={} gpu={}", idx, cf, gf);
+        assert!(
+            approx_eq(cf, gf, tol),
+            "tiled256 fast mismatch at {}: cpu={} gpu={}",
+            idx,
+            cf,
+            gf
+        );
     }
     for (idx, (&cs, &gs)) in cpu_slow_f32.iter().zip(slow_gpu.iter()).enumerate() {
-        assert!(approx_eq(cs, gs, tol), "tiled256 slow mismatch at {}: cpu={} gpu={}", idx, cs, gs);
+        assert!(
+            approx_eq(cs, gs, tol),
+            "tiled256 slow mismatch at {}: cpu={} gpu={}",
+            idx,
+            cs,
+            gs
+        );
     }
     Ok(())
 }

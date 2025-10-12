@@ -714,7 +714,9 @@ pub unsafe fn correlation_cycle_avx2(
         while j < period {
             let idx = i - (j + 1);
             let mut x = *dptr.add(idx);
-            if x != x { x = 0.0; }
+            if x != x {
+                x = 0.0;
+            }
             let c = *cptr.add(j);
             let s = *sptr.add(j);
             sum_x += x;
@@ -750,7 +752,9 @@ pub unsafe fn correlation_cycle_avx2(
         } else {
             let mut a = (r_val / i_val).atan() + half_pi;
             a = a.to_degrees();
-            if i_val > 0.0 { a -= 180.0; }
+            if i_val > 0.0 {
+                a -= 180.0;
+            }
             a
         };
         *angle.get_unchecked_mut(i) = a;
@@ -758,8 +762,14 @@ pub unsafe fn correlation_cycle_avx2(
         if i >= start_s {
             let prev = prev_angle;
             let st = if !prev.is_nan() && (a - prev).abs() < threshold {
-                if a >= 0.0 { 1.0 } else { -1.0 }
-            } else { 0.0 };
+                if a >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            } else {
+                0.0
+            };
             *state.get_unchecked_mut(i) = st;
         }
 
@@ -878,7 +888,9 @@ pub unsafe fn correlation_cycle_avx512(
         while j < period {
             let idx = i - (j + 1);
             let mut x = *dptr.add(idx);
-            if x != x { x = 0.0; }
+            if x != x {
+                x = 0.0;
+            }
             let c = *cptr.add(j);
             let s = *sptr.add(j);
             sum_x += x;
@@ -909,10 +921,14 @@ pub unsafe fn correlation_cycle_avx512(
         *real.get_unchecked_mut(i) = r_val;
         *imag.get_unchecked_mut(i) = i_val;
 
-        let a = if i_val == 0.0 { 0.0 } else {
+        let a = if i_val == 0.0 {
+            0.0
+        } else {
             let mut a = (r_val / i_val).atan() + half_pi;
             a = a.to_degrees();
-            if i_val > 0.0 { a -= 180.0; }
+            if i_val > 0.0 {
+                a -= 180.0;
+            }
             a
         };
         *angle.get_unchecked_mut(i) = a;
@@ -920,8 +936,14 @@ pub unsafe fn correlation_cycle_avx512(
         if i >= start_s {
             let prev = prev_angle;
             let st = if !prev.is_nan() && (a - prev).abs() < threshold {
-                if a >= 0.0 { 1.0 } else { -1.0 }
-            } else { 0.0 };
+                if a >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            } else {
+                0.0
+            };
             *state.get_unchecked_mut(i) = st;
         }
 
@@ -1039,12 +1061,12 @@ pub struct CorrelationCycleStream {
     // Precomputed constants
     n: f64,
     half_pi: f64,
-    z_re: f64,       // cos(w)
-    z_im: f64,       // -sin(w)  (negative!)
-    sum_cos: f64,    // Σ cos(w*(j+1)), j=0..N-1
-    sum_sin: f64,    // Σ (-sin(w*(j+1))), j=0..N-1
-    sqrt_t2c: f64,   // sqrt( N*Σcos^2 - (Σcos)^2 )
-    sqrt_t4c: f64,   // sqrt( N*Σ(-sin)^2 - (Σ(-sin))^2 )
+    z_re: f64,     // cos(w)
+    z_im: f64,     // -sin(w)  (negative!)
+    sum_cos: f64,  // Σ cos(w*(j+1)), j=0..N-1
+    sum_sin: f64,  // Σ (-sin(w*(j+1))), j=0..N-1
+    sqrt_t2c: f64, // sqrt( N*Σcos^2 - (Σcos)^2 )
+    sqrt_t4c: f64, // sqrt( N*Σ(-sin)^2 - (Σ(-sin))^2 )
     has_t2: bool,
     has_t4: bool,
 }
@@ -1053,13 +1075,16 @@ impl CorrelationCycleStream {
     pub fn try_new(params: CorrelationCycleParams) -> Result<Self, CorrelationCycleError> {
         let period = params.period.unwrap_or(20);
         if period == 0 {
-            return Err(CorrelationCycleError::InvalidPeriod { period, data_len: 0 });
+            return Err(CorrelationCycleError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let threshold = params.threshold.unwrap_or(9.0);
 
         // Match batch path constants exactly (asin-based pi to minimize drift)
-        let half_pi = f64::asin(1.0);         // π/2
-        let two_pi  = 4.0 * half_pi;          // 2π
+        let half_pi = f64::asin(1.0); // π/2
+        let two_pi = 4.0 * half_pi; // 2π
         let n = period as f64;
         let w = two_pi / n;
 
@@ -1070,9 +1095,9 @@ impl CorrelationCycleStream {
 
         // Precompute Σcos, Σ(-sin), and their squares exactly like the batch kernel
         let mut sum_cos = 0.0f64;
-        let mut sum_sin = 0.0f64;   // sum of (-sin)
+        let mut sum_sin = 0.0f64; // sum of (-sin)
         let mut sum_cos2 = 0.0f64;
-        let mut sum_sin2 = 0.0f64;  // (-sin)^2
+        let mut sum_sin2 = 0.0f64; // (-sin)^2
 
         let mut j = 0usize;
         while j + 4 <= period {
@@ -1092,10 +1117,10 @@ impl CorrelationCycleStream {
             let (s3, c3) = a3.sin_cos();
             let ys3 = -s3;
 
-            sum_cos  += c0 + c1 + c2 + c3;
-            sum_sin  += ys0 + ys1 + ys2 + ys3;
-            sum_cos2 += c0*c0 + c1*c1 + c2*c2 + c3*c3;
-            sum_sin2 += ys0*ys0 + ys1*ys1 + ys2*ys2 + ys3*ys3;
+            sum_cos += c0 + c1 + c2 + c3;
+            sum_sin += ys0 + ys1 + ys2 + ys3;
+            sum_cos2 += c0 * c0 + c1 * c1 + c2 * c2 + c3 * c3;
+            sum_sin2 += ys0 * ys0 + ys1 * ys1 + ys2 * ys2 + ys3 * ys3;
 
             j += 4;
         }
@@ -1103,10 +1128,10 @@ impl CorrelationCycleStream {
             let a = w * ((j as f64) + 1.0);
             let (s, c) = a.sin_cos();
             let ys = -s;
-            sum_cos  += c;
-            sum_sin  += ys;
-            sum_cos2 += c*c;
-            sum_sin2 += ys*ys;
+            sum_cos += c;
+            sum_sin += ys;
+            sum_cos2 += c * c;
+            sum_sin2 += ys * ys;
             j += 1;
         }
 
@@ -1157,7 +1182,7 @@ impl CorrelationCycleStream {
         self.head = (self.head + 1) % self.period;
 
         // 2) O(1) roll the normalization sums
-        self.sum_x  += x_new - x_old;
+        self.sum_x += x_new - x_old;
         // fused form for (x_new^2 - x_old^2)
         self.sum_x2 = (x_new * x_new) - (x_old * x_old) + self.sum_x2;
 
@@ -1165,10 +1190,10 @@ impl CorrelationCycleStream {
         //    P <- z * (P + (x_new - x_old))
         //    Using two FMAs: let s = Re(P) + (x_new - x_old)
         let dx = x_new - x_old;
-        let s  = self.phasor_re + dx;
+        let s = self.phasor_re + dx;
 
         let new_re = self.z_re.mul_add(s, -self.z_im * self.phasor_im);
-        let new_im = self.z_im.mul_add(s,  self.z_re * self.phasor_im);
+        let new_im = self.z_im.mul_add(s, self.z_re * self.phasor_im);
 
         self.phasor_re = new_re;
         self.phasor_im = new_im;
@@ -1221,13 +1246,19 @@ impl CorrelationCycleStream {
             if self.has_t2 {
                 let denom_r = sqrt_t1 * self.sqrt_t2c;
                 if denom_r > 0.0 {
-                    r_val = (self.n.mul_add(self.phasor_re, -(sum_x_exact * self.sum_cos))) / denom_r;
+                    r_val = (self
+                        .n
+                        .mul_add(self.phasor_re, -(sum_x_exact * self.sum_cos)))
+                        / denom_r;
                 }
             }
             if self.has_t4 {
                 let denom_i = sqrt_t1 * self.sqrt_t4c;
                 if denom_i > 0.0 {
-                    i_val = (self.n.mul_add(self.phasor_im, -(sum_x_exact * self.sum_sin))) / denom_i;
+                    i_val = (self
+                        .n
+                        .mul_add(self.phasor_im, -(sum_x_exact * self.sum_sin)))
+                        / denom_i;
                 }
             }
         }
@@ -1246,7 +1277,11 @@ impl CorrelationCycleStream {
 
         // State warmup behavior: first full window emits NaN (matches batch warmup +1)
         let st = if self.prev_angle.is_finite() && (ang - self.prev_angle).abs() < self.threshold {
-            if ang >= 0.0 { 1.0 } else { -1.0 }
+            if ang >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            }
         } else if self.prev_angle.is_finite() {
             0.0
         } else {
@@ -1261,7 +1296,11 @@ impl CorrelationCycleStream {
         let to_emit = self.last.take();
         self.last = Some((r_val, i_val, ang, st));
 
-        if first_wrap_now { None } else { to_emit }
+        if first_wrap_now {
+            None
+        } else {
+            to_emit
+        }
     }
 }
 

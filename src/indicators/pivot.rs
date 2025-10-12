@@ -494,7 +494,15 @@ pub unsafe fn pivot_scalar(
                 let l = low[i];
                 let c = close[i];
                 if h.is_nan() || l.is_nan() || c.is_nan() {
-                    r4[i] = nan; r3[i] = nan; r2[i] = nan; r1[i] = nan; pp[i] = nan; s1[i] = nan; s2[i] = nan; s3[i] = nan; s4[i] = nan;
+                    r4[i] = nan;
+                    r3[i] = nan;
+                    r2[i] = nan;
+                    r1[i] = nan;
+                    pp[i] = nan;
+                    s1[i] = nan;
+                    s2[i] = nan;
+                    s3[i] = nan;
+                    s4[i] = nan;
                     continue;
                 }
                 let d = h - l;
@@ -505,7 +513,10 @@ pub unsafe fn pivot_scalar(
                 r2[i] = p + d;
                 s1[i] = t2 - h;
                 s2[i] = p - d;
-                r3[i] = nan; r4[i] = nan; s3[i] = nan; s4[i] = nan;
+                r3[i] = nan;
+                r4[i] = nan;
+                s3[i] = nan;
+                s4[i] = nan;
             }
         }
 
@@ -516,7 +527,15 @@ pub unsafe fn pivot_scalar(
                 let l = low[i];
                 let c = close[i];
                 if h.is_nan() || l.is_nan() || c.is_nan() {
-                    r4[i] = nan; r3[i] = nan; r2[i] = nan; r1[i] = nan; pp[i] = nan; s1[i] = nan; s2[i] = nan; s3[i] = nan; s4[i] = nan;
+                    r4[i] = nan;
+                    r3[i] = nan;
+                    r2[i] = nan;
+                    r1[i] = nan;
+                    pp[i] = nan;
+                    s1[i] = nan;
+                    s2[i] = nan;
+                    s3[i] = nan;
+                    s4[i] = nan;
                     continue;
                 }
                 let d = h - l;
@@ -530,7 +549,8 @@ pub unsafe fn pivot_scalar(
                 s1[i] = p - d38;
                 s2[i] = p - d62;
                 s3[i] = p - d;
-                r4[i] = nan; s4[i] = nan;
+                r4[i] = nan;
+                s4[i] = nan;
             }
         }
 
@@ -542,15 +562,40 @@ pub unsafe fn pivot_scalar(
                 let c = close[i];
                 let o = open[i];
                 if h.is_nan() || l.is_nan() || c.is_nan() {
-                    r4[i] = nan; r3[i] = nan; r2[i] = nan; r1[i] = nan; pp[i] = nan; s1[i] = nan; s2[i] = nan; s3[i] = nan; s4[i] = nan;
+                    r4[i] = nan;
+                    r3[i] = nan;
+                    r2[i] = nan;
+                    r1[i] = nan;
+                    pp[i] = nan;
+                    s1[i] = nan;
+                    s2[i] = nan;
+                    s3[i] = nan;
+                    s4[i] = nan;
                     continue;
                 }
-                let p = if c < o { (h + (l + l) + c) * 0.25 } else if c > o { ((h + h) + l + c) * 0.25 } else { (h + l + (c + c)) * 0.25 };
+                let p = if c < o {
+                    (h + (l + l) + c) * 0.25
+                } else if c > o {
+                    ((h + h) + l + c) * 0.25
+                } else {
+                    (h + l + (c + c)) * 0.25
+                };
                 pp[i] = p;
-                let num = if c < o { (h + (l + l) + c) * 0.5 } else if c > o { ((h + h) + l + c) * 0.5 } else { (h + l + (c + c)) * 0.5 };
+                let num = if c < o {
+                    (h + (l + l) + c) * 0.5
+                } else if c > o {
+                    ((h + h) + l + c) * 0.5
+                } else {
+                    (h + l + (c + c)) * 0.5
+                };
                 r1[i] = num - l;
                 s1[i] = num - h;
-                r2[i] = nan; r3[i] = nan; r4[i] = nan; s2[i] = nan; s3[i] = nan; s4[i] = nan;
+                r2[i] = nan;
+                r3[i] = nan;
+                r4[i] = nan;
+                s2[i] = nan;
+                s3[i] = nan;
+                s4[i] = nan;
             }
         }
 
@@ -565,15 +610,32 @@ pub unsafe fn pivot_scalar(
                 let l = low[i];
                 let c = close[i];
                 if h.is_nan() || l.is_nan() || c.is_nan() {
-                    r4[i] = nan; r3[i] = nan; r2[i] = nan; r1[i] = nan; pp[i] = nan; s1[i] = nan; s2[i] = nan; s3[i] = nan; s4[i] = nan;
+                    r4[i] = nan;
+                    r3[i] = nan;
+                    r2[i] = nan;
+                    r1[i] = nan;
+                    pp[i] = nan;
+                    s1[i] = nan;
+                    s2[i] = nan;
+                    s3[i] = nan;
+                    s4[i] = nan;
                     continue;
                 }
                 let d = h - l;
                 let p = (h + l + c) * (1.0 / 3.0);
                 pp[i] = p;
-                let d1 = d * C1; let d2 = d * C2; let d3 = d * C3; let d4 = d * C4;
-                r1[i] = d1 + c; r2[i] = d2 + c; r3[i] = d3 + c; r4[i] = d4 + c;
-                s1[i] = c - d1; s2[i] = c - d2; s3[i] = c - d3; s4[i] = c - d4;
+                let d1 = d * C1;
+                let d2 = d * C2;
+                let d3 = d * C3;
+                let d4 = d * C4;
+                r1[i] = d1 + c;
+                r2[i] = d2 + c;
+                r3[i] = d3 + c;
+                r4[i] = d4 + c;
+                s1[i] = c - d1;
+                s2[i] = c - d2;
+                s3[i] = c - d3;
+                s4[i] = c - d4;
             }
         }
 
@@ -585,15 +647,33 @@ pub unsafe fn pivot_scalar(
                 let c = close[i];
                 let o = open[i];
                 if h.is_nan() || l.is_nan() || c.is_nan() {
-                    r4[i] = nan; r3[i] = nan; r2[i] = nan; r1[i] = nan; pp[i] = nan; s1[i] = nan; s2[i] = nan; s3[i] = nan; s4[i] = nan;
+                    r4[i] = nan;
+                    r3[i] = nan;
+                    r2[i] = nan;
+                    r1[i] = nan;
+                    pp[i] = nan;
+                    s1[i] = nan;
+                    s2[i] = nan;
+                    s3[i] = nan;
+                    s4[i] = nan;
                     continue;
                 }
                 let d = h - l;
                 let p = (h + l + (o + o)) * 0.25; // (H+L+2*O)/4
                 pp[i] = p;
-                let t2p = p + p; let t2l = l + l; let t2h = h + h;
-                let r3v = (t2p - t2l) + h; r3[i] = r3v; r4[i] = r3v + d; r2[i] = p + d; r1[i] = t2p - l;
-                s1[i] = t2p - h; s2[i] = p - d; let s3v = (l + t2p) - t2h; s3[i] = s3v; s4[i] = s3v - d;
+                let t2p = p + p;
+                let t2l = l + l;
+                let t2h = h + h;
+                let r3v = (t2p - t2l) + h;
+                r3[i] = r3v;
+                r4[i] = r3v + d;
+                r2[i] = p + d;
+                r1[i] = t2p - l;
+                s1[i] = t2p - h;
+                s2[i] = p - d;
+                let s3v = (l + t2p) - t2h;
+                s3[i] = s3v;
+                s4[i] = s3v - d;
             }
         }
 
@@ -647,14 +727,14 @@ pub unsafe fn pivot_avx2(
     let v_third = _mm256_set1_pd(1.0 / 3.0);
     let v_quart = _mm256_set1_pd(0.25);
     let v_half = _mm256_set1_pd(0.5);
-    let v_one  = _mm256_set1_pd(1.0);
+    let v_one = _mm256_set1_pd(1.0);
     let v_c0916 = _mm256_set1_pd(0.0916);
     let v_c0183 = _mm256_set1_pd(0.183);
     let v_c0275 = _mm256_set1_pd(0.275);
     let v_c0550 = _mm256_set1_pd(0.55);
     let v_c0382 = _mm256_set1_pd(0.382);
     let v_c0618 = _mm256_set1_pd(0.618);
-    let v_neg1  = _mm256_set1_pd(-1.0);
+    let v_neg1 = _mm256_set1_pd(-1.0);
     let v_n0382 = _mm256_set1_pd(-0.382);
     let v_n0618 = _mm256_set1_pd(-0.618);
 
@@ -715,10 +795,10 @@ pub unsafe fn pivot_avx2(
                 let d = _mm256_sub_pd(h, l);
                 let r1v = _mm256_fmadd_pd(d, v_c0382, p);
                 let r2v = _mm256_fmadd_pd(d, v_c0618, p);
-                let r3v = _mm256_fmadd_pd(d, v_one,   p);
+                let r3v = _mm256_fmadd_pd(d, v_one, p);
                 let s1v = _mm256_fmadd_pd(d, v_n0382, p);
                 let s2v = _mm256_fmadd_pd(d, v_n0618, p);
-                let s3v = _mm256_fmadd_pd(d, v_neg1,  p);
+                let s3v = _mm256_fmadd_pd(d, v_neg1, p);
 
                 _mm256_storeu_pd(ppp.add(i), blendv(v_nan, p, vld));
                 _mm256_storeu_pd(r1p.add(i), blendv(v_nan, r1v, vld));
@@ -744,17 +824,35 @@ pub unsafe fn pivot_avx2(
                 let mlt = _mm256_cmp_pd(c, o, _CMP_LT_OQ);
                 let mgt = _mm256_cmp_pd(c, o, _CMP_GT_OQ);
 
-                let p_lt = _mm256_mul_pd(_mm256_add_pd(_mm256_add_pd(h, _mm256_add_pd(l, l)), c), v_quart);
-                let p_gt = _mm256_mul_pd(_mm256_add_pd(_mm256_add_pd(_mm256_add_pd(h, h), l), c), v_quart);
-                let p_eq = _mm256_mul_pd(_mm256_add_pd(_mm256_add_pd(h, l), _mm256_add_pd(c, c)), v_quart);
+                let p_lt = _mm256_mul_pd(
+                    _mm256_add_pd(_mm256_add_pd(h, _mm256_add_pd(l, l)), c),
+                    v_quart,
+                );
+                let p_gt = _mm256_mul_pd(
+                    _mm256_add_pd(_mm256_add_pd(_mm256_add_pd(h, h), l), c),
+                    v_quart,
+                );
+                let p_eq = _mm256_mul_pd(
+                    _mm256_add_pd(_mm256_add_pd(h, l), _mm256_add_pd(c, c)),
+                    v_quart,
+                );
 
                 let mut p = blendv(p_eq, p_gt, mgt);
                 p = blendv(p, p_lt, mlt);
                 _mm256_storeu_pd(ppp.add(i), blendv(v_nan, p, vld));
 
-                let n_lt = _mm256_mul_pd(_mm256_add_pd(_mm256_add_pd(h, _mm256_add_pd(l, l)), c), v_half);
-                let n_gt = _mm256_mul_pd(_mm256_add_pd(_mm256_add_pd(_mm256_add_pd(h, h), l), c), v_half);
-                let n_eq = _mm256_mul_pd(_mm256_add_pd(_mm256_add_pd(h, l), _mm256_add_pd(c, c)), v_half);
+                let n_lt = _mm256_mul_pd(
+                    _mm256_add_pd(_mm256_add_pd(h, _mm256_add_pd(l, l)), c),
+                    v_half,
+                );
+                let n_gt = _mm256_mul_pd(
+                    _mm256_add_pd(_mm256_add_pd(_mm256_add_pd(h, h), l), c),
+                    v_half,
+                );
+                let n_eq = _mm256_mul_pd(
+                    _mm256_add_pd(_mm256_add_pd(h, l), _mm256_add_pd(c, c)),
+                    v_half,
+                );
 
                 let mut n = blendv(n_eq, n_gt, mgt);
                 n = blendv(n, n_lt, mlt);
@@ -820,7 +918,10 @@ pub unsafe fn pivot_avx2(
                 let o = _mm256_loadu_pd(op.add(i));
                 let vld = valid_mask_avx2(h, l, c);
 
-                let p = _mm256_mul_pd(_mm256_add_pd(_mm256_add_pd(h, l), _mm256_add_pd(o, o)), v_quart);
+                let p = _mm256_mul_pd(
+                    _mm256_add_pd(_mm256_add_pd(h, l), _mm256_add_pd(o, o)),
+                    v_quart,
+                );
                 let t2p = _mm256_add_pd(p, p);
                 let t2l = _mm256_add_pd(l, l);
                 let t2h = _mm256_add_pd(h, h);
@@ -853,7 +954,9 @@ pub unsafe fn pivot_avx2(
     }
 
     if i < len {
-        pivot_scalar(high, low, close, open, mode, i, r4, r3, r2, r1, pp, s1, s2, s3, s4);
+        pivot_scalar(
+            high, low, close, open, mode, i, r4, r3, r2, r1, pp, s1, s2, s3, s4,
+        );
     }
 }
 
@@ -956,14 +1059,14 @@ pub unsafe fn pivot_avx512_long(
     let v_third = _mm512_set1_pd(1.0 / 3.0);
     let v_quart = _mm512_set1_pd(0.25);
     let v_half = _mm512_set1_pd(0.5);
-    let v_one  = _mm512_set1_pd(1.0);
+    let v_one = _mm512_set1_pd(1.0);
     let v_c0916 = _mm512_set1_pd(0.0916);
     let v_c0183 = _mm512_set1_pd(0.183);
     let v_c0275 = _mm512_set1_pd(0.275);
     let v_c0550 = _mm512_set1_pd(0.55);
     let v_c0382 = _mm512_set1_pd(0.382);
     let v_c0618 = _mm512_set1_pd(0.618);
-    let v_neg1  = _mm512_set1_pd(-1.0);
+    let v_neg1 = _mm512_set1_pd(-1.0);
     let v_n0382 = _mm512_set1_pd(-0.382);
     let v_n0618 = _mm512_set1_pd(-0.618);
 
@@ -1019,10 +1122,10 @@ pub unsafe fn pivot_avx512_long(
                 let d = _mm512_sub_pd(h, l);
                 let r1v = _mm512_fmadd_pd(d, v_c0382, p);
                 let r2v = _mm512_fmadd_pd(d, v_c0618, p);
-                let r3v = _mm512_fmadd_pd(d, v_one,   p);
+                let r3v = _mm512_fmadd_pd(d, v_one, p);
                 let s1v = _mm512_fmadd_pd(d, v_n0382, p);
                 let s2v = _mm512_fmadd_pd(d, v_n0618, p);
-                let s3v = _mm512_fmadd_pd(d, v_neg1,  p);
+                let s3v = _mm512_fmadd_pd(d, v_neg1, p);
 
                 _mm512_storeu_pd(ppp.add(i), _mm512_mask_blend_pd(mk, v_nan, p));
                 _mm512_storeu_pd(r1p.add(i), _mm512_mask_blend_pd(mk, v_nan, r1v));
@@ -1049,18 +1152,36 @@ pub unsafe fn pivot_avx512_long(
                 let mgt = _mm512_cmp_pd_mask(c, o, _CMP_GT_OQ);
                 let meq = (!mlt) & (!mgt);
 
-                let p_lt = _mm512_mul_pd(_mm512_add_pd(_mm512_add_pd(h, _mm512_add_pd(l, l)), c), v_quart);
-                let p_gt = _mm512_mul_pd(_mm512_add_pd(_mm512_add_pd(_mm512_add_pd(h, h), l), c), v_quart);
-                let p_eq = _mm512_mul_pd(_mm512_add_pd(_mm512_add_pd(h, l), _mm512_add_pd(c, c)), v_quart);
+                let p_lt = _mm512_mul_pd(
+                    _mm512_add_pd(_mm512_add_pd(h, _mm512_add_pd(l, l)), c),
+                    v_quart,
+                );
+                let p_gt = _mm512_mul_pd(
+                    _mm512_add_pd(_mm512_add_pd(_mm512_add_pd(h, h), l), c),
+                    v_quart,
+                );
+                let p_eq = _mm512_mul_pd(
+                    _mm512_add_pd(_mm512_add_pd(h, l), _mm512_add_pd(c, c)),
+                    v_quart,
+                );
 
                 let mut p = p_eq;
                 p = _mm512_mask_blend_pd(mgt, p, p_gt);
                 p = _mm512_mask_blend_pd(mlt, p, p_lt);
                 _mm512_storeu_pd(ppp.add(i), _mm512_mask_blend_pd(mk, v_nan, p));
 
-                let n_lt = _mm512_mul_pd(_mm512_add_pd(_mm512_add_pd(h, _mm512_add_pd(l, l)), c), v_half);
-                let n_gt = _mm512_mul_pd(_mm512_add_pd(_mm512_add_pd(_mm512_add_pd(h, h), l), c), v_half);
-                let n_eq = _mm512_mul_pd(_mm512_add_pd(_mm512_add_pd(h, l), _mm512_add_pd(c, c)), v_half);
+                let n_lt = _mm512_mul_pd(
+                    _mm512_add_pd(_mm512_add_pd(h, _mm512_add_pd(l, l)), c),
+                    v_half,
+                );
+                let n_gt = _mm512_mul_pd(
+                    _mm512_add_pd(_mm512_add_pd(_mm512_add_pd(h, h), l), c),
+                    v_half,
+                );
+                let n_eq = _mm512_mul_pd(
+                    _mm512_add_pd(_mm512_add_pd(h, l), _mm512_add_pd(c, c)),
+                    v_half,
+                );
 
                 let mut n = n_eq;
                 n = _mm512_mask_blend_pd(mgt, n, n_gt);
@@ -1127,7 +1248,10 @@ pub unsafe fn pivot_avx512_long(
                 let o = _mm512_loadu_pd(op.add(i));
                 let mk = valid_mask_avx512(h, l, c);
 
-                let p = _mm512_mul_pd(_mm512_add_pd(_mm512_add_pd(h, l), _mm512_add_pd(o, o)), v_quart);
+                let p = _mm512_mul_pd(
+                    _mm512_add_pd(_mm512_add_pd(h, l), _mm512_add_pd(o, o)),
+                    v_quart,
+                );
                 let t2p = _mm512_add_pd(p, p);
                 let t2l = _mm512_add_pd(l, l);
                 let t2h = _mm512_add_pd(h, h);
@@ -1160,7 +1284,9 @@ pub unsafe fn pivot_avx512_long(
     }
 
     if i < len {
-        pivot_scalar(high, low, close, open, mode, i, r4, r3, r2, r1, pp, s1, s2, s3, s4);
+        pivot_scalar(
+            high, low, close, open, mode, i, r4, r3, r2, r1, pp, s1, s2, s3, s4,
+        );
     }
 }
 
@@ -1821,7 +1947,17 @@ impl PivotStream {
                 let r1 = half - low;
                 let s1 = half - high;
 
-                Some((f64::NAN, f64::NAN, f64::NAN, r1, pp, s1, f64::NAN, f64::NAN, f64::NAN))
+                Some((
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                    r1,
+                    pp,
+                    s1,
+                    f64::NAN,
+                    f64::NAN,
+                    f64::NAN,
+                ))
             }
 
             // ======================= CAMARILLA =======================

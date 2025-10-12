@@ -354,7 +354,11 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             // safe because i >= start >= period and we only subtract up to (period-1)
             let base_ptr = unsafe { data.as_ptr().add(i) };
             let (num, den) = unsafe { dot_sum_precomputed(base_ptr, n_items) };
-            out[i] = if den.abs() > f64::EPSILON { -num / den } else { 0.0 };
+            out[i] = if den.abs() > f64::EPSILON {
+                -num / den
+            } else {
+                0.0
+            };
         }
         return;
     }
@@ -406,7 +410,11 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
                 k += 1;
             }
 
-            out[i] = if den.abs() > f64::EPSILON { -num / den } else { 0.0 };
+            out[i] = if den.abs() > f64::EPSILON {
+                -num / den
+            } else {
+                0.0
+            };
         }
     }
 }
@@ -475,7 +483,11 @@ pub unsafe fn cg_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]
             k += 1;
         }
 
-        out[i] = if den.abs() > f64::EPSILON { -num / den } else { 0.0 };
+        out[i] = if den.abs() > f64::EPSILON {
+            -num / den
+        } else {
+            0.0
+        };
     }
 }
 
@@ -537,7 +549,11 @@ pub unsafe fn cg_avx512_short(data: &[f64], period: usize, first: usize, out: &m
             k += 1;
         }
 
-        out[i] = if den.abs() > f64::EPSILON { -num / den } else { 0.0 };
+        out[i] = if den.abs() > f64::EPSILON {
+            -num / den
+        } else {
+            0.0
+        };
     }
 }
 
@@ -700,7 +716,11 @@ impl CgStream {
         self.head = next;
 
         // Match scalar behavior: guard divide-by-zero and return 0.0 in that case.
-        let out = if den_new.abs() > f64::EPSILON { -num_new / den_new } else { 0.0 };
+        let out = if den_new.abs() > f64::EPSILON {
+            -num_new / den_new
+        } else {
+            0.0
+        };
         Some(out)
     }
 }

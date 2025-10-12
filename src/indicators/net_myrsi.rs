@@ -253,18 +253,18 @@ fn net_myrsi_compute_into(
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 net_myrsi_kernel_scalar(data, period, first, out)
             }
-            Kernel::Auto => {
-                match k {
-                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx512 => net_myrsi_kernel_avx512(data, period, first, out),
-                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    Kernel::Avx2 => net_myrsi_kernel_avx2(data, period, first, out),
-                    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-                    Kernel::Avx2 | Kernel::Avx512 => net_myrsi_kernel_scalar(data, period, first, out),
-                    Kernel::Scalar => net_myrsi_kernel_scalar(data, period, first, out),
-                    Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => unreachable!(),
+            Kernel::Auto => match k {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => net_myrsi_kernel_avx512(data, period, first, out),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => net_myrsi_kernel_avx2(data, period, first, out),
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx512 => net_myrsi_kernel_scalar(data, period, first, out),
+                Kernel::Scalar => net_myrsi_kernel_scalar(data, period, first, out),
+                Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => {
+                    unreachable!()
                 }
-            }
+            },
         }
     }
 }

@@ -49,7 +49,10 @@ pub struct CudaNmaPolicy {
 
 impl Default for CudaNmaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -109,7 +112,8 @@ impl CudaNma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaNmaError::Cuda(e.to_string()))?
@@ -149,14 +153,19 @@ impl CudaNma {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scn = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scn =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scn || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] NMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaNma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaNma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -164,14 +173,19 @@ impl CudaNma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scn = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scn =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scn || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] NMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaNma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaNma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -186,8 +200,14 @@ impl CudaNma {
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Ok((free, _total)) = mem_get_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Ok((free, _total)) = mem_get_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
     #[inline]
     fn grid_y_chunks(n_combos: usize) -> impl Iterator<Item = (usize, usize)> {
@@ -288,7 +308,10 @@ impl CudaNma {
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
 
         // Block size selection (simple, occupancy is adequate here)
-        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 128 };
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            _ => 128,
+        };
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -342,8 +365,8 @@ impl CudaNma {
         let d_abs_diffs =
             DeviceBuffer::from_slice(abs_diffs).map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        let d_periods =
+            DeviceBuffer::from_slice(&periods).map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
 
         // VRAM estimate and headroom (~64MB)
         let bytes_inputs = len * std::mem::size_of::<f32>();
@@ -513,7 +536,10 @@ impl CudaNma {
             .get_function("nma_many_series_one_param_f32")
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            _ => 128,
+        };
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -666,7 +692,9 @@ pub mod benches {
         crate::indicators::moving_averages::nma::NmaParams,
         nma_batch_dev,
         nma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::nma::NmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::nma::NmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::nma::NmaParams { period: Some(64) },
         "nma",
         "nma"

@@ -683,9 +683,9 @@ unsafe fn epma_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct EpmaStream {
-    period: usize,   // ring capacity (p), EPMA window is p1 = p - 1
+    period: usize, // ring capacity (p), EPMA window is p1 = p - 1
     offset: usize,
-    p1: usize,       // period - 1
+    p1: usize, // period - 1
 
     // ring buffer and head (head always points to the excluded slot)
     buffer: Vec<f64>,
@@ -721,7 +721,10 @@ impl EpmaStream {
         let offset = params.offset.unwrap_or(4);
 
         if period < 2 {
-            return Err(EpmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(EpmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         if offset >= period {
             return Err(EpmaError::InvalidOffset { offset });
@@ -1109,7 +1112,7 @@ fn epma_batch_inner_into_uninit(
             for j in warmup..cols {
                 let a = j + 1 - p1; // window start
                 let b = j; // inclusive end
-                // SumX = P[b] - P[a-1]
+                           // SumX = P[b] - P[a-1]
                 let sumx = if a > 0 { p[b] - p[a - 1] } else { p[b] };
                 // SumAbs = Q[b] - Q[a-1]
                 let sum_abs = if a > 0 { q[b] - q[a - 1] } else { q[b] };
@@ -1117,7 +1120,9 @@ fn epma_batch_inner_into_uninit(
                 let sum_ix = sum_abs - (a as f64) * sumx;
                 let y = (c0 * sumx + sum_ix) * inv;
                 // Safety: warmup regions were prefilled; we only write post-warmup
-                unsafe { *dst.get_unchecked_mut(j) = y; }
+                unsafe {
+                    *dst.get_unchecked_mut(j) = y;
+                }
             }
         };
 
@@ -1148,7 +1153,8 @@ fn epma_batch_inner_into_uninit(
             let offset = combos[row].offset.unwrap();
 
             // Cast this slice only; we know the kernel will overwrite every cell after warmup
-            let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+            let dst =
+                core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
             match kern {
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

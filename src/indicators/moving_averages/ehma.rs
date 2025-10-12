@@ -593,13 +593,13 @@ pub struct EhmaStream {
     period: usize,
     // ring buffer state
     buffer: Vec<f64>,
-    head: usize,   // points to the oldest slot (next overwrite)
+    head: usize, // points to the oldest slot (next overwrite)
     filled: bool,
 
     // O(1) accumulators
-    sum_x: f64,    // Σ x over the current window
-    z_re: f64,     // Re{ Σ x · e^{i ω m} } over the current window
-    z_im: f64,     // Im{ Σ x · e^{i ω m} } over the current window
+    sum_x: f64, // Σ x over the current window
+    z_re: f64,  // Re{ Σ x · e^{i ω m} } over the current window
+    z_im: f64,  // Im{ Σ x · e^{i ω m} } over the current window
 
     // precomputed constants
     inv_coef: f64, // = 1.0 / (period + 1)
@@ -614,7 +614,10 @@ impl EhmaStream {
     pub fn try_new(params: EhmaParams) -> Result<Self, EhmaError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(EhmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(EhmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         use std::f64::consts::PI;
@@ -717,12 +720,12 @@ impl EhmaStream {
         self.sum_x += value - old;
 
         // 2) rotate Z by e^{-iω}
-        let zr_rot = self.z_re.mul_add(self.cos_w,  self.z_im * self.sin_w);
+        let zr_rot = self.z_re.mul_add(self.cos_w, self.z_im * self.sin_w);
         let zi_rot = self.z_im.mul_add(self.cos_w, -self.z_re * self.sin_w);
 
         // 3) drop oldest and add newest with phase e^{iωp}
         self.z_re = (zr_rot - old) + self.cos_wp * value;
-        self.z_im =  zi_rot          + self.sin_wp * value;
+        self.z_im = zi_rot + self.sin_wp * value;
 
         // 4) EHMA = (Σx − Re{Z}) / (p+1)
         Some((self.sum_x - self.z_re) * self.inv_coef)
@@ -1150,13 +1153,14 @@ pub fn ehma_py<'py>(
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
     let kern = validate_kernel(kernel, false)?;
-    let params = EhmaParams { period: Some(period) };
+    let params = EhmaParams {
+        period: Some(period),
+    };
 
     // Match ALMA behavior: accept non-contiguous views by doing a minimal copy.
     let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
         let input = EhmaInput::from_slice(slice_in, params);
-        py
-            .allow_threads(|| ehma_with_kernel(&input, kern).map(|o| o.values))
+        py.allow_threads(|| ehma_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     } else {
         let owned = data.as_array().to_owned();
@@ -1164,8 +1168,7 @@ pub fn ehma_py<'py>(
             .as_slice()
             .expect("owned numpy array should be contiguous");
         let input = EhmaInput::from_slice(slice_in, params);
-        py
-            .allow_threads(|| ehma_with_kernel(&input, kern).map(|o| o.values))
+        py.allow_threads(|| ehma_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     };
 

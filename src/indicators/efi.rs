@@ -889,7 +889,9 @@ fn efi_batch_inner_into(
     // We only write indices that are valid; others remain uninitialized and will be
     // treated as "carry prev" in the row EMA stage (using price/volume to check validity).
     let mut fi_raw_mu: Vec<std::mem::MaybeUninit<f64>> = Vec::with_capacity(cols);
-    unsafe { fi_raw_mu.set_len(cols); }
+    unsafe {
+        fi_raw_mu.set_len(cols);
+    }
     unsafe {
         let p_ptr = price.as_ptr();
         let v_ptr = volume.as_ptr();

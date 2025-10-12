@@ -6,8 +6,8 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
-use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer, LockedBuffer};
 use cust::memory::AsyncCopyDestination;
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -40,7 +40,11 @@ pub enum BatchKernelPolicy {
     Plain { block_x: u32 },
     Tiled { tile: u32 },
 }
-impl Default for BatchKernelPolicy { fn default() -> Self { BatchKernelPolicy::Auto } }
+impl Default for BatchKernelPolicy {
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
+}
 
 /// Policy for the many-series (time-major) path.
 #[derive(Clone, Copy, Debug)]
@@ -49,7 +53,11 @@ pub enum ManySeriesKernelPolicy {
     OneD { block_x: u32 },
     Tiled2D { tx: u32, ty: u32 },
 }
-impl Default for ManySeriesKernelPolicy { fn default() -> Self { ManySeriesKernelPolicy::Auto } }
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
+}
 
 /// Global CUDA policy for EDCF wrapper.
 #[derive(Clone, Copy, Debug, Default)]
@@ -103,7 +111,8 @@ impl CudaEdcf {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaEdcfError::Cuda(e.to_string()))?
@@ -126,16 +135,27 @@ impl CudaEdcf {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaEdcfPolicy) -> Result<Self, CudaEdcfError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaEdcfPolicy,
+    ) -> Result<Self, CudaEdcfError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
 
-    pub fn set_policy(&mut self, policy: CudaEdcfPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaEdcfPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaEdcfPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaEdcfPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     pub fn synchronize(&self) -> Result<(), CudaEdcfError> {
         self.stream
@@ -146,14 +166,19 @@ impl CudaEdcf {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
-            if let Some(sel) = self.last_batch { 
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+            if let Some(sel) = self.last_batch {
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EDCF batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEdcf)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEdcf)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -161,14 +186,19 @@ impl CudaEdcf {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
-            if let Some(sel) = self.last_many { 
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+            if let Some(sel) = self.last_many {
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EDCF many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEdcf)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEdcf)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -186,16 +216,16 @@ impl CudaEdcf {
     /// Best-effort: silently ignores unsupported configurations.
     fn try_enable_persisting_l2(&self, base_dev_ptr: u64, bytes: usize) {
         // Enabled by default; allow explicit opt-out via EDCF_L2_PERSIST=0
-        if std::env::var("EDCF_L2_PERSIST").ok().as_deref() == Some("0") { return; }
+        if std::env::var("EDCF_L2_PERSIST").ok().as_deref() == Some("0") {
+            return;
+        }
         unsafe {
             use cust::device::Device as CuDevice;
             use cust::sys::{
                 cuCtxSetLimit, cuDeviceGetAttribute, cuStreamSetAttribute,
                 CUaccessPolicyWindow_v1 as CUaccessPolicyWindow,
-                CUaccessProperty_enum as AccessProp,
-                CUdevice_attribute_enum as DevAttr,
-                CUlimit_enum as CULimit,
-                CUstreamAttrID_enum as StreamAttrId,
+                CUaccessProperty_enum as AccessProp, CUdevice_attribute_enum as DevAttr,
+                CUlimit_enum as CULimit, CUstreamAttrID_enum as StreamAttrId,
                 CUstreamAttrValue_v1 as CUstreamAttrValue,
             };
 
@@ -251,7 +281,13 @@ impl CudaEdcf {
             return self.launch_compute_dist(&func, d_prices, len, period, first_valid, d_dist);
         }
 
-        let tile: u32 = if len >= (1 << 18) { 512 } else if len >= (1 << 16) { 256 } else { 128 };
+        let tile: u32 = if len >= (1 << 18) {
+            512
+        } else if len >= (1 << 16) {
+            256
+        } else {
+            128
+        };
         let fname = match tile {
             128 => "edcf_compute_dist_rolling_f32_tile128",
             256 => "edcf_compute_dist_rolling_f32_tile256",
@@ -264,7 +300,9 @@ impl CudaEdcf {
 
         let outputs_per_block = tile;
         let mut grid_x = ((len as u32) + outputs_per_block - 1) / outputs_per_block;
-        if grid_x == 0 { grid_x = 1; }
+        if grid_x == 0 {
+            grid_x = 1;
+        }
         let block_x = 128u32;
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -298,14 +336,20 @@ impl CudaEdcf {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     /// One-series × many-params. Host input → VRAM output.
@@ -327,7 +371,8 @@ impl CudaEdcf {
         let required = in_bytes + out_bytes + scratch_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaEdcfError::Cuda(format!(
-                "insufficient VRAM: need ~{} MiB", (required + (1<<20)-1) >> 20
+                "insufficient VRAM: need ~{} MiB",
+                (required + (1 << 20) - 1) >> 20
             )));
         }
         // H2D async copy for prices (pinned path improves throughput)
@@ -398,7 +443,8 @@ impl CudaEdcf {
             LockedBuffer::uninitialized(expected).map_err(|e| CudaEdcfError::Cuda(e.to_string()))?
         };
         unsafe {
-            d_out.async_copy_to(pinned.as_mut_slice(), &self.stream)
+            d_out
+                .async_copy_to(pinned.as_mut_slice(), &self.stream)
                 .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
         }
         self.synchronize()?;
@@ -430,7 +476,14 @@ impl CudaEdcf {
         let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
             .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
 
-        self.edcf_batch_device_impl(&d_prices, &combos, first_valid, series_len, &mut d_dist, &mut d_out)?;
+        self.edcf_batch_device_impl(
+            &d_prices,
+            &combos,
+            first_valid,
+            series_len,
+            &mut d_dist,
+            &mut d_out,
+        )?;
         self.synchronize()?;
 
         unsafe {
@@ -473,22 +526,47 @@ impl CudaEdcf {
         sweep: &EdcfBatchRange,
     ) -> Result<DeviceArrayF32, CudaEdcfError> {
         let combos = Self::expand_range(sweep);
-        if combos.is_empty() { return Err(CudaEdcfError::InvalidInput("no parameter combinations".into())); }
+        if combos.is_empty() {
+            return Err(CudaEdcfError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         for (i, prm) in combos.iter().enumerate() {
             let p = prm.period.unwrap_or(0);
-            if p == 0 { return Err(CudaEdcfError::InvalidInput(format!("invalid period at combo {}: 0", i))); }
+            if p == 0 {
+                return Err(CudaEdcfError::InvalidInput(format!(
+                    "invalid period at combo {}: 0",
+                    i
+                )));
+            }
             let need = first_valid + 2 * p;
-            if series_len < need { return Err(CudaEdcfError::InvalidInput(format!(
-                "not enough valid data (needed >= {}, series_len = {})", need, series_len))); }
+            if series_len < need {
+                return Err(CudaEdcfError::InvalidInput(format!(
+                    "not enough valid data (needed >= {}, series_len = {})",
+                    need, series_len
+                )));
+            }
         }
         let n_combos = combos.len();
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
         let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
             .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        self.edcf_batch_device_impl(d_prices, &combos, first_valid, series_len, &mut d_dist, &mut d_out)?;
+        self.edcf_batch_device_impl(
+            d_prices,
+            &combos,
+            first_valid,
+            series_len,
+            &mut d_dist,
+            &mut d_out,
+        )?;
         self.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     fn edcf_batch_device_impl(
@@ -529,7 +607,10 @@ impl CudaEdcf {
         }
 
         // Try to keep price window warm in L2 for sequential passes (best effort)
-        self.try_enable_persisting_l2(d_prices.as_device_ptr().as_raw(), series_len * std::mem::size_of::<f32>());
+        self.try_enable_persisting_l2(
+            d_prices.as_device_ptr().as_raw(),
+            series_len * std::mem::size_of::<f32>(),
+        );
 
         for (row_idx, params) in combos.iter().enumerate() {
             let period = params.period.unwrap_or(0);
@@ -554,13 +635,7 @@ impl CudaEdcf {
                 )));
             }
 
-            self.launch_compute_dist_auto(
-                d_prices,
-                series_len,
-                period,
-                first_valid,
-                d_dist,
-            )?;
+            self.launch_compute_dist_auto(d_prices, series_len, period, first_valid, d_dist)?;
 
             // Select apply path: tiled vs plain
             let offset_elems = row_idx * series_len;
@@ -579,7 +654,12 @@ impl CudaEdcf {
                     BatchKernelPolicy::Tiled { tile } => tile,
                     _ => 256,
                 };
-                let func_name = match tile { 128 => "edcf_apply_weights_tiled_f32_tile128", 256 => "edcf_apply_weights_tiled_f32_tile256", 512 => "edcf_apply_weights_tiled_f32_tile512", _ => "edcf_apply_weights_tiled_f32_tile256" };
+                let func_name = match tile {
+                    128 => "edcf_apply_weights_tiled_f32_tile128",
+                    256 => "edcf_apply_weights_tiled_f32_tile256",
+                    512 => "edcf_apply_weights_tiled_f32_tile512",
+                    _ => "edcf_apply_weights_tiled_f32_tile256",
+                };
                 let func = self
                     .module
                     .get_function(func_name)
@@ -622,14 +702,25 @@ impl CudaEdcf {
                     .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
 
                 // Introspection
-                let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
+                let block_x = match self.policy.batch {
+                    BatchKernelPolicy::Plain { block_x } => block_x,
+                    _ => 256,
+                };
                 unsafe {
                     let this = self as *const _ as *mut CudaEdcf;
                     (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
                 }
                 self.maybe_log_batch_debug();
 
-                self.launch_apply_weights(&apply_fn, d_prices, d_dist, series_len, period, first_valid, row_ptr)?;
+                self.launch_apply_weights(
+                    &apply_fn,
+                    d_prices,
+                    d_dist,
+                    series_len,
+                    period,
+                    first_valid,
+                    row_ptr,
+                )?;
             }
         }
 
@@ -645,7 +736,10 @@ impl CudaEdcf {
         first_valid: usize,
         d_dist: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEdcfError> {
-        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            _ => 256,
+        };
         let mut grid_x = ((len as u32) + block_x - 1) / block_x;
         if grid_x == 0 {
             grid_x = 1;
@@ -683,7 +777,10 @@ impl CudaEdcf {
         first_valid: usize,
         out_row_ptr: u64,
     ) -> Result<(), CudaEdcfError> {
-        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            _ => 256,
+        };
         let mut grid_x = ((len as u32) + block_x - 1) / block_x;
         if grid_x == 0 {
             grid_x = 1;
@@ -793,40 +890,77 @@ impl CudaEdcf {
         rows: usize,
         params: &EdcfParams,
     ) -> Result<DeviceArrayF32, CudaEdcfError> {
-        if cols == 0 || rows == 0 { return Err(CudaEdcfError::InvalidInput("empty matrix".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaEdcfError::InvalidInput("empty matrix".into()));
+        }
         let period = params.period.unwrap_or(0);
-        if period == 0 { return Err(CudaEdcfError::InvalidInput("period is zero".into())); }
-        if prices_tm_f32.len() != cols * rows { return Err(CudaEdcfError::InvalidInput("prices size mismatch".into())); }
+        if period == 0 {
+            return Err(CudaEdcfError::InvalidInput("period is zero".into()));
+        }
+        if prices_tm_f32.len() != cols * rows {
+            return Err(CudaEdcfError::InvalidInput("prices size mismatch".into()));
+        }
 
         // Compute first_valids per series
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
-            let mut fv = 0usize; let mut found = false;
-            for t in 0..rows { let v = prices_tm_f32[t * cols + s]; if !v.is_nan() { fv = t; found = true; break; } }
-            if !found { return Err(CudaEdcfError::InvalidInput(format!("column {} is all NaN", s))); }
+            let mut fv = 0usize;
+            let mut found = false;
+            for t in 0..rows {
+                let v = prices_tm_f32[t * cols + s];
+                if !v.is_nan() {
+                    fv = t;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(CudaEdcfError::InvalidInput(format!(
+                    "column {} is all NaN",
+                    s
+                )));
+            }
             first_valids[s] = fv as i32;
             let warm = fv + 2 * period;
-            if rows < warm { return Err(CudaEdcfError::InvalidInput(format!("not enough valid data in series {}: need >= {}, have {}", s, warm, rows - fv))); }
+            if rows < warm {
+                return Err(CudaEdcfError::InvalidInput(format!(
+                    "not enough valid data in series {}: need >= {}, have {}",
+                    s,
+                    warm,
+                    rows - fv
+                )));
+            }
         }
 
         // VRAM check
         let bytes = prices_tm_f32.len() * 4 + prices_tm_f32.len() * 4 + cols * 4;
         if !Self::will_fit(bytes, 64 * 1024 * 1024) {
-            return Err(CudaEdcfError::Cuda("insufficient VRAM for many-series".into()));
+            return Err(CudaEdcfError::Cuda(
+                "insufficient VRAM for many-series".into(),
+            ));
         }
 
         let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }
             .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
 
         // Kernel selection
         let try_2d = |tx: u32, ty: u32| -> Result<bool, CudaEdcfError> {
-            let fname = match (tx, ty) { (128, 4) => "edcf_ms1p_tiled_f32_tx128_ty4", (128, 2) => "edcf_ms1p_tiled_f32_tx128_ty2", _ => return Ok(false) };
-            let func = match self.module.get_function(fname) { Ok(f) => f, Err(_) => return Ok(false) };
+            let fname = match (tx, ty) {
+                (128, 4) => "edcf_ms1p_tiled_f32_tx128_ty4",
+                (128, 2) => "edcf_ms1p_tiled_f32_tx128_ty2",
+                _ => return Ok(false),
+            };
+            let func = match self.module.get_function(fname) {
+                Ok(f) => f,
+                Err(_) => return Ok(false),
+            };
             // Shared size per block
             let prices_elems = (tx as usize) + 2 * (period - 1);
-            let dist_elems   = (tx as usize) + (period - 1);
+            let dist_elems = (tx as usize) + (period - 1);
             let per_series = (prices_elems + 4 * dist_elems) * std::mem::size_of::<f32>();
             let shared_bytes = (per_series * (ty as usize)) as u32;
             let grid_x = ((rows as u32) + tx - 1) / tx;
@@ -847,7 +981,10 @@ impl CudaEdcf {
                 )
                 .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
             }
-            unsafe { let this = self as *const _ as *mut CudaEdcf; (*this).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty }); }
+            unsafe {
+                let this = self as *const _ as *mut CudaEdcf;
+                (*this).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
+            }
             self.maybe_log_many_debug();
             Ok(true)
         };
@@ -856,15 +993,29 @@ impl CudaEdcf {
             ManySeriesKernelPolicy::Tiled2D { tx, ty } => try_2d(tx, ty)?,
             ManySeriesKernelPolicy::Auto => {
                 // Prefer 2D when rows and cols are reasonably large
-                if cols >= 16 && rows >= 2048 { if try_2d(128, 4)? { true } else { try_2d(128, 2)? } } else { false }
+                if cols >= 16 && rows >= 2048 {
+                    if try_2d(128, 4)? {
+                        true
+                    } else {
+                        try_2d(128, 2)?
+                    }
+                } else {
+                    false
+                }
             }
             ManySeriesKernelPolicy::OneD { .. } => false,
         };
 
         if !launched {
             // 1D fallback
-            let func = self.module.get_function("edcf_many_series_one_param_f32").map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-            let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+            let func = self
+                .module
+                .get_function("edcf_many_series_one_param_f32")
+                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+            let block_x = match self.policy.many_series {
+                ManySeriesKernelPolicy::OneD { block_x } => block_x,
+                _ => 128,
+            };
             let grid: GridSize = (cols as u32, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             let shared_bytes = (2 * period * std::mem::size_of::<f32>()) as u32;
@@ -882,12 +1033,19 @@ impl CudaEdcf {
                 )
                 .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
             }
-            unsafe { let this = self as *const _ as *mut CudaEdcf; (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+            unsafe {
+                let this = self as *const _ as *mut CudaEdcf;
+                (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+            }
             self.maybe_log_many_debug();
         }
 
         self.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 
     /// Many-series (time-major) device-resident path with precomputed `first_valids`.
@@ -901,19 +1059,33 @@ impl CudaEdcf {
         period: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEdcfError> {
-        if cols == 0 || rows == 0 || period == 0 { return Err(CudaEdcfError::InvalidInput("invalid dims/period".into())); }
+        if cols == 0 || rows == 0 || period == 0 {
+            return Err(CudaEdcfError::InvalidInput("invalid dims/period".into()));
+        }
         // Best-effort L2 persisting cache for the time-major prices
-        self.try_enable_persisting_l2(d_prices_tm.as_device_ptr().as_raw(), cols * rows * std::mem::size_of::<f32>());
+        self.try_enable_persisting_l2(
+            d_prices_tm.as_device_ptr().as_raw(),
+            cols * rows * std::mem::size_of::<f32>(),
+        );
         // Try 2D tiled first (ty=4 then ty=2)
         let try_2d = |tx: u32, ty: u32| -> Result<bool, CudaEdcfError> {
-            let fname = match (tx, ty) { (128, 4) => "edcf_ms1p_tiled_f32_tx128_ty4", (128, 2) => "edcf_ms1p_tiled_f32_tx128_ty2", _ => return Ok(false) };
-            let func = match self.module.get_function(fname) { Ok(f) => f, Err(_) => return Ok(false) };
+            let fname = match (tx, ty) {
+                (128, 4) => "edcf_ms1p_tiled_f32_tx128_ty4",
+                (128, 2) => "edcf_ms1p_tiled_f32_tx128_ty2",
+                _ => return Ok(false),
+            };
+            let func = match self.module.get_function(fname) {
+                Ok(f) => f,
+                Err(_) => return Ok(false),
+            };
             let prices_elems = (tx as usize) + 2 * (period - 1);
-            let dist_elems   = (tx as usize) + (period - 1);
+            let dist_elems = (tx as usize) + (period - 1);
             let per_series = (prices_elems + 4 * dist_elems) * std::mem::size_of::<f32>();
             let shared_bytes = (per_series * (ty as usize)) as u32;
-            let grid_x = ((rows as u32) + tx - 1) / tx; let grid_y = ((cols as u32) + ty - 1) / ty;
-            let grid: GridSize = (grid_x, grid_y, 1).into(); let block: BlockSize = (128, ty, 1).into();
+            let grid_x = ((rows as u32) + tx - 1) / tx;
+            let grid_y = ((cols as u32) + ty - 1) / ty;
+            let grid: GridSize = (grid_x, grid_y, 1).into();
+            let block: BlockSize = (128, ty, 1).into();
             let stream = &self.stream;
             unsafe {
                 launch!(func<<<grid, block, shared_bytes, stream>>>(
@@ -924,10 +1096,22 @@ impl CudaEdcf {
             Ok(true)
         };
 
-        let launched = if cols >= 16 && rows >= 2048 { if try_2d(128, 4)? { true } else { try_2d(128, 2)? } } else { false };
+        let launched = if cols >= 16 && rows >= 2048 {
+            if try_2d(128, 4)? {
+                true
+            } else {
+                try_2d(128, 2)?
+            }
+        } else {
+            false
+        };
         if !launched {
-            let func = self.module.get_function("edcf_many_series_one_param_f32").map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-            let grid: GridSize = (cols as u32, 1, 1).into(); let block: BlockSize = (128, 1, 1).into();
+            let func = self
+                .module
+                .get_function("edcf_many_series_one_param_f32")
+                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+            let grid: GridSize = (cols as u32, 1, 1).into();
+            let block: BlockSize = (128, 1, 1).into();
             let shared_bytes = (2 * period * std::mem::size_of::<f32>()) as u32;
             let stream = &self.stream;
             unsafe {
@@ -945,8 +1129,8 @@ impl CudaEdcf {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;
@@ -981,24 +1165,49 @@ pub mod benches {
     impl CudaBenchState for EdcfBatchDeviceState {
         fn launch(&mut self) {
             self.cuda
-                .edcf_batch_device(&self.d_prices, &self.combos, self.first_valid, self.series_len, &mut self.d_dist, &mut self.d_out)
+                .edcf_batch_device(
+                    &self.d_prices,
+                    &self.combos,
+                    self.first_valid,
+                    self.series_len,
+                    &mut self.d_dist,
+                    &mut self.d_out,
+                )
                 .expect("edcf_batch_device");
             self.cuda.synchronize().expect("sync");
-            if !self.warmed { self.warmed = true; }
+            if !self.warmed {
+                self.warmed = true;
+            }
         }
     }
     fn prep_edcf_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaEdcf::new(0).expect("cuda edcf");
         let price = gen_series(ONE_SERIES_LEN);
-        let sweep = EdcfBatchRange { period: (8, 8 + PARAM_SWEEP - 1, 1) };
+        let sweep = EdcfBatchRange {
+            period: (8, 8 + PARAM_SWEEP - 1, 1),
+        };
         // Compute first_valid
         let first_valid = price.iter().position(|&x| !x.is_nan()).unwrap_or(0);
         let series_len = price.len();
-        let combos: Vec<EdcfParams> = (sweep.period.0..=sweep.period.1).step_by(sweep.period.2.max(1)).map(|p| EdcfParams { period: Some(p) }).collect();
+        let combos: Vec<EdcfParams> = (sweep.period.0..=sweep.period.1)
+            .step_by(sweep.period.2.max(1))
+            .map(|p| EdcfParams { period: Some(p) })
+            .collect();
         let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(combos.len() * series_len) }.expect("d_out");
-        let d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }.expect("d_dist");
-        Box::new(EdcfBatchDeviceState { cuda, d_prices, d_out, d_dist, combos, first_valid, series_len, warmed: false })
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(combos.len() * series_len) }.expect("d_out");
+        let d_dist: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len) }.expect("d_dist");
+        Box::new(EdcfBatchDeviceState {
+            cuda,
+            d_prices,
+            d_out,
+            d_dist,
+            combos,
+            first_valid,
+            series_len,
+            warmed: false,
+        })
     }
 
     struct EdcfManyDeviceState {
@@ -1014,37 +1223,75 @@ pub mod benches {
     impl CudaBenchState for EdcfManyDeviceState {
         fn launch(&mut self) {
             self.cuda
-                .edcf_many_series_one_param_time_major_device(&self.d_prices_tm, &self.d_first_valids, self.cols, self.rows, self.period, &mut self.d_out_tm)
+                .edcf_many_series_one_param_time_major_device(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    &mut self.d_out_tm,
+                )
                 .expect("edcf many device");
             self.cuda.synchronize().expect("sync");
-            if !self.warmed { self.warmed = true; }
+            if !self.warmed {
+                self.warmed = true;
+            }
         }
     }
     fn prep_edcf_many_series_one_param() -> Box<dyn CudaBenchState> {
         let cuda = CudaEdcf::new(0).expect("cuda edcf");
-        let cols = MANY_SERIES_COLS; let rows = MANY_SERIES_LEN;
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
         let data_tm = gen_time_major_prices(cols, rows);
         let period = 64usize;
         // Compute first_valids once on host
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
-            let mut fv = 0usize; for t in 0..rows { if !data_tm[t * cols + s].is_nan() { fv = t; break; } }
+            let mut fv = 0usize;
+            for t in 0..rows {
+                if !data_tm[t * cols + s].is_nan() {
+                    fv = t;
+                    break;
+                }
+            }
             first_valids[s] = fv as i32;
         }
         let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
         let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
-        let d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
-        Box::new(EdcfManyDeviceState { cuda, d_prices_tm, d_first_valids, d_out_tm, cols, rows, period, warmed: false })
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        Box::new(EdcfManyDeviceState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            d_out_tm,
+            cols,
+            rows,
+            period,
+            warmed: false,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new("edcf", "one_series_many_params", "edcf_cuda_batch_dev", "1m_x_250", prep_edcf_one_series_many_params)
-                .with_sample_size(10)
-                .with_mem_required(bytes_one_series_many_params()),
-            CudaBenchScenario::new("edcf", "many_series_one_param", "edcf_cuda_many_series_one_param", "250x1m", prep_edcf_many_series_one_param)
-                .with_sample_size(6)
-                .with_mem_required(bytes_many_series_one_param()),
+            CudaBenchScenario::new(
+                "edcf",
+                "one_series_many_params",
+                "edcf_cuda_batch_dev",
+                "1m_x_250",
+                prep_edcf_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "edcf",
+                "many_series_one_param",
+                "edcf_cuda_many_series_one_param",
+                "250x1m",
+                prep_edcf_many_series_one_param,
+            )
+            .with_sample_size(6)
+            .with_mem_required(bytes_many_series_one_param()),
         ]
     }
 }

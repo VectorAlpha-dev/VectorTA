@@ -503,8 +503,7 @@ pub unsafe fn emd_scalar_into(
 
         // --- band-pass recursion (order-2 resonator) ---
         let bp_curr = if count >= 2 {
-            half_one_minus_alpha * (price - price_prev2)
-                + beta_times_one_plus_alpha * bp_prev1
+            half_one_minus_alpha * (price - price_prev2) + beta_times_one_plus_alpha * bp_prev1
                 - alpha * bp_prev2
         } else {
             price
@@ -669,8 +668,7 @@ unsafe fn emd_scalar_prices_into(
         let price = *pr_ptr.add(i);
 
         let bp_curr = if count >= 2 {
-            half_one_minus_alpha * (price - price_prev2)
-                + beta_times_one_plus_alpha * bp_prev1
+            half_one_minus_alpha * (price - price_prev2) + beta_times_one_plus_alpha * bp_prev1
                 - alpha * bp_prev2
         } else {
             price

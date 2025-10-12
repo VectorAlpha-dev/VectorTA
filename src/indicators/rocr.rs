@@ -13,7 +13,7 @@
 //! - SIMD implemented (AVX2/AVX512) but disabled by default: memory-bound, no speedup vs scalar.
 //!   Auto kernel selection short-circuits to scalar; explicit SIMD remains for benchmarking.
 //! - Streaming: O(1) — updated to a branch-lean, modulo-free head wrap; exact semantics preserved
-//!   (past == 0 or NaN yields 0.0; otherwise value / past). 
+//!   (past == 0 or NaN yields 0.0; otherwise value / past).
 //! - Memory: Good — uses `alloc_with_nan_prefix` and `make_uninit_matrix`.
 //! - Batch: Scalar path uses a shared 1/x precompute (row-specific) to reduce per-row work; runtime
 //!   selection still defaults to scalar batch. SIMD batch paths are kept for benchmarking.
@@ -283,7 +283,11 @@ pub fn rocr_into_slice(dst: &mut [f64], input: &RocrInput, kern: Kernel) -> Resu
 pub fn rocr_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
     for i in (first_val + period)..data.len() {
         let past = data[i - period];
-        out[i] = if past == 0.0 || past.is_nan() { 0.0 } else { data[i] / past };
+        out[i] = if past == 0.0 || past.is_nan() {
+            0.0
+        } else {
+            data[i] / past
+        };
     }
 }
 

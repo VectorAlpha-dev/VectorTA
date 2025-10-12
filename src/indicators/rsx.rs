@@ -332,7 +332,11 @@ pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     // Hoist invariants and initialize at warmup boundary
     f90 = 1.0;
     f0 = 0.0;
-    f88 = if period >= 6 { (period - 1) as f64 } else { 5.0 };
+    f88 = if period >= 6 {
+        (period - 1) as f64
+    } else {
+        5.0
+    };
     f8 = 100.0 * data[start];
     f18 = 3.0 / (period as f64 + 2.0);
     f20 = 1.0 - f18;
@@ -424,7 +428,11 @@ pub unsafe fn rsx_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
     let mut f70 = 0.0;
     let mut f78 = 0.0;
     let mut f80 = 0.0;
-    let mut f88 = if period >= 6 { (period - 1) as f64 } else { 5.0 };
+    let mut f88 = if period >= 6 {
+        (period - 1) as f64
+    } else {
+        5.0
+    };
     let mut f90 = 1.0;
 
     *out.get_unchecked_mut(start) = f64::NAN;
@@ -557,7 +565,11 @@ impl RsxStream {
             init_done: false,
             alpha,
             beta,
-            f88: if period >= 6 { (period - 1) as f64 } else { 5.0 },
+            f88: if period >= 6 {
+                (period - 1) as f64
+            } else {
+                5.0
+            },
             f90: 1.0,
             f0: 0.0,
             f8: 0.0,
@@ -595,7 +607,11 @@ impl RsxStream {
         }
 
         // Post warm-up: O(1) recursive update
-        self.f90 = if self.f88 <= self.f90 { self.f88 + 1.0 } else { self.f90 + 1.0 };
+        self.f90 = if self.f88 <= self.f90 {
+            self.f88 + 1.0
+        } else {
+            self.f90 + 1.0
+        };
 
         let prev = self.f8;
         self.f8 = 100.0 * value;

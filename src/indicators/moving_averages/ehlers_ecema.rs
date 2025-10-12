@@ -575,7 +575,11 @@ unsafe fn ehlers_ecema_scalar_into_with_mode(
     debug_assert_eq!(ema_values.len(), len);
 
     // Determine start index by mode (prefix already NaN-initialized by caller)
-    let start_idx = if pine_compatible { first } else { first + length - 1 };
+    let start_idx = if pine_compatible {
+        first
+    } else {
+        first + length - 1
+    };
     if start_idx >= len {
         return;
     }
@@ -601,7 +605,11 @@ unsafe fn ehlers_ecema_scalar_into_with_mode(
 
         // Previous EC-EMA (mode-dependent seed at the first computed index)
         let prev_ec = if i == start_idx {
-            if pine_compatible { 0.0 } else { ema_i }
+            if pine_compatible {
+                0.0
+            } else {
+                ema_i
+            }
         } else {
             *out_ptr.add(i - 1)
         };
@@ -624,7 +632,7 @@ unsafe fn ehlers_ecema_scalar_into_with_mode(
             -gL
         } else {
             let k_cont = d / s; // ideal real-valued k
-            // If clearly out of bounds, the constrained minimizer is at the boundary
+                                // If clearly out of bounds, the constrained minimizer is at the boundary
             if k_cont <= (-(gL as f64) - 1.0) {
                 -gL
             } else if k_cont >= (gL as f64 + 1.0) {
@@ -650,7 +658,11 @@ unsafe fn ehlers_ecema_scalar_into_with_mode(
                 let e1 = (d - s * (k1 as f64)).abs();
 
                 // Tie -> pick smaller integer (mirrors '<' update in original scan)
-                if e0 <= e1 { k0 } else { k1 }
+                if e0 <= e1 {
+                    k0
+                } else {
+                    k1
+                }
             }
         };
 
@@ -1099,7 +1111,10 @@ impl EhlersEcemaStream {
         let confirmed_only = params.confirmed_only.unwrap_or(false);
 
         if length == 0 {
-            return Err(EhlersEcemaError::InvalidPeriod { period: length, data_len: 0 });
+            return Err(EhlersEcemaError::InvalidPeriod {
+                period: length,
+                data_len: 0,
+            });
         }
         if gain_limit == 0 {
             return Err(EhlersEcemaError::InvalidGainLimit { gain_limit });
@@ -1132,8 +1147,12 @@ impl EhlersEcemaStream {
     #[inline(always)]
     fn round_nearest_tie_down(x: f64) -> i32 {
         let f = x.floor();
-        let r = x - f;           // r in [0,1)
-        if r > 0.5 { (f + 1.0) as i32 } else { f as i32 }
+        let r = x - f; // r in [0,1)
+        if r > 0.5 {
+            (f + 1.0) as i32
+        } else {
+            f as i32
+        }
     }
 
     /// One EC-EMA step using the closed-form minimizer on the discrete grid.
@@ -1173,8 +1192,14 @@ impl EhlersEcemaStream {
         // confirmed_only uses the previous bar as the source when available
         let src = if self.confirmed_only {
             match self.prev_value {
-                Some(prev) => { self.prev_value = Some(value); prev }
-                None => { self.prev_value = Some(value); value }
+                Some(prev) => {
+                    self.prev_value = Some(value);
+                    prev
+                }
+                None => {
+                    self.prev_value = Some(value);
+                    value
+                }
             }
         } else {
             value
@@ -1186,7 +1211,11 @@ impl EhlersEcemaStream {
             // Pine-style EMA is zero-seeded and updated from bar 1 onward.
             self.ema_mean = self.alpha.mul_add(src, self.beta * self.ema_mean);
             // Seed EC with zero on the very first bar (batch parity).
-            let prev_ec = if self.count == 1 { 0.0 } else { self.prev_ecema };
+            let prev_ec = if self.count == 1 {
+                0.0
+            } else {
+                self.prev_ecema
+            };
             let ec = self.step(prev_ec, src, self.ema_mean);
             self.prev_ecema = ec;
             return ec;

@@ -394,11 +394,21 @@ pub unsafe fn gatorosc_scalar(
 
     // Warmup gates for outputs/changes
     let (uw, lw, ucw, lcw) = gator_warmups(
-        first_valid, jaws_length, jaws_shift, teeth_length, teeth_shift, lips_length, lips_shift,
+        first_valid,
+        jaws_length,
+        jaws_shift,
+        teeth_length,
+        teeth_shift,
+        lips_length,
+        lips_shift,
     );
 
     // Initialize EMA states
-    let mut jema = if data[first_valid].is_nan() { 0.0 } else { data[first_valid] };
+    let mut jema = if data[first_valid].is_nan() {
+        0.0
+    } else {
+        data[first_valid]
+    };
     let mut tema = jema;
     let mut lema = jema;
 
@@ -425,7 +435,11 @@ pub unsafe fn gatorosc_scalar(
     while i < n {
         let x = {
             let xi = *data.get_unchecked(i);
-            if xi.is_nan() { jema } else { xi }
+            if xi.is_nan() {
+                jema
+            } else {
+                xi
+            }
         };
 
         // EMA updates with fused multiply-add when available
@@ -440,11 +454,17 @@ pub unsafe fn gatorosc_scalar(
 
         // Wrapped indices without %
         let mut jj = rpos + buf_len - jaws_shift;
-        if jj >= buf_len { jj -= buf_len; }
+        if jj >= buf_len {
+            jj -= buf_len;
+        }
         let mut tt = rpos + buf_len - teeth_shift;
-        if tt >= buf_len { tt -= buf_len; }
+        if tt >= buf_len {
+            tt -= buf_len;
+        }
         let mut ll = rpos + buf_len - lips_shift;
-        if ll >= buf_len { ll -= buf_len; }
+        if ll >= buf_len {
+            ll -= buf_len;
+        }
 
         if i >= uw {
             let u = (*jring.get_unchecked(jj) - *tring.get_unchecked(tt)).abs();
@@ -473,7 +493,9 @@ pub unsafe fn gatorosc_scalar(
 
         // Advance ring position with branchless wrap
         rpos += 1;
-        if rpos == buf_len { rpos = 0; }
+        if rpos == buf_len {
+            rpos = 0;
+        }
 
         i += 1;
     }
@@ -532,7 +554,9 @@ pub unsafe fn gatorosc_avx2(
     use core::arch::x86_64::*;
 
     let n = data.len();
-    if first_valid >= n { return; }
+    if first_valid >= n {
+        return;
+    }
 
     let ja = 2.0 / (jaws_length as f64 + 1.0);
     let ta = 2.0 / (teeth_length as f64 + 1.0);
@@ -543,10 +567,20 @@ pub unsafe fn gatorosc_avx2(
     let oma = _mm256_sub_pd(one, a);
 
     let (uw, lw, ucw, lcw) = gator_warmups(
-        first_valid, jaws_length, jaws_shift, teeth_length, teeth_shift, lips_length, lips_shift,
+        first_valid,
+        jaws_length,
+        jaws_shift,
+        teeth_length,
+        teeth_shift,
+        lips_length,
+        lips_shift,
     );
 
-    let mut jema = if data.get_unchecked(first_valid).is_nan() { 0.0 } else { *data.get_unchecked(first_valid) };
+    let mut jema = if data.get_unchecked(first_valid).is_nan() {
+        0.0
+    } else {
+        *data.get_unchecked(first_valid)
+    };
     let mut tema = jema;
     let mut lema = jema;
 
@@ -573,11 +607,15 @@ pub unsafe fn gatorosc_avx2(
     while i < n {
         let x = {
             let xi = *data.get_unchecked(i);
-            if xi.is_nan() { jema } else { xi }
+            if xi.is_nan() {
+                jema
+            } else {
+                xi
+            }
         };
         let vx = _mm256_set1_pd(x);
         let oma_e = _mm256_mul_pd(oma, e);
-        let a_vx  = _mm256_mul_pd(a,  vx);
+        let a_vx = _mm256_mul_pd(a, vx);
         e = _mm256_add_pd(oma_e, a_vx);
 
         _mm256_storeu_pd(lanes.as_mut_ptr(), e);
@@ -589,27 +627,47 @@ pub unsafe fn gatorosc_avx2(
         *tring.get_unchecked_mut(rpos) = tema;
         *lring.get_unchecked_mut(rpos) = lema;
 
-        let mut jj = rpos + buf_len - jaws_shift; if jj >= buf_len { jj -= buf_len; }
-        let mut tt = rpos + buf_len - teeth_shift; if tt >= buf_len { tt -= buf_len; }
-        let mut ll = rpos + buf_len - lips_shift;  if ll >= buf_len { ll -= buf_len; }
+        let mut jj = rpos + buf_len - jaws_shift;
+        if jj >= buf_len {
+            jj -= buf_len;
+        }
+        let mut tt = rpos + buf_len - teeth_shift;
+        if tt >= buf_len {
+            tt -= buf_len;
+        }
+        let mut ll = rpos + buf_len - lips_shift;
+        if ll >= buf_len {
+            ll -= buf_len;
+        }
 
         if i >= uw {
             let u = (*jring.get_unchecked(jj) - *tring.get_unchecked(tt)).abs();
             *upper.get_unchecked_mut(i) = u;
-            if i == uw { u_prev = u; have_u = true; } else if i >= ucw && have_u {
-                *upper_change.get_unchecked_mut(i) = u - u_prev; u_prev = u;
+            if i == uw {
+                u_prev = u;
+                have_u = true;
+            } else if i >= ucw && have_u {
+                *upper_change.get_unchecked_mut(i) = u - u_prev;
+                u_prev = u;
             }
         }
 
         if i >= lw {
             let l = -(*tring.get_unchecked(tt) - *lring.get_unchecked(ll)).abs();
             *lower.get_unchecked_mut(i) = l;
-            if i == lw { l_prev = l; have_l = true; } else if i >= lcw && have_l {
-                *lower_change.get_unchecked_mut(i) = -(l - l_prev); l_prev = l;
+            if i == lw {
+                l_prev = l;
+                have_l = true;
+            } else if i >= lcw && have_l {
+                *lower_change.get_unchecked_mut(i) = -(l - l_prev);
+                l_prev = l;
             }
         }
 
-        rpos += 1; if rpos == buf_len { rpos = 0; }
+        rpos += 1;
+        if rpos == buf_len {
+            rpos = 0;
+        }
         i += 1;
     }
 }
@@ -682,28 +740,40 @@ pub unsafe fn gatorosc_avx512_short(
     use core::arch::x86_64::*;
 
     let n = data.len();
-    if first_valid >= n { return; }
+    if first_valid >= n {
+        return;
+    }
 
     let ja = 2.0 / (jaws_length as f64 + 1.0);
     let ta = 2.0 / (teeth_length as f64 + 1.0);
     let la = 2.0 / (lips_length as f64 + 1.0);
     // lanes: [j, t, l, 0, 0, 0, 0, 0]
-    let a   = _mm512_set_pd(0.0,0.0,0.0,0.0,0.0, la, ta, ja);
+    let a = _mm512_set_pd(0.0, 0.0, 0.0, 0.0, 0.0, la, ta, ja);
     let one = _mm512_set1_pd(1.0);
     let oma = _mm512_sub_pd(one, a);
 
     let (uw, lw, ucw, lcw) = gator_warmups(
-        first_valid, jaws_length, jaws_shift, teeth_length, teeth_shift, lips_length, lips_shift,
+        first_valid,
+        jaws_length,
+        jaws_shift,
+        teeth_length,
+        teeth_shift,
+        lips_length,
+        lips_shift,
     );
 
-    let mut jema = if data.get_unchecked(first_valid).is_nan() { 0.0 } else { *data.get_unchecked(first_valid) };
+    let mut jema = if data.get_unchecked(first_valid).is_nan() {
+        0.0
+    } else {
+        *data.get_unchecked(first_valid)
+    };
     let mut tema = jema;
     let mut lema = jema;
 
-    let mut e = _mm512_set_pd(0.0,0.0,0.0,0.0,0.0, lema, tema, jema);
+    let mut e = _mm512_set_pd(0.0, 0.0, 0.0, 0.0, 0.0, lema, tema, jema);
 
     let max_shift = jaws_shift.max(teeth_shift).max(lips_shift);
-    let buf_len   = max_shift + 1;
+    let buf_len = max_shift + 1;
     let mut jring: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, buf_len);
     let mut tring: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, buf_len);
     let mut lring: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, buf_len);
@@ -720,10 +790,17 @@ pub unsafe fn gatorosc_avx512_short(
 
     let mut i = first_valid;
     while i < n {
-        let x = { let xi = *data.get_unchecked(i); if xi.is_nan() { jema } else { xi } };
+        let x = {
+            let xi = *data.get_unchecked(i);
+            if xi.is_nan() {
+                jema
+            } else {
+                xi
+            }
+        };
         let vx = _mm512_set1_pd(x);
         let oma_e = _mm512_mul_pd(oma, e);
-        let a_vx  = _mm512_mul_pd(a,  vx);
+        let a_vx = _mm512_mul_pd(a, vx);
         e = _mm512_add_pd(oma_e, a_vx);
 
         _mm512_storeu_pd(lanes.as_mut_ptr(), e);
@@ -736,27 +813,47 @@ pub unsafe fn gatorosc_avx512_short(
         *tring.get_unchecked_mut(rpos) = tema;
         *lring.get_unchecked_mut(rpos) = lema;
 
-        let mut jj = rpos + buf_len - jaws_shift;  if jj >= buf_len { jj -= buf_len; }
-        let mut tt = rpos + buf_len - teeth_shift; if tt >= buf_len { tt -= buf_len; }
-        let mut ll = rpos + buf_len - lips_shift;  if ll >= buf_len { ll -= buf_len; }
+        let mut jj = rpos + buf_len - jaws_shift;
+        if jj >= buf_len {
+            jj -= buf_len;
+        }
+        let mut tt = rpos + buf_len - teeth_shift;
+        if tt >= buf_len {
+            tt -= buf_len;
+        }
+        let mut ll = rpos + buf_len - lips_shift;
+        if ll >= buf_len {
+            ll -= buf_len;
+        }
 
         if i >= uw {
             let u = (*jring.get_unchecked(jj) - *tring.get_unchecked(tt)).abs();
             *upper.get_unchecked_mut(i) = u;
-            if i == uw { u_prev = u; have_u = true; } else if i >= ucw && have_u {
-                *upper_change.get_unchecked_mut(i) = u - u_prev; u_prev = u;
+            if i == uw {
+                u_prev = u;
+                have_u = true;
+            } else if i >= ucw && have_u {
+                *upper_change.get_unchecked_mut(i) = u - u_prev;
+                u_prev = u;
             }
         }
 
         if i >= lw {
             let l = -(*tring.get_unchecked(tt) - *lring.get_unchecked(ll)).abs();
             *lower.get_unchecked_mut(i) = l;
-            if i == lw { l_prev = l; have_l = true; } else if i >= lcw && have_l {
-                *lower_change.get_unchecked_mut(i) = -(l - l_prev); l_prev = l;
+            if i == lw {
+                l_prev = l;
+                have_l = true;
+            } else if i >= lcw && have_l {
+                *lower_change.get_unchecked_mut(i) = -(l - l_prev);
+                l_prev = l;
             }
         }
 
-        rpos += 1; if rpos == buf_len { rpos = 0; }
+        rpos += 1;
+        if rpos == buf_len {
+            rpos = 0;
+        }
         i += 1;
     }
 }

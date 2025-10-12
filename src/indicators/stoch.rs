@@ -59,10 +59,10 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::collections::VecDeque;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-use std::collections::VecDeque;
 
 // === Input/Output Structs ===
 
@@ -500,7 +500,11 @@ pub fn stoch_scalar(
 
     for (o, (&cv, (&hv, &lv))) in outv.iter_mut().zip(c.iter().zip(h.iter().zip(l.iter()))) {
         let d = hv - lv;
-        *o = if d.abs() < EPS { 50.0 } else { (cv - lv).mul_add(SCALE / d, 0.0) };
+        *o = if d.abs() < EPS {
+            50.0
+        } else {
+            (cv - lv).mul_add(SCALE / d, 0.0)
+        };
     }
 }
 
@@ -591,7 +595,11 @@ unsafe fn stoch_avx2_impl(
         let c = *c_ptr.add(i);
         let l = *l_ptr.add(i);
         let d = *h_ptr.add(i) - l;
-        *o_ptr.add(i) = if d.abs() < f64::EPSILON { 50.0 } else { (c - l) * (100.0 / d) };
+        *o_ptr.add(i) = if d.abs() < f64::EPSILON {
+            50.0
+        } else {
+            (c - l) * (100.0 / d)
+        };
         i += 1;
     }
 }
@@ -698,7 +706,11 @@ unsafe fn stoch_avx512_impl(
         let c = *c_ptr.add(i);
         let l = *l_ptr.add(i);
         let d = *h_ptr.add(i) - l;
-        *o_ptr.add(i) = if d.abs() < f64::EPSILON { 50.0 } else { (c - l) * (100.0 / d) };
+        *o_ptr.add(i) = if d.abs() < f64::EPSILON {
+            50.0
+        } else {
+            (c - l) * (100.0 / d)
+        };
         i += 1;
     }
 }
@@ -1004,11 +1016,15 @@ fn stoch_batch_inner(
         let mut k_raw = alloc_with_nan_prefix(cols, first + fkp - 1);
         unsafe {
             match kern {
-                Kernel::Scalar => stoch_row_scalar(high, low, close, &hh, &ll, fkp, first, &mut k_raw),
+                Kernel::Scalar => {
+                    stoch_row_scalar(high, low, close, &hh, &ll, fkp, first, &mut k_raw)
+                }
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 Kernel::Avx2 => stoch_row_avx2(high, low, close, &hh, &ll, fkp, first, &mut k_raw),
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 => stoch_row_avx512(high, low, close, &hh, &ll, fkp, first, &mut k_raw),
+                Kernel::Avx512 => {
+                    stoch_row_avx512(high, low, close, &hh, &ll, fkp, first, &mut k_raw)
+                }
                 _ => unreachable!(),
             }
         }
@@ -1093,7 +1109,11 @@ unsafe fn stoch_row_scalar(
 
     for (o, (&cv, (&hv, &lv))) in outv.iter_mut().zip(c.iter().zip(h.iter().zip(l.iter()))) {
         let d = hv - lv;
-        *o = if d.abs() < EPS { 50.0 } else { (cv - lv).mul_add(SCALE / d, 0.0) };
+        *o = if d.abs() < EPS {
+            50.0
+        } else {
+            (cv - lv).mul_add(SCALE / d, 0.0)
+        };
     }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1180,7 +1200,11 @@ unsafe fn stoch_row_avx2_impl(
         let c = *c_ptr.add(i);
         let l = *l_ptr.add(i);
         let d = *h_ptr.add(i) - l;
-        *o_ptr.add(i) = if d.abs() < f64::EPSILON { 50.0 } else { (c - l) * (100.0 / d) };
+        *o_ptr.add(i) = if d.abs() < f64::EPSILON {
+            50.0
+        } else {
+            (c - l) * (100.0 / d)
+        };
         i += 1;
     }
 }
@@ -1300,7 +1324,11 @@ unsafe fn stoch_row_avx512_impl(
         let c = *c_ptr.add(i);
         let l = *l_ptr.add(i);
         let d = *h_ptr.add(i) - l;
-        *o_ptr.add(i) = if d.abs() < f64::EPSILON { 50.0 } else { (c - l) * (100.0 / d) };
+        *o_ptr.add(i) = if d.abs() < f64::EPSILON {
+            50.0
+        } else {
+            (c - l) * (100.0 / d)
+        };
         i += 1;
     }
 }
@@ -1366,15 +1394,14 @@ impl StochStream {
         let slowk_period = params.slowk_period.unwrap_or(3);
         let slowd_period = params.slowd_period.unwrap_or(3);
         if fastk_period == 0 || slowk_period == 0 || slowd_period == 0 {
-            return Err(StochError::InvalidPeriod { period: 0, data_len: 0 });
+            return Err(StochError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            });
         }
 
-        let slowk_ma_type = params
-            .slowk_ma_type
-            .unwrap_or_else(|| "sma".to_string());
-        let slowd_ma_type = params
-            .slowd_ma_type
-            .unwrap_or_else(|| "sma".to_string());
+        let slowk_ma_type = params.slowk_ma_type.unwrap_or_else(|| "sma".to_string());
+        let slowd_ma_type = params.slowd_ma_type.unwrap_or_else(|| "sma".to_string());
 
         // Precompute EMAs’ alpha (ignored for SMA/other)
         let alpha_k = 2.0 / (slowk_period as f64 + 1.0);
@@ -1556,7 +1583,11 @@ impl StochStream {
             k_vec.push(k_raw);
             self.k_stream = Some(k_vec.clone());
 
-            match ma(&self.slowk_ma_type, MaData::Slice(&k_vec), self.slowk_period) {
+            match ma(
+                &self.slowk_ma_type,
+                MaData::Slice(&k_vec),
+                self.slowk_period,
+            ) {
                 Ok(slowk) => *slowk.last().unwrap_or(&f64::NAN),
                 Err(_) => k_raw,
             }
@@ -1618,7 +1649,11 @@ impl StochStream {
             d_vec.push(k_last);
             self.d_stream = Some(d_vec.clone());
 
-            match ma(&self.slowd_ma_type, MaData::Slice(&d_vec), self.slowd_period) {
+            match ma(
+                &self.slowd_ma_type,
+                MaData::Slice(&d_vec),
+                self.slowd_period,
+            ) {
                 Ok(slowd) => *slowd.last().unwrap_or(&f64::NAN),
                 Err(_) => k_last,
             }

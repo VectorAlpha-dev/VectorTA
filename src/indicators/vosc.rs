@@ -651,8 +651,8 @@ pub struct VoscStream {
 
     // Circular buffer holds the last `long_period` samples.
     buf: Vec<f64>,
-    head: usize,    // next write index (points to the oldest sample)
-    count: usize,   // number of values seen so far (caps at long_period)
+    head: usize,  // next write index (points to the oldest sample)
+    count: usize, // number of values seen so far (caps at long_period)
 
     // Running state for O(1) updates
     short_sum: f64,
@@ -671,10 +671,16 @@ impl VoscStream {
         let long_period = params.long_period.unwrap_or(5);
 
         if short_period == 0 {
-            return Err(VoscError::InvalidShortPeriod { period: short_period, data_len: 0 });
+            return Err(VoscError::InvalidShortPeriod {
+                period: short_period,
+                data_len: 0,
+            });
         }
         if long_period == 0 {
-            return Err(VoscError::InvalidLongPeriod { period: long_period, data_len: 0 });
+            return Err(VoscError::InvalidLongPeriod {
+                period: long_period,
+                data_len: 0,
+            });
         }
         if short_period > long_period {
             return Err(VoscError::ShortPeriodGreaterThanLongPeriod);
@@ -755,9 +761,13 @@ impl VoscStream {
         }
 
         // ---- Commit: write new sample, advance head, bump count
-        unsafe { *self.buf.get_unchecked_mut(head) = value; }
+        unsafe {
+            *self.buf.get_unchecked_mut(head) = value;
+        }
         let mut next = head + 1;
-        if next == L { next = 0; }
+        if next == L {
+            next = 0;
+        }
         self.head = next;
 
         // Bump count (saturating at L) and emit None until we have L samples total

@@ -383,7 +383,11 @@ pub fn lrsi_scalar_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: 
             let sum_abs = a01 + a12 + a23; // cu + cd
             let cu = 0.5 * (d01 + a01 + d12 + a12 + d23 + a23);
 
-            let v = if sum_abs <= f64::EPSILON { 0.0 } else { cu / sum_abs };
+            let v = if sum_abs <= f64::EPSILON {
+                0.0
+            } else {
+                cu / sum_abs
+            };
             // Numerical safety: clamp to [0,1]
             out[i] = v.min(1.0).max(0.0);
         }
@@ -439,7 +443,11 @@ pub fn lrsi_scalar(price: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
             let sum_abs = a01 + a12 + a23;
             let cu = 0.5 * (d01 + a01 + d12 + a12 + d23 + a23);
 
-            let v = if sum_abs <= f64::EPSILON { 0.0 } else { cu / sum_abs };
+            let v = if sum_abs <= f64::EPSILON {
+                0.0
+            } else {
+                cu / sum_abs
+            };
             // Numerical safety: clamp to [0,1]
             out[i] = v.min(1.0).max(0.0);
         }
@@ -1877,7 +1885,10 @@ fn lrsi_batch_inner_into(
         .find(|&i| prices[i].is_finite())
         .ok_or(LrsiError::AllValuesNaN)?;
     if len - first < 4 {
-        return Err(LrsiError::NotEnoughValidData { needed: 4, valid: len - first });
+        return Err(LrsiError::NotEnoughValidData {
+            needed: 4,
+            valid: len - first,
+        });
     }
 
     let rows = combos.len();

@@ -63,7 +63,8 @@ impl CudaSma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaSmaError::Cuda(e.to_string()))?
@@ -211,7 +212,7 @@ impl CudaSma {
         let rows = combos.len();
         let bytes_required = len * std::mem::size_of::<f32>()   // prices
             + rows * std::mem::size_of::<i32>()                 // periods
-            + rows * len * std::mem::size_of::<f32>();          // outputs
+            + rows * len * std::mem::size_of::<f32>(); // outputs
         let headroom = env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -463,7 +464,9 @@ pub mod benches {
         crate::indicators::moving_averages::sma::SmaParams,
         sma_batch_dev,
         sma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::sma::SmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::sma::SmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::sma::SmaParams { period: Some(64) },
         "sma",
         "sma"

@@ -390,11 +390,21 @@ pub unsafe fn msw_avx2(
             rp += cos_table[j] * w;
             ip += sin_table[j] * w;
         }
-        let mut phase = if rp.abs() > 0.001 { atan(ip / rp) } else { TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 } };
-        if rp < 0.0 { phase += TULIP_PI; }
+        let mut phase = if rp.abs() > 0.001 {
+            atan(ip / rp)
+        } else {
+            TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 }
+        };
+        if rp < 0.0 {
+            phase += TULIP_PI;
+        }
         phase += TULIP_PI * 0.5;
-        if phase < 0.0 { phase += TULIP_TPI; }
-        if phase > TULIP_TPI { phase -= TULIP_TPI; }
+        if phase < 0.0 {
+            phase += TULIP_TPI;
+        }
+        if phase > TULIP_TPI {
+            phase -= TULIP_TPI;
+        }
         let (s, c) = phase.sin_cos();
         *sine.get_unchecked_mut(i) = s;
         *lead.get_unchecked_mut(i) = (s + c) * 0.707106781186547524400844362104849039_f64;
@@ -489,11 +499,21 @@ pub unsafe fn msw_avx512(
             rp += cos_table[j] * w;
             ip += sin_table[j] * w;
         }
-        let mut phase = if rp.abs() > 0.001 { atan(ip / rp) } else { TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 } };
-        if rp < 0.0 { phase += TULIP_PI; }
+        let mut phase = if rp.abs() > 0.001 {
+            atan(ip / rp)
+        } else {
+            TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 }
+        };
+        if rp < 0.0 {
+            phase += TULIP_PI;
+        }
         phase += TULIP_PI * 0.5;
-        if phase < 0.0 { phase += TULIP_TPI; }
-        if phase > TULIP_TPI { phase -= TULIP_TPI; }
+        if phase < 0.0 {
+            phase += TULIP_TPI;
+        }
+        if phase > TULIP_TPI {
+            phase -= TULIP_TPI;
+        }
         let (s, c) = phase.sin_cos();
         *sine.get_unchecked_mut(i) = s;
         *lead.get_unchecked_mut(i) = (s + c) * 0.707106781186547524400844362104849039_f64;

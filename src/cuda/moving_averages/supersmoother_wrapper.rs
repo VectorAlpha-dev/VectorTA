@@ -397,7 +397,9 @@ pub mod benches {
         crate::indicators::moving_averages::supersmoother::SuperSmootherParams,
         supersmoother_batch_dev,
         supersmoother_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::supersmoother::SuperSmootherBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::supersmoother::SuperSmootherBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::supersmoother::SuperSmootherParams { period: Some(64) },
         "supersmoother",
         "supersmoother"

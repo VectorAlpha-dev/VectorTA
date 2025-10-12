@@ -662,7 +662,7 @@ struct Smmaline {
     // Params
     period: usize,
     offset: usize,
-    inv: f64,     // 1.0 / period
+    inv: f64, // 1.0 / period
 
     // State
     seeded: bool, // true once the first SMA seed is complete
@@ -771,19 +771,28 @@ impl AlligatorStream {
         let lips_offset = params.lips_offset.unwrap_or(3);
 
         if jaw_period == 0 {
-            return Err(AlligatorError::InvalidJawPeriod { period: jaw_period, data_len: 0 });
+            return Err(AlligatorError::InvalidJawPeriod {
+                period: jaw_period,
+                data_len: 0,
+            });
         }
         if teeth_period == 0 {
-            return Err(AlligatorError::InvalidTeethPeriod { period: teeth_period, data_len: 0 });
+            return Err(AlligatorError::InvalidTeethPeriod {
+                period: teeth_period,
+                data_len: 0,
+            });
         }
         if lips_period == 0 {
-            return Err(AlligatorError::InvalidLipsPeriod { period: lips_period, data_len: 0 });
+            return Err(AlligatorError::InvalidLipsPeriod {
+                period: lips_period,
+                data_len: 0,
+            });
         }
 
         Ok(Self {
-            jaw:   Smmaline::new(jaw_period,   jaw_offset),
+            jaw: Smmaline::new(jaw_period, jaw_offset),
             teeth: Smmaline::new(teeth_period, teeth_offset),
-            lips:  Smmaline::new(lips_period,  lips_offset),
+            lips: Smmaline::new(lips_period, lips_offset),
         })
     }
 

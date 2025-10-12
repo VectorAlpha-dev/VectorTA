@@ -485,7 +485,9 @@ pub unsafe fn stochf_scalar(
     debug_assert_eq!(k_vals.len(), d_vals.len());
 
     let len = high.len();
-    if len == 0 { return; }
+    if len == 0 {
+        return;
+    }
 
     let hp = high.as_ptr();
     let lp = low.as_ptr();
@@ -512,38 +514,62 @@ pub unsafe fn stochf_scalar(
             while j < unroll_end {
                 let h0 = *hp.add(j);
                 let l0 = *lp.add(j);
-                if h0 > hh { hh = h0; }
-                if l0 < ll { ll = l0; }
+                if h0 > hh {
+                    hh = h0;
+                }
+                if l0 < ll {
+                    ll = l0;
+                }
 
                 let h1 = *hp.add(j + 1);
                 let l1 = *lp.add(j + 1);
-                if h1 > hh { hh = h1; }
-                if l1 < ll { ll = l1; }
+                if h1 > hh {
+                    hh = h1;
+                }
+                if l1 < ll {
+                    ll = l1;
+                }
 
                 let h2 = *hp.add(j + 2);
                 let l2 = *lp.add(j + 2);
-                if h2 > hh { hh = h2; }
-                if l2 < ll { ll = l2; }
+                if h2 > hh {
+                    hh = h2;
+                }
+                if l2 < ll {
+                    ll = l2;
+                }
 
                 let h3 = *hp.add(j + 3);
                 let l3 = *lp.add(j + 3);
-                if h3 > hh { hh = h3; }
-                if l3 < ll { ll = l3; }
+                if h3 > hh {
+                    hh = h3;
+                }
+                if l3 < ll {
+                    ll = l3;
+                }
 
                 j += 4;
             }
             while j < end {
                 let h = *hp.add(j);
                 let l = *lp.add(j);
-                if h > hh { hh = h; }
-                if l < ll { ll = l; }
+                if h > hh {
+                    hh = h;
+                }
+                if l < ll {
+                    ll = l;
+                }
                 j += 1;
             }
 
             let c = *cp.add(i);
             let denom = hh - ll;
             let kv = if denom == 0.0 {
-                if c == hh { 100.0 } else { 0.0 }
+                if c == hh {
+                    100.0
+                } else {
+                    0.0
+                }
             } else {
                 let inv = 100.0 / denom;
                 c.mul_add(inv, (-ll) * inv)
@@ -554,7 +580,8 @@ pub unsafe fn stochf_scalar(
                 if kv.is_nan() {
                     *d_vals.get_unchecked_mut(i) = f64::NAN;
                 } else if d_cnt < fastd_period {
-                    d_sum += kv; d_cnt += 1;
+                    d_sum += kv;
+                    d_cnt += 1;
                     if d_cnt == fastd_period {
                         *d_vals.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
                     } else {
@@ -569,7 +596,9 @@ pub unsafe fn stochf_scalar(
             i += 1;
         }
 
-        if matype != 0 { d_vals.fill(f64::NAN); }
+        if matype != 0 {
+            d_vals.fill(f64::NAN);
+        }
         return;
     }
 
@@ -592,13 +621,23 @@ pub unsafe fn stochf_scalar(
             let win_start = i + 1 - fastk_period;
             while qh_head != qh_tail {
                 let idx = *qh.get_unchecked(qh_head);
-                if idx >= win_start { break; }
-                qh_head += 1; if qh_head == cap { qh_head = 0; }
+                if idx >= win_start {
+                    break;
+                }
+                qh_head += 1;
+                if qh_head == cap {
+                    qh_head = 0;
+                }
             }
             while ql_head != ql_tail {
                 let idx = *ql.get_unchecked(ql_head);
-                if idx >= win_start { break; }
-                ql_head += 1; if ql_head == cap { ql_head = 0; }
+                if idx >= win_start {
+                    break;
+                }
+                ql_head += 1;
+                if ql_head == cap {
+                    ql_head = 0;
+                }
             }
         }
 
@@ -607,10 +646,17 @@ pub unsafe fn stochf_scalar(
             while qh_head != qh_tail {
                 let back = if qh_tail == 0 { cap - 1 } else { qh_tail - 1 };
                 let back_idx = *qh.get_unchecked(back);
-                if *hp.add(back_idx) <= h_i { qh_tail = back; } else { break; }
+                if *hp.add(back_idx) <= h_i {
+                    qh_tail = back;
+                } else {
+                    break;
+                }
             }
             *qh.get_unchecked_mut(qh_tail) = i;
-            qh_tail += 1; if qh_tail == cap { qh_tail = 0; }
+            qh_tail += 1;
+            if qh_tail == cap {
+                qh_tail = 0;
+            }
         }
 
         let l_i = *lp.add(i);
@@ -618,21 +664,41 @@ pub unsafe fn stochf_scalar(
             while ql_head != ql_tail {
                 let back = if ql_tail == 0 { cap - 1 } else { ql_tail - 1 };
                 let back_idx = *ql.get_unchecked(back);
-                if *lp.add(back_idx) >= l_i { ql_tail = back; } else { break; }
+                if *lp.add(back_idx) >= l_i {
+                    ql_tail = back;
+                } else {
+                    break;
+                }
             }
             *ql.get_unchecked_mut(ql_tail) = i;
-            ql_tail += 1; if ql_tail == cap { ql_tail = 0; }
+            ql_tail += 1;
+            if ql_tail == cap {
+                ql_tail = 0;
+            }
         }
 
         if i >= k_start {
-            let hh = if qh_head != qh_tail { *hp.add(*qh.get_unchecked(qh_head)) } else { f64::NEG_INFINITY };
-            let ll = if ql_head != ql_tail { *lp.add(*ql.get_unchecked(ql_head)) } else { f64::INFINITY };
+            let hh = if qh_head != qh_tail {
+                *hp.add(*qh.get_unchecked(qh_head))
+            } else {
+                f64::NEG_INFINITY
+            };
+            let ll = if ql_head != ql_tail {
+                *lp.add(*ql.get_unchecked(ql_head))
+            } else {
+                f64::INFINITY
+            };
             let c = *cp.add(i);
             let denom = hh - ll;
             let kv = if denom == 0.0 {
-                if c == hh { 100.0 } else { 0.0 }
+                if c == hh {
+                    100.0
+                } else {
+                    0.0
+                }
             } else {
-                let inv = 100.0 / denom; c.mul_add(inv, (-ll) * inv)
+                let inv = 100.0 / denom;
+                c.mul_add(inv, (-ll) * inv)
             };
             *k_vals.get_unchecked_mut(i) = kv;
 
@@ -640,7 +706,8 @@ pub unsafe fn stochf_scalar(
                 if kv.is_nan() {
                     *d_vals.get_unchecked_mut(i) = f64::NAN;
                 } else if d_cnt < fastd_period {
-                    d_sum += kv; d_cnt += 1;
+                    d_sum += kv;
+                    d_cnt += 1;
                     if d_cnt == fastd_period {
                         *d_vals.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
                     } else {
@@ -656,7 +723,9 @@ pub unsafe fn stochf_scalar(
         i += 1;
     }
 
-    if !use_sma_d { d_vals.fill(f64::NAN); }
+    if !use_sma_d {
+        d_vals.fill(f64::NAN);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -720,8 +789,12 @@ pub unsafe fn stochf_avx2(
             while j < end {
                 let h = *high.get_unchecked(j);
                 let l = *low.get_unchecked(j);
-                if h == h && h > hh { hh = h; }
-                if l == l && l < ll { ll = l; }
+                if h == h && h > hh {
+                    hh = h;
+                }
+                if l == l && l < ll {
+                    ll = l;
+                }
                 j += 1;
             }
 
@@ -729,7 +802,11 @@ pub unsafe fn stochf_avx2(
             let c = *close.get_unchecked(i);
             let denom = hh - ll;
             let kv = if denom == 0.0 {
-                if c == hh { 100.0 } else { 0.0 }
+                if c == hh {
+                    100.0
+                } else {
+                    0.0
+                }
             } else {
                 let inv = 100.0 / denom;
                 c.mul_add(inv, (-ll) * inv)
@@ -741,7 +818,8 @@ pub unsafe fn stochf_avx2(
                 if kv.is_nan() {
                     *d_vals.get_unchecked_mut(i) = f64::NAN;
                 } else if d_cnt < fastd_period {
-                    d_sum += kv; d_cnt += 1;
+                    d_sum += kv;
+                    d_cnt += 1;
                     if d_cnt == fastd_period {
                         *d_vals.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
                     } else {
@@ -754,10 +832,20 @@ pub unsafe fn stochf_avx2(
             }
         }
 
-        if !use_sma_d { d_vals.fill(f64::NAN); }
+        if !use_sma_d {
+            d_vals.fill(f64::NAN);
+        }
     } else {
         stochf_scalar(
-            high, low, close, fastk_period, fastd_period, matype, first_valid_idx, k_vals, d_vals,
+            high,
+            low,
+            close,
+            fastk_period,
+            fastd_period,
+            matype,
+            first_valid_idx,
+            k_vals,
+            d_vals,
         );
     }
 }
@@ -1582,40 +1670,65 @@ unsafe fn stochf_row_scalar(
             while j < unroll_end {
                 let h0 = *hp.add(j);
                 let l0 = *lp.add(j);
-                if h0 > hh { hh = h0; }
-                if l0 < ll { ll = l0; }
+                if h0 > hh {
+                    hh = h0;
+                }
+                if l0 < ll {
+                    ll = l0;
+                }
 
                 let h1 = *hp.add(j + 1);
                 let l1 = *lp.add(j + 1);
-                if h1 > hh { hh = h1; }
-                if l1 < ll { ll = l1; }
+                if h1 > hh {
+                    hh = h1;
+                }
+                if l1 < ll {
+                    ll = l1;
+                }
 
                 let h2 = *hp.add(j + 2);
                 let l2 = *lp.add(j + 2);
-                if h2 > hh { hh = h2; }
-                if l2 < ll { ll = l2; }
+                if h2 > hh {
+                    hh = h2;
+                }
+                if l2 < ll {
+                    ll = l2;
+                }
 
                 let h3 = *hp.add(j + 3);
                 let l3 = *lp.add(j + 3);
-                if h3 > hh { hh = h3; }
-                if l3 < ll { ll = l3; }
+                if h3 > hh {
+                    hh = h3;
+                }
+                if l3 < ll {
+                    ll = l3;
+                }
 
                 j += 4;
             }
             while j < end {
                 let h = *hp.add(j);
                 let l = *lp.add(j);
-                if h > hh { hh = h; }
-                if l < ll { ll = l; }
+                if h > hh {
+                    hh = h;
+                }
+                if l < ll {
+                    ll = l;
+                }
                 j += 1;
             }
 
             let c = *cp.add(i);
             let denom = hh - ll;
             let kv = if denom == 0.0 {
-                if c == hh { 100.0 } else { 0.0 }
+                if c == hh {
+                    100.0
+                } else {
+                    0.0
+                }
             } else {
-                let inv = 100.0 / denom; c.mul_add(inv, (-ll) * inv)
+                let inv = 100.0 / denom;
+                c.mul_add(inv, (-ll) * inv)
             };
             *k_out.get_unchecked_mut(i) = kv;
 
@@ -1623,7 +1736,8 @@ unsafe fn stochf_row_scalar(
                 if kv.is_nan() {
                     *d_out.get_unchecked_mut(i) = f64::NAN;
                 } else if d_cnt < fastd_period {
-                    d_sum += kv; d_cnt += 1;
+                    d_sum += kv;
+                    d_cnt += 1;
                     if d_cnt == fastd_period {
                         *d_out.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
                     } else {
@@ -1638,7 +1752,9 @@ unsafe fn stochf_row_scalar(
             i += 1;
         }
 
-        if matype != 0 { d_out.fill(f64::NAN); }
+        if matype != 0 {
+            d_out.fill(f64::NAN);
+        }
         return;
     }
 
@@ -1661,13 +1777,23 @@ unsafe fn stochf_row_scalar(
             let win_start = i + 1 - fastk_period;
             while qh_head != qh_tail {
                 let idx = *qh.get_unchecked(qh_head);
-                if idx >= win_start { break; }
-                qh_head += 1; if qh_head == cap { qh_head = 0; }
+                if idx >= win_start {
+                    break;
+                }
+                qh_head += 1;
+                if qh_head == cap {
+                    qh_head = 0;
+                }
             }
             while ql_head != ql_tail {
                 let idx = *ql.get_unchecked(ql_head);
-                if idx >= win_start { break; }
-                ql_head += 1; if ql_head == cap { ql_head = 0; }
+                if idx >= win_start {
+                    break;
+                }
+                ql_head += 1;
+                if ql_head == cap {
+                    ql_head = 0;
+                }
             }
         }
 
@@ -1676,10 +1802,17 @@ unsafe fn stochf_row_scalar(
             while qh_head != qh_tail {
                 let back = if qh_tail == 0 { cap - 1 } else { qh_tail - 1 };
                 let back_idx = *qh.get_unchecked(back);
-                if *hp.add(back_idx) <= h_i { qh_tail = back; } else { break; }
+                if *hp.add(back_idx) <= h_i {
+                    qh_tail = back;
+                } else {
+                    break;
+                }
             }
             *qh.get_unchecked_mut(qh_tail) = i;
-            qh_tail += 1; if qh_tail == cap { qh_tail = 0; }
+            qh_tail += 1;
+            if qh_tail == cap {
+                qh_tail = 0;
+            }
         }
 
         let l_i = *lp.add(i);
@@ -1687,21 +1820,41 @@ unsafe fn stochf_row_scalar(
             while ql_head != ql_tail {
                 let back = if ql_tail == 0 { cap - 1 } else { ql_tail - 1 };
                 let back_idx = *ql.get_unchecked(back);
-                if *lp.add(back_idx) >= l_i { ql_tail = back; } else { break; }
+                if *lp.add(back_idx) >= l_i {
+                    ql_tail = back;
+                } else {
+                    break;
+                }
             }
             *ql.get_unchecked_mut(ql_tail) = i;
-            ql_tail += 1; if ql_tail == cap { ql_tail = 0; }
+            ql_tail += 1;
+            if ql_tail == cap {
+                ql_tail = 0;
+            }
         }
 
         if i >= k_start {
-            let hh = if qh_head != qh_tail { *hp.add(*qh.get_unchecked(qh_head)) } else { f64::NEG_INFINITY };
-            let ll = if ql_head != ql_tail { *lp.add(*ql.get_unchecked(ql_head)) } else { f64::INFINITY };
+            let hh = if qh_head != qh_tail {
+                *hp.add(*qh.get_unchecked(qh_head))
+            } else {
+                f64::NEG_INFINITY
+            };
+            let ll = if ql_head != ql_tail {
+                *lp.add(*ql.get_unchecked(ql_head))
+            } else {
+                f64::INFINITY
+            };
             let c = *cp.add(i);
             let denom = hh - ll;
             let kv = if denom == 0.0 {
-                if c == hh { 100.0 } else { 0.0 }
+                if c == hh {
+                    100.0
+                } else {
+                    0.0
+                }
             } else {
-                let inv = 100.0 / denom; c.mul_add(inv, (-ll) * inv)
+                let inv = 100.0 / denom;
+                c.mul_add(inv, (-ll) * inv)
             };
             *k_out.get_unchecked_mut(i) = kv;
 
@@ -1709,7 +1862,8 @@ unsafe fn stochf_row_scalar(
                 if kv.is_nan() {
                     *d_out.get_unchecked_mut(i) = f64::NAN;
                 } else if d_cnt < fastd_period {
-                    d_sum += kv; d_cnt += 1;
+                    d_sum += kv;
+                    d_cnt += 1;
                     if d_cnt == fastd_period {
                         *d_out.get_unchecked_mut(i) = d_sum / (fastd_period as f64);
                     } else {
@@ -1725,7 +1879,9 @@ unsafe fn stochf_row_scalar(
         i += 1;
     }
 
-    if !use_sma_d { d_out.fill(f64::NAN); }
+    if !use_sma_d {
+        d_out.fill(f64::NAN);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

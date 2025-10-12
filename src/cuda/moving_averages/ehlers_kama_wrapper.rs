@@ -13,8 +13,8 @@ use crate::indicators::moving_averages::ehlers_kama::{EhlersKamaBatchRange, Ehle
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::memory::AsyncCopyDestination;
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -44,8 +44,16 @@ pub struct CudaEhlersKamaPolicy {
     pub many_series: ManySeriesKernelPolicy,
 }
 
-impl Default for BatchKernelPolicy { fn default() -> Self { BatchKernelPolicy::Auto } }
-impl Default for ManySeriesKernelPolicy { fn default() -> Self { ManySeriesKernelPolicy::Auto } }
+impl Default for BatchKernelPolicy {
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
+}
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -109,7 +117,8 @@ impl CudaEhlersKama {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])
@@ -142,10 +151,18 @@ impl CudaEhlersKama {
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaEhlersKamaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaEhlersKamaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaEhlersKamaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaEhlersKamaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     /// Synchronize the stream for deterministic timing.
     pub fn synchronize(&self) -> Result<(), CudaEhlersKamaError> {
@@ -157,14 +174,18 @@ impl CudaEhlersKama {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per = env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EhlersKama batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEhlersKama)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEhlersKama)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -172,14 +193,18 @@ impl CudaEhlersKama {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per = env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EhlersKama many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEhlersKama)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEhlersKama)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -193,13 +218,19 @@ impl CudaEhlersKama {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     fn expand_grid(range: &EhlersKamaBatchRange) -> Vec<EhlersKamaParams> {
@@ -330,14 +361,16 @@ impl CudaEhlersKama {
                 .into();
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                let mut periods_ptr = d_periods.as_device_ptr().as_raw().wrapping_add((launched) as u64 * std::mem::size_of::<i32>() as u64);
+                let mut periods_ptr = d_periods
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((launched) as u64 * std::mem::size_of::<i32>() as u64);
                 let mut first_valid_i = first_valid as i32;
                 let mut series_len_i = series_len as i32;
                 let mut n_combos_i = todo as i32;
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * series_len) as u64 * std::mem::size_of::<f32>() as u64);
+                let mut out_ptr = d_out.as_device_ptr().as_raw().wrapping_add(
+                    (launched * series_len) as u64 * std::mem::size_of::<f32>() as u64,
+                );
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut periods_ptr as *mut _ as *mut c_void,
@@ -355,9 +388,13 @@ impl CudaEhlersKama {
 
         // record selection for introspection/debug
         unsafe {
-            (*(self as *const _ as *mut CudaEhlersKama)).last_batch = Some(BatchKernelSelected::Plain {
-                block_x: match self.policy.batch { BatchKernelPolicy::Auto => 1, BatchKernelPolicy::Plain { block_x } => block_x },
-            });
+            (*(self as *const _ as *mut CudaEhlersKama)).last_batch =
+                Some(BatchKernelSelected::Plain {
+                    block_x: match self.policy.batch {
+                        BatchKernelPolicy::Auto => 1,
+                        BatchKernelPolicy::Plain { block_x } => block_x,
+                    },
+                });
         }
         self.maybe_log_batch_debug();
 
@@ -388,7 +425,9 @@ impl CudaEhlersKama {
             + combos.len() * std::mem::size_of::<i32>()
             + combos.len() * series_len * std::mem::size_of::<f32>();
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaEhlersKamaError::Cuda("insufficient device memory".into()));
+            return Err(CudaEhlersKamaError::Cuda(
+                "insufficient device memory".into(),
+            ));
         }
 
         let d_prices = DeviceBuffer::from_slice(data_f32)
@@ -469,18 +508,42 @@ impl CudaEhlersKama {
         first_valid: usize,
         combos: &[EhlersKamaParams],
     ) -> Result<DeviceArrayF32, CudaEhlersKamaError> {
-        if series_len == 0 { return Err(CudaEhlersKamaError::InvalidInput("series_len is zero".into())); }
+        if series_len == 0 {
+            return Err(CudaEhlersKamaError::InvalidInput(
+                "series_len is zero".into(),
+            ));
+        }
         let n_combos = combos.len();
-        if n_combos == 0 { return Err(CudaEhlersKamaError::InvalidInput("no parameter combinations".into())); }
+        if n_combos == 0 {
+            return Err(CudaEhlersKamaError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         let mut periods_i32 = Vec::with_capacity(n_combos);
-        for prm in combos { periods_i32.push(prm.period.unwrap_or(0) as i32); }
+        for prm in combos {
+            periods_i32.push(prm.period.unwrap_or(0) as i32);
+        }
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+                .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
+        self.launch_batch_kernel(
+            d_prices,
+            &d_periods,
+            first_valid,
+            series_len,
+            n_combos,
+            &mut d_out,
+        )?;
+        self.stream
+            .synchronize()
             .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
-        self.launch_batch_kernel(d_prices, &d_periods, first_valid, series_len, n_combos, &mut d_out)?;
-        self.stream.synchronize().map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     pub fn ehlers_kama_batch_dev(
@@ -600,22 +663,45 @@ impl CudaEhlersKama {
             ManySeriesKernelPolicy::Auto => {
                 // Prefer 2D whenever available; adapt tile to small N to avoid degenerate
                 // large tiles on very few series.
-                let has_2d = self.module.get_function("ehlers_kama_multi_series_one_param_2d_f32").is_ok();
+                let has_2d = self
+                    .module
+                    .get_function("ehlers_kama_multi_series_one_param_2d_f32")
+                    .is_ok();
                 if has_2d {
                     let choose = |n: usize| -> (u32, u32) {
-                        if n <= 1 { return (1, 1); }
-                        if n <= 2 { return (2, 1); }
-                        if n <= 4 { return (4, 1); }
-                        if n <= 8 { return (8, 1); }
-                        if n <= 16 { return (16, 1); }
-                        if n <= 32 { return (32, 1); }
-                        if n <= 64 { return (64, 1); }
+                        if n <= 1 {
+                            return (1, 1);
+                        }
+                        if n <= 2 {
+                            return (2, 1);
+                        }
+                        if n <= 4 {
+                            return (4, 1);
+                        }
+                        if n <= 8 {
+                            return (8, 1);
+                        }
+                        if n <= 16 {
+                            return (16, 1);
+                        }
+                        if n <= 32 {
+                            return (32, 1);
+                        }
+                        if n <= 64 {
+                            return (64, 1);
+                        }
                         (64, 2)
                     };
                     let (tx, ty) = choose(num_series);
-                    (ManySeriesKernelSelected::Tiled2D { tx, ty }, ManySeriesKernelPolicy::Tiled2D { tx, ty })
+                    (
+                        ManySeriesKernelSelected::Tiled2D { tx, ty },
+                        ManySeriesKernelPolicy::Tiled2D { tx, ty },
+                    )
                 } else {
-                    (ManySeriesKernelSelected::OneD { block_x: 64 }, ManySeriesKernelPolicy::OneD { block_x: 64 })
+                    (
+                        ManySeriesKernelSelected::OneD { block_x: 64 },
+                        ManySeriesKernelPolicy::OneD { block_x: 64 },
+                    )
                 }
             }
             ManySeriesKernelPolicy::OneD { block_x } => (
@@ -692,7 +778,9 @@ impl CudaEhlersKama {
             _ => unreachable!(),
         }
 
-        unsafe { (*(self as *const _ as *mut CudaEhlersKama)).last_many = Some(selected); }
+        unsafe {
+            (*(self as *const _ as *mut CudaEhlersKama)).last_many = Some(selected);
+        }
         self.maybe_log_many_debug();
 
         Ok(())
@@ -740,7 +828,9 @@ impl CudaEhlersKama {
             + cols * std::mem::size_of::<i32>()
             + cols * rows * std::mem::size_of::<f32>();
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaEhlersKamaError::Cuda("insufficient device memory".into()));
+            return Err(CudaEhlersKamaError::Cuda(
+                "insufficient device memory".into(),
+            ));
         }
 
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
@@ -829,7 +919,10 @@ impl CudaEhlersKama {
         }
         // Guard rails: as an ultimate safety, patch warm-up NaNs on host and
         // write back to device unless explicitly disabled.
-        let guard_on = std::env::var("KAMA_GUARD_RAILS").ok().map(|v| v != "0" && v.to_lowercase() != "false").unwrap_or(true);
+        let guard_on = std::env::var("KAMA_GUARD_RAILS")
+            .ok()
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
         if guard_on {
             // Copy to pinned host
             let mut pinned: LockedBuffer<f32> = unsafe {
@@ -850,7 +943,9 @@ impl CudaEhlersKama {
                 let fv = first_valids[s] as usize;
                 let warm = fv + period - 1;
                 let warm_clamped = warm.min(rows);
-                for t in 0..warm_clamped { pinned[t * cols + s] = nan; }
+                for t in 0..warm_clamped {
+                    pinned[t * cols + s] = nan;
+                }
             }
             // Copy updated host buffer back to device
             unsafe {
@@ -870,7 +965,11 @@ impl CudaEhlersKama {
                 .copy_to(&mut host)
                 .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
             let dump_cols = cols.min(8);
-            eprintln!("[DUMP] first row (t=0) first {} series: {:?}", dump_cols, &host[0..dump_cols]);
+            eprintln!(
+                "[DUMP] first row (t=0) first {} series: {:?}",
+                dump_cols,
+                &host[0..dump_cols]
+            );
         }
 
         Ok(DeviceArrayF32 {
@@ -966,7 +1065,9 @@ pub mod benches {
         crate::indicators::moving_averages::ehlers_kama::EhlersKamaParams,
         ehlers_kama_batch_dev,
         ehlers_kama_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::ehlers_kama::EhlersKamaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::ehlers_kama::EhlersKamaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::ehlers_kama::EhlersKamaParams { period: Some(64) },
         "ehlers_kama",
         "ehlers_kama"

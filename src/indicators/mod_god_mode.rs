@@ -1045,43 +1045,89 @@ pub fn mod_god_mode_into_slices(
             *v = f64::NAN;
         }
         let sig_start = warm.saturating_add(6 - 1).min(len);
-        for v in &mut dst_signal[..sig_start] { *v = f64::NAN; }
-        for v in &mut dst_hist[..sig_start] { *v = f64::NAN; }
+        for v in &mut dst_signal[..sig_start] {
+            *v = f64::NAN;
+        }
+        for v in &mut dst_hist[..sig_start] {
+            *v = f64::NAN;
+        }
         return Ok(());
     }
 
     // AVX2/AVX512: vectorize pointwise histogram transform, keep recurrences scalar
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx512f"))]
+    #[cfg(all(
+        feature = "nightly-avx",
+        target_arch = "x86_64",
+        target_feature = "avx512f"
+    ))]
     if actual == Kernel::Avx512 {
         let warm = first + need - 1;
         unsafe {
             mod_god_mode_avx512_fused_into_slices(
-                dst_wavetrend, dst_signal, dst_hist,
-                high, low, close, volume,
-                n1, n2, n3, input.get_mode(), input.get_use_volume(), first, warm,
+                dst_wavetrend,
+                dst_signal,
+                dst_hist,
+                high,
+                low,
+                close,
+                volume,
+                n1,
+                n2,
+                n3,
+                input.get_mode(),
+                input.get_use_volume(),
+                first,
+                warm,
             )?;
         }
         let sig_start = warm.saturating_add(6 - 1).min(len);
-        for v in &mut dst_wavetrend[..warm] { *v = f64::NAN; }
-        for v in &mut dst_signal[..sig_start] { *v = f64::NAN; }
-        for v in &mut dst_hist[..sig_start] { *v = f64::NAN; }
+        for v in &mut dst_wavetrend[..warm] {
+            *v = f64::NAN;
+        }
+        for v in &mut dst_signal[..sig_start] {
+            *v = f64::NAN;
+        }
+        for v in &mut dst_hist[..sig_start] {
+            *v = f64::NAN;
+        }
         return Ok(());
     }
 
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx2"))]
+    #[cfg(all(
+        feature = "nightly-avx",
+        target_arch = "x86_64",
+        target_feature = "avx2"
+    ))]
     if actual == Kernel::Avx2 {
         let warm = first + need - 1;
         unsafe {
             mod_god_mode_avx2_fused_into_slices(
-                dst_wavetrend, dst_signal, dst_hist,
-                high, low, close, volume,
-                n1, n2, n3, input.get_mode(), input.get_use_volume(), first, warm,
+                dst_wavetrend,
+                dst_signal,
+                dst_hist,
+                high,
+                low,
+                close,
+                volume,
+                n1,
+                n2,
+                n3,
+                input.get_mode(),
+                input.get_use_volume(),
+                first,
+                warm,
             )?;
         }
         let sig_start = warm.saturating_add(6 - 1).min(len);
-        for v in &mut dst_wavetrend[..warm] { *v = f64::NAN; }
-        for v in &mut dst_signal[..sig_start] { *v = f64::NAN; }
-        for v in &mut dst_hist[..sig_start] { *v = f64::NAN; }
+        for v in &mut dst_wavetrend[..warm] {
+            *v = f64::NAN;
+        }
+        for v in &mut dst_signal[..sig_start] {
+            *v = f64::NAN;
+        }
+        for v in &mut dst_hist[..sig_start] {
+            *v = f64::NAN;
+        }
         return Ok(());
     }
 
@@ -1318,11 +1364,22 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
         return Err(ModGodModeError::EmptyInputData);
     }
     if n1 == 0 || n2 == 0 || n3 == 0 {
-        return Err(ModGodModeError::InvalidPeriod { n1, n2, n3, data_len: len });
+        return Err(ModGodModeError::InvalidPeriod {
+            n1,
+            n2,
+            n3,
+            data_len: len,
+        });
     }
     if dst_wavetrend.len() != len || dst_signal.len() != len || dst_hist.len() != len {
-        let dst_len = dst_wavetrend.len().min(dst_signal.len()).min(dst_hist.len());
-        return Err(ModGodModeError::InvalidDestinationLen { dst: dst_len, src: len });
+        let dst_len = dst_wavetrend
+            .len()
+            .min(dst_signal.len())
+            .min(dst_hist.len());
+        return Err(ModGodModeError::InvalidDestinationLen {
+            dst: dst_len,
+            src: len,
+        });
     }
 
     #[inline(always)]
@@ -1330,11 +1387,16 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
         beta.mul_add(prev, alpha * x)
     }
     #[inline(always)]
-    fn nonzero(v: f64) -> bool { v != 0.0 && v.is_finite() }
+    fn nonzero(v: f64) -> bool {
+        v != 0.0 && v.is_finite()
+    }
 
-    let alpha1 = 2.0 / (n1 as f64 + 1.0); let beta1 = 1.0 - alpha1;
-    let alpha2 = 2.0 / (n2 as f64 + 1.0); let beta2 = 1.0 - alpha2;
-    let alpha3 = 2.0 / (n3 as f64 + 1.0); let beta3 = 1.0 - alpha3;
+    let alpha1 = 2.0 / (n1 as f64 + 1.0);
+    let beta1 = 1.0 - alpha1;
+    let alpha2 = 2.0 / (n2 as f64 + 1.0);
+    let beta2 = 1.0 - alpha2;
+    let alpha3 = 2.0 / (n3 as f64 + 1.0);
+    let beta3 = 1.0 - alpha3;
 
     // TCI
     let mut ema1_c = 0.0_f64;
@@ -1360,18 +1422,35 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     // Laguerre RSI (Ehlers)
     let alpha_l = 0.7_f64;
     let one_m_l = 1.0_f64 - alpha_l;
-    let mut l0 = 0.0_f64; let mut l1 = 0.0_f64; let mut l2 = 0.0_f64; let mut l3 = 0.0_f64;
+    let mut l0 = 0.0_f64;
+    let mut l1 = 0.0_f64;
+    let mut l2 = 0.0_f64;
+    let mut l3 = 0.0_f64;
 
     // Close-only Willy (%R) over n2
     #[inline(always)]
     fn willr_close_only(c: &[f64], idx: usize, win: usize) -> f64 {
-        if win == 0 || idx + 1 < win { return f64::NAN; }
+        if win == 0 || idx + 1 < win {
+            return f64::NAN;
+        }
         let s = idx + 1 - win;
         let mut hi = f64::NEG_INFINITY;
         let mut lo = f64::INFINITY;
-        for j in s..=idx { let v = c[j]; if v > hi { hi = v; } if v < lo { lo = v; } }
+        for j in s..=idx {
+            let v = c[j];
+            if v > hi {
+                hi = v;
+            }
+            if v < lo {
+                lo = v;
+            }
+        }
         let rng = hi - lo;
-        if rng == 0.0 { f64::NAN } else { 60.0 * (c[idx] - hi) / rng + 80.0 }
+        if rng == 0.0 {
+            f64::NAN
+        } else {
+            60.0 * (c[idx] - hi) / rng + 80.0
+        }
     }
 
     let has_vol = use_volume && volume.is_some();
@@ -1387,14 +1466,20 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     let mut tp_has_prev = false;
 
     // CSI (TSI) states
-    let mut tsi_ema_m_s = 0.0_f64; let mut tsi_ema_m_l = 0.0_f64;
-    let mut tsi_ema_a_s = 0.0_f64; let mut tsi_ema_a_l = 0.0_f64;
-    let mut tsi_seed_s = false; let mut tsi_seed_l = false;
+    let mut tsi_ema_m_s = 0.0_f64;
+    let mut tsi_ema_m_l = 0.0_f64;
+    let mut tsi_ema_a_s = 0.0_f64;
+    let mut tsi_ema_a_l = 0.0_f64;
+    let mut tsi_seed_s = false;
+    let mut tsi_seed_l = false;
 
     // CSI_MG states
-    let mut csi_num_e1 = 0.0_f64; let mut csi_num_e2 = 0.0_f64;
-    let mut csi_den_e1 = 0.0_f64; let mut csi_den_e2 = 0.0_f64;
-    let mut csi_seed_e1 = false; let mut csi_seed_e2 = false;
+    let mut csi_num_e1 = 0.0_f64;
+    let mut csi_num_e2 = 0.0_f64;
+    let mut csi_den_e1 = 0.0_f64;
+    let mut csi_den_e2 = 0.0_f64;
+    let mut csi_seed_e1 = false;
+    let mut csi_seed_e2 = false;
 
     // signal SMA(6) ring
     const SIGP: usize = 6;
@@ -1409,28 +1494,44 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
 
     let need = n1.max(n2).max(n3);
     if len - first < need {
-        return Err(ModGodModeError::NotEnoughValidData { needed: need, valid: len - first });
+        return Err(ModGodModeError::NotEnoughValidData {
+            needed: need,
+            valid: len - first,
+        });
     }
 
     prev_close = close[first];
-    if !prev_close.is_finite() { return Ok(()); }
+    if !prev_close.is_finite() {
+        return Ok(());
+    }
 
     for i in 0..len {
-        if i < first { continue; }
+        if i < first {
+            continue;
+        }
 
         // === TCI chain ===
         let c_i = close[i];
-        if !seed_ema1 { ema1_c = c_i; seed_ema1 = true; } else {
+        if !seed_ema1 {
+            ema1_c = c_i;
+            seed_ema1 = true;
+        } else {
             ema1_c = ema_step(c_i, ema1_c, alpha1, beta1);
         }
         let abs_dev = (c_i - ema1_c).abs();
-        if !seed_ema2 { ema2_abs = abs_dev; seed_ema2 = true; } else {
+        if !seed_ema2 {
+            ema2_abs = abs_dev;
+            seed_ema2 = true;
+        } else {
             ema2_abs = ema_step(abs_dev, ema2_abs, alpha1, beta1);
         }
         let mut tci_val = f64::NAN;
         if nonzero(ema2_abs) {
             let ci = (c_i - ema1_c) / (0.025 * ema2_abs);
-            if !seed_ema3 { ema3_ci = ci; seed_ema3 = true; } else {
+            if !seed_ema3 {
+                ema3_ci = ci;
+                seed_ema3 = true;
+            } else {
                 ema3_ci = ema_step(ci, ema3_ci, alpha2, beta2);
             }
             tci_val = ema3_ci + 50.0;
@@ -1439,57 +1540,99 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
         // === RSI / Wilder init + update ===
         let mut rsi_val = f64::NAN;
         if i == first {
-            rs_avg_gain = 0.0; rs_avg_loss = 0.0; rs_init_cnt = 0;
+            rs_avg_gain = 0.0;
+            rs_avg_loss = 0.0;
+            rs_init_cnt = 0;
         } else {
             let ch = c_i - prev_close;
             let gain = if ch > 0.0 { ch } else { 0.0 };
             let loss = if ch < 0.0 { -ch } else { 0.0 };
             if !rsi_seeded {
-                rs_init_cnt += 1; rs_avg_gain += gain; rs_avg_loss += loss;
+                rs_init_cnt += 1;
+                rs_avg_gain += gain;
+                rs_avg_loss += loss;
                 if rs_init_cnt >= n3 {
-                    rs_avg_gain /= n3 as f64; rs_avg_loss /= n3 as f64; rsi_seeded = true;
-                    let rs = if rs_avg_loss == 0.0 { f64::INFINITY } else { rs_avg_gain / rs_avg_loss };
+                    rs_avg_gain /= n3 as f64;
+                    rs_avg_loss /= n3 as f64;
+                    rsi_seeded = true;
+                    let rs = if rs_avg_loss == 0.0 {
+                        f64::INFINITY
+                    } else {
+                        rs_avg_gain / rs_avg_loss
+                    };
                     rsi_val = 100.0 - 100.0 / (1.0 + rs);
                 }
             } else {
                 rs_avg_gain = ((rs_avg_gain * ((n3 - 1) as f64)) + gain) / (n3 as f64);
                 rs_avg_loss = ((rs_avg_loss * ((n3 - 1) as f64)) + loss) / (n3 as f64);
-                let rs = if rs_avg_loss == 0.0 { f64::INFINITY } else { rs_avg_gain / rs_avg_loss };
+                let rs = if rs_avg_loss == 0.0 {
+                    f64::INFINITY
+                } else {
+                    rs_avg_gain / rs_avg_loss
+                };
                 rsi_val = 100.0 - 100.0 / (1.0 + rs);
             }
         }
 
         // Laguerre RSI recursion
         {
-            let prev_l0 = l0; l0 = alpha_l * c_i + one_m_l * prev_l0;
-            let prev_l1 = l1; l1 = -one_m_l * l0 + prev_l0 + one_m_l * prev_l1;
-            let prev_l2 = l2; l2 = -one_m_l * l1 + prev_l1 + one_m_l * prev_l2;
-            let _l3p = l3; l3 = -one_m_l * l2 + prev_l2 + one_m_l * l3;
+            let prev_l0 = l0;
+            l0 = alpha_l * c_i + one_m_l * prev_l0;
+            let prev_l1 = l1;
+            l1 = -one_m_l * l0 + prev_l0 + one_m_l * prev_l1;
+            let prev_l2 = l2;
+            l2 = -one_m_l * l1 + prev_l1 + one_m_l * prev_l2;
+            let _l3p = l3;
+            l3 = -one_m_l * l2 + prev_l2 + one_m_l * l3;
         }
         let cu = (l0 - l1).max(0.0) + (l1 - l2).max(0.0) + (l2 - l3).max(0.0);
         let cd = (l1 - l0).max(0.0) + (l2 - l1).max(0.0) + (l3 - l2).max(0.0);
-        let lrsi_val = if nonzero(cu + cd) { 100.0 * cu / (cu + cd) } else { f64::NAN };
+        let lrsi_val = if nonzero(cu + cd) {
+            100.0 * cu / (cu + cd)
+        } else {
+            f64::NAN
+        };
 
         // MFI or RSI-as-MF
         let mut mf_val = f64::NAN;
         if has_vol {
             let tp = (high[i] + low[i] + c_i) / 3.0;
             if tp_has_prev {
-                let sign: i8 = if tp > tp_prev { 1 } else if tp < tp_prev { -1 } else { 0 };
+                let sign: i8 = if tp > tp_prev {
+                    1
+                } else if tp < tp_prev {
+                    -1
+                } else {
+                    0
+                };
                 let mf_raw = tp * vol[i];
                 if rsi_seeded {
                     let old_mf = mf_ring_mf[mf_head];
                     let old_sign = mf_ring_sgn[mf_head];
-                    if old_sign > 0 { mf_pos_sum -= old_mf; } else if old_sign < 0 { mf_neg_sum -= old_mf; }
+                    if old_sign > 0 {
+                        mf_pos_sum -= old_mf;
+                    } else if old_sign < 0 {
+                        mf_neg_sum -= old_mf;
+                    }
                 }
-                mf_ring_mf[mf_head] = mf_raw; mf_ring_sgn[mf_head] = sign;
-                if sign > 0 { mf_pos_sum += mf_raw; } else if sign < 0 { mf_neg_sum += mf_raw; }
+                mf_ring_mf[mf_head] = mf_raw;
+                mf_ring_sgn[mf_head] = sign;
+                if sign > 0 {
+                    mf_pos_sum += mf_raw;
+                } else if sign < 0 {
+                    mf_neg_sum += mf_raw;
+                }
                 mf_head = (mf_head + 1) % n3.max(1);
                 if rsi_seeded {
-                    mf_val = if mf_neg_sum == 0.0 { 100.0 } else { 100.0 - 100.0 / (1.0 + (mf_pos_sum / mf_neg_sum)) };
+                    mf_val = if mf_neg_sum == 0.0 {
+                        100.0
+                    } else {
+                        100.0 - 100.0 / (1.0 + (mf_pos_sum / mf_neg_sum))
+                    };
                 }
             }
-            tp_prev = tp; tp_has_prev = true;
+            tp_prev = tp;
+            tp_has_prev = true;
         } else {
             mf_val = rsi_val;
         }
@@ -1500,10 +1643,20 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
             let old = rsi_ring[rsi_ring_head];
             rsi_ring[rsi_ring_head] = rsi_val;
             rsi_ring_head = (rsi_ring_head + 1) % n2.max(1);
-            let mom = if old.is_finite() && rsi_val.is_finite() { rsi_val - old } else { f64::NAN };
-            if !rsi_ema_seed && rsi_val.is_finite() { rsi_ema = rsi_val; rsi_ema_seed = true; }
-            else if rsi_val.is_finite() { rsi_ema = ema_step(rsi_val, rsi_ema, alpha3, beta3); }
-            if mom.is_finite() && rsi_ema_seed { cbci_val = mom + rsi_ema; }
+            let mom = if old.is_finite() && rsi_val.is_finite() {
+                rsi_val - old
+            } else {
+                f64::NAN
+            };
+            if !rsi_ema_seed && rsi_val.is_finite() {
+                rsi_ema = rsi_val;
+                rsi_ema_seed = true;
+            } else if rsi_val.is_finite() {
+                rsi_ema = ema_step(rsi_val, rsi_ema, alpha3, beta3);
+            }
+            if mom.is_finite() && rsi_ema_seed {
+                cbci_val = mom + rsi_ema;
+            }
         }
 
         // CSI/CSI_MG
@@ -1511,60 +1664,147 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
         let mut csi_mg_val = f64::NAN;
         if matches!(mode, ModGodModeMode::Godmode) {
             if i > first {
-                let mom = c_i - prev_close; let am = mom.abs();
-                if !tsi_seed_s { tsi_ema_m_s = mom; tsi_ema_a_s = am; tsi_seed_s = true; }
-                else { tsi_ema_m_s = ema_step(mom, tsi_ema_m_s, alpha1, beta1); tsi_ema_a_s = ema_step(am, tsi_ema_a_s, alpha1, beta1); }
-                if !tsi_seed_l && tsi_seed_s { tsi_ema_m_l = tsi_ema_m_s; tsi_ema_a_l = tsi_ema_a_s; tsi_seed_l = true; }
-                else if tsi_seed_l { tsi_ema_m_l = ema_step(tsi_ema_m_s, tsi_ema_m_l, alpha2, beta2); tsi_ema_a_l = ema_step(tsi_ema_a_s, tsi_ema_a_l, alpha2, beta2); }
+                let mom = c_i - prev_close;
+                let am = mom.abs();
+                if !tsi_seed_s {
+                    tsi_ema_m_s = mom;
+                    tsi_ema_a_s = am;
+                    tsi_seed_s = true;
+                } else {
+                    tsi_ema_m_s = ema_step(mom, tsi_ema_m_s, alpha1, beta1);
+                    tsi_ema_a_s = ema_step(am, tsi_ema_a_s, alpha1, beta1);
+                }
+                if !tsi_seed_l && tsi_seed_s {
+                    tsi_ema_m_l = tsi_ema_m_s;
+                    tsi_ema_a_l = tsi_ema_a_s;
+                    tsi_seed_l = true;
+                } else if tsi_seed_l {
+                    tsi_ema_m_l = ema_step(tsi_ema_m_s, tsi_ema_m_l, alpha2, beta2);
+                    tsi_ema_a_l = ema_step(tsi_ema_a_s, tsi_ema_a_l, alpha2, beta2);
+                }
                 if tsi_seed_l && nonzero(tsi_ema_a_l) {
                     let tsi = 100.0 * (tsi_ema_m_l / tsi_ema_a_l);
-                    if rsi_val.is_finite() { csi_val = (rsi_val + (0.5 * tsi + 50.0)) * 0.5; }
+                    if rsi_val.is_finite() {
+                        csi_val = (rsi_val + (0.5 * tsi + 50.0)) * 0.5;
+                    }
                 }
             }
         } else if matches!(mode, ModGodModeMode::GodmodeMg) {
             if i > first {
-                let a = prev_close; let b = c_i; let avg = 0.5 * (a + b);
+                let a = prev_close;
+                let b = c_i;
+                let avg = 0.5 * (a + b);
                 let pc_norm = if avg != 0.0 { (b - a) / avg } else { 0.0 };
                 let apc = (b - a).abs();
-                if !csi_seed_e1 { csi_num_e1 = pc_norm; csi_den_e1 = apc; csi_seed_e1 = true; }
-                else { csi_num_e1 = ema_step(pc_norm, csi_num_e1, alpha1, beta1); csi_den_e1 = ema_step(apc, csi_den_e1, alpha1, beta1); }
-                if !csi_seed_e2 && csi_seed_e1 { csi_num_e2 = csi_num_e1; csi_den_e2 = csi_den_e1; csi_seed_e2 = true; }
-                else if csi_seed_e2 { csi_num_e2 = ema_step(csi_num_e1, csi_num_e2, alpha2, beta2); csi_den_e2 = ema_step(csi_den_e1, csi_den_e2, alpha2, beta2); }
+                if !csi_seed_e1 {
+                    csi_num_e1 = pc_norm;
+                    csi_den_e1 = apc;
+                    csi_seed_e1 = true;
+                } else {
+                    csi_num_e1 = ema_step(pc_norm, csi_num_e1, alpha1, beta1);
+                    csi_den_e1 = ema_step(apc, csi_den_e1, alpha1, beta1);
+                }
+                if !csi_seed_e2 && csi_seed_e1 {
+                    csi_num_e2 = csi_num_e1;
+                    csi_den_e2 = csi_den_e1;
+                    csi_seed_e2 = true;
+                } else if csi_seed_e2 {
+                    csi_num_e2 = ema_step(csi_num_e1, csi_num_e2, alpha2, beta2);
+                    csi_den_e2 = ema_step(csi_den_e1, csi_den_e2, alpha2, beta2);
+                }
                 if csi_seed_e2 && nonzero(csi_den_e2) && rsi_val.is_finite() {
-                    let ttsi = 50.0 * (csi_num_e2 / csi_den_e2) + 50.0; csi_mg_val = 0.5 * (rsi_val + ttsi);
+                    let ttsi = 50.0 * (csi_num_e2 / csi_den_e2) + 50.0;
+                    csi_mg_val = 0.5 * (rsi_val + ttsi);
                 }
             }
         }
 
         // Combine components by mode into wavetrend
         if i >= warm {
-            let mut sum = 0.0_f64; let mut cnt = 0i32;
+            let mut sum = 0.0_f64;
+            let mut cnt = 0i32;
             match mode {
                 ModGodModeMode::Godmode => {
-                    if tci_val.is_finite() { sum += tci_val; cnt += 1; }
-                    if csi_val.is_finite() { sum += csi_val; cnt += 1; }
-                    if mf_val.is_finite()  { sum += mf_val;  cnt += 1; }
-                    let wil = willr_close_only(close, i, n2); if wil.is_finite() { sum += wil; cnt += 1; }
+                    if tci_val.is_finite() {
+                        sum += tci_val;
+                        cnt += 1;
+                    }
+                    if csi_val.is_finite() {
+                        sum += csi_val;
+                        cnt += 1;
+                    }
+                    if mf_val.is_finite() {
+                        sum += mf_val;
+                        cnt += 1;
+                    }
+                    let wil = willr_close_only(close, i, n2);
+                    if wil.is_finite() {
+                        sum += wil;
+                        cnt += 1;
+                    }
                 }
                 ModGodModeMode::Tradition => {
-                    if tci_val.is_finite() { sum += tci_val; cnt += 1; }
-                    if mf_val.is_finite()  { sum += mf_val;  cnt += 1; }
-                    if rsi_val.is_finite() { sum += rsi_val; cnt += 1; }
+                    if tci_val.is_finite() {
+                        sum += tci_val;
+                        cnt += 1;
+                    }
+                    if mf_val.is_finite() {
+                        sum += mf_val;
+                        cnt += 1;
+                    }
+                    if rsi_val.is_finite() {
+                        sum += rsi_val;
+                        cnt += 1;
+                    }
                 }
                 ModGodModeMode::GodmodeMg => {
-                    if tci_val.is_finite()     { sum += tci_val;     cnt += 1; }
-                    if csi_mg_val.is_finite()  { sum += csi_mg_val;  cnt += 1; }
-                    if mf_val.is_finite()      { sum += mf_val;      cnt += 1; }
-                    let wil = willr_close_only(close, i, n2); if wil.is_finite() { sum += wil; cnt += 1; }
-                    if cbci_val.is_finite()    { sum += cbci_val;    cnt += 1; }
-                    if lrsi_val.is_finite()    { sum += lrsi_val;    cnt += 1; }
+                    if tci_val.is_finite() {
+                        sum += tci_val;
+                        cnt += 1;
+                    }
+                    if csi_mg_val.is_finite() {
+                        sum += csi_mg_val;
+                        cnt += 1;
+                    }
+                    if mf_val.is_finite() {
+                        sum += mf_val;
+                        cnt += 1;
+                    }
+                    let wil = willr_close_only(close, i, n2);
+                    if wil.is_finite() {
+                        sum += wil;
+                        cnt += 1;
+                    }
+                    if cbci_val.is_finite() {
+                        sum += cbci_val;
+                        cnt += 1;
+                    }
+                    if lrsi_val.is_finite() {
+                        sum += lrsi_val;
+                        cnt += 1;
+                    }
                 }
                 ModGodModeMode::TraditionMg => {
-                    if tci_val.is_finite()   { sum += tci_val;   cnt += 1; }
-                    if mf_val.is_finite()    { sum += mf_val;    cnt += 1; }
-                    if rsi_val.is_finite()   { sum += rsi_val;   cnt += 1; }
-                    if cbci_val.is_finite()  { sum += cbci_val;  cnt += 1; }
-                    if lrsi_val.is_finite()  { sum += lrsi_val;  cnt += 1; }
+                    if tci_val.is_finite() {
+                        sum += tci_val;
+                        cnt += 1;
+                    }
+                    if mf_val.is_finite() {
+                        sum += mf_val;
+                        cnt += 1;
+                    }
+                    if rsi_val.is_finite() {
+                        sum += rsi_val;
+                        cnt += 1;
+                    }
+                    if cbci_val.is_finite() {
+                        sum += cbci_val;
+                        cnt += 1;
+                    }
+                    if lrsi_val.is_finite() {
+                        sum += lrsi_val;
+                        cnt += 1;
+                    }
                 }
             }
             if cnt > 0 {
@@ -1574,16 +1814,31 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
                 // Signal SMA(6)
                 if i >= sig_start {
                     if !have_sig {
-                        let mut s = 0.0; for k in 0..SIGP { let x = dst_wavetrend[i + 1 - SIGP + k]; sig_ring[k] = x; s += x; }
-                        sig_sum = s; have_sig = true; sig_head = 0; dst_signal[i] = s / (SIGP as f64);
+                        let mut s = 0.0;
+                        for k in 0..SIGP {
+                            let x = dst_wavetrend[i + 1 - SIGP + k];
+                            sig_ring[k] = x;
+                            s += x;
+                        }
+                        sig_sum = s;
+                        have_sig = true;
+                        sig_head = 0;
+                        dst_signal[i] = s / (SIGP as f64);
                     } else {
-                        let old = sig_ring[sig_head]; sig_ring[sig_head] = wt; sig_head = (sig_head + 1) % SIGP; sig_sum += wt - old;
+                        let old = sig_ring[sig_head];
+                        sig_ring[sig_head] = wt;
+                        sig_head = (sig_head + 1) % SIGP;
+                        sig_sum += wt - old;
                         dst_signal[i] = sig_sum / (SIGP as f64);
                     }
                     // Histogram EMA over diff = (wt - sig)*2 + 50
                     let d = (dst_wavetrend[i] - dst_signal[i]) * 2.0 + 50.0;
-                    if !hist_seeded { dst_hist[i] = d; hist_seeded = true; }
-                    else { dst_hist[i] = ema_step(d, dst_hist[i - 1], alpha3, beta3); }
+                    if !hist_seeded {
+                        dst_hist[i] = d;
+                        hist_seeded = true;
+                    } else {
+                        dst_hist[i] = ema_step(d, dst_hist[i - 1], alpha3, beta3);
+                    }
                 }
             }
         }
@@ -1593,7 +1848,11 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
 }
 
 // ====================== AVX2 ======================
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(all(
+    feature = "nightly-avx",
+    target_arch = "x86_64",
+    target_feature = "avx2"
+))]
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn mod_god_mode_avx2_fused_into_slices(
@@ -1614,14 +1873,29 @@ pub unsafe fn mod_god_mode_avx2_fused_into_slices(
 ) -> Result<(), ModGodModeError> {
     // Stub: delegate entirely to scalar fused implementation for accuracy/perf consistency
     mod_god_mode_scalar_fused_into_slices(
-        dst_wavetrend, dst_signal, dst_hist,
-        high, low, close, volume,
-        n1, n2, n3, mode, use_volume, first, warm,
+        dst_wavetrend,
+        dst_signal,
+        dst_hist,
+        high,
+        low,
+        close,
+        volume,
+        n1,
+        n2,
+        n3,
+        mode,
+        use_volume,
+        first,
+        warm,
     )
 }
 
 // ====================== AVX512 ======================
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx512f"))]
+#[cfg(all(
+    feature = "nightly-avx",
+    target_arch = "x86_64",
+    target_feature = "avx512f"
+))]
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn mod_god_mode_avx512_fused_into_slices(
@@ -1642,9 +1916,20 @@ pub unsafe fn mod_god_mode_avx512_fused_into_slices(
 ) -> Result<(), ModGodModeError> {
     // Stub: delegate entirely to scalar fused implementation for accuracy/perf consistency
     mod_god_mode_scalar_fused_into_slices(
-        dst_wavetrend, dst_signal, dst_hist,
-        high, low, close, volume,
-        n1, n2, n3, mode, use_volume, first, warm,
+        dst_wavetrend,
+        dst_signal,
+        dst_hist,
+        high,
+        low,
+        close,
+        volume,
+        n1,
+        n2,
+        n3,
+        mode,
+        use_volume,
+        first,
+        warm,
     )
 }
 
@@ -2232,7 +2517,7 @@ pub struct ModGodModeStream {
     alpha3: f64,
     beta3: f64,
     // warmup gates (match conservative compound warmups from classic kernel)
-    warm_wt: usize, // when wavetrend can start
+    warm_wt: usize,  // when wavetrend can start
     warm_sig: usize, // when signal (SMA6) can start
 
     // time index (# of samples processed so far)
@@ -2636,8 +2921,10 @@ impl ModGodModeStream {
                 self.tsi_ema_a_l = self.tsi_ema_a_s;
                 self.tsi_seed_l = true;
             } else if self.tsi_seed_l {
-                self.tsi_ema_m_l = ema_step(self.tsi_ema_m_s, self.tsi_ema_m_l, self.alpha2, self.beta2);
-                self.tsi_ema_a_l = ema_step(self.tsi_ema_a_s, self.tsi_ema_a_l, self.alpha2, self.beta2);
+                self.tsi_ema_m_l =
+                    ema_step(self.tsi_ema_m_s, self.tsi_ema_m_l, self.alpha2, self.beta2);
+                self.tsi_ema_a_l =
+                    ema_step(self.tsi_ema_a_s, self.tsi_ema_a_l, self.alpha2, self.beta2);
             }
 
             if self.tsi_seed_l && nonzero(self.tsi_ema_a_l) && rsi_val.is_finite() {
@@ -2651,7 +2938,11 @@ impl ModGodModeStream {
             let a = self.prev_close;
             let b = close;
             let avg = 0.5 * (a + b);
-            let pc_norm = if avg != 0.0 { (b - a) * avg.recip() } else { 0.0 };
+            let pc_norm = if avg != 0.0 {
+                (b - a) * avg.recip()
+            } else {
+                0.0
+            };
             let apc = (b - a).abs();
 
             if !self.csi_seed_e1 {
@@ -2668,8 +2959,10 @@ impl ModGodModeStream {
                 self.csi_den_e2 = self.csi_den_e1;
                 self.csi_seed_e2 = true;
             } else if self.csi_seed_e2 {
-                self.csi_num_e2 = ema_step(self.csi_num_e1, self.csi_num_e2, self.alpha2, self.beta2);
-                self.csi_den_e2 = ema_step(self.csi_den_e1, self.csi_den_e2, self.alpha2, self.beta2);
+                self.csi_num_e2 =
+                    ema_step(self.csi_num_e1, self.csi_num_e2, self.alpha2, self.beta2);
+                self.csi_den_e2 =
+                    ema_step(self.csi_den_e1, self.csi_den_e2, self.alpha2, self.beta2);
             }
 
             if self.csi_seed_e2 && nonzero(self.csi_den_e2) && rsi_val.is_finite() {

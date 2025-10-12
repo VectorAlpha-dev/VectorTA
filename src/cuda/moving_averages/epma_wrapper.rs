@@ -48,17 +48,24 @@ pub struct CudaEpmaPolicy {
 
 impl Default for CudaEpmaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaEpmaError {
@@ -105,11 +112,11 @@ impl CudaEpma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaEpmaError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -130,15 +137,26 @@ impl CudaEpma {
     }
 
     /// Create using an explicit policy.
-    pub fn new_with_policy(device_id: usize, policy: CudaEpmaPolicy) -> Result<Self, CudaEpmaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaEpmaPolicy,
+    ) -> Result<Self, CudaEpmaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaEpmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaEpmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaEpmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaEpmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     /// Expose synchronize for benches/tests that pre-stage device buffers.
     pub fn synchronize(&self) -> Result<(), CudaEpmaError> {
@@ -154,7 +172,9 @@ impl CudaEpma {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
@@ -170,14 +190,18 @@ impl CudaEpma {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_s = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_s || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EPMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEpma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEpma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -185,14 +209,18 @@ impl CudaEpma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per_s = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_s || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EPMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEpma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEpma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -200,12 +228,10 @@ impl CudaEpma {
     #[inline]
     fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
         const MAX_GRID_Y: usize = 65_535;
-        (0..n)
-            .step_by(MAX_GRID_Y)
-            .map(move |start| {
-                let len = (n - start).min(MAX_GRID_Y);
-                (start, len)
-            })
+        (0..n).step_by(MAX_GRID_Y).map(move |start| {
+            let len = (n - start).min(MAX_GRID_Y);
+            (start, len)
+        })
     }
 
     fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
@@ -335,22 +361,13 @@ impl CudaEpma {
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                 // Advance param pointers by start_combo
-                let mut periods_ptr = d_periods
-                    .as_device_ptr()
-                    .add(start_combo)
-                    .as_raw();
-                let mut offsets_ptr = d_offsets
-                    .as_device_ptr()
-                    .add(start_combo)
-                    .as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().add(start_combo).as_raw();
+                let mut offsets_ptr = d_offsets.as_device_ptr().add(start_combo).as_raw();
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = len_combo as i32;
                 let mut first_valid_i = first_valid as i32;
                 // Advance output pointer by whole rows already skipped
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .add(start_combo * series_len)
-                    .as_raw();
+                let mut out_ptr = d_out.as_device_ptr().add(start_combo * series_len).as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut periods_ptr as *mut _ as *mut c_void,
@@ -753,8 +770,14 @@ pub mod benches {
         crate::indicators::moving_averages::epma::EpmaParams,
         epma_batch_dev,
         epma_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::epma::EpmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), offset: (4, 4, 0) },
-        crate::indicators::moving_averages::epma::EpmaParams { period: Some(64), offset: Some(4) },
+        crate::indicators::moving_averages::epma::EpmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            offset: (4, 4, 0)
+        },
+        crate::indicators::moving_averages::epma::EpmaParams {
+            period: Some(64),
+            offset: Some(4)
+        },
         "epma",
         "epma"
     );

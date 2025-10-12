@@ -840,12 +840,22 @@ pub unsafe fn vwmacd_scalar_macd_into(
         }
     }
 
-    let slow_ma_cv = ma_with_kernel(slow_ma_type, MaData::Slice(&close_x_volume), slow, Kernel::Scalar)
-        .map_err(|e| VwmacdError::MaError(e.to_string()))?;
+    let slow_ma_cv = ma_with_kernel(
+        slow_ma_type,
+        MaData::Slice(&close_x_volume),
+        slow,
+        Kernel::Scalar,
+    )
+    .map_err(|e| VwmacdError::MaError(e.to_string()))?;
     let slow_ma_v = ma_with_kernel(slow_ma_type, MaData::Slice(&volume), slow, Kernel::Scalar)
         .map_err(|e| VwmacdError::MaError(e.to_string()))?;
-    let fast_ma_cv = ma_with_kernel(fast_ma_type, MaData::Slice(&close_x_volume), fast, Kernel::Scalar)
-        .map_err(|e| VwmacdError::MaError(e.to_string()))?;
+    let fast_ma_cv = ma_with_kernel(
+        fast_ma_type,
+        MaData::Slice(&close_x_volume),
+        fast,
+        Kernel::Scalar,
+    )
+    .map_err(|e| VwmacdError::MaError(e.to_string()))?;
     let fast_ma_v = ma_with_kernel(fast_ma_type, MaData::Slice(&volume), fast, Kernel::Scalar)
         .map_err(|e| VwmacdError::MaError(e.to_string()))?;
 
@@ -1087,7 +1097,11 @@ pub unsafe fn vwmacd_streaming_scalar(
                         valid += 1;
                     }
                 }
-                if valid == signal { sum / signal as f64 } else { f64::NAN }
+                if valid == signal {
+                    sum / signal as f64
+                } else {
+                    f64::NAN
+                }
             }
         };
     }
@@ -1289,13 +1303,25 @@ impl VwmacdStream {
                     ((idx + 1 + buf_len - self.fast_period) % buf_len)
                 };
                 for i in 0..self.fast_period {
-                    let b = if self.count <= buf_len { start + i } else { (start + i) % buf_len };
+                    let b = if self.count <= buf_len {
+                        start + i
+                    } else {
+                        (start + i) % buf_len
+                    };
                     self.fast_cv_work[i] = self.close_volume_buffer[b];
                     self.fast_v_work[i] = self.volume_buffer[b];
                 }
                 if let (Ok(cv_ma), Ok(v_ma)) = (
-                    ma(&self.fast_ma_type, MaData::Slice(&self.fast_cv_work), self.fast_period),
-                    ma(&self.fast_ma_type, MaData::Slice(&self.fast_v_work), self.fast_period),
+                    ma(
+                        &self.fast_ma_type,
+                        MaData::Slice(&self.fast_cv_work),
+                        self.fast_period,
+                    ),
+                    ma(
+                        &self.fast_ma_type,
+                        MaData::Slice(&self.fast_v_work),
+                        self.fast_period,
+                    ),
                 ) {
                     if let (Some(&cv_val), Some(&v_val)) = (cv_ma.last(), v_ma.last()) {
                         if v_val != 0.0 && !v_val.is_nan() {
@@ -1313,13 +1339,25 @@ impl VwmacdStream {
                     ((idx + 1 + buf_len - self.slow_period) % buf_len)
                 };
                 for i in 0..self.slow_period {
-                    let b = if self.count <= buf_len { start + i } else { (start + i) % buf_len };
+                    let b = if self.count <= buf_len {
+                        start + i
+                    } else {
+                        (start + i) % buf_len
+                    };
                     self.slow_cv_work[i] = self.close_volume_buffer[b];
                     self.slow_v_work[i] = self.volume_buffer[b];
                 }
                 if let (Ok(cv_ma), Ok(v_ma)) = (
-                    ma(&self.slow_ma_type, MaData::Slice(&self.slow_cv_work), self.slow_period),
-                    ma(&self.slow_ma_type, MaData::Slice(&self.slow_v_work), self.slow_period),
+                    ma(
+                        &self.slow_ma_type,
+                        MaData::Slice(&self.slow_cv_work),
+                        self.slow_period,
+                    ),
+                    ma(
+                        &self.slow_ma_type,
+                        MaData::Slice(&self.slow_v_work),
+                        self.slow_period,
+                    ),
                 ) {
                     if let (Some(&cv_val), Some(&v_val)) = (cv_ma.last(), v_ma.last()) {
                         if v_val != 0.0 && !v_val.is_nan() {
@@ -1801,7 +1839,11 @@ unsafe fn vwmacd_classic_into_avx2(
     for i in total_warmup_abs..len {
         let m = macd_out[i];
         let s = signal_out[i];
-        hist_out[i] = if !m.is_nan() && !s.is_nan() { m - s } else { f64::NAN };
+        hist_out[i] = if !m.is_nan() && !s.is_nan() {
+            m - s
+        } else {
+            f64::NAN
+        };
     }
 
     Ok(())
@@ -1926,7 +1968,11 @@ unsafe fn vwmacd_classic_into_avx512(
     for i in total_warmup_abs..len {
         let m = macd_out[i];
         let s = signal_out[i];
-        hist_out[i] = if !m.is_nan() && !s.is_nan() { m - s } else { f64::NAN };
+        hist_out[i] = if !m.is_nan() && !s.is_nan() {
+            m - s
+        } else {
+            f64::NAN
+        };
     }
 
     Ok(())

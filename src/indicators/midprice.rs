@@ -362,14 +362,17 @@ pub struct MidpriceStream {
     seen: usize,
     // Monotonic deques; store (index_since_start, value)
     dq_high: std::collections::VecDeque<(usize, f64)>, // max queue (descending values)
-    dq_low:  std::collections::VecDeque<(usize, f64)>, // min queue (ascending values)
+    dq_low: std::collections::VecDeque<(usize, f64)>,  // min queue (ascending values)
 }
 
 impl MidpriceStream {
     pub fn try_new(params: MidpriceParams) -> Result<Self, MidpriceError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(MidpriceError::InvalidPeriod { period, data_len: 0 });
+            return Err(MidpriceError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let cap = period + 1;
         Ok(Self {
@@ -377,7 +380,7 @@ impl MidpriceStream {
             started: false,
             seen: 0,
             dq_high: std::collections::VecDeque::with_capacity(cap),
-            dq_low:  std::collections::VecDeque::with_capacity(cap),
+            dq_low: std::collections::VecDeque::with_capacity(cap),
         })
     }
 
@@ -397,7 +400,11 @@ impl MidpriceStream {
         // Push into max-deque for highs (keep descending values)
         if high.is_finite() {
             while let Some(&(_, v)) = self.dq_high.back() {
-                if v <= high { self.dq_high.pop_back(); } else { break; }
+                if v <= high {
+                    self.dq_high.pop_back();
+                } else {
+                    break;
+                }
             }
             self.dq_high.push_back((i, high));
         }
@@ -405,7 +412,11 @@ impl MidpriceStream {
         // Push into min-deque for lows (keep ascending values)
         if low.is_finite() {
             while let Some(&(_, v)) = self.dq_low.back() {
-                if v >= low { self.dq_low.pop_back(); } else { break; }
+                if v >= low {
+                    self.dq_low.pop_back();
+                } else {
+                    break;
+                }
             }
             self.dq_low.push_back((i, low));
         }
@@ -413,10 +424,18 @@ impl MidpriceStream {
         // Evict items that fell out of the window [i - period + 1, i]
         let start = i.saturating_add(1).saturating_sub(self.period);
         while let Some(&(idx, _)) = self.dq_high.front() {
-            if idx < start { self.dq_high.pop_front(); } else { break; }
+            if idx < start {
+                self.dq_high.pop_front();
+            } else {
+                break;
+            }
         }
         while let Some(&(idx, _)) = self.dq_low.front() {
-            if idx < start { self.dq_low.pop_front(); } else { break; }
+            if idx < start {
+                self.dq_low.pop_front();
+            } else {
+                break;
+            }
         }
 
         // Advance stream index

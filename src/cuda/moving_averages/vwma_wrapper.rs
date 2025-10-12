@@ -61,11 +61,11 @@ impl CudaVwma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaVwmaError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -636,8 +636,8 @@ impl CudaVwma {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices, gen_time_major_volumes};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;
@@ -675,7 +675,13 @@ pub mod benches {
         let price = gen_series(ONE_SERIES_LEN);
         let volume = gen_series(ONE_SERIES_LEN)
             .into_iter()
-            .map(|v| if v.is_nan() { v } else { (v.abs() + 1.0) * 500.0 })
+            .map(|v| {
+                if v.is_nan() {
+                    v
+                } else {
+                    (v.abs() + 1.0) * 500.0
+                }
+            })
             .collect::<Vec<f32>>();
         let sweep = VwmaBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),

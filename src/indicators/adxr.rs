@@ -350,7 +350,9 @@ pub fn adxr_scalar(
     out: &mut [f64],
 ) {
     let len = close.len();
-    if len == 0 { return; }
+    if len == 0 {
+        return;
+    }
 
     let p = period as f64;
     let rp = 1.0 / p;
@@ -382,8 +384,12 @@ pub fn adxr_scalar(
 
         let up = ch - ph;
         let down = pl - cl;
-        if up > down && up > 0.0 { plus_dm_sum += up; }
-        if down > up && down > 0.0 { minus_dm_sum += down; }
+        if up > down && up > 0.0 {
+            plus_dm_sum += up;
+        }
+        if down > up && down > 0.0 {
+            minus_dm_sum += down;
+        }
     }
 
     // First DX from bootstrap (ATR cancels): DX0 = 100 * |PDM - MDM| / (PDM + MDM)
@@ -426,11 +432,11 @@ pub fn adxr_scalar(
 
         let up = ch - ph;
         let down = pl - cl;
-        let plus_dm  = if up   > down && up   > 0.0 { up   } else { 0.0 };
-        let minus_dm = if down > up   && down > 0.0 { down } else { 0.0 };
+        let plus_dm = if up > down && up > 0.0 { up } else { 0.0 };
+        let minus_dm = if down > up && down > 0.0 { down } else { 0.0 };
 
         // Wilder smoothing via (p-1)/p * prev + current
-        atr   = atr.mul_add(om, tr);
+        atr = atr.mul_add(om, tr);
         pdm_s = pdm_s.mul_add(om, plus_dm);
         mdm_s = mdm_s.mul_add(om, minus_dm);
 
@@ -460,10 +466,16 @@ pub fn adxr_scalar(
                 let prev_adx = adx_ring[head];
                 adx_ring[head] = adx_last;
                 head += 1;
-                if head == period { head = 0; }
+                if head == period {
+                    head = 0;
+                }
 
                 if i >= warmup_start {
-                    let v = if prev_adx.is_finite() { 0.5 * (adx_last + prev_adx) } else { f64::NAN };
+                    let v = if prev_adx.is_finite() {
+                        0.5 * (adx_last + prev_adx)
+                    } else {
+                        f64::NAN
+                    };
                     out[i] = v;
                 }
             }
@@ -475,10 +487,16 @@ pub fn adxr_scalar(
             let prev_adx = adx_ring[head];
             adx_ring[head] = adx_curr;
             head += 1;
-            if head == period { head = 0; }
+            if head == period {
+                head = 0;
+            }
 
             if i >= warmup_start {
-                let v = if prev_adx.is_finite() { 0.5 * (adx_curr + prev_adx) } else { f64::NAN };
+                let v = if prev_adx.is_finite() {
+                    0.5 * (adx_curr + prev_adx)
+                } else {
+                    f64::NAN
+                };
                 out[i] = v;
             }
         }
@@ -909,7 +927,9 @@ fn adxr_row_from_precomputed(
     out: &mut [f64],
 ) {
     let len = tr_all.len();
-    if len == 0 { return; }
+    if len == 0 {
+        return;
+    }
 
     let p = period as f64;
     let rp = 1.0 / p;
@@ -926,7 +946,9 @@ fn adxr_row_from_precomputed(
     let denom0 = pdm0 + mdm0;
     let initial_dx = if denom0 > 0.0 {
         100.0 * (pdm0 - mdm0).abs() / denom0
-    } else { 0.0 };
+    } else {
+        0.0
+    };
 
     let mut atr = atr0;
     let mut pdm_s = pdm0;
@@ -945,7 +967,7 @@ fn adxr_row_from_precomputed(
         let plus_dm = pdm_all[i];
         let minus_dm = mdm_all[i];
 
-        atr   = atr.mul_add(om, tr);
+        atr = atr.mul_add(om, tr);
         pdm_s = pdm_s.mul_add(om, plus_dm);
         mdm_s = mdm_s.mul_add(om, minus_dm);
 
@@ -953,7 +975,9 @@ fn adxr_row_from_precomputed(
         let denom = pdm_s + mdm_s;
         let dx = if denom > 0.0 {
             100.0 * (pdm_s - mdm_s).abs() / denom
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         if dx_count < period {
             dx_sum += dx;
@@ -968,10 +992,16 @@ fn adxr_row_from_precomputed(
                 let prev_adx = adx_ring[head];
                 adx_ring[head] = adx_last;
                 head += 1;
-                if head == period { head = 0; }
+                if head == period {
+                    head = 0;
+                }
 
                 if i >= warmup_start {
-                    let v = if prev_adx.is_finite() { 0.5 * (adx_last + prev_adx) } else { f64::NAN };
+                    let v = if prev_adx.is_finite() {
+                        0.5 * (adx_last + prev_adx)
+                    } else {
+                        f64::NAN
+                    };
                     out[i] = v;
                 }
             }
@@ -982,10 +1012,16 @@ fn adxr_row_from_precomputed(
             let prev_adx = adx_ring[head];
             adx_ring[head] = adx_curr;
             head += 1;
-            if head == period { head = 0; }
+            if head == period {
+                head = 0;
+            }
 
             if i >= warmup_start {
-                let v = if prev_adx.is_finite() { 0.5 * (adx_curr + prev_adx) } else { f64::NAN };
+                let v = if prev_adx.is_finite() {
+                    0.5 * (adx_curr + prev_adx)
+                } else {
+                    f64::NAN
+                };
                 out[i] = v;
             }
         }
@@ -1389,7 +1425,10 @@ impl AdxrStream {
     pub fn try_new(params: AdxrParams) -> Result<Self, AdxrError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(AdxrError::InvalidPeriod { period, data_len: 0 });
+            return Err(AdxrError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let p = period as f64;
         Ok(Self {

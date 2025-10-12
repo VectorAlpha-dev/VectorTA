@@ -4,9 +4,7 @@ use cust::memory::CopyDestination;
 use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::CudaDema;
-use my_project::indicators::moving_averages::dema::{
-    dema_batch_slice, DemaBatchRange, DemaParams,
-};
+use my_project::indicators::moving_averages::dema::{dema_batch_slice, DemaBatchRange, DemaParams};
 use my_project::utilities::enums::Kernel;
 
 fn make_test_series(len: usize) -> Vec<f64> {
@@ -36,8 +34,18 @@ fn compare_rows(cpu: &[f64], gpu: &[f64], combos: &[DemaParams], len: usize, fir
             let expected = cpu[idx];
             let actual = gpu[idx];
             if col < warm {
-                assert!(expected.is_nan(), "CPU warmup should be NaN at row {}, col {}", row_idx, col);
-                assert!(actual.is_nan(), "CUDA warmup mismatch at row {}, col {}", row_idx, col);
+                assert!(
+                    expected.is_nan(),
+                    "CPU warmup should be NaN at row {}, col {}",
+                    row_idx,
+                    col
+                );
+                assert!(
+                    actual.is_nan(),
+                    "CUDA warmup mismatch at row {}, col {}",
+                    row_idx,
+                    col
+                );
             } else {
                 let diff = (expected - actual).abs();
                 // Tighter tolerance: benefits from FMA delta form in kernel
@@ -112,8 +120,7 @@ fn dema_cuda_host_copy_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let cuda = CudaDema::new(0).expect("CudaDema::new");
 
     let mut gpu_flat = vec![0f32; cpu_out.len()];
-    cuda
-        .dema_batch_into_host_f32(&data_f32, &sweep, &mut gpu_flat)
+    cuda.dema_batch_into_host_f32(&data_f32, &sweep, &mut gpu_flat)
         .expect("dema_cuda_batch_into_host_f32");
     // Sanity: output length should match rows*cols
     assert_eq!(gpu_flat.len(), combos_cpu.len() * len);
@@ -160,17 +167,36 @@ fn dema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = price_tm[t * cols + s]; }
-        let params = DemaParams { period: Some(period) };
-        let input = my_project::indicators::moving_averages::dema::DemaInput { data: my_project::indicators::moving_averages::dema::DemaData::Slice(&series), params };
-        let out = my_project::indicators::moving_averages::dema::dema_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            series[t] = price_tm[t * cols + s];
+        }
+        let params = DemaParams {
+            period: Some(period),
+        };
+        let input = my_project::indicators::moving_averages::dema::DemaInput {
+            data: my_project::indicators::moving_averages::dema::DemaData::Slice(&series),
+            params,
+        };
+        let out = my_project::indicators::moving_averages::dema::dema_with_kernel(
+            &input,
+            Kernel::Scalar,
+        )?;
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaDema::new(0).expect("CudaDema::new");
     let dev = cuda
-        .dema_many_series_one_param_time_major_dev(&price_tm_f32, cols, rows, &DemaParams { period: Some(period) })
+        .dema_many_series_one_param_time_major_dev(
+            &price_tm_f32,
+            cols,
+            rows,
+            &DemaParams {
+                period: Some(period),
+            },
+        )
         .expect("dema_many_series_one_param_time_major_dev");
 
     assert_eq!(dev.rows, rows);
@@ -189,7 +215,16 @@ fn dema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         } else {
             let diff = (c - g).abs();
             let rtol = 5e-6 * c.abs();
-            assert!(diff <= tol + rtol, "mismatch at {}: cpu={} gpu={} diff={} tol={} rtol={}", idx, c, g, diff, tol, rtol);
+            assert!(
+                diff <= tol + rtol,
+                "mismatch at {}: cpu={} gpu={} diff={} tol={} rtol={}",
+                idx,
+                c,
+                g,
+                diff,
+                tol,
+                rtol
+            );
         }
     }
 

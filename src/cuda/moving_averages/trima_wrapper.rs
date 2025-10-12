@@ -10,15 +10,20 @@
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::trima::{TrimaBatchRange, TrimaParams};
 use cust::context::Context;
+use cust::context::{CacheConfig, SharedMemoryConfig};
 use cust::device::Device;
-use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::function::{BlockSize, Function, GridSize};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// Must match CUDA kernel defaults
+const TRIMA_TS: u32 = 128; // threads per block (x) for tiled many-series/time-major
+const TRIMA_TT: u32 = 64; // time tile length for tiled many-series
 
 #[derive(Debug)]
 pub enum CudaTrimaError {
@@ -43,12 +48,14 @@ impl std::error::Error for CudaTrimaError {}
 pub enum BatchKernelPolicy {
     Auto,
     Plain { block_x: u32 },
+    Tiled { tile: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
+    Tiled { tile_s: u32, tile_t: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,17 +77,20 @@ impl Default for CudaTrimaPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     OneD { block_x: u32 },
+    Tiled { tile: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
+    Tiled { tile_s: u32, tile_t: u32 },
 }
 
 pub struct CudaTrima {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
     policy: CudaTrimaPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -100,12 +110,13 @@ impl CudaTrima {
         // Prefer context-targeted JIT with moderate optimization; then fall back
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaTrimaError::Cuda(e.to_string()))?
@@ -119,6 +130,7 @@ impl CudaTrima {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
             policy: CudaTrimaPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -147,7 +159,9 @@ impl CudaTrima {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TRIMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTrima)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTrima)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -165,16 +179,26 @@ impl CudaTrima {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TRIMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTrima)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTrima)).debug_many_logged = true;
+                }
             }
         }
     }
 
     // Policy controls/inspection
-    pub fn set_policy(&mut self, policy: CudaTrimaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaTrimaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaTrimaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaTrimaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     fn expand_periods(range: &TrimaBatchRange) -> Vec<usize> {
         let (start, end, step) = range.period;
@@ -332,25 +356,73 @@ impl CudaTrima {
             ));
         }
 
-        let func = self
-            .module
-            .get_function("trima_batch_f32")
-            .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+        // Try tiled symbol first; if missing or smem insufficient, fall back to legacy 1-D
+        let sizeof_f32 = std::mem::size_of::<f32>();
+        let mut func: Function;
+        let grid_x: u32;
+        let block: BlockSize;
+        let shared_bytes: u32;
+        let selected: BatchKernelSelected;
+        if let Ok(mut f_tiled) = self.module.get_function("trima_batch_f32_tiled") {
+            let tile_x = match self.policy.batch {
+                BatchKernelPolicy::Tiled { tile } if tile > 0 => tile,
+                _ => 256,
+            };
+            let smem_bytes = (max_period + (tile_x as usize + max_period - 1)) * sizeof_f32;
+            self.prefer_shared_and_optin_smem(&mut f_tiled, smem_bytes);
+            let tiles_t = ((series_len as u32) + tile_x - 1) / tile_x;
+            let block_cfg: BlockSize = (tile_x, 1, 1).into();
+            let grid_cfg: GridSize = (tiles_t.max(1), 1, 1).into();
+            let mut use_tiled = true;
+            if let Ok(avail) =
+                f_tiled.available_dynamic_shared_memory_per_block(grid_cfg, block_cfg)
+            {
+                if smem_bytes > avail {
+                    use_tiled = false;
+                }
+            }
+            if use_tiled {
+                func = f_tiled;
+                grid_x = tiles_t;
+                block = block_cfg;
+                shared_bytes = smem_bytes as u32;
+                selected = BatchKernelSelected::Tiled { tile: tile_x };
+            } else {
+                func = self
+                    .module
+                    .get_function("trima_batch_f32")
+                    .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+                let block_x = match self.policy.batch {
+                    BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
+                    _ => 256,
+                };
+                grid_x = ((series_len as u32) + block_x - 1) / block_x;
+                block = (block_x, 1, 1).into();
+                shared_bytes = (max_period * sizeof_f32) as u32;
+                selected = BatchKernelSelected::OneD { block_x };
+            }
+        } else {
+            func = self
+                .module
+                .get_function("trima_batch_f32")
+                .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+            let block_x = match self.policy.batch {
+                BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
+                _ => 256,
+            };
+            grid_x = ((series_len as u32) + block_x - 1) / block_x;
+            block = (block_x, 1, 1).into();
+            shared_bytes = (max_period * sizeof_f32) as u32;
+            selected = BatchKernelSelected::OneD { block_x };
+        }
 
-        // Policy-selected block size; default to 256 like the original
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
-            _ => 256,
-        };
-        unsafe { (*(self as *const _ as *mut CudaTrima)).last_batch = Some(BatchKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaTrima)).last_batch = Some(selected);
+        }
         self.maybe_log_batch_debug();
 
         // Chunk grid.y to <= 65_535
         const MAX_GRID_Y: usize = 65_535;
-        let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
-        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
-        let block: BlockSize = (block_x, 1, 1).into();
-
         let mut launched = 0usize;
         while launched < n_combos {
             let len = (n_combos - launched).min(MAX_GRID_Y);
@@ -387,6 +459,61 @@ impl CudaTrima {
 
         Ok(())
     }
+    #[inline]
+    fn prefer_shared_and_optin_smem(&self, func: &mut Function, requested_dynamic_smem: usize) {
+        let _ = func.set_cache_config(CacheConfig::PreferShared);
+        let _ = func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize);
+        unsafe {
+            use cust::sys::{cuFuncSetAttribute, CUfunction_attribute_enum as Attr};
+            let raw = func.to_raw();
+            let _ = cuFuncSetAttribute(
+                raw,
+                Attr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                requested_dynamic_smem as i32,
+            );
+            let _ = cuFuncSetAttribute(
+                raw,
+                Attr::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                100,
+            );
+        }
+    }
+
+    #[inline]
+    fn upload_pinned_async(&self, data: &[f32]) -> Result<DeviceBuffer<f32>, CudaTrimaError> {
+        if data.is_empty() {
+            return Err(CudaTrimaError::InvalidInput("empty input slice".into()));
+        }
+        unsafe {
+            use cust::sys as cu;
+            let ptr = data.as_ptr() as *mut std::ffi::c_void;
+            let bytes = data.len() * std::mem::size_of::<f32>();
+            let r = cu::cuMemHostRegister_v2(ptr, bytes, 0);
+            if r != cu::CUresult::CUDA_SUCCESS {
+                return Err(CudaTrimaError::Cuda(format!(
+                    "cuMemHostRegister failed: {:?}",
+                    r
+                )));
+            }
+            let mut dev: DeviceBuffer<f32> =
+                DeviceBuffer::uninitialized_async(data.len(), &self.stream)
+                    .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+            dev.async_copy_from(data, &self.stream)
+                .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+            // Synchronize to ensure copy completes before unregister
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+            let r2 = cu::cuMemHostUnregister(ptr);
+            if r2 != cu::CUresult::CUDA_SUCCESS {
+                return Err(CudaTrimaError::Cuda(format!(
+                    "cuMemHostUnregister failed: {:?}",
+                    r2
+                )));
+            }
+            Ok(dev)
+        }
+    }
 
     fn launch_many_series_kernel(
         &self,
@@ -409,43 +536,135 @@ impl CudaTrima {
             ));
         }
 
-        let func = self
-            .module
-            .get_function("trima_multi_series_one_param_f32")
-            .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+        // Policy: prefer tiled for larger problems if it fits
+        let mut use_tiled = matches!(
+            self.policy.many_series,
+            ManySeriesKernelPolicy::Auto | ManySeriesKernelPolicy::Tiled { .. }
+        );
+        // Defaults must match TRIMA_TS/TRIMA_TT in the .cu
+        let mut tile_s: u32 = 128;
+        let mut tile_t: u32 = 64;
+        match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => {
+                use_tiled = false;
+                tile_s = block_x;
+            }
+            ManySeriesKernelPolicy::Tiled {
+                tile_s: ts,
+                tile_t: tt,
+            } => {
+                tile_s = ts.max(32);
+                tile_t = tt.max(32);
+            }
+            _ => {}
+        }
+        // Require at least one tile in each dimension to benefit
+        if cols < tile_s as usize || rows < tile_t as usize {
+            use_tiled = false;
+        }
 
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
-            _ => 128,
-        };
-        unsafe { (*(self as *const _ as *mut CudaTrima)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
-        self.maybe_log_many_debug();
+        let sizeof_f32 = std::mem::size_of::<f32>();
+        let mut shared_bytes_tiled =
+            ((period + (tile_s as usize * (tile_t as usize + period - 1))) * sizeof_f32) as u32;
+        if use_tiled {
+            if let Ok(dev) = Device::get_device(self.device_id) {
+                if let Ok(max_smem) =
+                    dev.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock)
+                {
+                    while shared_bytes_tiled as i32 > max_smem && (tile_s > 64 || tile_t > 32) {
+                        if tile_s > 64 {
+                            tile_s /= 2;
+                        } else if tile_t > 32 {
+                            tile_t /= 2;
+                        }
+                        shared_bytes_tiled = ((period
+                            + (tile_s as usize * (tile_t as usize + period - 1)))
+                            * sizeof_f32) as u32;
+                    }
+                    if shared_bytes_tiled as i32 > max_smem {
+                        use_tiled = false;
+                    }
+                }
+            }
+        }
 
-        let grid_x = ((rows as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
+        if use_tiled {
+            let mut func = self
+                .module
+                .get_function("trima_multi_series_one_param_f32_tm_tiled")
+                .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+            self.prefer_shared_and_optin_smem(&mut func, shared_bytes_tiled as usize);
+            let grid_x = ((cols as u32) + tile_s - 1) / tile_s;
+            let grid_y = ((rows as u32) + tile_t - 1) / tile_t;
+            let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+            let block: BlockSize = (tile_s, 1, 1).into();
 
-        unsafe {
-            let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
-            let mut weights_ptr = d_weights.as_device_ptr().as_raw();
-            let mut period_i = period as i32;
-            let mut num_series_i = cols as i32;
-            let mut series_len_i = rows as i32;
-            let mut first_valids_ptr = d_first_valids.as_device_ptr().as_raw();
-            let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut c_void,
-                &mut weights_ptr as *mut _ as *mut c_void,
-                &mut period_i as *mut _ as *mut c_void,
-                &mut num_series_i as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut first_valids_ptr as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?
+            unsafe {
+                let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
+                let mut weights_ptr = d_weights.as_device_ptr().as_raw();
+                let mut period_i = period as i32;
+                let mut num_series_i = cols as i32;
+                let mut series_len_i = rows as i32;
+                let mut first_valids_ptr = d_first_valids.as_device_ptr().as_raw();
+                let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut weights_ptr as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut num_series_i as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut first_valids_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes_tiled, args)
+                    .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+            }
+            unsafe {
+                (*(self as *const _ as *mut CudaTrima)).last_many =
+                    Some(ManySeriesKernelSelected::Tiled { tile_s, tile_t });
+            }
+            self.maybe_log_many_debug();
+        } else {
+            let func = self
+                .module
+                .get_function("trima_multi_series_one_param_f32")
+                .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+            let block_x = match self.policy.many_series {
+                ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
+                _ => 128,
+            };
+            unsafe {
+                (*(self as *const _ as *mut CudaTrima)).last_many =
+                    Some(ManySeriesKernelSelected::OneD { block_x });
+            }
+            self.maybe_log_many_debug();
+            let grid_x = ((rows as u32) + block_x - 1) / block_x;
+            let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            let shared_bytes = (period * sizeof_f32) as u32;
+
+            unsafe {
+                let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
+                let mut weights_ptr = d_weights.as_device_ptr().as_raw();
+                let mut period_i = period as i32;
+                let mut num_series_i = cols as i32;
+                let mut series_len_i = rows as i32;
+                let mut first_valids_ptr = d_first_valids.as_device_ptr().as_raw();
+                let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut weights_ptr as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut num_series_i as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut first_valids_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, shared_bytes, args)
+                    .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+            }
         }
 
         Ok(())
@@ -498,8 +717,7 @@ impl CudaTrima {
             .map(|&p| (first_valid + p - 1) as i32)
             .collect();
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+        let d_prices = self.upload_pinned_async(data_f32)?;
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
         let d_warms = DeviceBuffer::from_slice(&warms_i32)
@@ -548,8 +766,7 @@ impl CudaTrima {
         }
 
         let weights = Self::compute_weights(period);
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
+        let d_prices = self.upload_pinned_async(data_tm_f32)?;
         let d_weights =
             DeviceBuffer::from_slice(&weights).map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
         let d_first_valids = DeviceBuffer::from_slice(first_valids)
@@ -654,7 +871,9 @@ pub mod benches {
         crate::indicators::moving_averages::trima::TrimaParams,
         trima_batch_dev,
         trima_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::trima::TrimaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::trima::TrimaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::trima::TrimaParams { period: Some(64) },
         "trima",
         "trima"
