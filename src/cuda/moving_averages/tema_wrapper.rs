@@ -16,16 +16,29 @@
 use super::DeviceArrayF32;
 use crate::indicators::moving_averages::tema::{TemaBatchRange, TemaParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
-use cust::module::{Module, ModuleJitOption, OptLevel};
+use cust::memory::{mem_get_info, DeviceBuffer, AsyncCopyDestination};
+use cust::module::{Module, ModuleJitOption};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+const WARP: u32 = 32;
+#[inline]
+fn env_warps_per_block() -> u32 {
+    std::env::var("TEMA_WPB")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&v| (1..=32).contains(&v))
+        .unwrap_or(4)
+}
+#[inline]
+const fn qnan_u32() -> u32 { 0x7fc0_0000 }
 
 // ---------------- Kernel policy & selection (mirrors ALMA structure) ----------------
 
@@ -89,6 +102,10 @@ pub struct CudaTema {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+
+    // Warp-parallel launch tuning and device limits
+    warps_per_block: u32,
+    max_grid_x: u32,
 }
 
 impl CudaTema {
@@ -97,14 +114,14 @@ impl CudaTema {
 
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        let max_grid_x = device
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(|e| CudaTemaError::Cuda(e.to_string()))? as u32;
         let context = Context::new(device).map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/tema_kernel.ptx"));
-        // JIT to current context target with moderate optimization; fall back conservatively
-        let jit_opts = &[
-            ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
-        ];
+        // JIT to current context target; let optimization default to O4.
+        let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
@@ -118,6 +135,8 @@ impl CudaTema {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
 
+        let warps_per_block = env_warps_per_block();
+
         Ok(Self {
             module,
             stream,
@@ -128,6 +147,8 @@ impl CudaTema {
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
+            warps_per_block,
+            max_grid_x,
         })
     }
 
@@ -196,12 +217,25 @@ impl CudaTema {
     }
 
     #[inline]
-    fn grid_x_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
-        const MAX: usize = 65_535;
-        (0..n).step_by(MAX).map(move |start| {
-            let len = (n - start).min(MAX);
+    fn grid_x_chunks(_n: usize) -> impl Iterator<Item = (usize, usize)> { std::iter::empty() }
+
+    #[inline]
+    fn chunk_items_by_grid_x(&self, items: usize) -> impl Iterator<Item = (usize, usize)> {
+        let per_block = (self.warps_per_block as usize) * (WARP as usize);
+        let max_items_per_launch = (self.max_grid_x as usize).saturating_mul(per_block);
+        (0..items).step_by(max_items_per_launch).map(move |start| {
+            let len = (items - start).min(max_items_per_launch);
             (start, len)
         })
+    }
+
+    #[inline]
+    fn warp_launch_dims(&self, items: usize) -> (GridSize, BlockSize, u32) {
+        let wpb = self.warps_per_block;
+        let block_x = wpb * WARP;
+        let warps_needed = ((items as u32) + WARP - 1) / WARP;
+        let blocks_x = ((warps_needed + wpb - 1) / wpb).max(1);
+        ((blocks_x, 1, 1).into(), (block_x, 1, 1).into(), block_x)
     }
 
     pub fn tema_batch_dev(
@@ -230,8 +264,10 @@ impl CudaTema {
         }
 
         let arr = self.run_batch_kernel(prices, &inputs)?;
-        arr.buf
-            .copy_to(out)
+        unsafe { arr.buf.async_copy_to(out, &self.stream) }
+            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
             .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
         Ok((arr.rows, arr.cols, inputs.combos))
     }
@@ -328,8 +364,10 @@ impl CudaTema {
 
         let prepared = Self::prepare_many_series_inputs(prices_tm_f32, cols, rows, period)?;
         let arr = self.run_many_series_kernel(prices_tm_f32, cols, rows, period, &prepared)?;
-        arr.buf
-            .copy_to(out_tm)
+        unsafe { arr.buf.async_copy_to(out_tm, &self.stream) }
+            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
             .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
         Ok(())
     }
@@ -354,16 +392,23 @@ impl CudaTema {
             ));
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices).map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&inputs.periods)
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }
+            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&inputs.periods, &self.stream) }
             .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
                 .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
 
-        // Chunk very large grids to avoid legacy launch limits
-        for (start, len) in Self::grid_x_chunks(n_combos) {
+        // Prefill output with canonical quiet-NaN so the kernel only writes the warm region
+        memset_f32_qnan_async(&self.stream, &mut d_out)
+            .map_err(|e| CudaTemaError::Cuda(format!("prefill qNaN failed: {}", e)))?;
+
+        // Hint the driver to persist prices[] in L2 across blocks (best effort)
+        self.try_enable_persisting_l2(d_prices.as_device_ptr().as_raw(), prices_bytes);
+
+        // Chunk by real grid.x capacity under warp mapping when needed
+        for (start, len) in self.chunk_items_by_grid_x(n_combos) {
             let periods_ptr_raw = d_periods.as_device_ptr().as_raw() + (start * core::mem::size_of::<i32>()) as u64;
             let out_ptr_raw = d_out.as_device_ptr().as_raw() + (start * series_len * core::mem::size_of::<f32>()) as u64;
 
@@ -377,6 +422,7 @@ impl CudaTema {
             )?;
         }
 
+        // Ensure kernels complete before returning device buffer to callers that may use copy_to
         self.stream
             .synchronize()
             .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
@@ -419,6 +465,10 @@ impl CudaTema {
             unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }
                 .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
 
+        // Prefill output with quiet-NaN so the kernel only writes the warm region
+        memset_f32_qnan_async(&self.stream, &mut d_out_tm)
+            .map_err(|e| CudaTemaError::Cuda(format!("prefill qNaN failed: {}", e)))?;
+
         self.launch_many_series_kernel(
             &d_prices_tm,
             period,
@@ -428,6 +478,11 @@ impl CudaTema {
             &mut d_out_tm,
         )?;
 
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+
+        // Ensure kernels complete before returning device buffer
         self.stream
             .synchronize()
             .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
@@ -472,15 +527,8 @@ impl CudaTema {
             .get_function("tema_batch_f32")
             .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
 
-        // Policy: currently only Plain; record selection for debug parity
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto | BatchKernelPolicy::Plain { .. } => 1u32,
-        };
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
-        unsafe {
-            (*(self as *const _ as *mut CudaTema)).last_batch = Some(BatchKernelSelected::Plain { block_x });
-        }
+        let (grid, block, block_x) = self.warp_launch_dims(n_combos);
+        unsafe { (*(self as *const _ as *mut CudaTema)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
         self.maybe_log_batch_debug();
 
         unsafe {
@@ -519,14 +567,8 @@ impl CudaTema {
             .get_function("tema_multi_series_one_param_f32")
             .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
 
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto | ManySeriesKernelPolicy::OneD { .. } => 1u32,
-        };
-        let grid: GridSize = (num_series as u32, 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
-        unsafe {
-            (*(self as *const _ as *mut CudaTema)).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
-        }
+        let (grid, block, block_x) = self.warp_launch_dims(num_series);
+        unsafe { (*(self as *const _ as *mut CudaTema)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
         self.maybe_log_many_debug();
 
         unsafe {
@@ -676,6 +718,69 @@ pub mod benches {
         "tema"
     );
     pub use tema_benches::bench_profiles;
+}
+
+// --- L2 persistence hint (enabled by default) ---
+impl CudaTema {
+    fn try_enable_persisting_l2(&self, base_dev_ptr: u64, bytes: usize) {
+        unsafe {
+            use cust::device::Device as CuDevice;
+            use cust::sys::{
+                cuCtxSetLimit, cuDeviceGetAttribute, cuStreamSetAttribute,
+                CUaccessPolicyWindow_v1 as CUaccessPolicyWindow,
+                CUaccessProperty_enum as AccessProp,
+                CUdevice_attribute_enum as DevAttr,
+                CUlimit_enum as CULimit,
+                CUstreamAttrID_enum as StreamAttrId,
+                CUstreamAttrValue_v1 as CUstreamAttrValue,
+            };
+
+            // Query device max window size and clamp to requested bytes
+            let mut max_win_i32: i32 = 0;
+            if let Ok(dev) = CuDevice::get_device(self.device_id) {
+                let _ = cuDeviceGetAttribute(
+                    &mut max_win_i32 as *mut _,
+                    DevAttr::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+                    dev.as_raw(),
+                );
+            }
+            let max_bytes = (max_win_i32.max(0) as usize).min(bytes);
+            if max_bytes == 0 { return; }
+
+            // Best-effort set-aside for L2 persistence
+            let _ = cuCtxSetLimit(CULimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, max_bytes);
+
+            // Configure the stream access policy window
+            let mut val: CUstreamAttrValue = std::mem::zeroed();
+            val.accessPolicyWindow = CUaccessPolicyWindow {
+                base_ptr: base_dev_ptr as *mut std::ffi::c_void,
+                num_bytes: max_bytes,
+                hitRatio: 0.9f32,
+                hitProp: AccessProp::CU_ACCESS_PROPERTY_PERSISTING,
+                missProp: AccessProp::CU_ACCESS_PROPERTY_STREAMING,
+            };
+            let _ = cuStreamSetAttribute(
+                self.stream.as_inner(),
+                StreamAttrId::CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW,
+                &mut val as *mut _,
+            );
+        }
+    }
+}
+
+// --- utility: async memset to canonical quiet-NaN (0x7FC0_0000) ---
+#[inline]
+fn memset_f32_qnan_async(stream: &Stream, buf: &mut DeviceBuffer<f32>) -> Result<(), String> {
+    const QNAN_BITS: u32 = 0x7FC0_0000;
+    unsafe {
+        let ptr: cu::CUdeviceptr = buf.as_device_ptr().as_raw();
+        let n: usize = buf.len();
+        let st: cu::CUstream = stream.as_inner();
+        match cu::cuMemsetD32Async(ptr, QNAN_BITS, n, st) {
+            cu::CUresult::CUDA_SUCCESS => Ok(()),
+            e => Err(format!("cuMemsetD32Async failed: {:?}", e)),
+        }
+    }
 }
 
 struct BatchInputs {

@@ -19,6 +19,15 @@
 #include <math.h>
 #include <stdint.h>
 
+// Async copy (cp.async) via Cooperative Groups
+#include <cooperative_groups.h>
+#include <cooperative_groups/memcpy_async.h>
+namespace cg = cooperative_groups;
+
+#ifndef EHMA_USE_ASYNC
+#define EHMA_USE_ASYNC 1
+#endif
+
 __device__ __forceinline__ float ehma_hann_weight(int period, int idx) {
     // idx is [0, period) where 0 indexes the oldest sample.
     // Use 1 - cos(2*pi*x) = 2*sin^2(pi*x) and CUDA's sinpif for better accuracy.
@@ -323,6 +332,125 @@ DEFINE_EHMA_BATCH_TILED_PRECOMP_2X(ehma_batch_tiled_f32_2x_tile256, 256)
 DEFINE_EHMA_BATCH_TILED_PRECOMP_2X(ehma_batch_tiled_f32_2x_tile512, 512)
 
 // ---------------------------------------------------------------------------
+// Async, streamed precomputed-weight tiled batch (2x outputs/thread)
+//   - Uses cooperative_groups::memcpy_async (cp.async on SM >= 80)
+//   - Streams tiles across time within a block to overlap copy/compute
+//   - Keeps ALMA parity and existing EHMA math/warmup behavior
+
+template<int TILE>
+struct EhmaBatchTiledPrecomputed2X_Async {
+    static __device__ __forceinline__
+    void run(const float* __restrict__ prices,
+             const float* __restrict__ weights_flat,
+             const int*   __restrict__ periods,
+             const float* __restrict__ inv_norms, // ignored (weights are pre-normalized)
+             int max_period, int series_len, int n_combos, int first_valid,
+             float* __restrict__ out) {
+
+        const int THREADS = TILE / 2;    // two outputs per thread
+        if (blockDim.x != THREADS) return;
+
+        const int combo = blockIdx.y;
+        if (combo >= n_combos) return;
+
+        const int period = periods[combo];
+        if (period <= 0 || period > max_period) return;
+
+        // dynamic shared: weights + tile buffer
+        extern __shared__ __align__(16) unsigned char shraw[];
+        size_t off = 0;
+        float* w = reinterpret_cast<float*>(shraw + off);
+        off = ehma_align_up(off + size_t(period) * sizeof(float), 16);
+        // We allocate only one tile buffer; we still get cp.async benefits without double buffering
+        float* buf = reinterpret_cast<float*>(shraw + off);
+        const int total = TILE + period - 1;  // elements per tile load
+
+        // Load weights for this combo into shared (retain vectorized float4 path)
+        const float* wsrc = weights_flat + combo * max_period;
+        uintptr_t waddr = reinterpret_cast<uintptr_t>(wsrc);
+        if ((waddr & 0xF) == 0) {
+            int ve = period >> 2;
+            for (int vi = threadIdx.x; vi < ve; vi += THREADS) {
+                reinterpret_cast<float4*>(w)[vi] = reinterpret_cast<const float4*>(wsrc)[vi];
+            }
+            if ((threadIdx.x == 0) && ((period & 3) != 0)) {
+                int base = ve << 2;
+                for (int r = 0; r < (period & 3); ++r) w[base + r] = wsrc[base + r];
+            }
+        } else {
+            for (int i = threadIdx.x; i < period; i += THREADS) w[i] = wsrc[i];
+        }
+        __syncthreads();
+
+        const int warm = first_valid + period - 1;
+        const int combo_base = combo * series_len;
+
+        // --- stream tiles along x dimension (block covers multiple tiles) ---
+        for (int t0 = blockIdx.x * TILE; t0 < series_len; t0 += gridDim.x * TILE) {
+
+            // Compute tile base in input and whether the whole tile is in-bounds
+            const int p_base0 = t0 - (period - 1);
+            const bool in_bounds = (p_base0 >= 0) && ((p_base0 + total) <= series_len);
+
+#if EHMA_USE_ASYNC && (__CUDA_ARCH__ >= 800)
+            if (in_bounds) {
+                // Cooperative async copy: whole [total] floats to shared
+                auto block = cg::this_thread_block();
+                cg::memcpy_async(block, buf, prices + p_base0, sizeof(float) * total);
+                cg::wait(block);   // ensure cp.async completion
+                __syncthreads();
+            } else
+#endif
+            {
+                // Fallback (OOB zero-fill), also used on pre-Ampere
+                for (int i = threadIdx.x; i < total; i += THREADS) {
+                    int idx = p_base0 + i;
+                    buf[i] = (0 <= idx && idx < series_len) ? prices[idx] : 0.f;
+                }
+                __syncthreads();
+            }
+
+            // Each thread computes two consecutive outputs from shared buffer
+            int b = 2 * threadIdx.x;     // index within this tile
+            int t = t0 + b;
+
+            if (t < series_len) {
+                float out0 = NAN, out1 = NAN;
+                const bool can0 = (t >= warm);
+                const bool can1 = ((t + 1) < series_len) && ((t + 1) >= warm);
+                if (can0 && can1) {
+                    float s0, s1;
+                    ehma_dot2_shared(buf, b, w, period, s0, s1);
+                    out0 = s0; out1 = s1;
+                } else if (can0) {
+                    out0 = ehma_dot_uncomp(&buf[b], w, period);
+                } else if (can1) {
+                    out1 = ehma_dot_uncomp(&buf[b + 1], w, period);
+                }
+                out[combo_base + t] = out0;
+                if ((t + 1) < series_len) out[combo_base + t + 1] = out1;
+            }
+            __syncthreads();
+        } // tile streaming loop
+    }
+};
+
+#define DEFINE_EHMA_BATCH_TILED_PRECOMP_2X_ASYNC(NAME, TILE_OUT)                               \
+extern "C" __global__ void NAME(                                                               \
+  const float* __restrict__ prices, const float* __restrict__ weights_flat,                    \
+  const int*   __restrict__ periods, const float* __restrict__ inv_norms,                      \
+  int max_period, int series_len, int n_combos, int first_valid,                               \
+  float* __restrict__ out) {                                                                   \
+  EhmaBatchTiledPrecomputed2X_Async<TILE_OUT>::run(                                            \
+    prices, weights_flat, periods, inv_norms, max_period,                                      \
+    series_len, n_combos, first_valid, out);                                                   \
+}
+
+DEFINE_EHMA_BATCH_TILED_PRECOMP_2X_ASYNC(ehma_batch_tiled_f32_2x_tile128_async, 128)
+DEFINE_EHMA_BATCH_TILED_PRECOMP_2X_ASYNC(ehma_batch_tiled_f32_2x_tile256_async, 256)
+DEFINE_EHMA_BATCH_TILED_PRECOMP_2X_ASYNC(ehma_batch_tiled_f32_2x_tile512_async, 512)
+
+// ---------------------------------------------------------------------------
 // Many-series tiled (time-major), precomputed weights. Matches ALMA signature.
 
 __device__ __forceinline__
@@ -435,3 +563,100 @@ extern "C" __global__ void NAME(                                                
 
 DEFINE_EHMA_MS1P_TILED(ehma_ms1p_tiled_f32_tx128_ty2, 128, 2)
 DEFINE_EHMA_MS1P_TILED(ehma_ms1p_tiled_f32_tx128_ty4, 128, 4)
+
+// ---------------------------------------------------------------------------
+// Many-series tiled (time-major), async copy of row segments
+
+template<int TX, int TY>
+__device__ __forceinline__
+void ehma_ms1p_tiled_core_async(const float* __restrict__ prices_tm,
+                                const float* __restrict__ weights,
+                                int period, float inv_norm,    // inv_norm ignored (pre-normalized)
+                                int num_series, int series_len,
+                                const int* __restrict__ first_valids,
+                                float* __restrict__ out_tm) {
+    const int t0 = blockIdx.x * TX;
+    const int s0 = blockIdx.y * TY;
+    if (t0 >= series_len || s0 >= num_series) return;
+
+    const int total = TX + period - 1;
+    extern __shared__ __align__(16) unsigned char shraw[];
+    size_t off = 0;
+    float* w = reinterpret_cast<float*>(shraw + off);
+    off = ehma_align_up(off + size_t(period) * sizeof(float), 16);
+    float* tile = reinterpret_cast<float*>(shraw + off); // [total * TY]
+
+    // weights → shared (vectorized if aligned)
+    uintptr_t waddr = reinterpret_cast<uintptr_t>(weights);
+    const int THREADS = blockDim.x * blockDim.y;
+    if ((waddr & 0xF) == 0) {
+        int ve = period >> 2;
+        for (int vi = threadIdx.y * blockDim.x + threadIdx.x; vi < ve; vi += THREADS) {
+            reinterpret_cast<float4*>(w)[vi] = reinterpret_cast<const float4*>(weights)[vi];
+        }
+        if (threadIdx.x == 0 && threadIdx.y == 0 && ((period & 3) != 0)) {
+            int base = ve << 2;
+            for (int r = 0; r < (period & 3); ++r) w[base + r] = weights[base + r];
+        }
+    } else {
+        for (int i = threadIdx.y * blockDim.x + threadIdx.x; i < period; i += THREADS) w[i] = weights[i];
+    }
+    __syncthreads();
+
+    // Cooperative async staging of each tile row's TY segment
+    const int p0 = t0 - (period - 1);
+#if EHMA_USE_ASYNC && (__CUDA_ARCH__ >= 800)
+    auto block = cg::this_thread_block();
+#endif
+    for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
+        int t = p0 + dt;
+        if (t >= 0 && t < series_len) {
+            const float* src = &prices_tm[t * num_series + s0];
+            float* dst = &tile[dt * TY];
+#if EHMA_USE_ASYNC && (__CUDA_ARCH__ >= 800)
+            int seg = num_series - s0;
+            if (seg > TY) seg = TY;
+            cg::memcpy_async(block, dst, src, sizeof(float) * seg);
+#else
+            for (int j = threadIdx.y; j < TY; j += blockDim.y) {
+                int s = s0 + j;
+                dst[j] = (s < num_series) ? src[j] : 0.f;
+            }
+#endif
+        } else {
+            for (int j = threadIdx.y; j < TY; j += blockDim.y) {
+                int idx = dt * TY + j;
+                if (idx < total * TY) tile[idx] = 0.f;
+            }
+        }
+    }
+#if EHMA_USE_ASYNC && (__CUDA_ARCH__ >= 800)
+    cg::wait(block);  // ensure all row copies complete
+#endif
+    __syncthreads();
+
+    // Compute exactly as original tiled core
+    int s = s0 + threadIdx.y;
+    int t = t0 + threadIdx.x;
+    if (s >= num_series || t >= series_len) return;
+    int warm = first_valids[s] + period - 1;
+    int out_idx = t * num_series + s;
+    if (t < warm) { out_tm[out_idx] = NAN; return; }
+
+    int start = threadIdx.x; // within tile
+    const float* xptr = &tile[start * TY + threadIdx.y];
+    float acc = ehma_dot_stride_uncomp(xptr, TY, w, period);
+    out_tm[out_idx] = acc;
+}
+
+#define DEFINE_EHMA_MS1P_TILED_ASYNC(NAME, TX, TY)                                            \
+extern "C" __global__ void NAME(                                                              \
+  const float* __restrict__ prices_tm, const float* __restrict__ weights,                     \
+  int period, float inv_norm, int num_series, int series_len,                                 \
+  const int* __restrict__ first_valids, float* __restrict__ out_tm) {                         \
+  ehma_ms1p_tiled_core_async<TX, TY>(prices_tm, weights, period, inv_norm,                    \
+                                     num_series, series_len, first_valids, out_tm);           \
+}
+
+DEFINE_EHMA_MS1P_TILED_ASYNC(ehma_ms1p_tiled_f32_tx128_ty2_async, 128, 2)
+DEFINE_EHMA_MS1P_TILED_ASYNC(ehma_ms1p_tiled_f32_tx128_ty4_async, 128, 4)

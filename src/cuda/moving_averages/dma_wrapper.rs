@@ -190,14 +190,14 @@ impl CudaDma {
 
             // Configure stream access policy window
             let mut apw: cu::CUaccessPolicyWindow = zeroed();
-            apw.base_ptr = d_prices_ptr as u64;
+            apw.base_ptr = d_prices_ptr as usize as *mut c_void;
             apw.num_bytes = d_prices_bytes.min(max_window as usize);
             apw.hitRatio = 1.0;
             apw.hitProp = cu::CUaccessProperty::CU_ACCESS_PROPERTY_PERSISTING;
             apw.missProp = cu::CUaccessProperty::CU_ACCESS_PROPERTY_NORMAL;
 
             let mut attr: cu::CUstreamAttrValue = zeroed();
-            *attr.accessPolicyWindow.as_mut() = apw;
+            attr.accessPolicyWindow = apw;
 
             let hstream = self.stream.as_inner();
             let _ = cu::cuStreamSetAttribute(

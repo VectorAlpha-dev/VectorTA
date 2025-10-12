@@ -9,6 +9,7 @@ fn main() {
 #[cfg(feature = "cuda")]
 fn compile_cuda_kernels() {
     println!("cargo:rerun-if-changed=kernels/cuda");
+    println!("cargo:rerun-if-env-changed=CUDA_FILTER");
 
     let cuda_path = find_cuda_path();
 
@@ -230,6 +231,14 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
 
     println!("cargo:rerun-if-changed={rel_src}");
 
+    // Optional filter to speed up local iteration (e.g., CUDA_FILTER=gaussian,alma)
+    if let Ok(filter) = env::var("CUDA_FILTER") {
+        if !filter_allows(&filter, rel_src) {
+            eprintln!("[build.rs] CUDA_FILTER matched; skipping NVCC for {rel_src}");
+            return;
+        }
+    }
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
 
     if cfg!(target_os = "windows") && env::var("VCINSTALLDIR").is_err() {
@@ -255,7 +264,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         "--extended-lambda",
         "-ptx",
         "-O3",
-        "--use_fast_math",
+        // Avoid --use_fast_math to improve numerical parity with CPU for Reflex
         "-arch",
         &arch,
         "-o",
@@ -281,6 +290,13 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
         eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
 
+        let allow_placeholder = env::var("CUDA_PLACEHOLDER_ON_FAIL").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        if allow_placeholder {
+            eprintln!("[build.rs] Emitting placeholder PTX for {rel_src} at {}", ptx_path.display());
+            std::fs::write(&ptx_path, placeholder_ptx()).expect("write placeholder PTX");
+            return;
+        }
+
         if cfg!(target_os = "windows")
             && String::from_utf8_lossy(&output.stderr).contains("Cannot find compiler 'cl.exe'")
         {
@@ -294,6 +310,16 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
     }
 
     println!("Successfully compiled {rel_src} to {}", ptx_path.display());
+}
+
+#[cfg(feature = "cuda")]
+fn filter_allows(filter: &str, rel_src: &str) -> bool {
+    let tokens: Vec<&str> = filter
+        .split(|c| c == ',' || c == ' ')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if tokens.is_empty() { return true; }
+    tokens.iter().any(|t| rel_src.contains(t))
 }
 
 #[cfg(all(feature = "cuda", target_os = "windows"))]
@@ -331,4 +357,15 @@ fn find_vs_installation() -> Result<String, ()> {
 #[cfg(all(feature = "cuda", not(target_os = "windows")))]
 fn find_vs_installation() -> Result<String, ()> {
     Err(())
+}
+
+#[cfg(feature = "cuda")]
+fn placeholder_ptx() -> &'static str {
+    // Minimal valid PTX that defines no entry points; suitable for satisfying include_str!
+    // and Module::from_ptx() when the functions are never looked up.
+    r#".version 8.0
+.target sm_50
+.address_size 64
+// placeholder
+"#
 }

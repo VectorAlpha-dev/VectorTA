@@ -146,6 +146,60 @@ impl CudaJma {
             .map_err(|e| CudaJmaError::Cuda(e.to_string()))
     }
 
+    // --- Heuristics and helpers -------------------------------------------------
+    #[inline]
+    fn choose_block_x_auto(n: usize) -> u32 {
+        // Default for tiny-register kernels (Ada+): 256 threads per block.
+        // For small n, use next power-of-two up to 256 but at least one warp (32).
+        let hard = 256u32;
+        if n >= hard as usize {
+            hard
+        } else {
+            let t = n.next_power_of_two().max(32);
+            t.min(hard as usize) as u32
+        }
+    }
+
+    #[inline]
+    fn resolve_batch_block_x(&self, needed: usize) -> u32 {
+        match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x.clamp(32, 1024),
+            _ => {
+                if let Some(v) = std::env::var("JMA_BLOCK_X").ok().and_then(|s| s.parse::<u32>().ok()) {
+                    return v.clamp(32, 1024);
+                }
+                Self::choose_block_x_auto(needed)
+            }
+        }
+    }
+
+    #[inline]
+    fn resolve_many_block_x(&self, needed: usize) -> u32 {
+        match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.clamp(32, 1024),
+            _ => {
+                if let Some(v) = std::env::var("JMA_BLOCK_X").ok().and_then(|s| s.parse::<u32>().ok()) {
+                    return v.clamp(32, 1024);
+                }
+                Self::choose_block_x_auto(needed)
+            }
+        }
+    }
+
+    #[inline]
+    fn ceil_div_u32(n: usize, d: u32) -> u32 { ((n as u64 + d as u64 - 1) / d as u64) as u32 }
+
+    // Only chunks when grid.x would overflow for given block_x
+    #[inline]
+    fn grid_chunks_v2(n: usize, block_x: u32) -> impl Iterator<Item = (usize, usize)> {
+        const MAX_GRID_X: usize = i32::MAX as usize; // conservative
+        let max_elems = MAX_GRID_X.saturating_mul(block_x as usize);
+        (0..n).step_by(max_elems).map(move |start| {
+            let len = (n - start).min(max_elems);
+            (start, len)
+        })
+    }
+
     pub fn jma_batch_dev(
         &self,
         prices: &[f32],
@@ -271,6 +325,7 @@ impl CudaJma {
             ));
         }
 
+        let block_x = self.resolve_many_block_x(num_series);
         self.launch_many_series_kernel(
             d_prices_tm,
             alpha,
@@ -280,6 +335,7 @@ impl CudaJma {
             series_len,
             d_first_valids,
             d_out_tm,
+            block_x,
         )
     }
 
@@ -305,26 +361,31 @@ impl CudaJma {
             ));
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices).map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
-        let d_alphas = DeviceBuffer::from_slice(&inputs.alphas)
+        // Async allocations/copies (reduce host stalls)
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }
             .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
-        let d_one_minus_betas = DeviceBuffer::from_slice(&inputs.one_minus_betas)
+        let d_alphas = unsafe { DeviceBuffer::from_slice_async(&inputs.alphas, &self.stream) }
             .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
-        let d_phase_ratios = DeviceBuffer::from_slice(&inputs.phase_ratios)
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
+        let d_one_minus_betas =
+            unsafe { DeviceBuffer::from_slice_async(&inputs.one_minus_betas, &self.stream) }
                 .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
-        // Selection (only "Plain" with 1 thread for recurrence)
+        let d_phase_ratios =
+            unsafe { DeviceBuffer::from_slice_async(&inputs.phase_ratios, &self.stream) }
+                .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(series_len * n_combos, &self.stream) }
+                .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+
+        // Select block size and record selection
+        let block_x = self.resolve_batch_block_x(n_combos);
         unsafe {
             let this = self as *const _ as *mut CudaJma;
-            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x: 1 });
+            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
-        // Chunk combos to avoid grid limits; kernel maps combos to grid.x
-        for (start, len) in Self::grid_chunks(n_combos) {
+        // Modern chunking (rarely triggers, kept for correctness)
+        for (start, len) in Self::grid_chunks_v2(n_combos, block_x) {
             self.launch_batch_kernel_chunk(
                 &d_prices,
                 &d_alphas,
@@ -335,6 +396,7 @@ impl CudaJma {
                 len,
                 inputs.first_valid,
                 &mut d_out,
+                block_x,
             )?;
         }
 
@@ -372,18 +434,19 @@ impl CudaJma {
             ));
         }
 
-        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }
             .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
+        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream) }
             .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
         let mut d_out_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }
+            unsafe { DeviceBuffer::uninitialized_async(prices_tm_f32.len(), &self.stream) }
                 .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
 
         // Selection/introspection (plain 1D mapping)
+        let block_x = self.resolve_many_block_x(num_series);
         unsafe {
             let this = self as *const _ as *mut CudaJma;
-            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x: 1 });
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
         }
         self.maybe_log_many_debug();
 
@@ -396,6 +459,7 @@ impl CudaJma {
             series_len,
             &d_first_valids,
             &mut d_out_tm,
+            block_x,
         )?;
 
         self.stream
@@ -422,6 +486,7 @@ impl CudaJma {
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaJmaError> {
         // Back-compat: single-shot launch for all combos (no chunking)
+        let block_x = self.resolve_batch_block_x(n_combos);
         self.launch_batch_kernel_chunk(
             d_prices,
             d_alphas,
@@ -432,6 +497,7 @@ impl CudaJma {
             n_combos,
             first_valid,
             d_out,
+            block_x,
         )
     }
 
@@ -447,14 +513,16 @@ impl CudaJma {
         len_combos: usize,
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
+        block_x: u32,
     ) -> Result<(), CudaJmaError> {
         let func = self
             .module
             .get_function("jma_batch_f32")
             .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
 
-        let grid: GridSize = (len_combos as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        let grid_x = Self::ceil_div_u32(len_combos, block_x);
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -498,14 +566,16 @@ impl CudaJma {
         series_len: usize,
         d_first_valids: &DeviceBuffer<i32>,
         d_out_tm: &mut DeviceBuffer<f32>,
+        block_x: u32,
     ) -> Result<(), CudaJmaError> {
         let func = self
             .module
             .get_function("jma_many_series_one_param_f32")
             .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
 
-        let grid: GridSize = (num_series as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        let grid_x = Self::ceil_div_u32(num_series, block_x);
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
