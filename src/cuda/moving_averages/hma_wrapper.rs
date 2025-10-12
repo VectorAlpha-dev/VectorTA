@@ -16,10 +16,11 @@ use crate::indicators::moving_averages::hma::{HmaBatchRange, HmaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
@@ -83,6 +84,14 @@ impl Default for CudaHmaPolicy {
 }
 
 impl CudaHma {
+    #[inline]
+    fn ring_in_shared() -> bool {
+        true
+    }
+    #[inline]
+    fn assume_out_prefilled() -> bool {
+        true
+    }
     pub fn new(device_id: usize) -> Result<Self, CudaHmaError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
         let device =
@@ -92,7 +101,7 @@ impl CudaHma {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/hma_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -302,6 +311,7 @@ impl CudaHma {
         d_ring_ptr: u64,
         d_out_ptr: u64,
         block_x: u32,
+        shared_bytes: usize,
     ) -> Result<(), CudaHmaError> {
         let func = self
             .module
@@ -334,7 +344,7 @@ impl CudaHma {
             ];
 
             self.stream
-                .launch(&func, grid, block, 0, args)
+                .launch(&func, grid, block, shared_bytes as u32, args)
                 .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
         }
 
@@ -349,7 +359,8 @@ impl CudaHma {
         len: usize,
         max_sqrt_len: usize,
     ) -> Result<DeviceArrayF32, CudaHmaError> {
-        // VRAM estimate: prices + periods + ring + output
+        // VRAM estimate: prices + periods + ring + output (allocate ring to be robust
+        // to mismatched build macros; kernel may ignore it when using shared memory)
         let n = combos.len();
         let prices_bytes = len * std::mem::size_of::<f32>();
         let periods_bytes = n * std::mem::size_of::<i32>();
@@ -364,20 +375,35 @@ impl CudaHma {
             )));
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        // Async HtoD
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
+            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }
+            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
 
         let elems = n * len;
-        let mut d_ring: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(n * max_sqrt_len)
-                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(elems).map_err(|e| CudaHmaError::Cuda(e.to_string()))?
-        };
+        let mut d_ring: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n * max_sqrt_len) }
+                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+
+        // Device NaN prefill if kernel assumes prefilled output
+        if Self::assume_out_prefilled() {
+            unsafe {
+                let ptr: cu::CUdeviceptr = d_out.as_device_ptr().as_raw();
+                let n32: usize = d_out.len();
+                let st: cu::CUstream = self.stream.as_inner();
+                let res = cu::cuMemsetD32Async(ptr, 0x7FFF_FFFFu32, n32, st);
+                if res != cu::CUresult::CUDA_SUCCESS {
+                    return Err(CudaHmaError::Cuda(format!(
+                        "cuMemsetD32Async failed: {:?}",
+                        res
+                    )));
+                }
+            }
+        }
 
         // Policy: currently only Plain batch kernel; allow user override of block_x
         let block_x = match self.policy.batch {
@@ -387,7 +413,7 @@ impl CudaHma {
                 .and_then(|s| s.parse::<u32>().ok())
             {
                 Some(v) if v == 128 || v == 256 || v == 512 => v,
-                _ => 128,
+                _ => 256,
             },
         };
         unsafe {
@@ -396,29 +422,28 @@ impl CudaHma {
         }
         self.maybe_log_batch_debug();
 
-        // Chunk grid.y logically by offsetting pointers for periods/ring/out
-        for (start, len_chunk) in Self::grid_y_chunks(n) {
-            let periods_ptr = unsafe { d_periods.as_device_ptr().add(start).as_raw() };
-            let ring_ptr = unsafe { d_ring.as_device_ptr().add(start * max_sqrt_len).as_raw() };
-            let out_ptr = unsafe { d_out.as_device_ptr().add(start * len).as_raw() };
+        // Single grid-stride launch
+        let periods_ptr = unsafe { d_periods.as_device_ptr().as_raw() };
+        let ring_ptr = unsafe { d_ring.as_device_ptr().as_raw() };
+        let out_ptr = unsafe { d_out.as_device_ptr().as_raw() };
+        let shared_bytes: usize = if Self::ring_in_shared() {
+            max_sqrt_len * (block_x as usize) * std::mem::size_of::<f32>()
+        } else {
+            0
+        };
 
-            self.launch_batch_kernel(
-                &d_prices,
-                periods_ptr,
-                len,
-                len_chunk,
-                first_valid,
-                max_sqrt_len,
-                ring_ptr,
-                out_ptr,
-                block_x,
-            )?;
-        }
-
-        // Ensure completion before returning a VRAM handle
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        self.launch_batch_kernel(
+            &d_prices,
+            periods_ptr,
+            len,
+            n,
+            first_valid,
+            max_sqrt_len,
+            ring_ptr,
+            out_ptr,
+            block_x,
+            shared_bytes,
+        )?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -453,9 +478,32 @@ impl CudaHma {
             )));
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len, max_sqrt_len)?;
-        dev.buf
-            .copy_to(out)
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        // Async D2H with optional pinned staging for large outputs
+        let n_elems = out.len();
+        if n_elems >= (1 << 20) {
+            let mut pinned: LockedBuffer<f32> = unsafe {
+                LockedBuffer::uninitialized(n_elems)
+                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?
+            };
+            unsafe {
+                dev.buf
+                    .async_copy_to(pinned.as_mut_slice(), &self.stream)
+                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            }
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            out.copy_from_slice(pinned.as_slice());
+        } else {
+            unsafe {
+                dev.buf
+                    .async_copy_to(out, &self.stream)
+                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            }
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        }
         Ok((combos.len(), len, combos))
     }
 
@@ -535,9 +583,10 @@ impl CudaHma {
         series_len: usize,
         period: usize,
         max_sqrt_len: usize,
-        d_ring: &mut DeviceBuffer<f32>,
-        d_out: &mut DeviceBuffer<f32>,
+        d_ring_ptr: u64,
+        d_out_ptr: u64,
         block_x: u32,
+        shared_bytes: usize,
     ) -> Result<(), CudaHmaError> {
         let func = self
             .module
@@ -555,8 +604,8 @@ impl CudaHma {
             let mut rows_i = series_len as i32;
             let mut period_i = period as i32;
             let mut max_sqrt_i = max_sqrt_len as i32;
-            let mut ring_ptr = d_ring.as_device_ptr().as_raw();
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut ring_ptr = d_ring_ptr;
+            let mut out_ptr = d_out_ptr;
 
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
@@ -570,7 +619,7 @@ impl CudaHma {
             ];
 
             self.stream
-                .launch(&func, grid, block, 0, args)
+                .launch(&func, grid, block, shared_bytes as u32, args)
                 .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
         }
 
@@ -586,16 +635,31 @@ impl CudaHma {
         period: usize,
         sqrt_len: usize,
     ) -> Result<DeviceArrayF32, CudaHmaError> {
-        let d_prices =
-            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(first_valids)
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }
+            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        let d_first = unsafe { DeviceBuffer::from_slice_async(first_valids, &self.stream) }
             .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
 
         let elems = cols * rows;
-        let mut d_ring = unsafe { DeviceBuffer::<f32>::uninitialized(cols * sqrt_len) }
+        let mut d_ring: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * sqrt_len) }
             .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
             .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+
+        if Self::assume_out_prefilled() {
+            unsafe {
+                let ptr: cu::CUdeviceptr = d_out.as_device_ptr().as_raw();
+                let n32: usize = d_out.len();
+                let st: cu::CUstream = self.stream.as_inner();
+                let res = cu::cuMemsetD32Async(ptr, 0x7FFF_FFFFu32, n32, st);
+                if res != cu::CUresult::CUDA_SUCCESS {
+                    return Err(CudaHmaError::Cuda(format!(
+                        "cuMemsetD32Async failed: {:?}",
+                        res
+                    )));
+                }
+            }
+        }
 
         // Policy: currently only 1D many-series kernel; allow override of block_x
         let block_x = match self.policy.many_series {
@@ -605,7 +669,7 @@ impl CudaHma {
                 .and_then(|s| s.parse::<u32>().ok())
             {
                 Some(v) if v == 128 || v == 256 || v == 512 => v,
-                _ => 128,
+                _ => 256,
             },
         };
         unsafe {
@@ -614,6 +678,14 @@ impl CudaHma {
         }
         self.maybe_log_many_debug();
 
+        let ring_ptr = unsafe { d_ring.as_device_ptr().as_raw() };
+        let out_ptr = unsafe { d_out.as_device_ptr().as_raw() };
+        let shared_bytes: usize = if Self::ring_in_shared() {
+            sqrt_len * (block_x as usize) * std::mem::size_of::<f32>()
+        } else {
+            0
+        };
+
         self.launch_many_series_kernel(
             &d_prices,
             &d_first,
@@ -621,15 +693,11 @@ impl CudaHma {
             rows,
             period,
             sqrt_len,
-            &mut d_ring,
-            &mut d_out,
+            ring_ptr,
+            out_ptr,
             block_x,
+            shared_bytes,
         )?;
-
-        // Ensure completion before returning a VRAM handle
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -669,9 +737,33 @@ impl CudaHma {
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev =
             self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period, sqrt_len)?;
-        dev.buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))
+        // Async D2H with optional pinned staging
+        let n_elems = out_tm.len();
+        if n_elems >= (1 << 20) {
+            let mut pinned: LockedBuffer<f32> = unsafe {
+                LockedBuffer::uninitialized(n_elems)
+                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?
+            };
+            unsafe {
+                dev.buf
+                    .async_copy_to(pinned.as_mut_slice(), &self.stream)
+                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            }
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            out_tm.copy_from_slice(pinned.as_slice());
+        } else {
+            unsafe {
+                dev.buf
+                    .async_copy_to(out_tm, &self.stream)
+                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            }
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        }
+        Ok(())
     }
 }
 

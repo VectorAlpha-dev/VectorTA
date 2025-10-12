@@ -49,8 +49,16 @@ pub enum BatchKernelPolicy {
     Auto,
     Plain { block_x: u32 },
 }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
@@ -61,7 +69,17 @@ pub struct CudaHwmaPolicy {
     pub batch: BatchKernelPolicy,
     pub many_series: ManySeriesKernelPolicy,
 }
+pub struct CudaHwmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
 impl Default for CudaHwmaPolicy {
+    fn default() -> Self {
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
+    }
     fn default() -> Self {
         Self {
             batch: BatchKernelPolicy::Auto,
@@ -74,7 +92,13 @@ impl Default for CudaHwmaPolicy {
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -111,6 +135,9 @@ impl CudaHwma {
                 Err(_) => {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
                 }
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -129,6 +156,13 @@ impl CudaHwma {
         })
     }
 
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaHwmaPolicy,
+    ) -> Result<Self, CudaHwmaError> {
+        let mut s = Self::new(device_id)?;
+        s.policy = policy;
+        Ok(s)
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaHwmaPolicy,
@@ -208,12 +242,29 @@ impl CudaHwma {
             Err(_) => true,
         }
     }
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
+    }
     #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
         if !Self::mem_check_enabled() {
             return true;
         }
@@ -230,9 +281,18 @@ impl CudaHwma {
         if self.debug_batch_logged {
             return;
         }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] HWMA batch selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaHwma)).debug_batch_logged = true;
+                }
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] HWMA batch selected kernel: {:?}", sel);
                 }
@@ -248,9 +308,18 @@ impl CudaHwma {
         if self.debug_many_logged {
             return;
         }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] HWMA many-series selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaHwma)).debug_many_logged = true;
+                }
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] HWMA many-series selected kernel: {:?}", sel);
                 }
@@ -340,6 +409,8 @@ impl CudaHwma {
             BatchKernelPolicy::Auto => std::env::var("HWMA_BLOCK_X")
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok())
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
                 .filter(|&v| matches!(v, 64 | 128 | 256 | 512))
                 .unwrap_or(128),
         };
@@ -348,6 +419,10 @@ impl CudaHwma {
         let block: BlockSize = (block_x, 1, 1).into();
 
         // Introspection
+        unsafe {
+            (*(self as *const _ as *mut CudaHwma)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         unsafe {
             (*(self as *const _ as *mut CudaHwma)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -597,6 +672,10 @@ impl CudaHwma {
             (*(self as *const _ as *mut CudaHwma)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
+        unsafe {
+            (*(self as *const _ as *mut CudaHwma)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         unsafe {
@@ -717,6 +796,16 @@ pub mod benches {
         crate::indicators::moving_averages::hwma::HwmaParams,
         hwma_batch_dev,
         hwma_multi_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::hwma::HwmaBatchRange {
+            na: (0.05, 0.05 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001),
+            nb: (0.1, 0.1, 0.0),
+            nc: (0.1, 0.1, 0.0)
+        },
+        crate::indicators::moving_averages::hwma::HwmaParams {
+            na: Some(0.2),
+            nb: Some(0.1),
+            nc: Some(0.1)
+        },
         crate::indicators::moving_averages::hwma::HwmaBatchRange {
             na: (0.05, 0.05 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001),
             nb: (0.1, 0.1, 0.0),

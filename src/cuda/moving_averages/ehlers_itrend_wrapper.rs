@@ -15,6 +15,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{AsyncCopyDestination, DeviceCopy, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -131,7 +132,8 @@ impl CudaEhlersITrend {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_itrend_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            // O4 = most optimized JIT level; make it explicit.
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -272,8 +274,7 @@ impl CudaEhlersITrend {
             )));
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+        let d_prices = Self::h2d_from_slice_auto(data_f32, &self.stream)?;
         let d_warmups = DeviceBuffer::from_slice(&prepared.warmups)
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
         let d_max_dcs = DeviceBuffer::from_slice(&prepared.max_dcs)
@@ -293,6 +294,10 @@ impl CudaEhlersITrend {
             prepared.max_shared_dc,
             &mut d_out,
         )?;
+        // Deterministic completion before returning a finished buffer
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -365,7 +370,10 @@ impl CudaEhlersITrend {
             max_shared_dc,
             &mut d_out,
         )?;
-        self.synchronize()?;
+        // Single sync point at API boundary
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -456,8 +464,7 @@ impl CudaEhlersITrend {
             )));
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+        let d_prices = Self::h2d_from_slice_auto(data_tm_f32, &self.stream)?;
         let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
@@ -474,6 +481,10 @@ impl CudaEhlersITrend {
             prepared.max_dc,
             &mut d_out,
         )?;
+        // Deterministic completion before returning a finished buffer
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -564,12 +575,10 @@ impl CudaEhlersITrend {
             .get_function("ehlers_itrend_batch_f32")
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
 
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => block_x,
-            _ => 128,
-        };
+        // Serial per block; clamp to one thread. Dynamic shared memory matches kernel ring (max_dc+1).
+        let block_x: u32 = 1;
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes = (max_shared_dc * std::mem::size_of::<f32>()) as u32;
+        let shared_bytes = ((max_shared_dc + 1) * std::mem::size_of::<f32>()) as u32;
 
         let mut series_len_i = i32::try_from(series_len).map_err(|_| {
             CudaEhlersITrendError::InvalidInput("series_len exceeds i32::MAX".into())
@@ -585,41 +594,26 @@ impl CudaEhlersITrend {
         for (start, len) in Self::grid_x_chunks(n_combos) {
             let grid: GridSize = (len as u32, 1, 1).into();
 
-            // Create transient device slices for params/out with appropriate offsets
-            let d_warm_chunk = unsafe {
-                DeviceBuffer::from_raw_parts(
-                    d_warmups
-                        .as_device_ptr()
-                        .offset((start as isize).try_into().unwrap()),
-                    len,
-                )
-            };
-            let d_maxdc_chunk = unsafe {
-                DeviceBuffer::from_raw_parts(
-                    d_max_dcs
-                        .as_device_ptr()
-                        .offset((start as isize).try_into().unwrap()),
-                    len,
-                )
-            };
-            let mut d_out_chunk = unsafe {
-                DeviceBuffer::from_raw_parts(
-                    d_out
-                        .as_device_ptr()
-                        .offset(((start * series_len) as isize).try_into().unwrap()),
-                    len * series_len,
-                )
-            };
-
             let mut combos_i = i32::try_from(len).map_err(|_| {
                 CudaEhlersITrendError::InvalidInput("n_combos exceeds i32::MAX".into())
             })?;
 
+            // Compute raw device pointers for this chunk without creating temporary owners.
+            let warm_ptr_raw = unsafe { d_warmups.as_device_ptr().offset(start as isize).as_raw() };
+            let maxdc_ptr_raw =
+                unsafe { d_max_dcs.as_device_ptr().offset(start as isize).as_raw() };
+            let out_ptr_raw = unsafe {
+                d_out
+                    .as_device_ptr()
+                    .offset((start * series_len) as isize)
+                    .as_raw()
+            };
+
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                let mut warm_ptr = d_warm_chunk.as_device_ptr().as_raw();
-                let mut max_dc_ptr = d_maxdc_chunk.as_device_ptr().as_raw();
-                let mut out_ptr = d_out_chunk.as_device_ptr().as_raw();
+                let mut warm_ptr = warm_ptr_raw;
+                let mut max_dc_ptr = maxdc_ptr_raw;
+                let mut out_ptr = out_ptr_raw;
                 let mut args: [*mut c_void; 8] = [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut warm_ptr as *mut _ as *mut c_void,
@@ -634,19 +628,13 @@ impl CudaEhlersITrend {
                     .launch(&func, grid, block, shared_bytes, &mut args)
                     .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
             }
-            // Prevent RAII drop of temporary views (they alias the original buffers)
-            std::mem::forget(d_warm_chunk);
-            std::mem::forget(d_maxdc_chunk);
-            std::mem::forget(d_out_chunk);
         }
         unsafe {
             (*(self as *const _ as *mut CudaEhlersITrend)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))
+        Ok(())
     }
 
     fn launch_many_series_kernel(
@@ -668,12 +656,10 @@ impl CudaEhlersITrend {
             .get_function("ehlers_itrend_many_series_one_param_f32")
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
 
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } => block_x,
-            _ => 128,
-        };
+        // Serial per block; clamp to one thread. Dynamic shared memory matches kernel ring (max_dc+1).
+        let block_x: u32 = 1;
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes = (max_dc * std::mem::size_of::<f32>()) as u32;
+        let shared_bytes = ((max_dc + 1) * std::mem::size_of::<f32>()) as u32;
 
         let mut num_series_i = i32::try_from(num_series).map_err(|_| {
             CudaEhlersITrendError::InvalidInput("num_series exceeds i32::MAX".into())
@@ -690,34 +676,21 @@ impl CudaEhlersITrend {
         for (start, len) in Self::grid_x_chunks(num_series) {
             let grid: GridSize = (len as u32, 1, 1).into();
 
-            let d_first_chunk = unsafe {
-                DeviceBuffer::from_raw_parts(
-                    d_first_valids
-                        .as_device_ptr()
-                        .offset((start as isize).try_into().unwrap()),
-                    len,
-                )
+            let first_ptr_raw = unsafe {
+                d_first_valids
+                    .as_device_ptr()
+                    .offset(start as isize)
+                    .as_raw()
             };
-            let mut d_out_chunk = unsafe {
-                DeviceBuffer::from_raw_parts(
-                    d_out_tm
-                        .as_device_ptr()
-                        .offset((start as isize).try_into().unwrap()),
-                    len * series_len,
-                )
-            };
+            let out_ptr_raw = unsafe { d_out_tm.as_device_ptr().offset(start as isize).as_raw() };
+            let prices_ptr_raw =
+                unsafe { d_prices_tm.as_device_ptr().offset(start as isize).as_raw() };
 
             unsafe {
                 // time-major: base-pointer offset by `start` series is correct when passing full stride
-                let prices_chunk = DeviceBuffer::from_raw_parts(
-                    d_prices_tm
-                        .as_device_ptr()
-                        .offset((start as isize).try_into().unwrap()),
-                    len * series_len,
-                );
-                let mut prices_ptr = prices_chunk.as_device_ptr().as_raw();
-                let mut first_ptr = d_first_chunk.as_device_ptr().as_raw();
-                let mut out_ptr = d_out_chunk.as_device_ptr().as_raw();
+                let mut prices_ptr = prices_ptr_raw;
+                let mut first_ptr = first_ptr_raw;
+                let mut out_ptr = out_ptr_raw;
                 let mut args: [*mut c_void; 7] = [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut first_ptr as *mut _ as *mut c_void,
@@ -730,20 +703,14 @@ impl CudaEhlersITrend {
                 self.stream
                     .launch(&func, grid, block, shared_bytes, &mut args)
                     .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
-                // Prevent dropping the prices view early
-                std::mem::forget(prices_chunk);
             }
-            std::mem::forget(d_first_chunk);
-            std::mem::forget(d_out_chunk);
         }
         unsafe {
             (*(self as *const _ as *mut CudaEhlersITrend)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
         self.maybe_log_many_debug();
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))
+        Ok(())
     }
 
     fn prepare_batch_inputs(
@@ -888,6 +855,34 @@ impl CudaEhlersITrend {
             num_series,
             series_len,
         })
+    }
+}
+
+impl CudaEhlersITrend {
+    #[inline]
+    fn h2d_from_slice_auto<T: DeviceCopy>(
+        src: &[T],
+        stream: &Stream,
+    ) -> Result<DeviceBuffer<T>, CudaEhlersITrendError> {
+        use cust::memory::DeviceBuffer;
+        const PINNED_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
+        let bytes = src.len() * core::mem::size_of::<T>();
+        if bytes >= PINNED_THRESHOLD_BYTES {
+            // Use page-locked host memory + async copy for large transfers
+            let pinned = LockedBuffer::from_slice(src)
+                .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+            let mut dst = unsafe {
+                DeviceBuffer::uninitialized_async(src.len(), stream)
+                    .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?
+            };
+            unsafe {
+                dst.async_copy_from(&pinned, stream)
+                    .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+            }
+            Ok(dst)
+        } else {
+            DeviceBuffer::from_slice(src).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))
+        }
     }
 }
 

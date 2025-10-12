@@ -15,17 +15,16 @@
 
 use super::DeviceArrayF32;
 use crate::indicators::moving_averages::gaussian::{GaussianBatchRange, GaussianParams};
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::AsyncCopyDestination;
-use cust::memory::{DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
 use std::env;
-use std::ffi::c_void;
+use std::ffi::{c_void, CStr};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -364,10 +363,6 @@ impl CudaGaussian {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
-
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -407,6 +402,18 @@ impl CudaGaussian {
         let period = params.period.unwrap_or(14);
         let poles = params.poles.unwrap_or(4);
 
+        // Optional: populate GAUSS_COEFFS64 constant if present in the module.
+        if let Ok(mut sym) = self.module.get_global::<[f64; COEFF_STRIDE]>(unsafe {
+            CStr::from_bytes_with_nul_unchecked(b"GAUSS_COEFFS64\0")
+        }) {
+            let mut coeff64 = [0.0f64; COEFF_STRIDE];
+            for i in 0..COEFF_STRIDE {
+                coeff64[i] = prepared.coeffs[i] as f64;
+            }
+            sym.copy_from(&coeff64)
+                .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        }
+
         self.launch_many_series_kernel(
             &d_prices_tm,
             &d_coeffs,
@@ -417,10 +424,6 @@ impl CudaGaussian {
             &d_first_valids,
             &mut d_out,
         )?;
-
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -440,79 +443,63 @@ impl CudaGaussian {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaGaussianError> {
-        let func = self
+        let mut func = self
             .module
             .get_function("gaussian_batch_f32")
             .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
 
-        // Only a single-thread path is implemented by the kernel; allow a
-        // configurable block-x for parity with ALMA policy, but clamp to 1.
+        // Prefer L1 (harmless hint on arch where fixed)
+        func.set_cache_config(CacheConfig::PreferL1)
+            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+
+        // Ask CUDA for an occupancy-guided block size suggestion.
+        let (_min_grid, suggested_block) = func
+            .suggested_launch_configuration(0, BlockSize::xy(1024, 1))
+            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+
+        // Allow explicit policy override (benches); else use suggestion.
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
-            BatchKernelPolicy::Auto => 1,
+            BatchKernelPolicy::Auto => suggested_block.max(128),
         };
-        let block: BlockSize = (block_x.min(1), 1, 1).into();
+        let block: BlockSize = BlockSize::xyz(block_x, 1, 1);
 
-        // Introspection (constant for all chunks)
+        // Grid-stride across combos: single launch covers all work.
+        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid: GridSize = GridSize::xyz(grid_x.max(1), 1, 1);
+
+        // Introspection
         unsafe {
             let this = self as *const _ as *mut CudaGaussian;
-            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x: 1 });
+            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
-        // Chunk grid to avoid excessive grid dimension for very large sweeps.
-        const MAX_CHUNK: usize = 65_535;
-        let mut launched = 0usize;
-        while launched < n_combos {
-            let chunk = (n_combos - launched).min(MAX_CHUNK);
-            let grid: GridSize = (chunk as u32, 1, 1).into();
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut poles_ptr = d_poles.as_device_ptr().as_raw();
+            let mut coeffs_ptr = d_coeffs.as_device_ptr().as_raw();
+            let mut coeff_stride_i = COEFF_STRIDE as i32;
+            let mut series_len_i = series_len as i32;
+            let mut combos_i = n_combos as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
 
-            unsafe {
-                let prices_base = d_prices.as_device_ptr().as_raw();
-                let periods_base = d_periods.as_device_ptr().as_raw();
-                let poles_base = d_poles.as_device_ptr().as_raw();
-                let coeffs_base = d_coeffs.as_device_ptr().as_raw();
-                let out_base = d_out.as_device_ptr().as_raw();
-
-                // Byte offsets for chunk starts
-                let periods_ptr =
-                    periods_base + (launched as u64) * (std::mem::size_of::<i32>() as u64);
-                let poles_ptr =
-                    poles_base + (launched as u64) * (std::mem::size_of::<i32>() as u64);
-                let coeffs_ptr = coeffs_base
-                    + (launched as u64)
-                        * (COEFF_STRIDE as u64)
-                        * (std::mem::size_of::<f32>() as u64);
-                let out_ptr = out_base
-                    + (launched as u64) * (series_len as u64) * (std::mem::size_of::<f32>() as u64);
-
-                let mut prices_ptr_m = prices_base;
-                let mut periods_ptr_m = periods_ptr;
-                let mut poles_ptr_m = poles_ptr;
-                let mut coeffs_ptr_m = coeffs_ptr;
-                let mut coeff_stride_i = COEFF_STRIDE as i32;
-                let mut series_len_i = series_len as i32;
-                let mut combos_i = chunk as i32;
-                let mut first_valid_i = first_valid as i32;
-                let mut out_ptr_m = out_ptr;
-
-                let args: &mut [*mut c_void] = &mut [
-                    &mut prices_ptr_m as *mut _ as *mut c_void,
-                    &mut periods_ptr_m as *mut _ as *mut c_void,
-                    &mut poles_ptr_m as *mut _ as *mut c_void,
-                    &mut coeffs_ptr_m as *mut _ as *mut c_void,
-                    &mut coeff_stride_i as *mut _ as *mut c_void,
-                    &mut series_len_i as *mut _ as *mut c_void,
-                    &mut combos_i as *mut _ as *mut c_void,
-                    &mut first_valid_i as *mut _ as *mut c_void,
-                    &mut out_ptr_m as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
-            }
-
-            launched += chunk;
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut poles_ptr as *mut _ as *mut c_void,
+                &mut coeffs_ptr as *mut _ as *mut c_void,
+                &mut coeff_stride_i as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
         }
         Ok(())
     }
@@ -528,9 +515,13 @@ impl CudaGaussian {
         d_first_valids: &DeviceBuffer<i32>,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaGaussianError> {
-        let func = self
+        let mut func = self
             .module
             .get_function("gaussian_many_series_one_param_f32")
+            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+
+        // Hint: prefer L1
+        func.set_cache_config(CacheConfig::PreferL1)
             .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
 
         let block_x = match self.policy.many_series {
@@ -720,16 +711,7 @@ impl CudaGaussian {
 
     #[inline]
     fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
+        mem_get_info().ok()
     }
 
     #[inline]

@@ -383,7 +383,7 @@ impl CudaFwma {
             ));
         }
         // Select plain batch kernel (only variant available today)
-        let mut func = self
+        let func = self
             .module
             .get_function("fwma_batch_f32")
             .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
@@ -602,7 +602,7 @@ impl CudaFwma {
             ));
         }
 
-        let mut func = self
+        let func = self
             .module
             .get_function("fwma_multi_series_one_param_f32")
             .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
@@ -769,7 +769,11 @@ impl CudaFwma {
             .synchronize()
             .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
 
-        // Direct device → host slice copy (one copy)
+        // Use pinned buffer for potentially large copies
+        let mut pinned: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(cols * rows)
+                .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?
+        };
         d_out_tm
             .copy_to(out_tm)
             .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;

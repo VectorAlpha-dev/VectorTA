@@ -662,7 +662,7 @@ impl CudaCwma {
         } else {
             // Plain kernel path (use occupancy suggestion when Auto)
             let shared_bytes = ((max_period.saturating_sub(1)) * std::mem::size_of::<f32>()) as u32;
-            let func = self
+            let mut func = self
                 .module
                 .get_function("cwma_batch_f32")
                 .map_err(|e| CudaCwmaError::Cuda(e.to_string()))?;

@@ -554,6 +554,14 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         cmd.arg("-lineinfo");
     }
 
+    // Enable HMA kernel turbo macros by default (shared ring + prefilled output)
+    if rel_src.ends_with("/moving_averages/hma_kernel.cu")
+        || rel_src.ends_with("\\moving_averages\\hma_kernel.cu")
+    {
+        cmd.arg("-DHMA_RING_IN_SHARED=1");
+        cmd.arg("-DHMA_ASSUME_OUT_PREFILLED=1");
+    }
+
     cmd.args(&[
         "-arch",
         &arch,
@@ -610,6 +618,12 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
             }
             if env::var("CUDA_DEBUG").ok().as_deref() == Some("1") {
                 cmd2.arg("-lineinfo");
+            }
+            if rel_src.ends_with("/moving_averages/hma_kernel.cu")
+                || rel_src.ends_with("\\moving_averages\\hma_kernel.cu")
+            {
+                cmd2.arg("-DHMA_RING_IN_SHARED=1");
+                cmd2.arg("-DHMA_ASSUME_OUT_PREFILLED=1");
             }
             cmd2.args(&[
                 "-arch",
@@ -714,4 +728,15 @@ fn find_vs_installation() -> Result<String, ()> {
 #[cfg(all(feature = "cuda", not(target_os = "windows")))]
 fn find_vs_installation() -> Result<String, ()> {
     Err(())
+}
+
+#[cfg(feature = "cuda")]
+fn placeholder_ptx() -> &'static str {
+    // Minimal valid PTX that defines no entry points; suitable for satisfying include_str!
+    // and Module::from_ptx() when the functions are never looked up.
+    r#".version 8.0
+.target sm_50
+.address_size 64
+// placeholder
+"#
 }

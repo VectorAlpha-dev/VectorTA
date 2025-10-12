@@ -22,6 +22,7 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
@@ -71,6 +72,10 @@ impl Default for CudaSamaPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -80,8 +85,14 @@ impl Default for CudaSamaPolicy {
 pub enum SamaBatchKernelSelected {
     Plain { block_x: u32 },
 }
+pub enum SamaBatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
+pub enum SamaManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 pub enum SamaManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -108,6 +119,8 @@ impl CudaSama {
         cust::init(CudaFlags::empty()).map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sama_kernel.ptx"));
@@ -119,6 +132,8 @@ impl CudaSama {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                 if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
@@ -149,6 +164,10 @@ impl CudaSama {
         device_id: usize,
         policy: CudaSamaPolicy,
     ) -> Result<Self, CudaSamaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaSamaPolicy,
+    ) -> Result<Self, CudaSamaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
@@ -158,7 +177,13 @@ impl CudaSama {
     pub fn set_policy(&mut self, policy: CudaSamaPolicy) {
         self.policy = policy;
     }
+    pub fn set_policy(&mut self, policy: CudaSamaPolicy) {
+        self.policy = policy;
+    }
     #[inline]
+    pub fn policy(&self) -> &CudaSamaPolicy {
+        &self.policy
+    }
     pub fn policy(&self) -> &CudaSamaPolicy {
         &self.policy
     }
@@ -166,7 +191,13 @@ impl CudaSama {
     pub fn selected_batch_kernel(&self) -> Option<SamaBatchKernelSelected> {
         self.last_batch
     }
+    pub fn selected_batch_kernel(&self) -> Option<SamaBatchKernelSelected> {
+        self.last_batch
+    }
     #[inline]
+    pub fn selected_many_series_kernel(&self) -> Option<SamaManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn selected_many_series_kernel(&self) -> Option<SamaManySeriesKernelSelected> {
         self.last_many
     }
@@ -179,12 +210,11 @@ impl CudaSama {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
-        // VRAM estimate (prices + params + output)
+        // VRAM estimate (prices + params + output). Note: first_valids filled on device.
         let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
         let params_bytes = n_combos
             * (std::mem::size_of::<i32>() // lengths
-                + 2 * std::mem::size_of::<f32>() // alphas
-                + std::mem::size_of::<i32>()); // first_valids
+                + 2 * std::mem::size_of::<f32>()); // alphas
         let out_bytes = n_combos * prepared.series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + params_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024; // ~64MB
@@ -203,14 +233,22 @@ impl CudaSama {
             .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
         let d_maj = DeviceBuffer::from_slice(&prepared.maj_alphas)
             .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&prepared.first_valids)
-            .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
+
+        // Allocate device first_valids and fill it on-device (avoid H->D copy)
+        let mut d_first: DeviceBuffer<i32> = unsafe {
+            DeviceBuffer::uninitialized(n_combos).map_err(|e| CudaSamaError::Cuda(e.to_string()))?
+        };
+        memset_i32_async(&self.stream, &mut d_first, prepared.first_valid as i32)?;
+
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(prepared.series_len * n_combos)
                 .map_err(|e| CudaSamaError::Cuda(e.to_string()))?
         };
 
-        self.launch_batch_kernel_sliced(
+        // Compute max_window for this run; we will still compute per-slice values.
+        let max_window_total: i32 = *prepared.lengths_i32.iter().max().unwrap_or(&0);
+
+        self.launch_batch_kernel_sliced_opt(
             &d_prices,
             &d_lengths,
             &d_min,
@@ -218,6 +256,8 @@ impl CudaSama {
             &d_first,
             prepared.series_len,
             n_combos,
+            Some(&prepared.lengths_i32),
+            max_window_total,
             &mut d_out,
         )?;
 
@@ -270,7 +310,14 @@ impl CudaSama {
             ));
         }
 
-        self.launch_batch_kernel_sliced(
+        // Derive max_window with one small D->H copy to enable per-slice smem sizing
+        let mut h_lengths = vec![0i32; n_combos];
+        d_lengths
+            .copy_to(&mut h_lengths)
+            .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
+        let max_window_total: i32 = *h_lengths.iter().max().unwrap_or(&0);
+
+        self.launch_batch_kernel_sliced_opt(
             d_prices,
             d_lengths,
             d_min_alphas,
@@ -278,6 +325,8 @@ impl CudaSama {
             d_first_valids,
             series_len,
             n_combos,
+            Some(&h_lengths),
+            max_window_total,
             d_out,
         )
     }
@@ -308,6 +357,8 @@ impl CudaSama {
         series_len: usize,
         params: &SamaParams,
     ) -> Result<DeviceArrayF32, CudaSamaError> {
+        let prepared =
+            Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
@@ -344,6 +395,11 @@ impl CudaSama {
             &mut d_out,
         )?;
 
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: series_len,
+            cols: num_series,
+        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: series_len,
@@ -424,7 +480,7 @@ impl CudaSama {
 
     // Launch helper that chunks across parameter combos to respect grid limits
     // and supports large sweeps. Each chunk updates param/output pointers.
-    fn launch_batch_kernel_sliced(
+    fn launch_batch_kernel_sliced_opt(
         &self,
         d_prices: &DeviceBuffer<f32>,
         d_lengths: &DeviceBuffer<i32>,
@@ -433,9 +489,14 @@ impl CudaSama {
         d_first_valids: &DeviceBuffer<i32>,
         series_len: usize,
         n_combos: usize,
+        host_lengths_opt: Option<&[i32]>,
+        max_window_total: i32,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSamaError> {
         let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto
+            | BatchKernelPolicy::Plain { .. }
+            | BatchKernelPolicy::Tiled { .. } => 256u32,
             BatchKernelPolicy::Auto
             | BatchKernelPolicy::Plain { .. }
             | BatchKernelPolicy::Tiled { .. } => 256u32,
@@ -452,10 +513,14 @@ impl CudaSama {
             (*(self as *const _ as *mut CudaSama)).last_batch =
                 Some(SamaBatchKernelSelected::Plain { block_x });
         }
+        unsafe {
+            (*(self as *const _ as *mut CudaSama)).last_batch =
+                Some(SamaBatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
 
-        // Chunk across combos to keep launch sizes manageable (<= 65_535 per slice)
-        const MAX_SLICE: usize = 65_535; // conservative even though grid.x allows much larger
+        // Chunk across combos; modern gridDim.x permits very large x
+        const MAX_SLICE: usize = 2_147_483_647; // modern x-dim limit
         let mut start = 0usize;
         while start < n_combos {
             let len = (n_combos - start).min(MAX_SLICE);
@@ -467,8 +532,15 @@ impl CudaSama {
                 let mut first_ptr = d_first_valids.as_device_ptr().add(start).as_raw();
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = len as i32;
+                // Choose per-slice max_window when host lengths present, else total
+                let slice_max_window: i32 = if let Some(host_lengths) = host_lengths_opt {
+                    *host_lengths[start..start + len].iter().max().unwrap_or(&0)
+                } else {
+                    max_window_total
+                };
+                let mut max_window_i = slice_max_window;
                 let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();
-                let mut args: [*mut c_void; 8] = [
+                let mut args: [*mut c_void; 9] = [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut lengths_ptr as *mut _ as *mut c_void,
                     &mut min_ptr as *mut _ as *mut c_void,
@@ -476,16 +548,23 @@ impl CudaSama {
                     &mut first_ptr as *mut _ as *mut c_void,
                     &mut series_len_i as *mut _ as *mut c_void,
                     &mut combos_i as *mut _ as *mut c_void,
+                    &mut max_window_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
                 let grid: GridSize = (len as u32, 1, 1).into();
+                // Dynamic shared memory for two deques of indices
+                let shmem_bytes: u32 =
+                    (2 * ((slice_max_window as usize) + 1) * std::mem::size_of::<i32>()) as u32;
                 self.stream
-                    .launch(&func, grid, block, 0, &mut args)
+                    .launch(&func, grid, block, shmem_bytes, &mut args)
                     .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
             }
             start += len;
         }
 
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaSamaError::Cuda(e.to_string()))
         self.stream
             .synchronize()
             .map_err(|e| CudaSamaError::Cuda(e.to_string()))
@@ -506,6 +585,9 @@ impl CudaSama {
             ManySeriesKernelPolicy::Auto
             | ManySeriesKernelPolicy::OneD { .. }
             | ManySeriesKernelPolicy::Tiled2D { .. } => 256u32,
+            ManySeriesKernelPolicy::Auto
+            | ManySeriesKernelPolicy::OneD { .. }
+            | ManySeriesKernelPolicy::Tiled2D { .. } => 256u32,
         };
         let block: BlockSize = (block_x, 1, 1).into();
         let grid: GridSize = (num_series as u32, 1, 1).into();
@@ -520,7 +602,16 @@ impl CudaSama {
             (*(self as *const _ as *mut CudaSama)).last_many =
                 Some(SamaManySeriesKernelSelected::OneD { block_x });
         }
+        unsafe {
+            (*(self as *const _ as *mut CudaSama)).last_many =
+                Some(SamaManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
+
+        // Dynamic shared memory for deques (cap = length + 1)
+        let max_window = length.max(0);
+        let shmem_bytes: u32 =
+            (2 * ((max_window as usize) + 1) * std::mem::size_of::<i32>()) as u32;
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -530,8 +621,9 @@ impl CudaSama {
             let mut maj_a = maj_alpha;
             let mut num_series_i = num_series as i32;
             let mut series_len_i = series_len as i32;
+            let mut max_window_i = max_window;
             let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
-            let mut args: [*mut c_void; 8] = [
+            let mut args: [*mut c_void; 9] = [
                 &mut prices_ptr as *mut _ as *mut c_void,
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut length_i as *mut _ as *mut c_void,
@@ -539,13 +631,17 @@ impl CudaSama {
                 &mut maj_a as *mut _ as *mut c_void,
                 &mut num_series_i as *mut _ as *mut c_void,
                 &mut series_len_i as *mut _ as *mut c_void,
+                &mut max_window_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&func, grid, block, 0, &mut args)
+                .launch(&func, grid, block, shmem_bytes, &mut args)
                 .map_err(|e| CudaSamaError::Cuda(e.to_string()))?;
         }
 
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaSamaError::Cuda(e.to_string()))
         self.stream
             .synchronize()
             .map_err(|e| CudaSamaError::Cuda(e.to_string()))
@@ -697,9 +793,15 @@ impl CudaSama {
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if !Self::mem_check_enabled() {
             return true;
         }
@@ -716,12 +818,20 @@ impl CudaSama {
         if self.debug_batch_logged {
             return;
         }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] SAMA batch selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaSama)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaSama)).debug_batch_logged = true;
@@ -736,8 +846,13 @@ impl CudaSama {
         if self.debug_many_logged {
             return;
         }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
@@ -746,7 +861,32 @@ impl CudaSama {
                 unsafe {
                     (*(self as *const _ as *mut CudaSama)).debug_many_logged = true;
                 }
+                unsafe {
+                    (*(self as *const _ as *mut CudaSama)).debug_many_logged = true;
+                }
             }
+        }
+    }
+}
+
+// --- utility: async memset to fill i32 buffers on device ---
+#[inline]
+fn memset_i32_async(
+    stream: &Stream,
+    buf: &mut DeviceBuffer<i32>,
+    value: i32,
+) -> Result<(), CudaSamaError> {
+    unsafe {
+        let ptr: cu::CUdeviceptr = buf.as_device_ptr().as_raw();
+        let n: usize = buf.len();
+        let st: cu::CUstream = stream.as_inner();
+        let res = cu::cuMemsetD32Async(ptr, value as u32, n, st);
+        match res {
+            cu::CUresult::CUDA_SUCCESS => Ok(()),
+            e => Err(CudaSamaError::Cuda(format!(
+                "cuMemsetD32Async failed: {:?}",
+                e
+            ))),
         }
     }
 }
@@ -764,6 +904,16 @@ pub mod benches {
         crate::indicators::moving_averages::sama::SamaParams,
         sama_batch_dev,
         sama_many_series_one_param_time_major_dev,
+        crate::indicators::moving_averages::sama::SamaBatchRange {
+            length: (64, 64 + PARAM_SWEEP - 1, 1),
+            maj_length: (14, 14, 0),
+            min_length: (6, 6, 0)
+        },
+        crate::indicators::moving_averages::sama::SamaParams {
+            length: Some(64),
+            maj_length: Some(14),
+            min_length: Some(6)
+        },
         crate::indicators::moving_averages::sama::SamaBatchRange {
             length: (64, 64 + PARAM_SWEEP - 1, 1),
             maj_length: (14, 14, 0),

@@ -42,6 +42,10 @@ pub struct CudaSqwma {
     module: Module,
     stream: Stream,
     _context: Context,
+    // Cached device attributes for launch sizing
+    sm_count: i32,
+    max_grid_x: u32,
+    _warp_size: i32,
 }
 
 impl CudaSqwma {
@@ -52,25 +56,40 @@ impl CudaSqwma {
             .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
 
+        // Cache basic device attributes for launch heuristics
+        let sm_count = device
+            .get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)
+            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        let max_grid_x = device
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))? as u32;
+        let warp_size = device
+            .get_attribute(cust::device::DeviceAttribute::WarpSize)
+            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sqwma_kernel.ptx"));
-        let module = match Module::from_ptx(
+
+        // Prefer higher JIT opt level first, then fallback for compatibility
+        let module = Module::from_ptx(
             ptx,
             &[
                 ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
+                ModuleJitOption::OptLevel(OptLevel::O4),
             ],
-        ) {
-            Ok(m) => m,
-            Err(_) => {
-                // Retry with simpler options for better driver/toolkit compatibility
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?
-                }
-            }
-        };
+        )
+        .or_else(|_| {
+            Module::from_ptx(
+                ptx,
+                &[
+                    ModuleJitOption::DetermineTargetFromContext,
+                    ModuleJitOption::OptLevel(OptLevel::O2),
+                ],
+            )
+        })
+        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+        .or_else(|_| Module::from_ptx(ptx, &[]))
+        .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
 
@@ -78,6 +97,9 @@ impl CudaSqwma {
             module,
             stream,
             _context: context,
+            sm_count,
+            max_grid_x,
+            _warp_size: warp_size,
         })
     }
 
@@ -353,16 +375,18 @@ impl CudaSqwma {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSqwmaError> {
+        // keep API-compatible even though max_period no longer affects shared mem
+        let _ = max_period;
+
         let func = self
             .module
             .get_function("sqwma_batch_f32")
             .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
-
-        let block_x: u32 = 256;
-        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let block_x: u32 = Self::block_x();
+        let grid_x: u32 = self.grid_x_for_series(series_len);
         let grid: GridSize = (grid_x, n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes = ((max_period.saturating_sub(1)) * std::mem::size_of::<f32>()) as u32;
+        let shared_bytes: u32 = 0; // optimized kernels do not use dynamic shared memory
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -399,12 +423,11 @@ impl CudaSqwma {
             .module
             .get_function("sqwma_many_series_one_param_f32")
             .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
-
-        let block_x: u32 = 256;
-        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let block_x: u32 = Self::block_x();
+        let grid_x: u32 = self.grid_x_for_series(series_len);
         let grid: GridSize = (grid_x, num_series as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes = ((period.saturating_sub(1)) * std::mem::size_of::<f32>()) as u32;
+        let shared_bytes: u32 = 0; // optimized kernels do not use dynamic shared memory
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -426,6 +449,48 @@ impl CudaSqwma {
                 .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?
         }
         Ok(())
+    }
+
+    // === Launch sizing helpers (kept simple; no gating; defaults match kernel) ===
+    #[inline]
+    fn out_per_thread() -> u32 {
+        if let Ok(s) = std::env::var("SQWMA_OUT_PER_THREAD") {
+            if let Ok(v) = s.parse::<u32>() {
+                return v.max(1);
+            }
+        }
+        8
+    }
+
+    #[inline]
+    fn block_x() -> u32 {
+        if let Ok(s) = std::env::var("SQWMA_BLOCK_X") {
+            if let Ok(v) = s.parse::<u32>() {
+                // clamp to multiples of 32, within [32, 1024]
+                let v = (v / 32).max(1).min(32) * 32;
+                return v as u32;
+            }
+        }
+        256
+    }
+
+    #[inline]
+    fn grid_x_for_series(&self, series_len: usize) -> u32 {
+        let bx = Self::block_x() as u64;
+        let opt = Self::out_per_thread() as u64;
+        let tile = bx * opt;
+        let need = if tile == 0 {
+            1
+        } else {
+            ((series_len as u64) + tile - 1) / tile
+        };
+        // target many resident blocks per SM to hide latency
+        let target = (self.sm_count.max(1) as u32) * 32;
+        let gx = std::cmp::max(
+            1,
+            std::cmp::min(need.min(self.max_grid_x as u64) as u32, target),
+        );
+        gx
     }
 
     fn prepare_batch_inputs(

@@ -497,7 +497,7 @@ impl CudaPwma {
                 (128, 2) => "pwma_ms1p_tiled_f32_tx128_ty2",
                 _ => return None,
             };
-            let mut func = match self.module.get_function(fname) {
+            let func = match self.module.get_function(fname) {
                 Ok(f) => f,
                 Err(_) => return None,
             };
@@ -511,7 +511,7 @@ impl CudaPwma {
                 ty as usize
             };
             let shared_bytes = (align16(wlen * std::mem::size_of::<f32>())
-                + total * ty_pad * std::mem::size_of::<f32>())
+                + total * ty as usize * std::mem::size_of::<f32>())
                 as u32;
             let grid_x = ((series_len as u32) + tx - 1) / tx;
             let grid_y = ((num_series as u32) + ty - 1) / ty;
@@ -894,7 +894,6 @@ impl Default for CudaPwmaPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
-    AsyncTiled { tx: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]

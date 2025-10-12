@@ -16,10 +16,12 @@
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::sinwma::{SinWmaBatchRange, SinWmaParams};
-use cust::context::Context;
-use cust::device::Device;
-use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
+use cust::context::{CacheConfig, Context, SharedMemoryConfig};
+use cust::device::{Device, DeviceAttribute};
+use cust::function::{BlockSize, Function, GridSize};
+use cust::memory::{
+    mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer,
+};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -27,6 +29,9 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// raw driver symbol to opt-in >48KB dynamic shared memory per block
+use cust::sys::{cuFuncSetAttribute, CUfunction_attribute_enum as CUfuncAttr};
 
 #[derive(Debug)]
 pub enum CudaSinwmaError {
@@ -293,6 +298,107 @@ impl CudaSinwma {
         Ok((combos, first_valid, series_len, max_period))
     }
 
+    // ======== Helpers for tiled kernels ========
+
+    #[inline]
+    fn dynamic_smem_bytes(period: usize, block_x: u32) -> usize {
+        // floats needed = (2*period - 1) for weights+halo + block_x for the tile
+        (2usize.saturating_mul(period).saturating_sub(1) + block_x as usize)
+            * std::mem::size_of::<f32>()
+    }
+
+    fn try_pick_block_x(
+        &self,
+        func: &Function,
+        period: usize,
+        prefer: Option<u32>,
+    ) -> Result<(u32, usize), CudaSinwmaError> {
+        // Candidates from large to small; always warp-multiples.
+        let mut candidates = [512u32, 384, 256, 192, 128, 96, 64, 48, 32];
+        if let Some(px) = prefer {
+            if !candidates.contains(&px) {
+                candidates[0] = px;
+            } else {
+                let mut order = vec![px];
+                order.extend(candidates.into_iter().filter(|&b| b != px));
+                candidates = order
+                    .try_into()
+                    .unwrap_or([px, 512, 384, 256, 192, 128, 96, 64, 32]);
+            }
+        }
+
+        // Guard by device thread-per-block limit
+        let device =
+            Device::get_device(self.device_id).map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+        let max_threads = device
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+
+        for &bx in &candidates {
+            if bx > max_threads {
+                continue;
+            }
+            let need = Self::dynamic_smem_bytes(period, bx);
+            let avail = func
+                .available_dynamic_shared_memory_per_block(
+                    GridSize::xy(1, 1),
+                    BlockSize::xyz(bx, 1, 1),
+                )
+                .unwrap_or(48 * 1024);
+            if need <= avail {
+                return Ok((bx, need));
+            }
+        }
+        // As a last resort, derive a minimal bx that fits
+        let probe_bx = 64u32.min(max_threads);
+        let avail = func
+            .available_dynamic_shared_memory_per_block(
+                GridSize::xy(1, 1),
+                BlockSize::xyz(probe_bx, 1, 1),
+            )
+            .unwrap_or(48 * 1024);
+        let avail_floats = avail / std::mem::size_of::<f32>();
+        let min_floats = (2 * period - 1) as usize;
+        if avail_floats <= min_floats {
+            return Err(CudaSinwmaError::InvalidInput(format!(
+                "period={} requires too much shared memory (need > {}B, have {}B)",
+                period,
+                (min_floats + 32) * 4,
+                avail
+            )));
+        }
+        let mut bx = (avail_floats - min_floats) as u32;
+        bx = (bx / 32).max(1) * 32;
+        bx = bx.min(max_threads).max(32);
+        let need = Self::dynamic_smem_bytes(period, bx);
+        Ok((bx, need))
+    }
+
+    #[inline]
+    fn prefer_shared_and_optin(
+        &self,
+        func: &mut Function,
+        dynamic_smem: usize,
+    ) -> Result<(), CudaSinwmaError> {
+        // Prefer shared carve-out and 4-byte bank size for f32 traffic
+        func.set_cache_config(CacheConfig::PreferShared)
+            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+        func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)
+            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+
+        // Opt-in to >48KB if requested; non-fatal on failure
+        unsafe {
+            let raw = func.to_raw();
+            let rc = cuFuncSetAttribute(
+                raw,
+                CUfuncAttr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                dynamic_smem as i32,
+            );
+            let _ = rc; // ignore non-success; launch may still succeed if within 48KB
+        }
+        Ok(())
+    }
+
     #[inline]
     fn grid_y_chunks(n_combos: usize) -> impl Iterator<Item = (usize, usize)> {
         const MAX_GRID_Y: usize = 65_535;
@@ -318,25 +424,20 @@ impl CudaSinwma {
             ));
         }
 
-        const BLOCK_X: u32 = 256;
-        let grid_x = ((series_len as u32) + BLOCK_X - 1) / BLOCK_X;
-        let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
-
-        let shared_bytes = max_period
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaSinwmaError::InvalidInput("shared memory size overflow".into()))?;
-        if shared_bytes > 96 * 1024 {
-            return Err(CudaSinwmaError::InvalidInput(format!(
-                "period {} requires {} bytes shared memory (exceeds limit)",
-                max_period, shared_bytes
-            )));
-        }
-
-        let func = self
+        let mut func = self
             .module
             .get_function("sinwma_batch_f32")
             .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+
+        // Auto-choose a block size that fits dynamic shared memory for worst-case period
+        let prefer = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => Some(block_x),
+            _ => None,
+        };
+        let (block_x, shared_bytes) = self.try_pick_block_x(&func, max_period, prefer)?;
+        self.prefer_shared_and_optin(&mut func, shared_bytes)?;
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let block: BlockSize = (block_x, 1, 1).into();
 
         for (start, len) in Self::grid_y_chunks(n_combos) {
             unsafe {
@@ -362,7 +463,7 @@ impl CudaSinwma {
         }
         unsafe {
             (*(self as *const _ as *mut CudaSinwma)).last_batch =
-                Some(BatchKernelSelected::Plain { block_x: BLOCK_X });
+                Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
         Ok(())
@@ -389,14 +490,45 @@ impl CudaSinwma {
             )));
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
-        let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+        let use_pinned = std::env::var("CUDA_PINNED").ok().as_deref() == Some("1");
+
+        let d_prices: DeviceBuffer<f32> = if use_pinned {
+            let h_prices = LockedBuffer::from_slice(data_f32)
                 .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut d = DeviceBuffer::uninitialized_async(series_len, &self.stream)
+                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                d.async_copy_from(h_prices.as_slice(), &self.stream)
+                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                d
+            }
+        } else {
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+        };
+
+        let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
+        let d_periods: DeviceBuffer<i32> = if use_pinned {
+            let h_periods = LockedBuffer::from_slice(&periods_i32)
+                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut d = DeviceBuffer::uninitialized_async(n_combos, &self.stream)
+                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                d.async_copy_from(h_periods.as_slice(), &self.stream)
+                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                d
+            }
+        } else {
+            DeviceBuffer::from_slice(&periods_i32)
+                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+        };
+
+        let mut d_out: DeviceBuffer<f32> = if use_pinned {
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
+                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+        } else {
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+        };
 
         self.launch_batch_kernel(
             &d_prices,
@@ -538,25 +670,20 @@ impl CudaSinwma {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSinwmaError> {
-        const BLOCK_X: u32 = 128;
-        let grid_x = ((rows as u32) + BLOCK_X - 1) / BLOCK_X;
-        let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
-        let block: BlockSize = (BLOCK_X, 1, 1).into();
-
-        let shared_bytes = period
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaSinwmaError::InvalidInput("shared memory size overflow".into()))?;
-        if shared_bytes > 96 * 1024 {
-            return Err(CudaSinwmaError::InvalidInput(format!(
-                "period {} requires {} bytes shared memory (exceeds limit)",
-                period, shared_bytes
-            )));
-        }
-
-        let func = self
+        let mut func = self
             .module
             .get_function("sinwma_many_series_one_param_time_major_f32")
             .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+
+        let prefer = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => Some(block_x),
+            _ => None,
+        };
+        let (block_x, shared_bytes) = self.try_pick_block_x(&func, period, prefer)?;
+        self.prefer_shared_and_optin(&mut func, shared_bytes)?;
+        let grid_x = ((rows as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -579,7 +706,7 @@ impl CudaSinwma {
         }
         unsafe {
             (*(self as *const _ as *mut CudaSinwma)).last_many =
-                Some(ManySeriesKernelSelected::OneD { block_x: BLOCK_X });
+                Some(ManySeriesKernelSelected::OneD { block_x });
         }
         self.maybe_log_many_debug();
         Ok(())
@@ -605,12 +732,45 @@ impl CudaSinwma {
             )));
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(first_valids)
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+        let use_pinned = std::env::var("CUDA_PINNED").ok().as_deref() == Some("1");
+
+        let d_prices: DeviceBuffer<f32> = if use_pinned {
+            let h = LockedBuffer::from_slice(data_tm_f32)
+                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut d = DeviceBuffer::uninitialized_async(cols * rows, &self.stream)
+                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                d.async_copy_from(h.as_slice(), &self.stream)
+                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                d
+            }
+        } else {
+            DeviceBuffer::from_slice(data_tm_f32)
+                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+        };
+
+        let d_first_valids: DeviceBuffer<i32> = if use_pinned {
+            let h = LockedBuffer::from_slice(first_valids)
+                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut d = DeviceBuffer::uninitialized_async(cols, &self.stream)
+                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                d.async_copy_from(h.as_slice(), &self.stream)
+                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                d
+            }
+        } else {
+            DeviceBuffer::from_slice(first_valids)
+                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+        };
+
+        let mut d_out: DeviceBuffer<f32> = if use_pinned {
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+        } else {
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }
+                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+        };
 
         self.launch_many_series_kernel(&d_prices, period, cols, rows, &d_first_valids, &mut d_out)?;
 

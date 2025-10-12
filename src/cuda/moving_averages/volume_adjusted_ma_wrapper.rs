@@ -6,7 +6,7 @@
 //! required.
 //!
 //! Notes/parity with ALMA wrapper:
-//! - PTX JIT options: DetermineTargetFromContext + OptLevel O2 with fallbacks.
+//! - PTX JIT options: DetermineTargetFromContext + OptLevel O4 with fallbacks.
 //! - Non-blocking stream.
 //! - VRAM checks with ~64MB headroom for batch, ~48MB for many-series.
 //! - Batch grid.y chunking to <= 65_535 with pointer offsetting.
@@ -19,14 +19,15 @@ use crate::cuda::moving_averages::{BatchKernelPolicy, ManySeriesKernelPolicy};
 use crate::indicators::moving_averages::volume_adjusted_ma::{
     VolumeAdjustedMaBatchRange, VolumeAdjustedMaParams,
 };
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
+use cust::memory::{
+    mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer,
+};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
@@ -66,10 +67,10 @@ impl CudaVama {
         let context = Context::new(device).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/volume_adjusted_ma_kernel.ptx"));
-        // Prefer target from context + O2, with graceful fallback for brittle drivers.
+        // Prefer target from context + O4 (cust default), with graceful fallback for brittle drivers.
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -84,6 +85,8 @@ impl CudaVama {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+
+        // No cache preference by default; rely on architecture defaults.
 
         Ok(Self {
             module,
@@ -119,16 +122,7 @@ impl CudaVama {
     }
 
     fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
+        mem_get_info().ok()
     }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -316,23 +310,23 @@ impl CudaVama {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaVamaError> {
-        // Select block size based on policy
+        let func = self
+            .module
+            .get_function("volume_adjusted_ma_batch_f32")
+            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+
+        // Select block size based on policy or default (stable numerics)
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
             _ => 256,
         };
 
-        // One-time debug print of selected kernel when BENCH_DEBUG=1
+        // One-time debug record
         unsafe {
             let this = self as *const _ as *mut CudaVama;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
-
-        let func = self
-            .module
-            .get_function("volume_adjusted_ma_batch_f32")
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
 
         // Chunk Y dimension to avoid exceeding 65,535
         const MAX_GRID_Y: usize = 65_535;
@@ -454,7 +448,8 @@ impl CudaVama {
             first_valid,
             &mut d_out,
         )?;
-
+        // Ensure kernel completion before returning the device buffer, so callers
+        // using blocking copy_to() on the default stream observe completed work.
         self.stream
             .synchronize()
             .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
@@ -552,6 +547,17 @@ impl CudaVama {
         ))
     }
 
+    fn next_pow2_le(x: usize) -> u32 {
+        if x == 0 {
+            return 1;
+        }
+        let mut p: u32 = 1;
+        while (p as usize) << 1 <= x {
+            p <<= 1;
+        }
+        p
+    }
+
     fn launch_many_series_kernel(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -567,18 +573,28 @@ impl CudaVama {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaVamaError> {
-        let block_x: u32 = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
-            _ => 128,
-        };
-        let grid_x = ((rows as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
-
+        // Time-major, coalesced mapping: grid over time, threads over series
         let func = self
             .module
             .get_function("volume_adjusted_ma_multi_series_one_param_time_major_f32")
             .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+
+        // Ask driver for a good block size; clamp to series count power-of-two and 256 max
+        let (suggested_block_x, min_grid) = func
+            .suggested_launch_configuration(0, (0u32, 0u32, 0u32).into())
+            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+
+        let mut threads = Self::next_pow2_le(cols)
+            .min(suggested_block_x.max(128).min(1024))
+            .min(256);
+        if threads < 32 {
+            threads = 32;
+        }
+
+        // Use occupancy-guided grid size; kernel grid-strides over time anyway
+        let grid_x = (rows as u32).min(min_grid.max(1));
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (threads, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -614,7 +630,7 @@ impl CudaVama {
         // Introspection for selected kernel
         unsafe {
             let this = self as *const _ as *mut CudaVama;
-            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x: threads });
         }
         self.maybe_log_many_debug();
         Ok(())
@@ -676,11 +692,6 @@ impl CudaVama {
             &d_first_valids,
             &mut d_out,
         )?;
-
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -713,9 +724,19 @@ impl CudaVama {
             series_len,
             max_length,
         )?;
-        arr.buf
-            .copy_to(out)
+        // Pinned + async D2H copy for better throughput
+        let mut pinned: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(expected).map_err(|e| CudaVamaError::Cuda(e.to_string()))?
+        };
+        unsafe {
+            arr.buf
+                .async_copy_to(pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
             .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        out.copy_from_slice(pinned.as_slice());
         Ok((arr.rows, arr.cols, combos))
     }
 
@@ -801,9 +822,21 @@ impl CudaVama {
             rows,
             params,
         )?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))
+        // Pinned + async D2H copy
+        let mut pinned: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(cols * rows)
+                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
+        };
+        unsafe {
+            arr.buf
+                .async_copy_to(pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        out.copy_from_slice(pinned.as_slice());
+        Ok(())
     }
 
     pub fn vama_multi_series_one_param_time_major_device(

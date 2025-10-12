@@ -22,6 +22,7 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cu; // raw CUDA driver API for stream memset
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -134,8 +135,11 @@ impl CudaTilson {
             Err(_) => {
                 if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaTilsonError::Cuda(e.to_string()))?
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaTilsonError::Cuda(e.to_string()))?
                 }
             }
@@ -159,9 +163,25 @@ impl CudaTilson {
         device_id: usize,
         policy: CudaTilsonPolicy,
     ) -> Result<Self, CudaTilsonError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaTilsonPolicy,
+    ) -> Result<Self, CudaTilsonError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
+    }
+    pub fn set_policy(&mut self, policy: CudaTilsonPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaTilsonPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
     }
     pub fn set_policy(&mut self, policy: CudaTilsonPolicy) {
         self.policy = policy;
@@ -182,12 +202,20 @@ impl CudaTilson {
         if self.debug_batch_logged {
             return;
         }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] Tilson batch selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTilson)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaTilson)).debug_batch_logged = true;
@@ -202,8 +230,13 @@ impl CudaTilson {
         if self.debug_many_logged {
             return;
         }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
@@ -212,7 +245,26 @@ impl CudaTilson {
                 unsafe {
                     (*(self as *const _ as *mut CudaTilson)).debug_many_logged = true;
                 }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTilson)).debug_many_logged = true;
+                }
             }
+        }
+    }
+
+    // Stream-ordered async qNaN prefill (32-bit)
+    #[inline]
+    fn memset_nan32_async(&self, dst_ptr_raw: u64, n_elems: usize) -> Result<(), CudaTilsonError> {
+        const QNAN_BITS: u32 = 0x7FC0_0000; // canonical IEEE-754 f32 quiet NaN
+        let st: cu::CUstream = self.stream.as_inner();
+        let ptr: cu::CUdeviceptr = dst_ptr_raw;
+        let res = unsafe { cu::cuMemsetD32Async(ptr, QNAN_BITS, n_elems, st) };
+        match res {
+            cu::CUresult::CUDA_SUCCESS => Ok(()),
+            e => Err(CudaTilsonError::Cuda(format!(
+                "cuMemsetD32Async failed: {:?}",
+                e
+            ))),
         }
     }
 
@@ -229,6 +281,9 @@ impl CudaTilson {
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn headroom_bytes() -> usize {
@@ -238,12 +293,18 @@ impl CudaTilson {
             if let Ok(mb) = v.parse::<usize>() {
                 return mb.saturating_mul(1024 * 1024);
             }
+            if let Ok(mb) = v.parse::<usize>() {
+                return mb.saturating_mul(1024 * 1024);
+            }
         }
         DEFAULT_MB * 1024 * 1024
     }
 
     #[inline]
     fn will_fit(required_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if !Self::mem_check_enabled() {
             return true;
         }
@@ -262,6 +323,8 @@ impl CudaTilson {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
+        let d_prices =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
         let d_prices =
             DeviceBuffer::from_slice(data_f32).map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
         let d_periods = DeviceBuffer::from_slice(&prepared.periods_i32)
@@ -284,6 +347,7 @@ impl CudaTilson {
         };
 
         // Chunk by VRAM and grid dimension limits.
+        let combos_per_launch = self.suggest_combos_per_launch(prepared.series_len, n_combos);
         let combos_per_launch = self.suggest_combos_per_launch(prepared.series_len, n_combos);
         let mut launched = 0usize;
         while launched < n_combos {
@@ -311,6 +375,11 @@ impl CudaTilson {
             .synchronize()
             .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
 
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: prepared.series_len,
+        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -439,6 +508,11 @@ impl CudaTilson {
             rows: series_len,
             cols: num_series,
         })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: series_len,
+            cols: num_series,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -520,10 +594,16 @@ impl CudaTilson {
             BatchKernelPolicy::Auto => 256u32,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        // 1-D launch across combos
+        let blocks_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (blocks_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         // Record selection and maybe log once
+        unsafe {
+            (*(self as *const _ as *mut CudaTilson)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         unsafe {
             (*(self as *const _ as *mut CudaTilson)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -534,6 +614,20 @@ impl CudaTilson {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
             // offset parameter buffers and output pointer by combos_offset
             let combos_off_i = combos_offset as u64;
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw()
+                + combos_off_i * std::mem::size_of::<i32>() as u64;
+            let mut ks_ptr =
+                d_ks.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
+            let mut c1_ptr =
+                d_c1.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
+            let mut c2_ptr =
+                d_c2.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
+            let mut c3_ptr =
+                d_c3.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
+            let mut c4_ptr =
+                d_c4.as_device_ptr().as_raw() + combos_off_i * std::mem::size_of::<f32>() as u64;
+            let mut lookbacks_ptr = d_lookbacks.as_device_ptr().as_raw()
+                + combos_off_i * std::mem::size_of::<i32>() as u64;
             let mut periods_ptr = d_periods.as_device_ptr().as_raw()
                 + combos_off_i * std::mem::size_of::<i32>() as u64;
             let mut ks_ptr =
@@ -602,17 +696,26 @@ impl CudaTilson {
             .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
 
         let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 128u32,
+            ManySeriesKernelPolicy::Auto => 256u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
         };
-        let grid: GridSize = (1, num_series as u32, 1).into();
+        // 1-D launch across series
+        let blocks_x = ((num_series as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (blocks_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             (*(self as *const _ as *mut CudaTilson)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
+        unsafe {
+            (*(self as *const _ as *mut CudaTilson)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
+
+        // Prefill entire output with qNaN once per call
+        self.memset_nan32_async(d_out_tm.as_device_ptr().as_raw(), num_series * series_len)?;
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -874,6 +977,14 @@ pub mod benches {
             period: Some(64),
             volume_factor: Some(0.0)
         },
+        crate::indicators::moving_averages::tilson::TilsonBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            volume_factor: (0.0, 0.0, 0.0)
+        },
+        crate::indicators::moving_averages::tilson::TilsonParams {
+            period: Some(64),
+            volume_factor: Some(0.0)
+        },
         "tilson",
         "tilson"
     );
@@ -927,8 +1038,12 @@ fn expand_combos(range: &TilsonBatchRange) -> Vec<TilsonParams> {
 impl CudaTilson {
     #[inline]
     fn suggest_combos_per_launch(&self, series_len: usize, total_combos: usize) -> usize {
-        const MAX_GRID_DIM: usize = 65_535; // keep parity with ALMA guidance
+        // gridDim.x limit (Y/Z are 65,535); keep generous headroom for huge sweeps
+        const MAX_GRID_DIM: usize = 2_147_483_647; // 2^31 - 1
         let by_dim = total_combos.min(MAX_GRID_DIM);
+        if !Self::mem_check_enabled() {
+            return by_dim.max(1);
+        }
         if !Self::mem_check_enabled() {
             return by_dim.max(1);
         }
@@ -939,6 +1054,8 @@ impl CudaTilson {
             + std::mem::size_of::<f32>() * 5 // k + c1..c4
             + std::mem::size_of::<i32>()
             // lookbacks
+            + std::mem::size_of::<i32>()
+            // lookbacks
         );
         let out_per_combo = series_len.saturating_mul(std::mem::size_of::<f32>());
 
@@ -946,8 +1063,15 @@ impl CudaTilson {
             Some((f, _)) => f,
             None => return by_dim.max(1),
         };
+        let free = match Self::device_mem_info() {
+            Some((f, _)) => f,
+            None => return by_dim.max(1),
+        };
         let headroom = Self::headroom_bytes();
         let usable = free.saturating_sub(headroom);
+        if usable <= input_bytes {
+            return 1.min(by_dim).max(1);
+        }
         if usable <= input_bytes {
             return 1.min(by_dim).max(1);
         }

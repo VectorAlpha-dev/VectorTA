@@ -745,7 +745,10 @@ impl CudaMaaq {
             &d_first_valids,
             &mut d_out_tm,
         )?;
-        // Use pinned host buffer for faster D2H (no early sync; let copy overlap)
+        // Use pinned host buffer for faster D2H
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?;
         let mut pinned: LockedBuffer<f32> = unsafe {
             LockedBuffer::uninitialized(cols * rows)
                 .map_err(|e| CudaMaaqError::Cuda(e.to_string()))?

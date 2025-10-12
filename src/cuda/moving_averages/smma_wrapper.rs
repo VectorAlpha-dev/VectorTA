@@ -253,23 +253,9 @@ impl CudaSmma {
             .get_function("smma_batch_f32")
             .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
 
-        // Prefer L1 for this memory-bound kernel (no dynamic shared memory)
-        let _ = func.set_cache_config(CacheConfig::PreferL1);
-
-        // Occupancy-guided block size suggestion from the driver
-        let (_, suggested_block) = func
-            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
-        let default_block = 128u32;
-        let auto_block_x = if suggested_block == 0 {
-            default_block
-        } else {
-            suggested_block
-        };
-
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
-            _ => auto_block_x.clamp(64, 1024),
+            _ => 128,
         };
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -501,21 +487,9 @@ impl CudaSmma {
             .get_function("smma_multi_series_one_param_f32")
             .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
 
-        let _ = func.set_cache_config(CacheConfig::PreferL1);
-
-        let (_, suggested_block) = func
-            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-            .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
-        let default_block = 128u32;
-        let auto_block_x = if suggested_block == 0 {
-            default_block
-        } else {
-            suggested_block
-        };
-
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
-            _ => auto_block_x.clamp(64, 1024),
+            _ => 128,
         };
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();

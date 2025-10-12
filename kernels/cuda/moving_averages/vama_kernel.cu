@@ -1,3 +1,4 @@
+// Restored original O(W) kernel for parity with CPU reference
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -216,47 +217,63 @@ void vama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         return;
     }
 
-    for (int t = warm; t < series_len; ++t) {
-        const float mid = ema_tm[t * stride + series_idx];
-        if (!isfinite(mid)) {
-            continue;
-        }
+    // O(N) deques (head/tail) matching CPU semantics
+    extern __shared__ unsigned char smem_rb2[];
+    float* dq_max_vals = reinterpret_cast<float*>(smem_rb2);
+    int*   dq_max_idx  = reinterpret_cast<int*>(dq_max_vals + vol_period);
+    float* dq_min_vals = reinterpret_cast<float*>(dq_max_idx  + vol_period);
+    int*   dq_min_idx  = reinterpret_cast<int*>(dq_min_vals + vol_period);
+    int headMax = 0, tailMax = 0;
+    int headMin = 0, tailMin = 0;
 
-        int window_len = vol_period;
+    for (int t = first_valid; t < series_len; ++t) {
         const int available = t + 1 - first_valid;
-        if (available < window_len) {
-            window_len = available;
-        }
-        if (window_len <= 0) {
-            continue;
-        }
-
+        const int window_len = (available < vol_period) ? available : vol_period;
         const int start = t + 1 - window_len;
-        double vol_up = -CUDART_INF;
-        double vol_down = CUDART_INF;
-        for (int k = start; k <= t; ++k) {
-            const float ema_val = ema_tm[k * stride + series_idx];
-            if (!isfinite(ema_val)) {
-                continue;
-            }
-            const float price = prices_tm[k * stride + series_idx];
-            if (!isfinite(price)) {
-                continue;
-            }
-            const double dev = static_cast<double>(price) - static_cast<double>(ema_val);
-            if (dev > vol_up) {
-                vol_up = dev;
-            }
-            if (dev < vol_down) {
-                vol_down = dev;
-            }
+
+        while (headMax != tailMax) {
+            int idx = dq_max_idx[headMax];
+            if (idx >= start) break;
+            headMax = (headMax + 1) % vol_period;
+        }
+        while (headMin != tailMin) {
+            int idx = dq_min_idx[headMin];
+            if (idx >= start) break;
+            headMin = (headMin + 1) % vol_period;
         }
 
-        const int out_idx = t * stride + series_idx;
-        if (!isfinite(vol_up) || !isfinite(vol_down)) {
-            out_tm[out_idx] = mid;
-        } else {
-            out_tm[out_idx] = mid + static_cast<float>(0.5) * static_cast<float>(vol_up + vol_down);
+        const int off = t * stride + series_idx;
+        const float mid = ema_tm[off];
+        const float p = prices_tm[off];
+        if (isfinite(mid) && isfinite(p)) {
+            const float d = p - mid;
+            while (headMax != tailMax) {
+                int last = (tailMax == 0 ? vol_period - 1 : tailMax - 1);
+                if (dq_max_vals[last] <= d) {
+                    tailMax = last;
+                } else break;
+            }
+            dq_max_vals[tailMax] = d;
+            dq_max_idx[tailMax]  = t;
+            tailMax = (tailMax + 1) % vol_period;
+
+            while (headMin != tailMin) {
+                int last = (tailMin == 0 ? vol_period - 1 : tailMin - 1);
+                if (dq_min_vals[last] >= d) {
+                    tailMin = last;
+                } else break;
+            }
+            dq_min_vals[tailMin] = d;
+            dq_min_idx[tailMin]  = t;
+            tailMin = (tailMin + 1) % vol_period;
+        }
+
+        if (t >= warm) {
+            if (!isfinite(mid) || headMax == tailMax || headMin == tailMin) {
+                out_tm[off] = mid;
+            } else {
+                out_tm[off] = mid + 0.5f * (dq_max_vals[headMax] + dq_min_vals[headMin]);
+            }
         }
     }
 }

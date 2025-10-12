@@ -13,10 +13,12 @@ use crate::indicators::moving_averages::mwdx::{expand_grid_mwdx, MwdxBatchRange,
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::AsyncCopyDestination; // for async_copy_to on DeviceBuffer
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cu; // raw CUDA driver API
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,6 +65,54 @@ struct PreparedMwdxManySeries {
 }
 
 impl CudaMwdx {
+    /// Best-effort: request L2 persisting set-aside and configure the stream's
+    /// Access Policy Window (APW) so that `d_prices` is treated as persisting in L2.
+    ///
+    /// Safe to call repeatedly; failures are ignored and do not affect correctness.
+    unsafe fn try_enable_persisting_l2_for_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+    ) {
+        use cu::{
+            cuCtxSetLimit, cuDeviceGetAttribute, cuStreamSetAttribute,
+            CUaccessPolicyWindow_v1 as CUaccessPolicyWindow, CUaccessProperty_enum as AccessProp,
+            CUdevice_attribute_enum as DevAttr, CUlimit_enum as CULimit,
+            CUstreamAttrID_enum as StreamAttrId, CUstreamAttrValue_v1 as CUstreamAttrValue,
+        };
+        use cust::device::Device as CuDevice;
+
+        let window_bytes = series_len.saturating_mul(std::mem::size_of::<f32>());
+
+        // Query device max supported APW size and clamp the request
+        let mut max_window_bytes_i32: i32 = 0;
+        if let Ok(dev) = CuDevice::get_device(self.device_id) {
+            let _ = cuDeviceGetAttribute(
+                &mut max_window_bytes_i32 as *mut _,
+                DevAttr::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
+                dev.as_raw(),
+            );
+        }
+        let max_window_bytes = (max_window_bytes_i32.max(0) as usize).min(window_bytes);
+
+        // Best-effort L2 persisting set-aside
+        let _ = cuCtxSetLimit(CULimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, max_window_bytes);
+
+        // Configure stream APW: persisting on hit, streaming on miss
+        let mut val: CUstreamAttrValue = std::mem::zeroed();
+        val.accessPolicyWindow = CUaccessPolicyWindow {
+            base_ptr: d_prices.as_device_ptr().as_raw() as *mut c_void,
+            num_bytes: max_window_bytes,
+            hitRatio: 0.90f32,
+            hitProp: AccessProp::CU_ACCESS_PROPERTY_PERSISTING,
+            missProp: AccessProp::CU_ACCESS_PROPERTY_STREAMING,
+        };
+        let _ = cuStreamSetAttribute(
+            self.stream.as_inner(),
+            StreamAttrId::CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW,
+            &mut val as *mut _,
+        );
+    }
     pub fn new(device_id: usize) -> Result<Self, CudaMwdxError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
         let device =
@@ -72,7 +122,8 @@ impl CudaMwdx {
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/mwdx_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
+            ModuleJitOption::MaxRegisters(64),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -236,10 +287,23 @@ impl CudaMwdx {
             ));
         }
         let handle = self.mwdx_batch_dev(data_f32, sweep)?;
-        handle
-            .buf
-            .copy_to(out_flat)
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))
+
+        // Use page-locked host buffer and async copy for better throughput.
+        let mut host_locked: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(out_flat.len())
+                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?
+        };
+        unsafe {
+            handle
+                .buf
+                .async_copy_to(&mut host_locked, &self.stream)
+                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+        out_flat.copy_from_slice(host_locked.as_slice());
+        Ok(())
     }
 
     pub fn mwdx_many_series_one_param_time_major_dev(
@@ -353,10 +417,22 @@ impl CudaMwdx {
             series_len,
             params,
         )?;
-        handle
-            .buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))
+
+        let mut host_locked: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(out_tm.len())
+                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?
+        };
+        unsafe {
+            handle
+                .buf
+                .async_copy_to(&mut host_locked, &self.stream)
+                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+        out_tm.copy_from_slice(host_locked.as_slice());
+        Ok(())
     }
 
     fn launch_batch_kernel(
@@ -390,6 +466,11 @@ impl CudaMwdx {
             .module
             .get_function("mwdx_batch_f32")
             .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+
+        // Hint driver to persist `prices` in L2 across combo CTAs.
+        unsafe {
+            self.try_enable_persisting_l2_for_prices(d_prices, series_len);
+        }
 
         // Chunk grid.y to avoid 65k limit; shift pointers per-chunk
         for (start, len) in Self::grid_y_chunks(n_combos) {

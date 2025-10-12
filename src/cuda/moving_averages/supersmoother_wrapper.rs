@@ -10,11 +10,11 @@ use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::supersmoother::{
     expand_grid_supersmoother, SuperSmootherBatchRange, SuperSmootherParams,
 };
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
-use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
-use cust::module::Module;
+use cust::function::{BlockSize, Function, GridSize};
+use cust::memory::{AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer};
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
@@ -53,8 +53,31 @@ impl CudaSuperSmoother {
             Context::new(device).map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/supersmoother_kernel.ptx"));
-        let module =
-            Module::from_ptx(ptx, &[]).map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+
+        // Prefer aggressive JIT with target taken from current context; allow optional maxreg override.
+        let mut jit_opts: Vec<ModuleJitOption> = vec![
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O4),
+        ];
+        if let Ok(v) = std::env::var("SS_MAXREG") {
+            if let Ok(cap) = v.parse::<u32>() {
+                jit_opts.push(ModuleJitOption::MaxRegisters(cap));
+            }
+        }
+
+        let module = match Module::from_ptx(ptx, &jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?
+                }
+            }
+        };
+
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
 
@@ -119,12 +142,19 @@ impl CudaSuperSmoother {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSuperSmootherError> {
-        let func = self
+        let mut func: Function = self
             .module
             .get_function("supersmoother_batch_f32")
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = 128;
+        // Prefer L1 (no dynamic shared memory in kernel)
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+        // Ask CUDA for a good block size; fallback to 256
+        let (_min_grid, block_x) = func
+            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+            .unwrap_or((0, 256));
+        let block_x: u32 = block_x.max(64);
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -168,7 +198,7 @@ impl CudaSuperSmoother {
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
 
         let elems = combos.len() * len;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
@@ -288,12 +318,16 @@ impl CudaSuperSmoother {
         period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSuperSmootherError> {
-        let func = self
+        let mut func: Function = self
             .module
             .get_function("supersmoother_many_series_one_param_f32")
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        let block_x: u32 = 128;
+        let (_min_grid, block_x) = func
+            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+            .unwrap_or((0, 256));
+        let block_x: u32 = block_x.max(64);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -336,7 +370,7 @@ impl CudaSuperSmoother {
         let d_first_valids = DeviceBuffer::from_slice(first_valids)
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
         let elems = cols * rows;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(&d_prices, &d_first_valids, cols, rows, period, &mut d_out)?;
@@ -380,6 +414,105 @@ impl CudaSuperSmoother {
         let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period)?;
         dev.buf
             .copy_to(out_tm)
+            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))
+    }
+
+    // -------- Optional fast-paths: device-resident input & pinned host I/O --------
+    /// Run batch with prices already on the device (avoids HtoD copy of inputs).
+    pub fn supersmoother_batch_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        first_valid: usize,
+        len: usize,
+        combos: &[SuperSmootherParams],
+    ) -> Result<DeviceArrayF32, CudaSuperSmootherError> {
+        if d_prices.len() != len {
+            return Err(CudaSuperSmootherError::InvalidInput(format!(
+                "device prices length mismatch: expected {}, got {}",
+                len,
+                d_prices.len()
+            )));
+        }
+        if combos.is_empty() {
+            return Err(CudaSuperSmootherError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods)
+            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let elems = combos.len() * len;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        self.launch_batch_kernel(
+            d_prices,
+            &d_periods,
+            len,
+            combos.len(),
+            first_valid,
+            &mut d_out,
+        )?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
+    }
+
+    /// Batch into pinned host memory using async D2H for maximum bandwidth.
+    pub fn supersmoother_batch_into_pinned_host_f32(
+        &self,
+        data_f32: &[f32],
+        sweep: &SuperSmootherBatchRange,
+        out_pinned: &mut LockedBuffer<f32>,
+    ) -> Result<(usize, usize, Vec<SuperSmootherParams>), CudaSuperSmootherError> {
+        let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
+        let expected = combos.len() * len;
+        if out_pinned.len() != expected {
+            return Err(CudaSuperSmootherError::InvalidInput(format!(
+                "output pinned buffer length mismatch: expected {}, got {}",
+                expected,
+                out_pinned.len()
+            )));
+        }
+        let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len)?;
+        unsafe {
+            dev.buf
+                .async_copy_to(out_pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        Ok((combos.len(), len, combos))
+    }
+
+    /// Many-series into pinned host memory using async D2H.
+    pub fn supersmoother_multi_series_one_param_time_major_into_host_pinned_f32(
+        &self,
+        data_tm_f32: &[f32],
+        cols: usize,
+        rows: usize,
+        params: &SuperSmootherParams,
+        out_tm_pinned: &mut LockedBuffer<f32>,
+    ) -> Result<(), CudaSuperSmootherError> {
+        if out_tm_pinned.len() != cols * rows {
+            return Err(CudaSuperSmootherError::InvalidInput(format!(
+                "output pinned buffer length mismatch: expected {}, got {}",
+                cols * rows,
+                out_tm_pinned.len()
+            )));
+        }
+        let (first_valids, period) =
+            Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
+        let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period)?;
+        unsafe {
+            dev.buf
+                .async_copy_to(out_tm_pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))
     }
 }

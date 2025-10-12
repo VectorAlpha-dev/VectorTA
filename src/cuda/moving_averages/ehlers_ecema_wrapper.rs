@@ -16,6 +16,9 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{CopyDestination, DeviceBuffer};
+// PATCH 1: imports for pinned/async transfers and mem info
+use cust::memory::mem_get_info;
+use cust::memory::{AsyncCopyDestination, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -115,12 +118,23 @@ impl CudaEhlersEcema {
             Context::new(device).map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_ecema_kernel.ptx"));
-        // Align JIT options with ALMA: prefer context-targeted O2, with graceful fallback.
-        let jit_opts = &[
+        // PATCH 2: Harden JIT policy. Default to O4 with optional env overrides.
+        let opt_level = match Self::env_u32("ECEMA_JIT_OLEVEL") {
+            Some(0) => OptLevel::O0,
+            Some(1) => OptLevel::O1,
+            Some(2) => OptLevel::O2,
+            Some(3) => OptLevel::O3,
+            Some(_) => OptLevel::O4,
+            None => OptLevel::O4,
+        };
+        let mut jit_opts: Vec<ModuleJitOption> = vec![
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(opt_level),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
+        if let Some(maxr) = Self::env_u32("ECEMA_MAX_REGS") {
+            jit_opts.push(ModuleJitOption::MaxRegisters(maxr));
+        }
+        let module = match Module::from_ptx(ptx, &jit_opts) {
             Ok(m) => m,
             Err(_) => {
                 // Retry with progressively simpler JIT options to improve robustness across drivers.
@@ -230,17 +244,9 @@ impl CudaEhlersEcema {
             .and_then(|v| v.trim().parse::<u32>().ok())
     }
 
+    // PATCH 3: use mem_get_info wrapper
     fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
+        mem_get_info().ok()
     }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -478,9 +484,10 @@ impl CudaEhlersEcema {
                 (required as f64) / (1024.0 * 1024.0)
             )));
         }
-
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        // PATCH 4A: async allocations + optional pinned host staging for input
+        let mut d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(series_len, &self.stream) }
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
         let lengths_i32: Vec<i32> = combos.iter().map(|p| p.length.unwrap() as i32).collect();
         let gain_i32: Vec<i32> = combos
             .iter()
@@ -516,8 +523,21 @@ impl CudaEhlersEcema {
         let d_confirmed = DeviceBuffer::from_slice(&confirmed_flags)
             .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
                 .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+
+        // Input copy: pinned path by default to enable true async HtoD
+        let use_pinned = Self::env_bool("ECEMA_PINNED").unwrap_or(true);
+        if use_pinned {
+            let h_prices = LockedBuffer::from_slice(data_f32)
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+            unsafe { d_prices.async_copy_from(&h_prices, &self.stream) }
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        } else {
+            d_prices
+                .copy_from(data_f32)
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        }
 
         // Select kernel according to policy. Default to thread-per-combo when available.
         let have_thread_per_combo = self
@@ -610,9 +630,15 @@ impl CudaEhlersEcema {
             )));
         }
         let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len)?;
-        arr.buf
-            .copy_to(out)
+        // PATCH 5: async D→H into pinned buffer, then host copy
+        let mut h_out = unsafe { LockedBuffer::<f32>::uninitialized(expected) }
             .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        unsafe { arr.buf.as_slice().async_copy_to(&mut h_out, &self.stream) }
+            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        out.copy_from_slice(h_out.as_slice());
         Ok((arr.rows, arr.cols, combos))
     }
 
@@ -953,12 +979,27 @@ impl CudaEhlersEcema {
             )));
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        // PATCH 6A: async allocations + optional pinned host input
+        let mut d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
         let d_first_valids = DeviceBuffer::from_slice(first_valids)
             .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+
+        let use_pinned = Self::env_bool("ECEMA_PINNED").unwrap_or(true);
+        if use_pinned {
+            let h_prices = LockedBuffer::from_slice(data_tm_f32)
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+            unsafe { d_prices.async_copy_from(&h_prices, &self.stream) }
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        } else {
+            d_prices
+                .copy_from(data_tm_f32)
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        }
 
         self.launch_many_series_kernel(
             &d_prices,
@@ -1025,9 +1066,17 @@ impl CudaEhlersEcema {
             rows,
             params,
         )?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))
+        // PATCH 6B: async D→H to pinned, then host copy
+        let expected = cols * rows;
+        let mut h_out = unsafe { LockedBuffer::<f32>::uninitialized(expected) }
+            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        unsafe { arr.buf.as_slice().async_copy_to(&mut h_out, &self.stream) }
+            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        out.copy_from_slice(h_out.as_slice());
+        Ok(())
     }
 
     pub fn ehlers_ecema_many_series_one_param_time_major_device(

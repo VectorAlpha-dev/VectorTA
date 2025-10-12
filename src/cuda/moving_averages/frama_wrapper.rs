@@ -17,7 +17,9 @@ use crate::indicators::moving_averages::frama::{FramaBatchRange, FramaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
+use cust::memory::{
+    mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer,
+};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -152,9 +154,10 @@ impl CudaFrama {
         let context = Context::new(device).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/frama_kernel.ptx"));
+        // Prefer most-optimized JIT level (O4) and still fall back if needed.
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -366,13 +369,18 @@ impl CudaFrama {
             .module
             .get_function("frama_batch_f32")
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        // Policy/override for block size (threads per block)
+
+        // Auto policy picks occupancy-suggested block size; env override stays.
+        let auto_block_x: u32 = match func.suggested_launch_configuration(0, (1024, 1, 1).into()) {
+            Ok((_min_grid, suggested_block)) => suggested_block,
+            Err(_) => 256,
+        };
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => std::env::var("FRAMA_BLOCK_X")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(256),
+                .unwrap_or(auto_block_x),
         };
 
         // Introspection
@@ -382,27 +390,25 @@ impl CudaFrama {
         }
         self.maybe_log_batch_debug();
 
-        // Chunk grid.x launches if n_combos is huge: launch multiple passes and offset param/output pointers.
-        const MAX_PER_LAUNCH: usize = 65_535 * 256; // generous upper bound for combos processed per launch
-        let mut start = 0usize;
-        while start < n_combos {
-            let len = (n_combos - start).min(MAX_PER_LAUNCH);
-            let grid_x = ((len as u32) + block_x - 1) / block_x;
-            let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        // Compute grid size; no artificial 65,535 cap for x-dimension.
+        let total_blocks_u64 = ((n_combos as u64) + (block_x as u64) - 1) / (block_x as u64);
+        let max_grid_x = 2_147_483_647u64; // 2^31 - 1 per CUDA spec
+
+        if total_blocks_u64 <= max_grid_x {
+            let grid: GridSize = ((total_blocks_u64 as u32).max(1), 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
 
             unsafe {
-                // Offset parameter and output pointers by `start`
                 let mut high_ptr = d_high.as_device_ptr().as_raw();
                 let mut low_ptr = d_low.as_device_ptr().as_raw();
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
-                let mut win_ptr = d_windows.as_device_ptr().add(start).as_raw();
-                let mut sc_ptr = d_scs.as_device_ptr().add(start).as_raw();
-                let mut fc_ptr = d_fcs.as_device_ptr().add(start).as_raw();
+                let mut win_ptr = d_windows.as_device_ptr().as_raw();
+                let mut sc_ptr = d_scs.as_device_ptr().as_raw();
+                let mut fc_ptr = d_fcs.as_device_ptr().as_raw();
                 let mut len_i = series_len as i32;
-                let mut combos_i = len as i32;
+                let mut combos_i = n_combos as i32;
                 let mut first_valid_i = first_valid as i32;
-                let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();
+                let mut out_ptr = d_out.as_device_ptr().as_raw();
 
                 let args: &mut [*mut c_void] = &mut [
                     &mut high_ptr as *mut _ as *mut c_void,
@@ -421,10 +427,49 @@ impl CudaFrama {
                     .launch(&func, grid, block, 0, args)
                     .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
             }
-            start += len;
+        } else {
+            // Extremely rare: chunk only if grid.x would overflow the limit.
+            let max_blocks_per_launch = max_grid_x as usize;
+            let mut start = 0usize;
+            while start < n_combos {
+                let len = (n_combos - start).min(max_blocks_per_launch * (block_x as usize));
+                let blocks = ((len as u32) + block_x - 1) / block_x;
+                let grid: GridSize = (blocks.max(1), 1, 1).into();
+                let block: BlockSize = (block_x, 1, 1).into();
+
+                unsafe {
+                    let mut high_ptr = d_high.as_device_ptr().as_raw();
+                    let mut low_ptr = d_low.as_device_ptr().as_raw();
+                    let mut close_ptr = d_close.as_device_ptr().as_raw();
+                    let mut win_ptr = d_windows.as_device_ptr().add(start).as_raw();
+                    let mut sc_ptr = d_scs.as_device_ptr().add(start).as_raw();
+                    let mut fc_ptr = d_fcs.as_device_ptr().add(start).as_raw();
+                    let mut len_i = series_len as i32;
+                    let mut combos_i = len as i32;
+                    let mut first_valid_i = first_valid as i32;
+                    let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();
+
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut high_ptr as *mut _ as *mut c_void,
+                        &mut low_ptr as *mut _ as *mut c_void,
+                        &mut close_ptr as *mut _ as *mut c_void,
+                        &mut win_ptr as *mut _ as *mut c_void,
+                        &mut sc_ptr as *mut _ as *mut c_void,
+                        &mut fc_ptr as *mut _ as *mut c_void,
+                        &mut len_i as *mut _ as *mut c_void,
+                        &mut combos_i as *mut _ as *mut c_void,
+                        &mut first_valid_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+
+                    self.stream
+                        .launch(&func, grid, block, 0, args)
+                        .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+                }
+                start += len;
+            }
         }
 
-        // Ensure the kernel finishes before we hand out the VRAM handle
         self.stream
             .synchronize()
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
@@ -507,6 +552,59 @@ impl CudaFrama {
         Ok((dev, combos))
     }
 
+    // Device-resident fast path (one series × many params): reuse device price buffers.
+    pub fn frama_batch_dev_from_device(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        sweep: &FramaBatchRange,
+        series_len: usize,
+        first_valid: usize,
+    ) -> Result<(DeviceArrayF32, Vec<FramaParams>), CudaFramaError> {
+        let combos = expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaFramaError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
+        let windows: Vec<i32> = combos.iter().map(|c| c.window.unwrap() as i32).collect();
+        let scs: Vec<i32> = combos.iter().map(|c| c.sc.unwrap() as i32).collect();
+        let fcs: Vec<i32> = combos.iter().map(|c| c.fc.unwrap() as i32).collect();
+        let d_windows =
+            DeviceBuffer::from_slice(&windows).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_scs =
+            DeviceBuffer::from_slice(&scs).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_fcs =
+            DeviceBuffer::from_slice(&fcs).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(combos.len() * series_len) }
+            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+
+        self.launch_batch_kernel(
+            d_high,
+            d_low,
+            d_close,
+            &d_windows,
+            &d_scs,
+            &d_fcs,
+            series_len,
+            combos.len(),
+            first_valid,
+            &mut d_out,
+        )?;
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: series_len,
+            },
+            combos,
+        ))
+    }
+
     pub fn frama_batch_into_host_f32(
         &self,
         high: &[f32],
@@ -529,6 +627,88 @@ impl CudaFrama {
             .copy_to(out)
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
         Ok((dev.rows, dev.cols, combos))
+    }
+
+    // Optional pinned/async fast path using the same stream; still synchronizes before return.
+    pub fn frama_batch_into_host_f32_pinned(
+        &self,
+        high_locked: &LockedBuffer<f32>,
+        low_locked: &LockedBuffer<f32>,
+        close_locked: &LockedBuffer<f32>,
+        sweep: &FramaBatchRange,
+        out_locked: &mut LockedBuffer<f32>,
+    ) -> Result<(usize, usize, Vec<FramaParams>), CudaFramaError> {
+        let (combos, first_valid, len) = Self::prepare_batch_inputs(
+            high_locked.as_slice(),
+            low_locked.as_slice(),
+            close_locked.as_slice(),
+            sweep,
+        )?;
+        let expected = combos.len() * len;
+        if out_locked.len() != expected {
+            return Err(CudaFramaError::InvalidInput(format!(
+                "output length mismatch: expected {}, got {}",
+                expected,
+                out_locked.len()
+            )));
+        }
+
+        // Device inputs
+        let mut d_high = unsafe { DeviceBuffer::<f32>::uninitialized(len) }
+            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let mut d_low = unsafe { DeviceBuffer::<f32>::uninitialized(len) }
+            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let mut d_close = unsafe { DeviceBuffer::<f32>::uninitialized(len) }
+            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+
+        unsafe {
+            d_high
+                .async_copy_from(high_locked.as_slice(), &self.stream)
+                .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+            d_low
+                .async_copy_from(low_locked.as_slice(), &self.stream)
+                .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+            d_close
+                .async_copy_from(close_locked.as_slice(), &self.stream)
+                .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        }
+
+        let windows: Vec<i32> = combos.iter().map(|c| c.window.unwrap() as i32).collect();
+        let scs: Vec<i32> = combos.iter().map(|c| c.sc.unwrap() as i32).collect();
+        let fcs: Vec<i32> = combos.iter().map(|c| c.fc.unwrap() as i32).collect();
+        let d_windows =
+            DeviceBuffer::from_slice(&windows).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_scs =
+            DeviceBuffer::from_slice(&scs).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_fcs =
+            DeviceBuffer::from_slice(&fcs).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(expected) }
+            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+
+        self.launch_batch_kernel(
+            &d_high,
+            &d_low,
+            &d_close,
+            &d_windows,
+            &d_scs,
+            &d_fcs,
+            len,
+            combos.len(),
+            first_valid,
+            &mut d_out,
+        )?;
+
+        unsafe {
+            d_out
+                .async_copy_to(out_locked.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+
+        Ok((combos.len(), len, combos))
     }
 
     fn prepare_many_series_inputs(
@@ -640,14 +820,19 @@ impl CudaFrama {
             .module
             .get_function("frama_many_series_one_param_f32")
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        // Policy/override
+
+        // Auto policy picks occupancy-suggested block size; env override stays.
+        let auto_block_x: u32 = match func.suggested_launch_configuration(0, (1024, 1, 1).into()) {
+            Ok((_min_grid, suggested_block)) => suggested_block,
+            Err(_) => 128,
+        };
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Tiled2D { tx, .. } => tx, // fall back to OneD geometry
             ManySeriesKernelPolicy::Auto => std::env::var("FRAMA_MS1P_BLOCK_X")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(128),
+                .unwrap_or(auto_block_x),
         };
         // Introspection
         unsafe {
@@ -655,8 +840,16 @@ impl CudaFrama {
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
         }
         self.maybe_log_many_debug();
-        let grid_x = ((num_series as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+
+        let total_blocks_u64 = ((num_series as u64) + (block_x as u64) - 1) / (block_x as u64);
+        let max_grid_x = 2_147_483_647u64; // 2^31 - 1
+        if total_blocks_u64 > max_grid_x {
+            return Err(CudaFramaError::InvalidInput(format!(
+                "too many series for one launch: need {} blocks, max {}",
+                total_blocks_u64, max_grid_x
+            )));
+        }
+        let grid: GridSize = ((total_blocks_u64 as u32).max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
@@ -765,6 +958,45 @@ impl CudaFrama {
             sc_i,
             fc_i,
         )
+    }
+
+    // Device-resident fast path: prices and first_valids already in VRAM; avoid host copies.
+    pub fn frama_many_series_one_param_time_major_dev_from_device(
+        &self,
+        d_high_tm: &DeviceBuffer<f32>,
+        d_low_tm: &DeviceBuffer<f32>,
+        d_close_tm: &DeviceBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        first_valids: &[i32],
+        params: &FramaParams,
+    ) -> Result<DeviceArrayF32, CudaFramaError> {
+        let window = params.window.ok_or_else(|| {
+            CudaFramaError::InvalidInput("window parameter must be provided".into())
+        })? as i32;
+        let sc = params
+            .sc
+            .ok_or_else(|| CudaFramaError::InvalidInput("sc parameter must be provided".into()))?
+            as i32;
+        let fc = params
+            .fc
+            .ok_or_else(|| CudaFramaError::InvalidInput("fc parameter must be provided".into()))?
+            as i32;
+
+        let d_first = DeviceBuffer::from_slice(first_valids)
+            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
+            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+
+        self.launch_many_series_kernel(
+            d_high_tm, d_low_tm, d_close_tm, &d_first, cols, rows, window, sc, fc, &mut d_out,
+        )?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn frama_many_series_one_param_time_major_into_host_f32(

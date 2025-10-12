@@ -86,9 +86,9 @@ void volume_adjusted_ma_batch_f32(
             continue;
         }
 
-        float avg_volume;
+        double avg_volume_d;
         if (sample_period == 0) {
-            avg_volume = prefix_volumes[t] / float(t + 1);
+            avg_volume_d = (double)prefix_volumes[t] / (double)(t + 1);
         } else {
             if (t + 1 < sample_period) {
                 out[out_idx] = NAN;
@@ -96,24 +96,43 @@ void volume_adjusted_ma_batch_f32(
                 continue;
             }
             const int start = t + 1 - sample_period;
-            const float window_sum = prefix_window(prefix_volumes, t, start);
-            avg_volume = window_sum / float(sample_period);
+            const double window_sum = (double)prefix_window(prefix_volumes, t, start);
+            avg_volume_d = window_sum / (double)sample_period;
         }
 
-        const float vi_threshold = avg_volume * vi_factor;
+        const double vi_threshold_d = avg_volume_d * (double)vi_factor;
+        const float  vi_threshold   = (float)vi_threshold_d;
         float weighted_sum = 0.0f;
         float v2i_sum = 0.0f;
         int nmb = 0;
 
-        if (!strict && vi_threshold > 0.0f) {
-            const int window = length;
-            const int start = t - window + 1;
-            const float sum_vol = prefix_window(prefix_volumes, t, start);
-            const float sum_price_vol = prefix_window(prefix_price_volumes, t, start);
-            const float inv = 1.0f / vi_threshold;
-            v2i_sum = sum_vol * inv;
-            weighted_sum = sum_price_vol * inv;
-            nmb = window;
+        if (!strict) {
+            // Non-strict: fixed-width window with explicit accumulation (matches scalar ordering)
+            int cap = length;
+            if (cap > t + 1) cap = t + 1;
+
+            double wsum_d = 0.0;
+            double v2i_sum_d = 0.0;
+            int idx = t;
+            for (int j = 0; j < cap; ++j) {
+                const float vol_val = volumes[idx];
+                if (isfinite(vol_val)) {
+                    const double v2i = ((double)vol_val) / vi_threshold_d;
+                    if (isfinite(v2i)) {
+                        v2i_sum_d += v2i;
+                        const float price_val = prices[idx];
+                        if (isfinite(price_val)) {
+                            wsum_d = fma((double)price_val, v2i, wsum_d);
+                        }
+                    }
+                }
+                nmb = j + 1;
+                if (nmb >= length) break;
+                if (idx == 0) break;
+                --idx;
+            }
+            v2i_sum = (float)v2i_sum_d;
+            weighted_sum = (float)wsum_d;
         } else {
             int cap = strict ? length * 10 : length;
             if (cap > t + 1) {
@@ -188,129 +207,102 @@ void volume_adjusted_ma_multi_series_one_param_time_major_f32(
     int num_series,
     int series_len,
     const int* __restrict__ first_valids,
-    float* __restrict__ out_tm) {
-    const int series_idx = blockIdx.y;
-    if (series_idx >= num_series) {
-        return;
-    }
+    float* __restrict__ out_tm)
+{
+    if (period <= 0 || series_len <= 0) return;
+    const bool strict = (strict_flag != 0);
+    const float inv_period = 1.0f / float(period);
 
-    if (period <= 0 || series_len <= 0) {
-        return;
-    }
+    // Grid-stride loop over time; threads iterate over series for coalesced access
+    for (int t = blockIdx.x; t < series_len; t += gridDim.x) {
+        for (int s = threadIdx.x; s < num_series; s += blockDim.x) {
+            const int warm = first_valids[s] + period - 1;
+            const int out_idx = t * num_series + s;
 
-    const bool strict = strict_flag != 0;
-    const int warm = first_valids[series_idx] + period - 1;
-    const int stride = gridDim.x * blockDim.x;
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
-
-    while (t < series_len) {
-        const int out_idx = t * num_series + series_idx;
-        if (t < warm) {
-            out_tm[out_idx] = NAN;
-            t += stride;
-            continue;
-        }
-
-        float avg_volume;
-        if (sample_period == 0) {
-            avg_volume = prefix_at_tm(prefix_volumes_tm, t, series_idx, num_series)
-                / float(t + 1);
-        } else {
-            if (t + 1 < sample_period) {
+            if (t < warm) {
                 out_tm[out_idx] = NAN;
-                t += stride;
                 continue;
             }
-            const int start = t + 1 - sample_period;
-            const float window_sum = prefix_window_tm(
-                prefix_volumes_tm,
-                t,
-                start,
-                series_idx,
-                num_series);
-            avg_volume = window_sum / float(sample_period);
-        }
 
-        const float vi_threshold = avg_volume * vi_factor;
-        float weighted_sum = 0.0f;
-        float v2i_sum = 0.0f;
-        int nmb = 0;
-
-        if (!strict && vi_threshold > 0.0f) {
-            const int window = period;
-            const int start = t - window + 1;
-            const float sum_vol = prefix_window_tm(
-                prefix_volumes_tm,
-                t,
-                start,
-                series_idx,
-                num_series);
-            const float sum_price_vol = prefix_window_tm(
-                prefix_price_volumes_tm,
-                t,
-                start,
-                series_idx,
-                num_series);
-            const float inv = 1.0f / vi_threshold;
-            v2i_sum = sum_vol * inv;
-            weighted_sum = sum_price_vol * inv;
-            nmb = window;
-        } else {
-            int cap = strict ? period * 10 : period;
-            if (cap > t + 1) {
-                cap = t + 1;
+            // Average volume for (t, s)
+            float avg_volume;
+            if (sample_period == 0) {
+                const float pref = prefix_volumes_tm[t * num_series + s];
+                avg_volume = pref / float(t + 1);
+            } else {
+                if (t + 1 < sample_period) {
+                    out_tm[out_idx] = NAN;
+                    continue;
+                }
+                const int start = t + 1 - sample_period;
+                const float end_sum = prefix_volumes_tm[t * num_series + s];
+                const float start_sum = (start <= 0)
+                    ? 0.0f
+                    : prefix_volumes_tm[(start - 1) * num_series + s];
+                avg_volume = (end_sum - start_sum) / float(sample_period);
             }
 
-            int idx = t;
-            for (int j = 0; j < cap; ++j) {
-                const int in_idx = idx * num_series + series_idx;
-                const float vol_val = volumes_tm[in_idx];
-                float v2i_nz = 0.0f;
-                if (vi_threshold > 0.0f && isfinite(vol_val)) {
-                    const float ratio = vol_val / vi_threshold;
-                    if (isfinite(ratio)) {
-                        v2i_nz = ratio;
+            const float vi_threshold = avg_volume * vi_factor;
+            const float inv_th = (vi_threshold > 0.0f) ? (1.0f / vi_threshold) : 0.0f;
+
+            float weighted_sum = 0.0f;
+            float v2i_sum      = 0.0f;
+            int   nmb          = 0;
+
+            if (!strict && inv_th > 0.0f) {
+                const int start = t - period + 1;
+                const float sum_vol = (start <= 0)
+                    ? prefix_volumes_tm[t * num_series + s]
+                    : (prefix_volumes_tm[t * num_series + s] -
+                       prefix_volumes_tm[(start - 1) * num_series + s]);
+                const float sum_price_vol = (start <= 0)
+                    ? prefix_price_volumes_tm[t * num_series + s]
+                    : (prefix_price_volumes_tm[t * num_series + s] -
+                       prefix_price_volumes_tm[(start - 1) * num_series + s]);
+
+                v2i_sum      = sum_vol * inv_th;
+                weighted_sum = sum_price_vol * inv_th;
+                nmb          = period;
+            } else {
+                int cap = strict ? (period * 10) : period;
+                if (cap > t + 1) cap = t + 1;
+
+                int idx = t;
+                #pragma unroll 4
+                for (int j = 0; j < cap; ++j, --idx) {
+                    const float vol_val = volumes_tm[idx * num_series + s];
+                    const float v2i_nz  = (isfinite(vol_val)) ? (vol_val * inv_th) : 0.0f;
+
+                    if (v2i_nz != 0.0f) {
+                        const float price_val = prices_tm[idx * num_series + s];
+                        if (isfinite(price_val)) {
+                            weighted_sum = fmaf(price_val, v2i_nz, weighted_sum);
+                        }
                     }
-                }
 
-                if (v2i_nz != 0.0f) {
-                    const float price_val = prices_tm[in_idx];
-                    if (isfinite(price_val)) {
-                        weighted_sum = fmaf(price_val, v2i_nz, weighted_sum);
-                    }
-                }
+                    v2i_sum += v2i_nz;
+                    nmb = j + 1;
 
-                v2i_sum += v2i_nz;
-                nmb = j + 1;
-
-                if (strict) {
-                    if (v2i_sum >= float(period)) {
+                    if (strict) {
+                        if (v2i_sum >= float(period)) break;
+                    } else if (nmb >= period) {
                         break;
                     }
-                } else if (nmb >= period) {
-                    break;
+                    if (idx == 0) break;
                 }
-
-                if (idx == 0) {
-                    break;
-                }
-                --idx;
             }
-        }
 
-        if (nmb > 0 && t >= nmb) {
-            const int idx_nmb = (t - nmb) * num_series + series_idx;
-            const float p0 = prices_tm[idx_nmb];
-            if (isfinite(p0)) {
-                const float numer = weighted_sum - (v2i_sum - float(period)) * p0;
-                out_tm[out_idx] = numer / float(period);
+            if (nmb > 0 && t >= nmb) {
+                const float p0 = prices_tm[(t - nmb) * num_series + s];
+                if (isfinite(p0)) {
+                    const float numer = weighted_sum - (v2i_sum - float(period)) * p0;
+                    out_tm[out_idx] = numer * inv_period;
+                } else {
+                    out_tm[out_idx] = NAN;
+                }
             } else {
                 out_tm[out_idx] = NAN;
             }
-        } else {
-            out_tm[out_idx] = NAN;
         }
-
-        t += stride;
     }
 }

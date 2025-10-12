@@ -246,12 +246,13 @@ impl CudaKama {
         // Record selection for introspection/debug
         unsafe {
             let this = self as *const _ as *mut CudaKama;
-            (*this).last_batch = Some(BatchKernelSelected::OneD { block_x: 128 });
+            (*this).last_batch = Some(BatchKernelSelected::OneD { block_x: 32 });
         }
         self.maybe_log_batch_debug();
 
         // Limit grid dimension; launch in chunks of <= 65_535 combos.
-        const BLOCK_X: u32 = 128;
+        // One warp per block is optimal for these sequential recurrences.
+        const BLOCK_X: u32 = 32;
         for (start, len) in Self::grid_chunks(n_combos) {
             let grid: GridSize = (len as u32, 1, 1).into();
             let block: BlockSize = (BLOCK_X, 1, 1).into();
@@ -300,11 +301,11 @@ impl CudaKama {
         // Record selection for introspection/debug (same OneD shape)
         unsafe {
             let this = self as *const _ as *mut CudaKama;
-            (*this).last_batch = Some(BatchKernelSelected::OneD { block_x: 128 });
+            (*this).last_batch = Some(BatchKernelSelected::OneD { block_x: 32 });
         }
         self.maybe_log_batch_debug();
 
-        const BLOCK_X: u32 = 128;
+        const BLOCK_X: u32 = 32;
         for (start, len) in Self::grid_chunks(n_combos) {
             let grid: GridSize = (len as u32, 1, 1).into();
             let block: BlockSize = (BLOCK_X, 1, 1).into();
@@ -349,13 +350,23 @@ impl CudaKama {
         combos: &[KamaParams],
         first_valid: usize,
         series_len: usize,
+        max_period: usize,
     ) -> Result<DeviceArrayF32, CudaKamaError> {
         let n_combos = combos.len();
         let prices_bytes = series_len * std::mem::size_of::<f32>();
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let prefix_bytes = Self::build_roc1_prefix_bytes(series_len);
-        // Budget for prefix path; we will skip allocating it if kernel not present.
+
+        let have_prefix_kernel = self.has_function("kama_batch_prefix_f32");
+        let use_prefix =
+            have_prefix_kernel && Self::should_use_prefix(n_combos, series_len, max_period);
+
+        // Only budget prefix memory when we actually use the prefix path.
+        let prefix_bytes = if use_prefix {
+            Self::build_roc1_prefix_bytes(series_len)
+        } else {
+            0
+        };
         let required = prices_bytes + periods_bytes + out_bytes + prefix_bytes;
         let headroom = 64 * 1024 * 1024; // 64MB cushion (match ALMA default)
         if !Self::will_fit(required, headroom) {
@@ -374,8 +385,8 @@ impl CudaKama {
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
                 .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
 
-        if self.has_function("kama_batch_prefix_f32") {
-            // Host-shared precompute for Σ|Δp| prefix (NaN-insensitive accumulation)
+        if use_prefix {
+            // Host-precompute Σ|Δp| prefix (NaN-insensitive accumulation) only when beneficial.
             let mut prefix: Vec<f32> = Vec::with_capacity(series_len + 1);
             prefix.push(0.0f32);
             let mut acc = 0.0f32;
@@ -426,14 +437,21 @@ impl CudaKama {
         })
     }
 
+    #[inline]
+    fn should_use_prefix(n_combos: usize, series_len: usize, max_period: usize) -> bool {
+        // Heuristic: choose prefix when aggregate warmup work is relatively large.
+        // Rule-of-thumb from guide: n_combos * max_period >= 8 * (series_len + 1)
+        n_combos.saturating_mul(max_period) >= 8usize.saturating_mul(series_len + 1)
+    }
+
     pub fn kama_batch_dev(
         &self,
         data_f32: &[f32],
         sweep: &KamaBatchRange,
     ) -> Result<DeviceArrayF32, CudaKamaError> {
-        let (combos, first_valid, series_len, _max_period) =
+        let (combos, first_valid, series_len, max_period) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
-        self.run_batch_kernel(data_f32, &combos, first_valid, series_len)
+        self.run_batch_kernel(data_f32, &combos, first_valid, series_len, max_period)
     }
 
     pub fn kama_batch_into_host_f32(
@@ -442,7 +460,7 @@ impl CudaKama {
         sweep: &KamaBatchRange,
         out: &mut [f32],
     ) -> Result<(usize, usize, Vec<KamaParams>), CudaKamaError> {
-        let (combos, first_valid, series_len, _max_period) =
+        let (combos, first_valid, series_len, max_period) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let expected = combos.len() * series_len;
         if out.len() != expected {
@@ -452,7 +470,7 @@ impl CudaKama {
                 expected
             )));
         }
-        let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len)?;
+        let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len, max_period)?;
         arr.buf
             .copy_to(out)
             .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
@@ -542,13 +560,12 @@ impl CudaKama {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaKamaError> {
-        // Only a 1D time-major kernel is implemented for KAMA (recurrence).
-        // Keep geometry simple; allow block override via env if desired.
+        // One warp per series (sequential recurrence handled by lane 0).
+        // Default to 32; allow override via env for experiments.
         let block_x = std::env::var("KAMA_BLOCK_X")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .filter(|&v| v == 64 || v == 128 || v == 256 || v == 512)
-            .unwrap_or(128);
+            .unwrap_or(32);
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
