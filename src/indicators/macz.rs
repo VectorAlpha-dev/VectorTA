@@ -1094,8 +1094,16 @@ pub unsafe fn macz_scalar_classic(
         let have_fast = i >= fast_start && n_fast_nan == 0;
         let have_slow = i >= slow_start && n_slow_nan == 0;
 
-        let fast_ma = if have_fast { sum_fast * inv_fast } else { f64::NAN };
-        let slow_ma = if have_slow { sum_slow * inv_slow } else { f64::NAN };
+        let fast_ma = if have_fast {
+            sum_fast * inv_fast
+        } else {
+            f64::NAN
+        };
+        let slow_ma = if have_slow {
+            sum_slow * inv_slow
+        } else {
+            f64::NAN
+        };
 
         let macd = if fast_ma.is_nan() || slow_ma.is_nan() {
             f64::NAN
@@ -1198,7 +1206,9 @@ pub unsafe fn macz_scalar_classic(
                 sig_sum += macz_val;
             }
             sig_head += 1;
-            if sig_head == sig { sig_head = 0; }
+            if sig_head == sig {
+                sig_head = 0;
+            }
 
             // --- Histogram -> out (only tail; prefix already NaN) ---
             if i >= warm_hist {
@@ -1856,36 +1866,42 @@ impl MaczStream {
     pub fn try_new(params: MaczParams) -> Result<Self, MaczError> {
         let fast = params.fast_length.unwrap_or(12);
         let slow = params.slow_length.unwrap_or(25);
-        let lz   = params.lengthz.unwrap_or(20);
-        let lsd  = params.length_stdev.unwrap_or(25);
-        let sig  = params.signal_length.unwrap_or(9);
+        let lz = params.lengthz.unwrap_or(20);
+        let lsd = params.length_stdev.unwrap_or(25);
+        let sig = params.signal_length.unwrap_or(9);
         let use_lag = params.use_lag.unwrap_or(false);
-        let gamma   = params.gamma.unwrap_or(0.02);
+        let gamma = params.gamma.unwrap_or(0.02);
 
         if fast == 0 || slow == 0 || lz == 0 || lsd == 0 || sig == 0 {
-            return Err(MaczError::InvalidParameter { msg: "periods must be > 0".into() });
+            return Err(MaczError::InvalidParameter {
+                msg: "periods must be > 0".into(),
+            });
         }
         if !(0.0..1.0).contains(&gamma) {
             return Err(MaczError::InvalidGamma { gamma });
         }
         let a = params.a.unwrap_or(1.0);
         let b = params.b.unwrap_or(1.0);
-        if !(-2.0..=2.0).contains(&a) { return Err(MaczError::InvalidA { a }); }
-        if !(-2.0..=2.0).contains(&b) { return Err(MaczError::InvalidB { b }); }
+        if !(-2.0..=2.0).contains(&a) {
+            return Err(MaczError::InvalidA { a });
+        }
+        if !(-2.0..=2.0).contains(&b) {
+            return Err(MaczError::InvalidB { b });
+        }
 
         // One shared ring large enough for all windows
         let buffer_size = fast.max(slow).max(lz).max(lsd);
 
         // Warm lengths (match batch): first MACZ at warm_m-1, first histogram at warm_hist
-        let warm_m   = slow.max(lz).max(lsd);
+        let warm_m = slow.max(lz).max(lsd);
         let warm_hist = warm_m + sig - 1;
 
         // Precompute reciprocals and modulo-free offsets
         let inv_fast = 1.0 / (fast as f64);
         let inv_slow = 1.0 / (slow as f64);
-        let inv_lz   = 1.0 / (lz   as f64);
-        let inv_lsd  = 1.0 / (lsd  as f64);
-        let inv_sig  = 1.0 / (sig  as f64);
+        let inv_lz = 1.0 / (lz as f64);
+        let inv_lsd = 1.0 / (lsd as f64);
+        let inv_sig = 1.0 / (sig as f64);
 
         let off = |p: usize| buffer_size - (p % buffer_size);
 
@@ -1917,8 +1933,12 @@ impl MaczStream {
             sig_count: 0,
             sig_nan: 0,
 
-            l0: 0.0, l1: 0.0, l2: 0.0, l3: 0.0,
-            use_lag, gamma,
+            l0: 0.0,
+            l1: 0.0,
+            l2: 0.0,
+            l3: 0.0,
+            use_lag,
+            gamma,
 
             current_vwap: f64::NAN,
             current_zvwap: f64::NAN,
@@ -1929,15 +1949,25 @@ impl MaczStream {
             current_macz: f64::NAN,
             current_signal: f64::NAN,
 
-            fast, slow, lz, lsd, sig,
-            a, b,
-            inv_fast, inv_slow, inv_lz, inv_lsd, inv_sig,
-            warm_m, warm_hist,
+            fast,
+            slow,
+            lz,
+            lsd,
+            sig,
+            a,
+            b,
+            inv_fast,
+            inv_slow,
+            inv_lz,
+            inv_lsd,
+            inv_sig,
+            warm_m,
+            warm_hist,
 
             off_fast: off(fast),
             off_slow: off(slow),
-            off_lz:   off(lz),
-            off_lsd:  off(lsd),
+            off_lz: off(lz),
+            off_lsd: off(lsd),
         })
     }
 
@@ -1961,22 +1991,46 @@ impl MaczStream {
         #[inline(always)]
         fn add_off(i: usize, off: usize, n: usize) -> usize {
             let j = i + off;
-            if j >= n { j - n } else { j }
+            if j >= n {
+                j - n
+            } else {
+                j
+            }
         }
 
         // --- Identify leaving elements (before overwriting head) ---
         let leaving_fast_idx = add_off(idx, self.off_fast, bsz);
         let leaving_slow_idx = add_off(idx, self.off_slow, bsz);
-        let leaving_lz_idx   = add_off(idx, self.off_lz,   bsz);
-        let leaving_lsd_idx  = add_off(idx, self.off_lsd,  bsz);
+        let leaving_lz_idx = add_off(idx, self.off_lz, bsz);
+        let leaving_lsd_idx = add_off(idx, self.off_lsd, bsz);
 
-        let exiting_fast = if self.index >= self.fast { self.price_buffer[leaving_fast_idx] } else { 0.0 };
-        let exiting_slow = if self.index >= self.slow { self.price_buffer[leaving_slow_idx] } else { 0.0 };
-        let exiting_lz   = if self.index >= self.lz   { self.price_buffer[leaving_lz_idx] }   else { 0.0 };
-        let exiting_lsd  = if self.index >= self.lsd  { self.price_buffer[leaving_lsd_idx] }  else { 0.0 };
+        let exiting_fast = if self.index >= self.fast {
+            self.price_buffer[leaving_fast_idx]
+        } else {
+            0.0
+        };
+        let exiting_slow = if self.index >= self.slow {
+            self.price_buffer[leaving_slow_idx]
+        } else {
+            0.0
+        };
+        let exiting_lz = if self.index >= self.lz {
+            self.price_buffer[leaving_lz_idx]
+        } else {
+            0.0
+        };
+        let exiting_lsd = if self.index >= self.lsd {
+            self.price_buffer[leaving_lsd_idx]
+        } else {
+            0.0
+        };
 
         let exiting_vwap_price = exiting_lz;
-        let exiting_vwap_vol   = if self.index >= self.lz { self.volume_buffer[leaving_lz_idx] } else { 0.0 };
+        let exiting_vwap_vol = if self.index >= self.lz {
+            self.volume_buffer[leaving_lz_idx]
+        } else {
+            0.0
+        };
         let leaving_vol_ok = exiting_vwap_vol.is_finite() && exiting_vwap_vol > 0.0;
 
         // --- Overwrite head with new sample ---
@@ -1987,16 +2041,20 @@ impl MaczStream {
         self.fast_sum += value - exiting_fast;
         self.slow_sum += value - exiting_slow;
 
-        self.sum_lz  += value - exiting_lz;
+        self.sum_lz += value - exiting_lz;
         self.sum2_lz += value.mul_add(value, -exiting_lz * exiting_lz);
 
         self.vwap_pv_sum += value * vol - exiting_vwap_price * exiting_vwap_vol;
-        self.vwap_v_sum  += vol - exiting_vwap_vol;
+        self.vwap_v_sum += vol - exiting_vwap_vol;
 
-        if !vol_ok { self.vwap_bad += 1; }
-        if self.index >= self.lz && !leaving_vol_ok && self.vwap_bad > 0 { self.vwap_bad -= 1; }
+        if !vol_ok {
+            self.vwap_bad += 1;
+        }
+        if self.index >= self.lz && !leaving_vol_ok && self.vwap_bad > 0 {
+            self.vwap_bad -= 1;
+        }
 
-        self.stdev_sum  += value - exiting_lsd;
+        self.stdev_sum += value - exiting_lsd;
         self.stdev_sum2 += value.mul_add(value, -exiting_lsd * exiting_lsd);
 
         // --- advance (logical) index and ring head after ingest ---
@@ -2013,18 +2071,23 @@ impl MaczStream {
         // --- Fast/Slow SMA & MACD ---
         self.current_fast_ma = self.fast_sum * self.inv_fast;
         self.current_slow_ma = self.slow_sum * self.inv_slow;
-        self.current_macd    = self.current_fast_ma - self.current_slow_ma;
+        self.current_macd = self.current_fast_ma - self.current_slow_ma;
 
         // --- VWAP (strict): NaN if any bad vol in window or volume sum <= 0 ---
         if self.vwap_bad == 0 && self.vwap_v_sum > 0.0 {
             self.current_vwap = self.vwap_pv_sum / self.vwap_v_sum;
 
             // --- ZVWAP using population variance around fixed VWAP mean ---
-            let e  = self.sum_lz  * self.inv_lz;
+            let e = self.sum_lz * self.inv_lz;
             let e2 = self.sum2_lz * self.inv_lz;
-            let var = (-2.0 * self.current_vwap).mul_add(e, e2) + self.current_vwap * self.current_vwap;
-            let sd  = var.max(0.0).sqrt();
-            self.current_zvwap = if sd > 0.0 { (value - self.current_vwap) / sd } else { 0.0 };
+            let var =
+                (-2.0 * self.current_vwap).mul_add(e, e2) + self.current_vwap * self.current_vwap;
+            let sd = var.max(0.0).sqrt();
+            self.current_zvwap = if sd > 0.0 {
+                (value - self.current_vwap) / sd
+            } else {
+                0.0
+            };
         } else {
             self.current_vwap = f64::NAN;
             self.current_zvwap = f64::NAN;
@@ -2032,7 +2095,7 @@ impl MaczStream {
 
         // --- Population stdev on source over lsd: sqrt(E[x^2] - E[x]^2) ---
         let mean_lsd = self.stdev_sum * self.inv_lsd;
-        let var_lsd  = self.stdev_sum2 * self.inv_lsd - mean_lsd * mean_lsd;
+        let var_lsd = self.stdev_sum2 * self.inv_lsd - mean_lsd * mean_lsd;
         self.current_stdev = var_lsd.max(0.0).sqrt();
 
         // --- MAC-Z raw ---
@@ -2040,7 +2103,12 @@ impl MaczStream {
             && self.current_stdev > 0.0
             && self.current_zvwap.is_finite()
             && self.current_macd.is_finite()
-        { self.current_zvwap.mul_add(self.a, (self.current_macd / self.current_stdev) * self.b) } else { f64::NAN };
+        {
+            self.current_zvwap
+                .mul_add(self.a, (self.current_macd / self.current_stdev) * self.b)
+        } else {
+            f64::NAN
+        };
 
         // --- Optional Laguerre smoothing (finite inputs only) ---
         let macz_val = if self.use_lag && macz_raw.is_finite() {
@@ -2049,22 +2117,39 @@ impl MaczStream {
             let new_l1 = (-self.gamma).mul_add(new_l0, self.l0 + self.gamma * self.l1);
             let new_l2 = (-self.gamma).mul_add(new_l1, self.l1 + self.gamma * self.l2);
             let new_l3 = (-self.gamma).mul_add(new_l2, self.l2 + self.gamma * self.l3);
-            self.l0 = new_l0; self.l1 = new_l1; self.l2 = new_l2; self.l3 = new_l3;
+            self.l0 = new_l0;
+            self.l1 = new_l1;
+            self.l2 = new_l2;
+            self.l3 = new_l3;
             (self.l0 + 2.0 * self.l1 + 2.0 * self.l2 + self.l3) / 6.0
-        } else { macz_raw };
+        } else {
+            macz_raw
+        };
 
         // --- Strict signal SMA ring (O(1), starts once MAC-Z is available) ---
         if i_next >= self.warm_m {
             if self.sig_count == self.sig {
                 let leaving = self.signal_buffer[self.sig_head];
-                if leaving.is_nan() { if self.sig_nan > 0 { self.sig_nan -= 1; } } else { self.signal_sum -= leaving; }
+                if leaving.is_nan() {
+                    if self.sig_nan > 0 {
+                        self.sig_nan -= 1;
+                    }
+                } else {
+                    self.signal_sum -= leaving;
+                }
             } else {
                 self.sig_count += 1;
             }
             self.signal_buffer[self.sig_head] = macz_val;
-            if macz_val.is_nan() { self.sig_nan += 1; } else { self.signal_sum += macz_val; }
+            if macz_val.is_nan() {
+                self.sig_nan += 1;
+            } else {
+                self.signal_sum += macz_val;
+            }
             self.sig_head += 1;
-            if self.sig_head == self.sig { self.sig_head = 0; }
+            if self.sig_head == self.sig {
+                self.sig_head = 0;
+            }
         }
 
         // Advance after all computations
@@ -2073,14 +2158,18 @@ impl MaczStream {
         self.filled |= self.index >= bsz;
 
         // Mirror batch warmup behavior: no outputs until > warm_hist
-        if self.index <= self.warm_hist { return None; }
+        if self.index <= self.warm_hist {
+            return None;
+        }
 
         // Output histogram (NaN if signal window contains any NaN)
         if self.sig_count == self.sig && self.sig_nan == 0 && macz_val.is_finite() {
             self.current_macz = macz_val;
             self.current_signal = self.signal_sum * self.inv_sig;
             Some(self.current_macz - self.current_signal)
-        } else { Some(f64::NAN) }
+        } else {
+            Some(f64::NAN)
+        }
     }
 }
 

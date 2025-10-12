@@ -50,17 +50,24 @@ pub struct CudaFwmaPolicy {
 
 impl Default for CudaFwmaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaFwmaError {
@@ -107,11 +114,11 @@ impl CudaFwma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaFwmaError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -131,17 +138,30 @@ impl CudaFwma {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaFwmaPolicy) -> Result<Self, CudaFwmaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaFwmaPolicy,
+    ) -> Result<Self, CudaFwmaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaFwmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaFwmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaFwmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaFwmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaFwmaError> {
-        self.stream.synchronize().map_err(|e| CudaFwmaError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaFwmaError::Cuda(e.to_string()))
     }
 
     #[inline]
@@ -152,13 +172,19 @@ impl CudaFwma {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
     #[inline]
     fn grid_y_chunks(n_combos: usize) -> impl Iterator<Item = (usize, usize)> {
@@ -171,28 +197,36 @@ impl CudaFwma {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_s = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_s || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] FWMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaFwma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaFwma)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per_s = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_s || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] FWMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaFwma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaFwma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -317,7 +351,8 @@ impl CudaFwma {
             ));
         }
         // Select plain batch kernel (only variant available today)
-        let func = self.module
+        let func = self
+            .module
             .get_function("fwma_batch_f32")
             .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
         let block_x: u32 = match self.policy.batch {
@@ -410,16 +445,17 @@ impl CudaFwma {
             .map(|p| (first_valid + p.period.unwrap() - 1) as i32)
             .collect();
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
         let d_weights = DeviceBuffer::from_slice(&weights_flat)
             .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
-        let d_warms = DeviceBuffer::from_slice(&warms_i32)
-            .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-            .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
+        let d_warms =
+            DeviceBuffer::from_slice(&warms_i32).map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+                .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
             &d_prices, &d_weights, &d_periods, &d_warms, series_len, n_combos, max_period,
@@ -524,7 +560,8 @@ impl CudaFwma {
             ));
         }
 
-        let func = self.module
+        let func = self
+            .module
             .get_function("fwma_multi_series_one_param_f32")
             .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
 
@@ -646,7 +683,7 @@ impl CudaFwma {
             rows,
             cols,
         })
-}
+    }
 
     pub fn fwma_multi_series_one_param_time_major_into_host_f32(
         &self,
@@ -689,7 +726,8 @@ impl CudaFwma {
 
         // Use pinned buffer for potentially large copies
         let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(cols * rows).map_err(|e| CudaFwmaError::Cuda(e.to_string()))?
+            LockedBuffer::uninitialized(cols * rows)
+                .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?
         };
         d_out_tm
             .copy_to(pinned.as_mut_slice())
@@ -713,7 +751,9 @@ pub mod benches {
         crate::indicators::moving_averages::fwma::FwmaParams,
         fwma_batch_dev,
         fwma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::fwma::FwmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::fwma::FwmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::fwma::FwmaParams { period: Some(64) },
         "fwma",
         "fwma"

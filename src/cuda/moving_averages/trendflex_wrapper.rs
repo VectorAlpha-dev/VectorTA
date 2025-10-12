@@ -11,11 +11,11 @@ use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::trendflex::{
     expand_grid_trendflex, TrendFlexBatchRange, TrendFlexParams,
 };
+use cust::context::CacheConfig;
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::context::CacheConfig;
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -75,17 +75,24 @@ pub struct CudaTrendflexPolicy {
 
 impl Default for CudaTrendflexPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 impl CudaTrendflex {
     pub fn new(device_id: usize) -> Result<Self, CudaTrendflexError> {
@@ -103,10 +110,12 @@ impl CudaTrendflex {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -130,27 +139,43 @@ impl CudaTrendflex {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaTrendflexPolicy) -> Result<Self, CudaTrendflexError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaTrendflexPolicy,
+    ) -> Result<Self, CudaTrendflexError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaTrendflexPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaTrendflexPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaTrendflexPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaTrendflexPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TrendFlex batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTrendflex)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTrendflex)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -158,14 +183,19 @@ impl CudaTrendflex {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TrendFlex many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTrendflex)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTrendflex)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -181,14 +211,20 @@ impl CudaTrendflex {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     fn prepare_batch_inputs(
@@ -268,7 +304,11 @@ impl CudaTrendflex {
                 let (_min_grid, block) = func
                     .suggested_launch_configuration(0, (0, 0, 0).into())
                     .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-                if block == 0 { 128 } else { block }
+                if block == 0 {
+                    128
+                } else {
+                    block
+                }
             }
         };
         // Chunk by combos to keep grid.x blocks under 65_535
@@ -387,7 +427,9 @@ impl CudaTrendflex {
         d_ssf: &mut DeviceBuffer<f32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTrendflexError> {
-        if combos.is_empty() { return Err(CudaTrendflexError::InvalidInput("no combos".into())); }
+        if combos.is_empty() {
+            return Err(CudaTrendflexError::InvalidInput("no combos".into()));
+        }
         // Upload small periods list only
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)
@@ -411,7 +453,9 @@ impl CudaTrendflex {
         combos: &[TrendFlexParams],
         first_valid: usize,
     ) -> Result<DeviceArrayF32, CudaTrendflexError> {
-        if combos.is_empty() { return Err(CudaTrendflexError::InvalidInput("no combos".into())); }
+        if combos.is_empty() {
+            return Err(CudaTrendflexError::InvalidInput("no combos".into()));
+        }
         let elems = combos.len() * len;
         let mut d_ssf = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
             .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
@@ -419,9 +463,18 @@ impl CudaTrendflex {
             .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
 
         self.trendflex_batch_dev_with_device_prices_into(
-            d_prices, len, combos, first_valid, &mut d_ssf, &mut d_out,
+            d_prices,
+            len,
+            combos,
+            first_valid,
+            &mut d_ssf,
+            &mut d_out,
         )?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
     }
 
     pub fn trendflex_batch_into_host_f32(
@@ -542,7 +595,11 @@ impl CudaTrendflex {
                 let (_min_grid, block) = func
                     .suggested_launch_configuration(0, (0, 0, 0).into())
                     .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-                if block == 0 { 128 } else { block }
+                if block == 0 {
+                    128
+                } else {
+                    block
+                }
             }
         };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
@@ -681,9 +738,19 @@ impl CudaTrendflex {
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
             .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
         self.trendflex_many_series_one_param_on_device_into(
-            d_prices_tm, cols, rows, &d_first_valids, period, &mut d_ssf, &mut d_out,
+            d_prices_tm,
+            cols,
+            rows,
+            &d_first_valids,
+            period,
+            &mut d_ssf,
+            &mut d_out,
         )?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn trendflex_multi_series_one_param_time_major_into_host_f32(
@@ -727,7 +794,9 @@ pub mod benches {
         crate::indicators::moving_averages::trendflex::TrendFlexParams,
         trendflex_batch_dev,
         trendflex_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::trendflex::TrendFlexBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::trendflex::TrendFlexBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::trendflex::TrendFlexParams { period: Some(64) },
         "trendflex",
         "trendflex"

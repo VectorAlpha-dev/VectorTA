@@ -453,7 +453,11 @@ pub unsafe fn safezonestop_scalar(
     }
 
     // Direction once (branch-hoisted)
-    let dir_long = direction.as_bytes().get(0).map(|&b| b == b'l').unwrap_or(true);
+    let dir_long = direction
+        .as_bytes()
+        .get(0)
+        .map(|&b| b == b'l')
+        .unwrap_or(true);
 
     // Heuristic: tiny lookbacks favor a tight two-pass with a small inner loop;
     // large lookbacks favor a jammed one-pass with a monotonic deque (O(n)).
@@ -463,9 +467,22 @@ pub unsafe fn safezonestop_scalar(
     if max_lookback > LB_DEQUE_THRESHOLD {
         // ---- One-pass: bootstrap + recurrence + monotonic deque ----
         #[inline(always)]
-        fn ring_dec(x: usize, cap: usize) -> usize { if x == 0 { cap - 1 } else { x - 1 } }
+        fn ring_dec(x: usize, cap: usize) -> usize {
+            if x == 0 {
+                cap - 1
+            } else {
+                x - 1
+            }
+        }
         #[inline(always)]
-        fn ring_inc(x: usize, cap: usize) -> usize { let y = x + 1; if y == cap { 0 } else { y } }
+        fn ring_inc(x: usize, cap: usize) -> usize {
+            let y = x + 1;
+            if y == cap {
+                0
+            } else {
+                y
+            }
+        }
 
         let cap = max_lookback.max(1) + 1;
         let mut q_idx = vec![0usize; cap];
@@ -490,9 +507,17 @@ pub unsafe fn safezonestop_scalar(
             let up_pos = if up > 0.0 { up } else { 0.0 };
             let dn_pos = if dn > 0.0 { dn } else { 0.0 };
             let dm_raw = if dir_long {
-                if dn_pos > up_pos { dn_pos } else { 0.0 }
+                if dn_pos > up_pos {
+                    dn_pos
+                } else {
+                    0.0
+                }
             } else {
-                if up_pos > dn_pos { up_pos } else { 0.0 }
+                if up_pos > dn_pos {
+                    up_pos
+                } else {
+                    0.0
+                }
             };
 
             if !dm_ready {
@@ -526,8 +551,17 @@ pub unsafe fn safezonestop_scalar(
                 while q_len > 0 {
                     let last = ring_dec(q_tail, cap);
                     let back_val = *q_val.get_unchecked(last);
-                    let pop = if dir_long { back_val <= cand } else { back_val >= cand };
-                    if pop { q_tail = last; q_len -= 1; } else { break; }
+                    let pop = if dir_long {
+                        back_val <= cand
+                    } else {
+                        back_val >= cand
+                    };
+                    if pop {
+                        q_tail = last;
+                        q_len -= 1;
+                    } else {
+                        break;
+                    }
                 }
                 *q_idx.get_unchecked_mut(q_tail) = i;
                 *q_val.get_unchecked_mut(q_tail) = cand;
@@ -536,7 +570,11 @@ pub unsafe fn safezonestop_scalar(
             }
 
             if i >= warm {
-                *out.get_unchecked_mut(i) = if q_len > 0 { *q_val.get_unchecked(q_head) } else { f64::NAN };
+                *out.get_unchecked_mut(i) = if q_len > 0 {
+                    *q_val.get_unchecked(q_head)
+                } else {
+                    f64::NAN
+                };
             }
 
             prev_high = h;
@@ -557,7 +595,19 @@ pub unsafe fn safezonestop_scalar(
             let dn = prev_l - l;
             let up_pos = if up > 0.0 { up } else { 0.0 };
             let dn_pos = if dn > 0.0 { dn } else { 0.0 };
-            let dm = if dir_long { if dn_pos > up_pos { dn_pos } else { 0.0 } } else { if up_pos > dn_pos { up_pos } else { 0.0 } };
+            let dm = if dir_long {
+                if dn_pos > up_pos {
+                    dn_pos
+                } else {
+                    0.0
+                }
+            } else {
+                if up_pos > dn_pos {
+                    up_pos
+                } else {
+                    0.0
+                }
+            };
             sum += dm;
             prev_h = h;
             prev_l = l;
@@ -573,7 +623,19 @@ pub unsafe fn safezonestop_scalar(
             let dn = prev_l - l;
             let up_pos = if up > 0.0 { up } else { 0.0 };
             let dn_pos = if dn > 0.0 { dn } else { 0.0 };
-            let dm = if dir_long { if dn_pos > up_pos { dn_pos } else { 0.0 } } else { if up_pos > dn_pos { up_pos } else { 0.0 } };
+            let dm = if dir_long {
+                if dn_pos > up_pos {
+                    dn_pos
+                } else {
+                    0.0
+                }
+            } else {
+                if up_pos > dn_pos {
+                    up_pos
+                } else {
+                    0.0
+                }
+            };
             let prev = *dm_smooth.get_unchecked(i - 1);
             *dm_smooth.get_unchecked_mut(i) = alpha.mul_add(prev, dm);
             prev_h = h;
@@ -585,11 +647,17 @@ pub unsafe fn safezonestop_scalar(
             for i in warm..len {
                 let start_idx = i + 1 - max_lookback;
                 let j0 = start_idx.max(end0);
-                if j0 > i { *out.get_unchecked_mut(i) = f64::NAN; continue; }
+                if j0 > i {
+                    *out.get_unchecked_mut(i) = f64::NAN;
+                    continue;
+                }
                 let mut mx = f64::NEG_INFINITY;
                 for j in j0..=i {
-                    let val = (-mult).mul_add(*dm_smooth.get_unchecked(j), *low.get_unchecked(j - 1));
-                    if val > mx { mx = val; }
+                    let val =
+                        (-mult).mul_add(*dm_smooth.get_unchecked(j), *low.get_unchecked(j - 1));
+                    if val > mx {
+                        mx = val;
+                    }
                 }
                 *out.get_unchecked_mut(i) = mx;
             }
@@ -597,11 +665,16 @@ pub unsafe fn safezonestop_scalar(
             for i in warm..len {
                 let start_idx = i + 1 - max_lookback;
                 let j0 = start_idx.max(end0);
-                if j0 > i { *out.get_unchecked_mut(i) = f64::NAN; continue; }
+                if j0 > i {
+                    *out.get_unchecked_mut(i) = f64::NAN;
+                    continue;
+                }
                 let mut mn = f64::INFINITY;
                 for j in j0..=i {
                     let val = mult.mul_add(*dm_smooth.get_unchecked(j), *high.get_unchecked(j - 1));
-                    if val < mn { mn = val; }
+                    if val < mn {
+                        mn = val;
+                    }
                 }
                 *out.get_unchecked_mut(i) = mn;
             }
@@ -713,11 +786,19 @@ impl SafeZoneStopStream {
     #[inline]
     fn ring_inc(&self, x: usize) -> usize {
         let y = x + 1;
-        if y == self.cap { 0 } else { y }
+        if y == self.cap {
+            0
+        } else {
+            y
+        }
     }
     #[inline]
     fn ring_dec(&self, x: usize) -> usize {
-        if x == 0 { self.cap - 1 } else { x - 1 }
+        if x == 0 {
+            self.cap - 1
+        } else {
+            x - 1
+        }
     }
 
     pub fn try_new(params: SafeZoneStopParams, direction: &str) -> Result<Self, SafeZoneStopError> {
@@ -725,7 +806,10 @@ impl SafeZoneStopStream {
         let mult = params.mult.unwrap_or(2.5);
         let max_lookback = params.max_lookback.unwrap_or(3);
         if period == 0 {
-            return Err(SafeZoneStopError::InvalidPeriod { period, data_len: 0 });
+            return Err(SafeZoneStopError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         if direction != "long" && direction != "short" {
             return Err(SafeZoneStopError::InvalidDirection);
@@ -842,9 +926,17 @@ impl SafeZoneStopStream {
         let up_pos = if up > 0.0 { up } else { 0.0 };
         let dn_pos = if dn > 0.0 { dn } else { 0.0 };
         let dm_raw = if self.dir_long {
-            if dn_pos > up_pos { dn_pos } else { 0.0 }
+            if dn_pos > up_pos {
+                dn_pos
+            } else {
+                0.0
+            }
         } else {
-            if up_pos > dn_pos { up_pos } else { 0.0 }
+            if up_pos > dn_pos {
+                up_pos
+            } else {
+                0.0
+            }
         };
 
         // index j corresponds to the DM we just formed
@@ -866,9 +958,9 @@ impl SafeZoneStopStream {
         // candidate uses previous bar's extreme and current smoothed DM
         if self.dm_ready {
             let cand = if self.dir_long {
-                (-self.mult).mul_add(self.dm_prev, self.prev_low)  // prev_low - mult*dm
+                (-self.mult).mul_add(self.dm_prev, self.prev_low) // prev_low - mult*dm
             } else {
-                self.mult.mul_add(self.dm_prev, self.prev_high)    // prev_high + mult*dm
+                self.mult.mul_add(self.dm_prev, self.prev_high) // prev_high + mult*dm
             };
             self.push_candidate(j, cand);
         }
@@ -1129,7 +1221,11 @@ fn safezonestop_batch_inner(
     // no "fill remaining with NaN" here
 
     // Row-specific batch speedup: precompute dm_raw once per direction
-    let dir_long = direction.as_bytes().get(0).map(|&b| b == b'l').unwrap_or(true);
+    let dir_long = direction
+        .as_bytes()
+        .get(0)
+        .map(|&b| b == b'l')
+        .unwrap_or(true);
     let mut dm_raw = vec![0.0f64; len];
     {
         let mut prev_h = unsafe { *high.get_unchecked(first) };
@@ -1142,9 +1238,17 @@ fn safezonestop_batch_inner(
             let up_pos = if up > 0.0 { up } else { 0.0 };
             let dn_pos = if dn > 0.0 { dn } else { 0.0 };
             let v = if dir_long {
-                if dn_pos > up_pos { dn_pos } else { 0.0 }
+                if dn_pos > up_pos {
+                    dn_pos
+                } else {
+                    0.0
+                }
             } else {
-                if up_pos > dn_pos { up_pos } else { 0.0 }
+                if up_pos > dn_pos {
+                    up_pos
+                } else {
+                    0.0
+                }
             };
             dm_raw[i] = v;
             prev_h = h;
@@ -1157,9 +1261,9 @@ fn safezonestop_batch_inner(
         let m = combos[row].mult.unwrap();
         let lb = combos[row].max_lookback.unwrap();
         match kern {
-            Kernel::Scalar => {
-                safezonestop_row_scalar_with_dmraw(high, low, p, m, lb, dir_long, first, &dm_raw, out_row)
-            }
+            Kernel::Scalar => safezonestop_row_scalar_with_dmraw(
+                high, low, p, m, lb, dir_long, first, &dm_raw, out_row,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => safezonestop_row_avx2(high, low, p, m, lb, direction, first, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1245,7 +1349,11 @@ pub fn safezonestop_batch_inner_into(
     let cols = len;
 
     // Precompute dm_raw once per direction
-    let dir_long = direction.as_bytes().get(0).map(|&b| b == b'l').unwrap_or(true);
+    let dir_long = direction
+        .as_bytes()
+        .get(0)
+        .map(|&b| b == b'l')
+        .unwrap_or(true);
     let mut dm_raw = vec![0.0f64; len];
     {
         let mut prev_h = unsafe { *high.get_unchecked(first) };
@@ -1258,9 +1366,17 @@ pub fn safezonestop_batch_inner_into(
             let up_pos = if up > 0.0 { up } else { 0.0 };
             let dn_pos = if dn > 0.0 { dn } else { 0.0 };
             let v = if dir_long {
-                if dn_pos > up_pos { dn_pos } else { 0.0 }
+                if dn_pos > up_pos {
+                    dn_pos
+                } else {
+                    0.0
+                }
             } else {
-                if up_pos > dn_pos { up_pos } else { 0.0 }
+                if up_pos > dn_pos {
+                    up_pos
+                } else {
+                    0.0
+                }
             };
             dm_raw[i] = v;
             prev_h = h;
@@ -1273,9 +1389,9 @@ pub fn safezonestop_batch_inner_into(
         let m = combos[row].mult.unwrap();
         let lb = combos[row].max_lookback.unwrap();
         match kern {
-            Kernel::Scalar => {
-                safezonestop_row_scalar_with_dmraw(high, low, p, m, lb, dir_long, first, &dm_raw, out_row)
-            }
+            Kernel::Scalar => safezonestop_row_scalar_with_dmraw(
+                high, low, p, m, lb, dir_long, first, &dm_raw, out_row,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => safezonestop_row_avx2(high, low, p, m, lb, direction, first, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1353,8 +1469,23 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
         const LB_DEQUE_THRESHOLD: usize = 32;
         if max_lookback > LB_DEQUE_THRESHOLD {
             // One-pass jam with deque over cand values (using dm_raw recurrence)
-            #[inline(always)] fn ring_dec(x: usize, cap: usize) -> usize { if x == 0 { cap - 1 } else { x - 1 } }
-            #[inline(always)] fn ring_inc(x: usize, cap: usize) -> usize { let y = x + 1; if y == cap { 0 } else { y } }
+            #[inline(always)]
+            fn ring_dec(x: usize, cap: usize) -> usize {
+                if x == 0 {
+                    cap - 1
+                } else {
+                    x - 1
+                }
+            }
+            #[inline(always)]
+            fn ring_inc(x: usize, cap: usize) -> usize {
+                let y = x + 1;
+                if y == cap {
+                    0
+                } else {
+                    y
+                }
+            }
             let cap = max_lookback.max(1) + 1;
             let mut q_idx = vec![0usize; cap];
             let mut q_val = vec![0.0f64; cap];
@@ -1364,11 +1495,14 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
 
             // bootstrap
             let mut boot_sum = 0.0;
-            for i in (first + 1)..=end0 { boot_sum += *dm_raw.get_unchecked(i); }
+            for i in (first + 1)..=end0 {
+                boot_sum += *dm_raw.get_unchecked(i);
+            }
             let mut dm_prev = boot_sum;
             let alpha = 1.0 - 1.0 / (period as f64);
 
-            for i in (end0 + 1)..len { // j == i here
+            for i in (end0 + 1)..len {
+                // j == i here
                 dm_prev = alpha.mul_add(dm_prev, *dm_raw.get_unchecked(i));
 
                 let cand = if dir_long {
@@ -1380,13 +1514,27 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
                 let start = i.saturating_add(1).saturating_sub(max_lookback);
                 while q_len > 0 {
                     let idx_front = *q_idx.get_unchecked(q_head);
-                    if idx_front < start { q_head = ring_inc(q_head, cap); q_len -= 1; } else { break; }
+                    if idx_front < start {
+                        q_head = ring_inc(q_head, cap);
+                        q_len -= 1;
+                    } else {
+                        break;
+                    }
                 }
                 while q_len > 0 {
                     let last = ring_dec(q_tail, cap);
                     let back_val = *q_val.get_unchecked(last);
-                    let pop = if dir_long { back_val <= cand } else { back_val >= cand };
-                    if pop { q_tail = last; q_len -= 1; } else { break; }
+                    let pop = if dir_long {
+                        back_val <= cand
+                    } else {
+                        back_val >= cand
+                    };
+                    if pop {
+                        q_tail = last;
+                        q_len -= 1;
+                    } else {
+                        break;
+                    }
                 }
                 *q_idx.get_unchecked_mut(q_tail) = i;
                 *q_val.get_unchecked_mut(q_tail) = cand;
@@ -1394,14 +1542,20 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
                 q_len += 1;
 
                 if i >= warm {
-                    *out.get_unchecked_mut(i) = if q_len > 0 { *q_val.get_unchecked(q_head) } else { f64::NAN };
+                    *out.get_unchecked_mut(i) = if q_len > 0 {
+                        *q_val.get_unchecked(q_head)
+                    } else {
+                        f64::NAN
+                    };
                 }
             }
         } else {
             // Two-pass per row using shared dm_raw
             let mut dm_smooth = vec![0.0f64; len];
             let mut sum = 0.0;
-            for i in (first + 1)..=end0 { sum += *dm_raw.get_unchecked(i); }
+            for i in (first + 1)..=end0 {
+                sum += *dm_raw.get_unchecked(i);
+            }
             *dm_smooth.get_unchecked_mut(end0) = sum;
             let alpha = 1.0 - 1.0 / (period as f64);
             for i in (end0 + 1)..len {
@@ -1412,11 +1566,17 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
                 for i in warm..len {
                     let start_idx = i + 1 - max_lookback;
                     let j0 = start_idx.max(end0);
-                    if j0 > i { *out.get_unchecked_mut(i) = f64::NAN; continue; }
+                    if j0 > i {
+                        *out.get_unchecked_mut(i) = f64::NAN;
+                        continue;
+                    }
                     let mut mx = f64::NEG_INFINITY;
                     for j in j0..=i {
-                        let val = (-mult).mul_add(*dm_smooth.get_unchecked(j), *low.get_unchecked(j - 1));
-                        if val > mx { mx = val; }
+                        let val =
+                            (-mult).mul_add(*dm_smooth.get_unchecked(j), *low.get_unchecked(j - 1));
+                        if val > mx {
+                            mx = val;
+                        }
                     }
                     *out.get_unchecked_mut(i) = mx;
                 }
@@ -1424,11 +1584,17 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
                 for i in warm..len {
                     let start_idx = i + 1 - max_lookback;
                     let j0 = start_idx.max(end0);
-                    if j0 > i { *out.get_unchecked_mut(i) = f64::NAN; continue; }
+                    if j0 > i {
+                        *out.get_unchecked_mut(i) = f64::NAN;
+                        continue;
+                    }
                     let mut mn = f64::INFINITY;
                     for j in j0..=i {
-                        let val = mult.mul_add(*dm_smooth.get_unchecked(j), *high.get_unchecked(j - 1));
-                        if val < mn { mn = val; }
+                        let val =
+                            mult.mul_add(*dm_smooth.get_unchecked(j), *high.get_unchecked(j - 1));
+                        if val < mn {
+                            mn = val;
+                        }
                     }
                     *out.get_unchecked_mut(i) = mn;
                 }

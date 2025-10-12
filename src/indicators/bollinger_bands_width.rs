@@ -694,7 +694,9 @@ pub unsafe fn bollinger_bands_width_scalar_classic_sma(
     // First output
     let mut mean = sum * inv_n;
     let mut var = (sq_sum * inv_n) - mean * mean;
-    if var < 0.0 { var = 0.0; }
+    if var < 0.0 {
+        var = 0.0;
+    }
     let mut std = var.sqrt();
     let mut mid = mean;
     *out.get_unchecked_mut(start) = (u_plus_d * std) / mid;
@@ -709,7 +711,9 @@ pub unsafe fn bollinger_bands_width_scalar_classic_sma(
         sq_sum = new_v.mul_add(new_v, sq_sum - old_v * old_v);
         mean = sum * inv_n;
         var = (sq_sum * inv_n) - mean * mean;
-        if var < 0.0 { var = 0.0; }
+        if var < 0.0 {
+            var = 0.0;
+        }
         std = var.sqrt();
         mid = mean;
         *out.get_unchecked_mut(i) = (u_plus_d * std) / mid;
@@ -749,7 +753,9 @@ pub unsafe fn bollinger_bands_width_scalar_classic_ema(
     let mut ema = sum * inv_n;
     let mut mu_w = ema;
     let mut var_w = (sq_sum * inv_n) - mu_w * mu_w;
-    if var_w < 0.0 { var_w = 0.0; }
+    if var_w < 0.0 {
+        var_w = 0.0;
+    }
     let mut var_about_ema = var_w;
     let mut std = var_about_ema.sqrt();
     *out.get_unchecked_mut(start) = (u_plus_d * std) / ema;
@@ -768,11 +774,17 @@ pub unsafe fn bollinger_bands_width_scalar_classic_ema(
         ema = alpha * new_v + beta * ema;
 
         var_w = (sq_sum * inv_n) - mu_w * mu_w;
-        if var_w < 0.0 { var_w = 0.0; }
+        if var_w < 0.0 {
+            var_w = 0.0;
+        }
         let diff = mu_w - ema;
         var_about_ema = var_w + diff * diff;
 
-        std = if var_about_ema > 0.0 { var_about_ema.sqrt() } else { 0.0 };
+        std = if var_about_ema > 0.0 {
+            var_about_ema.sqrt()
+        } else {
+            0.0
+        };
         *out.get_unchecked_mut(i) = (u_plus_d * std) / ema;
         i += 1;
     }
@@ -804,8 +816,7 @@ pub unsafe fn bollinger_bands_width_avx512_into(
     let devtype = input.get_devtype();
     let matype = input.get_matype();
 
-    if !(devtype == 0
-        && (matype.eq_ignore_ascii_case("sma") || matype.eq_ignore_ascii_case("ema")))
+    if !(devtype == 0 && (matype.eq_ignore_ascii_case("sma") || matype.eq_ignore_ascii_case("ema")))
     {
         return bollinger_bands_width_scalar_into(data, input, first_valid_idx, out);
     }
@@ -847,15 +858,25 @@ pub unsafe fn bollinger_bands_width_avx512_into(
     let mut mu_w = sum * inv_n;
     let mut ema = mu_w;
     let mut var_w = (sumsq * inv_n) - mu_w * mu_w;
-    if var_w < 0.0 { var_w = 0.0; }
-    let mut mid = if matype.eq_ignore_ascii_case("sma") { mu_w } else { ema };
+    if var_w < 0.0 {
+        var_w = 0.0;
+    }
+    let mut mid = if matype.eq_ignore_ascii_case("sma") {
+        mu_w
+    } else {
+        ema
+    };
     let mut var_about_mid = if matype.eq_ignore_ascii_case("sma") {
         var_w
     } else {
         let diff = mu_w - ema;
         var_w + diff * diff
     };
-    let mut std = if var_about_mid > 0.0 { var_about_mid.sqrt() } else { 0.0 };
+    let mut std = if var_about_mid > 0.0 {
+        var_about_mid.sqrt()
+    } else {
+        0.0
+    };
     *out.get_unchecked_mut(start) = (u_plus_d * std) / mid;
 
     // Streaming phase (scalar updates)
@@ -875,7 +896,9 @@ pub unsafe fn bollinger_bands_width_avx512_into(
             ema = mu_w;
         }
         var_w = (sumsq * inv_n) - mu_w * mu_w;
-        if var_w < 0.0 { var_w = 0.0; }
+        if var_w < 0.0 {
+            var_w = 0.0;
+        }
         if matype.eq_ignore_ascii_case("sma") {
             mid = mu_w;
             var_about_mid = var_w;
@@ -884,7 +907,11 @@ pub unsafe fn bollinger_bands_width_avx512_into(
             let diff = mu_w - ema;
             var_about_mid = var_w + diff * diff;
         }
-        std = if var_about_mid > 0.0 { var_about_mid.sqrt() } else { 0.0 };
+        std = if var_about_mid > 0.0 {
+            var_about_mid.sqrt()
+        } else {
+            0.0
+        };
         *out.get_unchecked_mut(i) = (u_plus_d * std) / mid;
         i += 1;
     }
@@ -916,8 +943,7 @@ pub unsafe fn bollinger_bands_width_avx2_into(
     let devtype = input.get_devtype();
     let matype = input.get_matype();
 
-    if !(devtype == 0
-        && (matype.eq_ignore_ascii_case("sma") || matype.eq_ignore_ascii_case("ema")))
+    if !(devtype == 0 && (matype.eq_ignore_ascii_case("sma") || matype.eq_ignore_ascii_case("ema")))
     {
         return bollinger_bands_width_scalar_into(data, input, first_valid_idx, out);
     }
@@ -959,15 +985,25 @@ pub unsafe fn bollinger_bands_width_avx2_into(
     let mut mu_w = sum * inv_n;
     let mut ema = mu_w;
     let mut var_w = (sumsq * inv_n) - mu_w * mu_w;
-    if var_w < 0.0 { var_w = 0.0; }
-    let mut mid = if matype.eq_ignore_ascii_case("sma") { mu_w } else { ema };
+    if var_w < 0.0 {
+        var_w = 0.0;
+    }
+    let mut mid = if matype.eq_ignore_ascii_case("sma") {
+        mu_w
+    } else {
+        ema
+    };
     let mut var_about_mid = if matype.eq_ignore_ascii_case("sma") {
         var_w
     } else {
         let diff = mu_w - ema;
         var_w + diff * diff
     };
-    let mut std = if var_about_mid > 0.0 { var_about_mid.sqrt() } else { 0.0 };
+    let mut std = if var_about_mid > 0.0 {
+        var_about_mid.sqrt()
+    } else {
+        0.0
+    };
     *out.get_unchecked_mut(start) = (u_plus_d * std) / mid;
 
     // Streaming phase (scalar updates)
@@ -987,7 +1023,9 @@ pub unsafe fn bollinger_bands_width_avx2_into(
             ema = mu_w;
         }
         var_w = (sumsq * inv_n) - mu_w * mu_w;
-        if var_w < 0.0 { var_w = 0.0; }
+        if var_w < 0.0 {
+            var_w = 0.0;
+        }
         if matype.eq_ignore_ascii_case("sma") {
             mid = mu_w;
             var_about_mid = var_w;
@@ -996,7 +1034,11 @@ pub unsafe fn bollinger_bands_width_avx2_into(
             let diff = mu_w - ema;
             var_about_mid = var_w + diff * diff;
         }
-        std = if var_about_mid > 0.0 { var_about_mid.sqrt() } else { 0.0 };
+        std = if var_about_mid > 0.0 {
+            var_about_mid.sqrt()
+        } else {
+            0.0
+        };
         *out.get_unchecked_mut(i) = (u_plus_d * std) / mid;
         i += 1;
     }
@@ -1443,7 +1485,8 @@ pub fn bollinger_bands_width_batch_inner_into(
                                             i += 8;
                                         }
                                         while i < cols {
-                                            *out_row.get_unchecked_mut(i) = u_plus_d * *ratio.get_unchecked(i);
+                                            *out_row.get_unchecked_mut(i) =
+                                                u_plus_d * *ratio.get_unchecked(i);
                                             i += 1;
                                         }
                                     },
@@ -1458,7 +1501,8 @@ pub fn bollinger_bands_width_batch_inner_into(
                                             i += 4;
                                         }
                                         while i < cols {
-                                            *out_row.get_unchecked_mut(i) = u_plus_d * *ratio.get_unchecked(i);
+                                            *out_row.get_unchecked_mut(i) =
+                                                u_plus_d * *ratio.get_unchecked(i);
                                             i += 1;
                                         }
                                     },

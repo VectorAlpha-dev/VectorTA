@@ -786,14 +786,34 @@ fn vi_batch_inner(
         unsafe {
             match kern {
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 | Kernel::Avx512Batch => {
-                    vi_prefix_avx512(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
-                }
+                Kernel::Avx512 | Kernel::Avx512Batch => vi_prefix_avx512(
+                    high,
+                    low,
+                    close,
+                    first,
+                    &mut pfx_tr,
+                    &mut pfx_vp,
+                    &mut pfx_vm,
+                ),
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx2 | Kernel::Avx2Batch => {
-                    vi_prefix_avx2(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
-                }
-                _ => vi_prefix_scalar(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm),
+                Kernel::Avx2 | Kernel::Avx2Batch => vi_prefix_avx2(
+                    high,
+                    low,
+                    close,
+                    first,
+                    &mut pfx_tr,
+                    &mut pfx_vp,
+                    &mut pfx_vm,
+                ),
+                _ => vi_prefix_scalar(
+                    high,
+                    low,
+                    close,
+                    first,
+                    &mut pfx_tr,
+                    &mut pfx_vp,
+                    &mut pfx_vm,
+                ),
             }
         }
     }
@@ -806,9 +826,21 @@ fn vi_batch_inner(
         }
         let mut i = warm;
         while i < cols {
-            let tr_sum = if i >= period { pfx_tr[i] - pfx_tr[i - period] } else { pfx_tr[i] };
-            let vp_sum = if i >= period { pfx_vp[i] - pfx_vp[i - period] } else { pfx_vp[i] };
-            let vm_sum = if i >= period { pfx_vm[i] - pfx_vm[i - period] } else { pfx_vm[i] };
+            let tr_sum = if i >= period {
+                pfx_tr[i] - pfx_tr[i - period]
+            } else {
+                pfx_tr[i]
+            };
+            let vp_sum = if i >= period {
+                pfx_vp[i] - pfx_vp[i - period]
+            } else {
+                pfx_vp[i]
+            };
+            let vm_sum = if i >= period {
+                pfx_vm[i] - pfx_vm[i - period]
+            } else {
+                pfx_vm[i]
+            };
             plus_row[i] = vp_sum / tr_sum;
             minus_row[i] = vm_sum / tr_sum;
             i += 1;
@@ -985,14 +1017,34 @@ fn vi_batch_inner_into(
         unsafe {
             match kernel {
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 | Kernel::Avx512Batch => {
-                    vi_prefix_avx512(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
-                }
+                Kernel::Avx512 | Kernel::Avx512Batch => vi_prefix_avx512(
+                    high,
+                    low,
+                    close,
+                    first,
+                    &mut pfx_tr,
+                    &mut pfx_vp,
+                    &mut pfx_vm,
+                ),
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx2 | Kernel::Avx2Batch => {
-                    vi_prefix_avx2(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm)
-                }
-                _ => vi_prefix_scalar(high, low, close, first, &mut pfx_tr, &mut pfx_vp, &mut pfx_vm),
+                Kernel::Avx2 | Kernel::Avx2Batch => vi_prefix_avx2(
+                    high,
+                    low,
+                    close,
+                    first,
+                    &mut pfx_tr,
+                    &mut pfx_vp,
+                    &mut pfx_vm,
+                ),
+                _ => vi_prefix_scalar(
+                    high,
+                    low,
+                    close,
+                    first,
+                    &mut pfx_tr,
+                    &mut pfx_vp,
+                    &mut pfx_vm,
+                ),
             }
         }
     }
@@ -1010,9 +1062,21 @@ fn vi_batch_inner_into(
         }
         let mut i = warm;
         while i < cols {
-            let tr_sum = if i >= period { pfx_tr[i] - pfx_tr[i - period] } else { pfx_tr[i] };
-            let vp_sum = if i >= period { pfx_vp[i] - pfx_vp[i - period] } else { pfx_vp[i] };
-            let vm_sum = if i >= period { pfx_vm[i] - pfx_vm[i - period] } else { pfx_vm[i] };
+            let tr_sum = if i >= period {
+                pfx_tr[i] - pfx_tr[i - period]
+            } else {
+                pfx_tr[i]
+            };
+            let vp_sum = if i >= period {
+                pfx_vp[i] - pfx_vp[i - period]
+            } else {
+                pfx_vp[i]
+            };
+            let vm_sum = if i >= period {
+                pfx_vm[i] - pfx_vm[i - period]
+            } else {
+                pfx_vm[i]
+            };
             p_row[i] = vp_sum / tr_sum;
             m_row[i] = vm_sum / tr_sum;
             i += 1;

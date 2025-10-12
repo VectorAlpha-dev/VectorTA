@@ -512,7 +512,10 @@ impl LinearRegInterceptStream {
     pub fn try_new(params: LinearRegInterceptParams) -> Result<Self, LinearRegInterceptError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(LinearRegInterceptError::InvalidPeriod { period, data_len: 0 });
+            return Err(LinearRegInterceptError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         // Closed-form precomputation (no loop) for x = 1..n
@@ -550,7 +553,11 @@ impl LinearRegInterceptStream {
 
         // Write incoming element and advance head
         self.buffer[tail] = value;
-        self.head = if self.head + 1 == self.period { 0 } else { self.head + 1 };
+        self.head = if self.head + 1 == self.period {
+            0
+        } else {
+            self.head + 1
+        };
 
         if !self.filled {
             // Warmup: maintain Σy and Σ(xy) with correct x index = (tail + 1)

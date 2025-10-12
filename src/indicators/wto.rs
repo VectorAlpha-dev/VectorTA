@@ -535,12 +535,20 @@ pub fn wto_scalar(
         if x.is_finite() {
             esa = beta_e.mul_add(esa, alpha_e * x);
         }
-        let abs_diff = if x.is_finite() { fast_abs(x - esa) } else { f64::NAN };
+        let abs_diff = if x.is_finite() {
+            fast_abs(x - esa)
+        } else {
+            f64::NAN
+        };
         d = abs_diff;
 
         let denom = k015 * d;
         let ci = if denom != 0.0 && denom.is_finite() {
-            if x.is_finite() { (x - esa) / denom } else { f64::NAN }
+            if x.is_finite() {
+                (x - esa) / denom
+            } else {
+                f64::NAN
+            }
         } else {
             0.0
         };
@@ -850,12 +858,20 @@ unsafe fn wto_avx512(
         if x.is_finite() {
             esa = beta_e.mul_add(esa, alpha_e * x);
         }
-        let abs_diff = if x.is_finite() { fast_abs(x - esa) } else { f64::NAN };
+        let abs_diff = if x.is_finite() {
+            fast_abs(x - esa)
+        } else {
+            f64::NAN
+        };
         d = abs_diff;
 
         let denom = k015 * d;
         let ci = if denom != 0.0 && denom.is_finite() {
-            if x.is_finite() { (x - esa) / denom } else { f64::NAN }
+            if x.is_finite() {
+                (x - esa) / denom
+            } else {
+                f64::NAN
+            }
         } else {
             0.0
         };
@@ -2018,10 +2034,16 @@ impl WtoStream {
         let average_length = params.average_length.unwrap_or(21);
 
         if channel_length == 0 {
-            return Err(WtoError::InvalidPeriod { period: channel_length, data_len: 0 });
+            return Err(WtoError::InvalidPeriod {
+                period: channel_length,
+                data_len: 0,
+            });
         }
         if average_length == 0 {
-            return Err(WtoError::InvalidPeriod { period: average_length, data_len: 0 });
+            return Err(WtoError::InvalidPeriod {
+                period: average_length,
+                data_len: 0,
+            });
         }
 
         let esa_alpha = 2.0 / (channel_length as f64 + 1.0);

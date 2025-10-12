@@ -1238,14 +1238,20 @@ impl EriStream {
     pub fn try_new(params: EriParams) -> Result<Self, EriError> {
         let period = params.period.unwrap_or(13);
         if period == 0 {
-            return Err(EriError::InvalidPeriod { period, data_len: 0 });
+            return Err(EriError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
-        let ma_type = params
-            .ma_type
-            .unwrap_or_else(|| "ema".to_string());
+        let ma_type = params.ma_type.unwrap_or_else(|| "ema".to_string());
 
         let engine = make_engine(period, &ma_type);
-        Ok(Self { period, ma_type, engine, ready: false })
+        Ok(Self {
+            period,
+            ma_type,
+            engine,
+            ready: false,
+        })
     }
 
     /// O(1) streaming update for SMA/EMA/RMA/DEMA/TEMA/WMA.
@@ -1284,30 +1290,66 @@ fn make_engine(period: usize, ma_type: &str) -> StreamMa {
     match t.as_str() {
         "sma" => StreamMa::Sma(SmaState {
             buf: vec![0.0; period],
-            pos: 0, count: 0, sum: 0.0, inv_n: 1.0 / period as f64,
+            pos: 0,
+            count: 0,
+            sum: 0.0,
+            inv_n: 1.0 / period as f64,
         }),
         "ema" | "ewma" => StreamMa::Ema(EmaState {
-            n: period, alpha: 2.0 / (period as f64 + 1.0), beta: 1.0 - (2.0 / (period as f64 + 1.0)),
-            init_sum: 0.0, init_count: 0, ema: f64::NAN,
+            n: period,
+            alpha: 2.0 / (period as f64 + 1.0),
+            beta: 1.0 - (2.0 / (period as f64 + 1.0)),
+            init_sum: 0.0,
+            init_count: 0,
+            ema: f64::NAN,
         }),
         "rma" | "wilder" | "smma" => StreamMa::Rma(EmaState {
-            n: period, alpha: 1.0 / period as f64, beta: 1.0 - (1.0 / period as f64),
-            init_sum: 0.0, init_count: 0, ema: f64::NAN,
+            n: period,
+            alpha: 1.0 / period as f64,
+            beta: 1.0 - (1.0 / period as f64),
+            init_sum: 0.0,
+            init_count: 0,
+            ema: f64::NAN,
         }),
         "dema" => StreamMa::Dema(DemaState {
-            n: period, alpha: 2.0 / (period as f64 + 1.0), beta: 1.0 - (2.0 / (period as f64 + 1.0)),
-            init_sum: 0.0, init_count: 0, e1: f64::NAN, e2: f64::NAN,
+            n: period,
+            alpha: 2.0 / (period as f64 + 1.0),
+            beta: 1.0 - (2.0 / (period as f64 + 1.0)),
+            init_sum: 0.0,
+            init_count: 0,
+            e1: f64::NAN,
+            e2: f64::NAN,
         }),
         "tema" => StreamMa::Tema(TemaState {
-            n: period, alpha: 2.0 / (period as f64 + 1.0), beta: 1.0 - (2.0 / (period as f64 + 1.0)),
-            init_sum: 0.0, init_count: 0, e1: f64::NAN, e2: f64::NAN, e3: f64::NAN,
+            n: period,
+            alpha: 2.0 / (period as f64 + 1.0),
+            beta: 1.0 - (2.0 / (period as f64 + 1.0)),
+            init_sum: 0.0,
+            init_count: 0,
+            e1: f64::NAN,
+            e2: f64::NAN,
+            e3: f64::NAN,
         }),
         "wma" | "lwma" | "linear" | "linear_wma" => {
             let n = period as f64;
             let den_inv = 2.0 / (n * (n + 1.0));
-            StreamMa::Wma(WmaState { n: period, den_inv, buf: vec![0.0; period], pos: 0, count: 0, s: 0.0, ws: 0.0 })
+            StreamMa::Wma(WmaState {
+                n: period,
+                den_inv,
+                buf: vec![0.0; period],
+                pos: 0,
+                count: 0,
+                s: 0.0,
+                ws: 0.0,
+            })
         }
-        _ => StreamMa::Generic(GenericState { n: period, buf: vec![0.0; period], pos: 0, count: 0, scratch: vec![0.0; period] }),
+        _ => StreamMa::Generic(GenericState {
+            n: period,
+            buf: vec![0.0; period],
+            pos: 0,
+            count: 0,
+            scratch: vec![0.0; period],
+        }),
     }
 }
 

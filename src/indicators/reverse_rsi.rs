@@ -511,7 +511,11 @@ unsafe fn reverse_rsi_compute_into_unsafe_fast(
     if all_finite {
         while i < warm_end {
             let cur = *data.get_unchecked(i);
-            let prev = if i == first { 0.0 } else { *data.get_unchecked(i - 1) };
+            let prev = if i == first {
+                0.0
+            } else {
+                *data.get_unchecked(i - 1)
+            };
             let d = cur - prev;
             sum_up += d.max(0.0);
             sum_dn += (-d).max(0.0);
@@ -520,7 +524,11 @@ unsafe fn reverse_rsi_compute_into_unsafe_fast(
     } else {
         while i < warm_end {
             let cur = *data.get_unchecked(i);
-            let prev = if i == first { 0.0 } else { *data.get_unchecked(i - 1) };
+            let prev = if i == first {
+                0.0
+            } else {
+                *data.get_unchecked(i - 1)
+            };
             if cur.is_finite() & prev.is_finite() {
                 let d = cur - prev;
                 sum_up += d.max(0.0);
@@ -589,7 +597,11 @@ fn reverse_rsi_compute_into_avx2_stub(
     rsi_level: f64,
     out: &mut [f64],
 ) -> Result<(), ReverseRsiError> {
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx2"))]
+    #[cfg(all(
+        feature = "nightly-avx",
+        target_arch = "x86_64",
+        target_feature = "avx2"
+    ))]
     unsafe {
         use core::arch::x86_64::*;
         let len = data.len();
@@ -685,7 +697,11 @@ fn reverse_rsi_compute_into_avx2_stub(
             let m = (x >= 0.0) as i32 as f64;
             let scale = neg_scale + m * (1.0 - neg_scale);
             let val = cur + x * scale;
-            *out.get_unchecked_mut(j) = if val.is_finite() || x >= 0.0 { val } else { 0.0 };
+            *out.get_unchecked_mut(j) = if val.is_finite() || x >= 0.0 {
+                val
+            } else {
+                0.0
+            };
             j += 1;
         }
 
@@ -705,7 +721,11 @@ fn reverse_rsi_compute_into_avx512_stub(
     rsi_level: f64,
     out: &mut [f64],
 ) -> Result<(), ReverseRsiError> {
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx512f"))]
+    #[cfg(all(
+        feature = "nightly-avx",
+        target_arch = "x86_64",
+        target_feature = "avx512f"
+    ))]
     unsafe {
         use core::arch::x86_64::*;
         let len = data.len();
@@ -798,7 +818,11 @@ fn reverse_rsi_compute_into_avx512_stub(
             let m = (x >= 0.0) as i32 as f64;
             let scale = neg_scale + m * (1.0 - neg_scale);
             let val = cur + x * scale;
-            *out.get_unchecked_mut(j) = if val.is_finite() || x >= 0.0 { val } else { 0.0 };
+            *out.get_unchecked_mut(j) = if val.is_finite() || x >= 0.0 {
+                val
+            } else {
+                0.0
+            };
             j += 1;
         }
 
@@ -819,9 +843,14 @@ fn reverse_rsi_compute_into(
     kern: Kernel,
     out: &mut [f64],
 ) -> Result<(), ReverseRsiError> {
-    let k = to_non_batch(match kern { Kernel::Auto => detect_best_kernel(), x => x });
+    let k = to_non_batch(match kern {
+        Kernel::Auto => detect_best_kernel(),
+        x => x,
+    });
     match k {
-        Kernel::Avx512 => reverse_rsi_compute_into_avx512_stub(data, first, rsi_length, rsi_level, out),
+        Kernel::Avx512 => {
+            reverse_rsi_compute_into_avx512_stub(data, first, rsi_length, rsi_level, out)
+        }
         Kernel::Avx2 => reverse_rsi_compute_into_avx2_stub(data, first, rsi_length, rsi_level, out),
         _ => reverse_rsi_compute_into_scalar_safe(data, first, rsi_length, rsi_level, out),
     }
@@ -912,10 +941,10 @@ pub struct ReverseRsiStream {
     beta: f64,
 
     // precomputed constants
-    n_minus_1: f64,   // (n - 1)
-    rs_target: f64,   // L / (100 - L)
-    rs_coeff: f64,    // (n - 1) * rs_target
-    neg_scale: f64,   // (100 - L) / L
+    n_minus_1: f64, // (n - 1)
+    rs_target: f64, // L / (100 - L)
+    rs_coeff: f64,  // (n - 1) * rs_target
+    neg_scale: f64, // (100 - L) / L
 
     // state
     seen_first: bool, // started after first finite sample (matches batch 'first')
@@ -924,7 +953,7 @@ pub struct ReverseRsiStream {
     sum_dn: f64,
     up_ema: f64,
     down_ema: f64,
-    prev: f64,        // previous raw value (can be NaN)
+    prev: f64, // previous raw value (can be NaN)
 }
 
 impl ReverseRsiStream {
@@ -933,7 +962,8 @@ impl ReverseRsiStream {
         let rsi_length = params.rsi_length.unwrap_or(14);
         if rsi_length == 0 {
             return Err(ReverseRsiError::InvalidPeriod {
-                period: 0, data_len: 0,
+                period: 0,
+                data_len: 0,
             });
         }
 
@@ -945,14 +975,14 @@ impl ReverseRsiStream {
         // EMA warm-up has length = 2*n - 1 so that alpha = 2/(len+1) == 1/n (Wilder smoothing)
         let ema_length = (2 * rsi_length).saturating_sub(1);
         let alpha = 2.0 / (ema_length as f64 + 1.0); // == 1.0 / rsi_length as f64
-        let beta  = 1.0 - alpha;
+        let beta = 1.0 - alpha;
 
         // Precompute all level/length constants once
         let n_minus_1 = (rsi_length - 1) as f64;
         let inv = 100.0 - rsi_level;
-        let rs_target = rsi_level / inv;     // L / (100 - L)
-        let rs_coeff  = n_minus_1 * rs_target;
-        let neg_scale = inv / rsi_level;     // (100 - L) / L
+        let rs_target = rsi_level / inv; // L / (100 - L)
+        let rs_coeff = n_minus_1 * rs_target;
+        let neg_scale = inv / rsi_level; // (100 - L) / L
 
         Ok(Self {
             rsi_length,
@@ -1001,7 +1031,11 @@ impl ReverseRsiStream {
         }
 
         // General case: compute delta guarding non-finites
-        let d = if value.is_finite() && self.prev.is_finite() { value - self.prev } else { 0.0 };
+        let d = if value.is_finite() && self.prev.is_finite() {
+            value - self.prev
+        } else {
+            0.0
+        };
         let up = if d > 0.0 { d } else { 0.0 };
         let dn = if d < 0.0 { -d } else { 0.0 };
 
@@ -1022,7 +1056,7 @@ impl ReverseRsiStream {
         }
 
         // Seeded: Wilder-EMA recurrence
-        self.up_ema   = self.beta.mul_add(self.up_ema,   self.alpha * up);
+        self.up_ema = self.beta.mul_add(self.up_ema, self.alpha * up);
         self.down_ema = self.beta.mul_add(self.down_ema, self.alpha * dn);
 
         let out = self.emit_from(value);
@@ -1041,21 +1075,33 @@ impl ReverseRsiStream {
     #[inline(always)]
     fn emit_seed(&self, base: f64) -> f64 {
         // x0 = (n-1)*(dn_ema * (L/(100-L)) - up_ema)
-        let x0 = self.rs_coeff.mul_add(self.down_ema, -self.n_minus_1 * self.up_ema);
+        let x0 = self
+            .rs_coeff
+            .mul_add(self.down_ema, -self.n_minus_1 * self.up_ema);
         // Branchless scale: if x >= 0 => 1.0 else => neg_scale
         let m = (x0 >= 0.0) as i32 as f64;
         let scale0 = self.neg_scale + m * (1.0 - self.neg_scale);
         let v0 = base + x0 * scale0;
-        if v0.is_finite() || x0 >= 0.0 { v0 } else { 0.0 }
+        if v0.is_finite() || x0 >= 0.0 {
+            v0
+        } else {
+            0.0
+        }
     }
 
     #[inline(always)]
     fn emit_from(&self, cur: f64) -> f64 {
-        let x = self.rs_coeff.mul_add(self.down_ema, -self.n_minus_1 * self.up_ema);
+        let x = self
+            .rs_coeff
+            .mul_add(self.down_ema, -self.n_minus_1 * self.up_ema);
         let m = (x >= 0.0) as i32 as f64;
         let scale = self.neg_scale + m * (1.0 - self.neg_scale);
         let v = cur + x * scale;
-        if v.is_finite() || x >= 0.0 { v } else { 0.0 }
+        if v.is_finite() || x >= 0.0 {
+            v
+        } else {
+            0.0
+        }
     }
 }
 
@@ -1208,7 +1254,8 @@ fn reverse_rsi_batch_inner_into(
         let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
         // Group rows by rsi_length
-        let mut groups: std::collections::BTreeMap<usize, Vec<(usize, f64)>> = std::collections::BTreeMap::new();
+        let mut groups: std::collections::BTreeMap<usize, Vec<(usize, f64)>> =
+            std::collections::BTreeMap::new();
         for (row, p) in combos.iter().enumerate() {
             let l = p.rsi_length.unwrap_or(14);
             let level = p.rsi_level.unwrap_or(50.0);
@@ -1221,7 +1268,9 @@ fn reverse_rsi_batch_inner_into(
             for (r, s) in out.chunks_mut(cols).enumerate() {
                 let input = ReverseRsiInput::from_slice(data, combos[r].clone());
                 if reverse_rsi_into_slice(s, &input, row_kern).is_err() {
-                    for v in s { *v = f64::NAN; }
+                    for v in s {
+                        *v = f64::NAN;
+                    }
                 }
             }
             return Ok(());
@@ -1243,7 +1292,11 @@ fn reverse_rsi_batch_inner_into(
             let mut prev = 0.0f64;
             for i in first..warm_end {
                 let cur = data[i];
-                let d = if all_finite || (cur.is_finite() && prev.is_finite()) { cur - prev } else { 0.0 };
+                let d = if all_finite || (cur.is_finite() && prev.is_finite()) {
+                    cur - prev
+                } else {
+                    0.0
+                };
                 sum_up += d.max(0.0);
                 sum_dn += (-d).max(0.0);
                 prev = cur;
@@ -1278,7 +1331,11 @@ fn reverse_rsi_batch_inner_into(
             prev = base;
             for i in warm_end..len {
                 let cur = data[i];
-                let d = if all_finite || (cur.is_finite() && prev.is_finite()) { cur - prev } else { 0.0 };
+                let d = if all_finite || (cur.is_finite() && prev.is_finite()) {
+                    cur - prev
+                } else {
+                    0.0
+                };
                 let up = d.max(0.0);
                 let dn = (-d).max(0.0);
                 up_ema = beta.mul_add(up_ema, alpha * up);

@@ -16,14 +16,14 @@
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::volatility_adjusted_ma::{VamaBatchRange, VamaParams};
 use cust::context::Context;
-use cust::device::Device;
 use cust::context::SharedMemoryConfig;
+use cust::device::Device;
 use cust::function::{BlockSize, Function, GridSize};
-use cust::sys as cuda_sys;
 use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cuda_sys;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,14 +34,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub enum BatchKernelPolicy {
     Auto,
     /// Plain 1D grid over combos; `block_x` threads per block
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
     /// 2D grid (x over time, y over series); `block_x` threads
-    OneD { block_x: u32 },
+    OneD {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -50,13 +54,25 @@ pub struct CudaVamaPolicy {
     pub many_series: ManySeriesKernelPolicy,
 }
 
-impl Default for BatchKernelPolicy { fn default() -> Self { BatchKernelPolicy::Auto } }
-impl Default for ManySeriesKernelPolicy { fn default() -> Self { ManySeriesKernelPolicy::Auto } }
+impl Default for BatchKernelPolicy {
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
+}
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaVamaError {
@@ -135,27 +151,43 @@ impl CudaVama {
     }
 
     /// Create using an explicit policy.
-    pub fn new_with_policy(device_id: usize, policy: CudaVamaPolicy) -> Result<Self, CudaVamaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaVamaPolicy,
+    ) -> Result<Self, CudaVamaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaVamaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaVamaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaVamaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaVamaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] VAMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaVama)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaVama)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -163,14 +195,19 @@ impl CudaVama {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] VAMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaVama)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaVama)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -184,13 +221,19 @@ impl CudaVama {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     // ----- Dynamic shared memory helpers -----
@@ -209,18 +252,20 @@ impl CudaVama {
                 cu_dev,
             );
             if res != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(CudaVamaError::Cuda(
-                    format!(
-                        "cuDeviceGetAttribute(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN) failed: {res:?}"
-                    ),
-                ));
+                return Err(CudaVamaError::Cuda(format!(
+                    "cuDeviceGetAttribute(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN) failed: {res:?}"
+                )));
             }
             Ok(bytes)
         }
     }
 
     #[inline]
-    fn set_kernel_dynamic_smem(&self, func: &mut Function, requested: usize) -> Result<usize, CudaVamaError> {
+    fn set_kernel_dynamic_smem(
+        &self,
+        func: &mut Function,
+        requested: usize,
+    ) -> Result<usize, CudaVamaError> {
         let limit = self.optin_smem_limit_bytes()? as usize;
         let bytes = requested.min(limit);
 
@@ -259,8 +304,8 @@ impl CudaVama {
         // VRAM estimation: inputs + params + ema + outputs
         let headroom = 64usize * 1024 * 1024; // ~64MB
         let price_bytes = prepared.series_len * std::mem::size_of::<f32>();
-        let params_bytes = n_combos
-            * (std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>() * 2);
+        let params_bytes =
+            n_combos * (std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>() * 2);
         let work_bytes = n_combos * prepared.series_len * std::mem::size_of::<f32>() * 2; // ema + out
         let total_est = price_bytes + params_bytes + work_bytes;
         if !Self::will_fit(total_est, headroom) {
@@ -308,7 +353,11 @@ impl CudaVama {
             .synchronize()
             .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: prepared.series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: prepared.series_len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -612,7 +661,9 @@ impl CudaVama {
         d_out: &mut DeviceBuffer<f32>,
         host_vol_periods: &[i32],
     ) -> Result<(), CudaVamaError> {
-        if n_combos == 0 { return Ok(()); }
+        if n_combos == 0 {
+            return Ok(());
+        }
         // Fallback: for exact parity, reuse the many-series kernel per-combo (time-major with 1 series).
         // This avoids minor differences between batch kernel and CPU reference.
         let mut d_first_valids = DeviceBuffer::from_slice(&[first_valid as i32])
@@ -627,10 +678,18 @@ impl CudaVama {
         let mut host_vols = vec![0i32; n_combos];
         let mut host_alphas = vec![0f32; n_combos];
         let mut host_betas = vec![0f32; n_combos];
-        d_base.copy_to(&mut host_base).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        d_vol.copy_to(&mut host_vols).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        d_alphas.copy_to(&mut host_alphas).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        d_betas.copy_to(&mut host_betas).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        d_base
+            .copy_to(&mut host_base)
+            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        d_vol
+            .copy_to(&mut host_vols)
+            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        d_alphas
+            .copy_to(&mut host_alphas)
+            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        d_betas
+            .copy_to(&mut host_betas)
+            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
         for c in 0..n_combos {
             let base_p = host_base[c] as usize;
             let vol_p = host_vols[c] as usize;
@@ -647,7 +706,9 @@ impl CudaVama {
             let requested_smem = 16usize * vol_p;
             let smem_bytes: u32 = if requested_smem > 48 * 1024 {
                 self.set_kernel_dynamic_smem(&mut func, requested_smem)? as u32
-            } else { requested_smem as u32 };
+            } else {
+                requested_smem as u32
+            };
 
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -845,8 +906,17 @@ pub mod benches {
         crate::indicators::moving_averages::volatility_adjusted_ma::VamaParams,
         vama_batch_dev,
         vama_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::volatility_adjusted_ma::VamaBatchRange { base_period: (16, 16 + PARAM_SWEEP - 1, 1), vol_period: (51, 51, 0) },
-        crate::indicators::moving_averages::volatility_adjusted_ma::VamaParams { base_period: Some(64), vol_period: Some(51), smoothing: Some(false), smooth_type: Some(3), smooth_period: Some(5) },
+        crate::indicators::moving_averages::volatility_adjusted_ma::VamaBatchRange {
+            base_period: (16, 16 + PARAM_SWEEP - 1, 1),
+            vol_period: (51, 51, 0)
+        },
+        crate::indicators::moving_averages::volatility_adjusted_ma::VamaParams {
+            base_period: Some(64),
+            vol_period: Some(51),
+            smoothing: Some(false),
+            smooth_type: Some(3),
+            smooth_period: Some(5)
+        },
         "vama",
         "vama"
     );

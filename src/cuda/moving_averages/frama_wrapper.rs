@@ -17,7 +17,9 @@ use crate::indicators::moving_averages::frama::{FramaBatchRange, FramaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
+use cust::memory::{
+    mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer,
+};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -53,17 +55,24 @@ pub struct CudaFramaPolicy {
 }
 impl Default for CudaFramaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaFramaError {
@@ -153,7 +162,8 @@ impl CudaFrama {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaFramaError::Cuda(e.to_string()))?
@@ -176,27 +186,43 @@ impl CudaFrama {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaFramaPolicy) -> Result<Self, CudaFramaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaFramaPolicy,
+    ) -> Result<Self, CudaFramaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaFramaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaFramaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaFramaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaFramaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] FRAMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaFrama)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaFrama)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -204,14 +230,19 @@ impl CudaFrama {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] FRAMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaFrama)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaFrama)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -225,13 +256,19 @@ impl CudaFrama {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     fn prepare_batch_inputs(
@@ -462,9 +499,12 @@ impl CudaFrama {
             )));
         }
 
-        let d_high = DeviceBuffer::from_slice(high).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_high =
+            DeviceBuffer::from_slice(high).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_low =
+            DeviceBuffer::from_slice(low).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_close =
+            DeviceBuffer::from_slice(close).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
 
         let windows: Vec<i32> = combos.iter().map(|c| c.window.unwrap() as i32).collect();
         let scs: Vec<i32> = combos.iter().map(|c| c.sc.unwrap() as i32).collect();
@@ -524,18 +564,20 @@ impl CudaFrama {
     ) -> Result<(DeviceArrayF32, Vec<FramaParams>), CudaFramaError> {
         let combos = expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaFramaError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaFramaError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
 
         let windows: Vec<i32> = combos.iter().map(|c| c.window.unwrap() as i32).collect();
         let scs: Vec<i32> = combos.iter().map(|c| c.sc.unwrap() as i32).collect();
         let fcs: Vec<i32> = combos.iter().map(|c| c.fc.unwrap() as i32).collect();
-        let d_windows = DeviceBuffer::from_slice(&windows)
-            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_scs = DeviceBuffer::from_slice(&scs)
-            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_fcs = DeviceBuffer::from_slice(&fcs)
-            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_windows =
+            DeviceBuffer::from_slice(&windows).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_scs =
+            DeviceBuffer::from_slice(&scs).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_fcs =
+            DeviceBuffer::from_slice(&fcs).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
 
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(combos.len() * series_len) }
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
@@ -554,7 +596,11 @@ impl CudaFrama {
         )?;
 
         Ok((
-            DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: series_len },
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: series_len,
+            },
             combos,
         ))
     }
@@ -630,12 +676,12 @@ impl CudaFrama {
         let windows: Vec<i32> = combos.iter().map(|c| c.window.unwrap() as i32).collect();
         let scs: Vec<i32> = combos.iter().map(|c| c.sc.unwrap() as i32).collect();
         let fcs: Vec<i32> = combos.iter().map(|c| c.fc.unwrap() as i32).collect();
-        let d_windows = DeviceBuffer::from_slice(&windows)
-            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_scs = DeviceBuffer::from_slice(&scs)
-            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_fcs = DeviceBuffer::from_slice(&fcs)
-            .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_windows =
+            DeviceBuffer::from_slice(&windows).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_scs =
+            DeviceBuffer::from_slice(&scs).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_fcs =
+            DeviceBuffer::from_slice(&fcs).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
 
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(expected) }
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
@@ -789,7 +835,10 @@ impl CudaFrama {
                 .unwrap_or(auto_block_x),
         };
         // Introspection
-        unsafe { let this = self as *const _ as *mut CudaFrama; (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            let this = self as *const _ as *mut CudaFrama;
+            (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         let total_blocks_u64 = ((num_series as u64) + (block_x as u64) - 1) / (block_x as u64);
@@ -865,9 +914,12 @@ impl CudaFrama {
             )));
         }
 
-        let d_high = DeviceBuffer::from_slice(high_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_high =
+            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_low =
+            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
+        let d_close =
+            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(first_valids)
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
@@ -919,16 +971,17 @@ impl CudaFrama {
         first_valids: &[i32],
         params: &FramaParams,
     ) -> Result<DeviceArrayF32, CudaFramaError> {
-        let window = params
-            .window
-            .ok_or_else(|| CudaFramaError::InvalidInput("window parameter must be provided".into()))?
-            as i32;
+        let window = params.window.ok_or_else(|| {
+            CudaFramaError::InvalidInput("window parameter must be provided".into())
+        })? as i32;
         let sc = params
             .sc
-            .ok_or_else(|| CudaFramaError::InvalidInput("sc parameter must be provided".into()))? as i32;
+            .ok_or_else(|| CudaFramaError::InvalidInput("sc parameter must be provided".into()))?
+            as i32;
         let fc = params
             .fc
-            .ok_or_else(|| CudaFramaError::InvalidInput("fc parameter must be provided".into()))? as i32;
+            .ok_or_else(|| CudaFramaError::InvalidInput("fc parameter must be provided".into()))?
+            as i32;
 
         let d_first = DeviceBuffer::from_slice(first_valids)
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
@@ -936,19 +989,14 @@ impl CudaFrama {
             .map_err(|e| CudaFramaError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
-            d_high_tm,
-            d_low_tm,
-            d_close_tm,
-            &d_first,
-            cols,
-            rows,
-            window,
-            sc,
-            fc,
-            &mut d_out,
+            d_high_tm, d_low_tm, d_close_tm, &d_first, cols, rows, window, sc, fc, &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn frama_many_series_one_param_time_major_into_host_f32(
@@ -992,8 +1040,8 @@ impl CudaFrama {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;

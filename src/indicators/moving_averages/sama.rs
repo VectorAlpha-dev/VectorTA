@@ -425,17 +425,25 @@ pub fn sama_scalar(
         // Drop outdated indices from heads (max)
         while max_len > 0 {
             let idx = max_idx[max_head];
-            if idx >= wstart { break; }
+            if idx >= wstart {
+                break;
+            }
             max_head += 1;
-            if max_head == cap { max_head = 0; }
+            if max_head == cap {
+                max_head = 0;
+            }
             max_len -= 1;
         }
         // Drop outdated indices from heads (min)
         while min_len > 0 {
             let idx = min_idx[min_head];
-            if idx >= wstart { break; }
+            if idx >= wstart {
+                break;
+            }
             min_head += 1;
-            if min_head == cap { min_head = 0; }
+            if min_head == cap {
+                min_head = 0;
+            }
             min_len -= 1;
         }
 
@@ -493,7 +501,6 @@ pub fn sama_scalar(
         out[i] = sama_val;
     }
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -843,16 +850,24 @@ fn sama_batch_inner_into(
             // Drop outdated
             while max_len > 0 {
                 let idx = max_idx[max_head];
-                if idx >= wstart { break; }
+                if idx >= wstart {
+                    break;
+                }
                 max_head += 1;
-                if max_head == cap { max_head = 0; }
+                if max_head == cap {
+                    max_head = 0;
+                }
                 max_len -= 1;
             }
             while min_len > 0 {
                 let idx = min_idx[min_head];
-                if idx >= wstart { break; }
+                if idx >= wstart {
+                    break;
+                }
                 min_head += 1;
-                if min_head == cap { min_head = 0; }
+                if min_head == cap {
+                    min_head = 0;
+                }
                 min_len -= 1;
             }
 

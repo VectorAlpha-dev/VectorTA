@@ -1055,7 +1055,10 @@ impl MediumAdStream {
     pub fn try_new(params: MediumAdParams) -> Result<Self, MediumAdError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(MediumAdError::InvalidPeriod { period, data_len: 0 });
+            return Err(MediumAdError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         Ok(Self {
             period,
@@ -1081,7 +1084,10 @@ impl MediumAdStream {
             self.ring[self.head] = None;
             false
         } else {
-            let e = Entry { val: value, id: self.next_id };
+            let e = Entry {
+                val: value,
+                id: self.next_id,
+            };
             self.next_id = self.next_id.wrapping_add(1);
             self.os.insert(e);
             self.ring[self.head] = Some(e);
@@ -1154,11 +1160,27 @@ impl MediumAdStream {
             let i = (lo + hi) >> 1; // take i from left distances
             let j = k - i; // and j from right distances
 
-            let l_im1 = if i == 0 { f64::NEG_INFINITY } else { self.ldist(i - 1, median, left_sz) };
-            let l_i = if i == left_sz { f64::INFINITY } else { self.ldist(i, median, left_sz) };
+            let l_im1 = if i == 0 {
+                f64::NEG_INFINITY
+            } else {
+                self.ldist(i - 1, median, left_sz)
+            };
+            let l_i = if i == left_sz {
+                f64::INFINITY
+            } else {
+                self.ldist(i, median, left_sz)
+            };
 
-            let r_jm1 = if j == 0 { f64::NEG_INFINITY } else { self.rdist(j - 1, median, left_sz) };
-            let r_j = if j == right_sz { f64::INFINITY } else { self.rdist(j, median, left_sz) };
+            let r_jm1 = if j == 0 {
+                f64::NEG_INFINITY
+            } else {
+                self.rdist(j - 1, median, left_sz)
+            };
+            let r_j = if j == right_sz {
+                f64::INFINITY
+            } else {
+                self.rdist(j, median, left_sz)
+            };
 
             // partition correct?
             if l_im1 <= r_j && r_jm1 <= l_i {
@@ -1229,10 +1251,14 @@ struct Node {
 
 impl OrderStatTree {
     #[inline(always)]
-    fn new() -> Self { Self { root: None } }
+    fn new() -> Self {
+        Self { root: None }
+    }
 
     #[inline(always)]
-    fn len(&self) -> usize { size_of(&self.root) }
+    fn len(&self) -> usize {
+        size_of(&self.root)
+    }
 
     #[inline(always)]
     fn insert(&mut self, key: Entry) {
@@ -1267,7 +1293,13 @@ fn upd(node: &mut Box<Node>) {
 #[inline(always)]
 fn less(a: Entry, b: Entry) -> bool {
     // NaN never enters the tree; tie-break by id for strict weak ordering
-    if a.val < b.val { true } else if a.val > b.val { false } else { a.id < b.id }
+    if a.val < b.val {
+        true
+    } else if a.val > b.val {
+        false
+    } else {
+        a.id < b.id
+    }
 }
 
 #[inline(always)]
@@ -1292,7 +1324,13 @@ fn rotate_right(mut y: Box<Node>) -> Box<Node> {
 
 fn insert_rec(node: Link, key: Entry, prio: u64) -> Link {
     match node {
-        None => Some(Box::new(Node { key, prio, size: 1, left: None, right: None })),
+        None => Some(Box::new(Node {
+            key,
+            prio,
+            size: 1,
+            left: None,
+            right: None,
+        })),
         Some(mut n) => {
             if less(key, n.key) {
                 n.left = insert_rec(n.left.take(), key, prio);
@@ -1323,11 +1361,23 @@ fn remove_rec(node: Link, key: Entry) -> Link {
                     (Some(lc), Some(rc)) => {
                         // rotate the higher priority child up, then continue
                         let (mut n2, left_is_higher) = if lc.prio > rc.prio {
-                            let mut n2 = Box::new(Node { key: n.key, prio: n.prio, size: 0, left: Some(lc), right: Some(rc) });
+                            let mut n2 = Box::new(Node {
+                                key: n.key,
+                                prio: n.prio,
+                                size: 0,
+                                left: Some(lc),
+                                right: Some(rc),
+                            });
                             n2 = rotate_right(n2);
                             (n2, true)
                         } else {
-                            let mut n2 = Box::new(Node { key: n.key, prio: n.prio, size: 0, left: Some(lc), right: Some(rc) });
+                            let mut n2 = Box::new(Node {
+                                key: n.key,
+                                prio: n.prio,
+                                size: 0,
+                                left: Some(lc),
+                                right: Some(rc),
+                            });
                             n2 = rotate_left(n2);
                             (n2, false)
                         };

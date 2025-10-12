@@ -417,7 +417,10 @@ impl SuperSmootherStream {
     pub fn try_new(params: SuperSmootherParams) -> Result<Self, SuperSmootherError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(SuperSmootherError::InvalidPeriod { period, data_len: 0 });
+            return Err(SuperSmootherError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         // Compute coefficients once (no divides in the hot path)
@@ -500,7 +503,10 @@ impl SuperSmootherStream {
     #[inline]
     pub fn reconfigure(&mut self, period: usize) -> Result<(), SuperSmootherError> {
         if period == 0 {
-            return Err(SuperSmootherError::InvalidPeriod { period, data_len: 0 });
+            return Err(SuperSmootherError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         self.period = period;
 

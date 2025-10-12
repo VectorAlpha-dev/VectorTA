@@ -1293,7 +1293,11 @@ impl BuffAveragesStream {
         // Compute masked new terms (identical NaN semantics as offline kernels):
         // If either price or volume is NaN, both contributions are 0.
         let valid = !price.is_nan() && !volume.is_nan();
-        let pv_new = if valid { price.mul_add(volume, 0.0) } else { 0.0 };
+        let pv_new = if valid {
+            price.mul_add(volume, 0.0)
+        } else {
+            0.0
+        };
         let vv_new = if valid { volume } else { 0.0 };
 
         // Remove the elements that fall out of each window after adding this tick.
@@ -1945,21 +1949,23 @@ pub fn buff_averages_cuda_many_series_one_param_dev_py(
     let volumes = volumes_tm_f32.as_slice()?;
 
     let (fast_dev, slow_dev) = py.allow_threads(|| {
-        let cuda = CudaBuffAverages::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .buff_averages_many_series_one_param_time_major_dev(
-                prices,
-                volumes,
-                cols,
-                rows,
-                fast_period,
-                slow_period,
-            )
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaBuffAverages::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.buff_averages_many_series_one_param_time_major_dev(
+            prices,
+            volumes,
+            cols,
+            rows,
+            fast_period,
+            slow_period,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok((DeviceArrayF32Py { inner: fast_dev }, DeviceArrayF32Py { inner: slow_dev }))
+    Ok((
+        DeviceArrayF32Py { inner: fast_dev },
+        DeviceArrayF32Py { inner: slow_dev },
+    ))
 }
 
 #[cfg(feature = "python")]

@@ -920,8 +920,8 @@ pub struct DpoStream {
     inv_period: f64,
 
     // state
-    sma_buf: Vec<f64>,  // length = period
-    lag_buf: Vec<f64>,  // length = back + 1
+    sma_buf: Vec<f64>, // length = period
+    lag_buf: Vec<f64>, // length = back + 1
     sum: f64,
 
     sma_head: usize,
@@ -934,7 +934,10 @@ impl DpoStream {
     pub fn try_new(params: DpoParams) -> Result<Self, DpoError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(DpoError::InvalidPeriod { period, data_len: 0 });
+            return Err(DpoError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let back = period / 2 + 1;
         let inv_period = 1.0f64 / (period as f64);

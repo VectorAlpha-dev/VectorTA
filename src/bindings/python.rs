@@ -189,13 +189,13 @@ use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStrea
 use crate::indicators::moving_averages::alma::{
     alma_cuda_batch_dev_py, alma_cuda_many_series_one_param_dev_py,
 };
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::buff_averages::{
-    buff_averages_cuda_batch_dev_py, buff_averages_cuda_many_series_one_param_dev_py,
-};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::buff_averages::{
     buff_averages_batch_py, buff_averages_py, BuffAveragesStreamPy,
+};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::buff_averages::{
+    buff_averages_cuda_batch_dev_py, buff_averages_cuda_many_series_one_param_dev_py,
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::cwma::{cwma_batch_py, cwma_py, CwmaStreamPy};
@@ -203,12 +203,12 @@ use crate::indicators::moving_averages::cwma::{cwma_batch_py, cwma_py, CwmaStrea
 use crate::indicators::moving_averages::cwma::{
     cwma_cuda_batch_dev_py, cwma_cuda_many_series_one_param_dev_py,
 };
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::dema::{dema_batch_py, dema_py, DemaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::dema::{
     dema_cuda_batch_dev_py, dema_cuda_many_series_one_param_dev_py,
 };
-#[cfg(feature = "python")]
-use crate::indicators::moving_averages::dema::{dema_batch_py, dema_py, DemaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::dma::{dma_batch_py, dma_py, DmaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -503,36 +503,36 @@ use crate::indicators::moving_averages::vpwma::{vpwma_batch_py, vpwma_py, VpwmaS
 use crate::indicators::moving_averages::vpwma::{
     vpwma_cuda_batch_dev_py, vpwma_cuda_many_series_one_param_dev_py,
 };
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::vwap::{vwap_batch_py, vwap_py, VwapStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::vwap::{
     vwap_cuda_batch_dev_py, vwap_cuda_many_series_one_param_dev_py,
 };
-#[cfg(feature = "python")]
-use crate::indicators::moving_averages::vwap::{vwap_batch_py, vwap_py, VwapStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::vwma::{vwma_batch_py, vwma_py, VwmaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::vwma::{
     vwma_cuda_batch_dev_py, vwma_cuda_many_series_one_param_dev_py,
 };
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::wilders::{wilders_batch_py, wilders_py, WildersStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::wilders::{
     wilders_cuda_batch_dev_py, wilders_cuda_many_series_one_param_dev_py,
 };
-#[cfg(feature = "python")]
-use crate::indicators::moving_averages::wilders::{wilders_batch_py, wilders_py, WildersStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::wma::{wma_batch_py, wma_py, WmaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::wma::{
     wma_cuda_batch_dev_py, wma_cuda_many_series_one_param_dev_py,
 };
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::zlema::{zlema_batch_py, zlema_py, ZlemaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::zlema::{
     zlema_cuda_batch_dev_py, zlema_cuda_many_series_one_param_dev_py,
 };
-#[cfg(feature = "python")]
-use crate::indicators::moving_averages::zlema::{zlema_batch_py, zlema_py, ZlemaStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::msw::{msw_batch_py, msw_py, MswStreamPy};
 #[cfg(feature = "python")]
@@ -782,10 +782,7 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(cwma_cuda_batch_dev_py, m)?)?;
-        m.add_function(wrap_pyfunction!(
-            cwma_cuda_many_series_one_param_dev_py,
-            m
-        )?)?;
+        m.add_function(wrap_pyfunction!(cwma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
     // Register DEMA functions with their user-facing names

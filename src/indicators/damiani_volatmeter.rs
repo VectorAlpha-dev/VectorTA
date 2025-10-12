@@ -512,7 +512,10 @@ pub unsafe fn damiani_volatmeter_scalar(
     // Hoisted constants
     let vis_atr_f = vis_atr as f64;
     let sed_atr_f = sed_atr as f64;
-    let needed_all = *[vis_atr, vis_std, sed_atr, sed_std, 3].iter().max().unwrap();
+    let needed_all = *[vis_atr, vis_std, sed_atr, sed_std, 3]
+        .iter()
+        .max()
+        .unwrap();
 
     // Initialize prev_close to first finite value
     let mut prev_close = f64::NAN;
@@ -1176,10 +1179,12 @@ fn damiani_volatmeter_batch_inner_into(
         if used_scalar_fallback {
             unsafe {
                 match kern {
-                    Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => damiani_volatmeter_scalar(
-                        high, low, close, vis_atr, vis_std, sed_atr, sed_std, threshold, first,
-                        out_vol, out_anti,
-                    ),
+                    Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => {
+                        damiani_volatmeter_scalar(
+                            high, low, close, vis_atr, vis_std, sed_atr, sed_std, threshold, first,
+                            out_vol, out_anti,
+                        )
+                    }
                     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     Kernel::Avx2 | Kernel::Avx2Batch => damiani_volatmeter_avx2(
                         high, low, close, vis_atr, vis_std, sed_atr, sed_std, threshold, first,
@@ -1215,10 +1220,11 @@ fn damiani_volatmeter_batch_inner_into(
     // If using a row-optimized path, build shared precomputes here and run rows with them.
     // Row-optimized batch experiment: present but disabled by default due to mixed results.
     // Enable manually by setting this to true for local experiments.
-    let use_row_optimized = false && matches!(
-        kern,
-        Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch
-    );
+    let use_row_optimized = false
+        && matches!(
+            kern,
+            Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch
+        );
 
     if use_row_optimized {
         let len = data.len();
@@ -1258,7 +1264,10 @@ fn damiani_volatmeter_batch_inner_into(
             let threshold = p.threshold.unwrap_or(1.4);
 
             let len = data.len();
-            let needed = *[vis_atr, vis_std, sed_atr, sed_std, 3].iter().max().unwrap();
+            let needed = *[vis_atr, vis_std, sed_atr, sed_std, 3]
+                .iter()
+                .max()
+                .unwrap();
             let start_idx = first + needed - 1;
 
             let vis_atr_f = vis_atr as f64;
@@ -1321,7 +1330,11 @@ fn damiani_volatmeter_batch_inner_into(
                     let vars = (sums2 / (sed_std as f64) - means * means).max(0.0);
                     let stds = vars.sqrt();
 
-                    let den = if stds != 0.0 { stds } else { stds + f64::EPSILON };
+                    let den = if stds != 0.0 {
+                        stds
+                    } else {
+                        stds + f64::EPSILON
+                    };
                     outa[i] = threshold - (stdv / den);
                 }
             }
@@ -1505,8 +1518,8 @@ pub unsafe fn damiani_volatmeter_row_avx512_long(
 #[derive(Debug, Clone)]
 pub struct DamianiVolatmeterStream<'a> {
     // Data
-    high:  &'a [f64],
-    low:   &'a [f64],
+    high: &'a [f64],
+    low: &'a [f64],
     close: &'a [f64],
 
     // Params
@@ -1552,8 +1565,8 @@ pub struct DamianiVolatmeterStream<'a> {
     inv_sed_atr: f64,
     inv_vis_std: f64,
     inv_sed_std: f64,
-    vis_atr_m1:  f64,
-    sed_atr_m1:  f64,
+    vis_atr_m1: f64,
+    sed_atr_m1: f64,
 }
 
 impl<'a> DamianiVolatmeterStream<'a> {
@@ -1579,7 +1592,9 @@ impl<'a> DamianiVolatmeterStream<'a> {
         params: DamianiVolatmeterParams,
     ) -> Result<Self, DamianiVolatmeterError> {
         let len = close.len();
-        if len == 0 { return Err(DamianiVolatmeterError::EmptyData); }
+        if len == 0 {
+            return Err(DamianiVolatmeterError::EmptyData);
+        }
 
         let vis_atr = params.vis_atr.unwrap_or(13);
         let vis_std = params.vis_std.unwrap_or(20);
@@ -1587,17 +1602,32 @@ impl<'a> DamianiVolatmeterStream<'a> {
         let sed_std = params.sed_std.unwrap_or(100);
         let threshold = params.threshold.unwrap_or(1.4);
 
-        if vis_atr == 0 || vis_std == 0 || sed_atr == 0 || sed_std == 0
-            || vis_atr > len || vis_std > len || sed_atr > len || sed_std > len
+        if vis_atr == 0
+            || vis_std == 0
+            || sed_atr == 0
+            || sed_std == 0
+            || vis_atr > len
+            || vis_std > len
+            || sed_atr > len
+            || sed_std > len
         {
             return Err(DamianiVolatmeterError::InvalidPeriod {
-                data_len: len, vis_atr, vis_std, sed_atr, sed_std
+                data_len: len,
+                vis_atr,
+                vis_std,
+                sed_atr,
+                sed_std,
             });
         }
 
-        let start = close.iter().position(|&x| !x.is_nan())
+        let start = close
+            .iter()
+            .position(|&x| !x.is_nan())
             .ok_or(DamianiVolatmeterError::AllValuesNaN)?;
-        let needed_all = *[vis_atr, vis_std, sed_atr, sed_std, 3].iter().max().unwrap();
+        let needed_all = *[vis_atr, vis_std, sed_atr, sed_std, 3]
+            .iter()
+            .max()
+            .unwrap();
         if len - start < needed_all {
             return Err(DamianiVolatmeterError::NotEnoughValidData {
                 needed: needed_all,
@@ -1606,8 +1636,14 @@ impl<'a> DamianiVolatmeterStream<'a> {
         }
 
         Ok(Self {
-            high, low, close,
-            vis_atr, vis_std, sed_atr, sed_std, threshold,
+            high,
+            low,
+            close,
+            vis_atr,
+            vis_std,
+            sed_atr,
+            sed_std,
+            threshold,
 
             start,
             index: start,
@@ -1640,8 +1676,8 @@ impl<'a> DamianiVolatmeterStream<'a> {
             inv_sed_atr: 1.0 / (sed_atr as f64),
             inv_vis_std: 1.0 / (vis_std as f64),
             inv_sed_std: 1.0 / (sed_std as f64),
-            vis_atr_m1:  (vis_atr as f64) - 1.0,
-            sed_atr_m1:  (sed_atr as f64) - 1.0,
+            vis_atr_m1: (vis_atr as f64) - 1.0,
+            sed_atr_m1: (sed_atr as f64) - 1.0,
         })
     }
 
@@ -1650,7 +1686,9 @@ impl<'a> DamianiVolatmeterStream<'a> {
     pub fn update(&mut self) -> Option<(f64, f64)> {
         let i = self.index;
         let len = self.close.len();
-        if i >= len { return None; }
+        if i >= len {
+            return None;
+        }
 
         let cl = self.close[i];
         let hi = self.high[i];
@@ -1661,11 +1699,13 @@ impl<'a> DamianiVolatmeterStream<'a> {
             let tr2 = (hi - self.prev_close).abs();
             let tr3 = (lo - self.prev_close).abs();
             tr1.max(tr2).max(tr3)
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         if cl.is_finite() {
             self.prev_close = cl;
-            self.have_prev  = true;
+            self.have_prev = true;
         }
 
         // ATR (vis)
@@ -1697,13 +1737,15 @@ impl<'a> DamianiVolatmeterStream<'a> {
         let old_v = self.ring_vis[self.idx_vis];
         self.ring_vis[self.idx_vis] = v;
         self.idx_vis += 1;
-        if self.idx_vis == self.vis_std { self.idx_vis = 0; }
+        if self.idx_vis == self.vis_std {
+            self.idx_vis = 0;
+        }
         if self.filled_vis < self.vis_std {
-            self.filled_vis     += 1;
-            self.sum_vis_std    += v;
+            self.filled_vis += 1;
+            self.sum_vis_std += v;
             self.sum_sq_vis_std = v.mul_add(v, self.sum_sq_vis_std);
         } else {
-            self.sum_vis_std    += v - old_v;
+            self.sum_vis_std += v - old_v;
             self.sum_sq_vis_std += v.mul_add(v, -old_v * old_v);
         }
 
@@ -1711,13 +1753,15 @@ impl<'a> DamianiVolatmeterStream<'a> {
         let old_s = self.ring_sed[self.idx_sed];
         self.ring_sed[self.idx_sed] = v;
         self.idx_sed += 1;
-        if self.idx_sed == self.sed_std { self.idx_sed = 0; }
+        if self.idx_sed == self.sed_std {
+            self.idx_sed = 0;
+        }
         if self.filled_sed < self.sed_std {
-            self.filled_sed     += 1;
-            self.sum_sed_std    += v;
+            self.filled_sed += 1;
+            self.sum_sed_std += v;
             self.sum_sq_sed_std = v.mul_add(v, self.sum_sq_sed_std);
         } else {
-            self.sum_sed_std    += v - old_s;
+            self.sum_sed_std += v - old_s;
             self.sum_sq_sed_std += v.mul_add(v, -old_s * old_s);
         }
 
@@ -1725,14 +1769,26 @@ impl<'a> DamianiVolatmeterStream<'a> {
         self.index = i + 1;
 
         // Warmup gating (match scalar: absolute index threshold)
-        if i < self.needed_all { return None; }
+        if i < self.needed_all {
+            return None;
+        }
 
         // Lag terms
-        let p1 = if self.vol_hist[0].is_nan() { 0.0 } else { self.vol_hist[0] };
-        let p3 = if self.vol_hist[2].is_nan() { 0.0 } else { self.vol_hist[2] };
+        let p1 = if self.vol_hist[0].is_nan() {
+            0.0
+        } else {
+            self.vol_hist[0]
+        };
+        let p3 = if self.vol_hist[2].is_nan() {
+            0.0
+        } else {
+            self.vol_hist[2]
+        };
         let sed_safe = if self.atr_sed_val.is_finite() && self.atr_sed_val != 0.0 {
             self.atr_sed_val
-        } else { f64::EPSILON };
+        } else {
+            f64::EPSILON
+        };
         let vol_now = (self.atr_vis_val / sed_safe) + self.lag_s * (p1 - p3);
 
         // Shift history
@@ -1741,13 +1797,13 @@ impl<'a> DamianiVolatmeterStream<'a> {
         self.vol_hist[0] = vol_now;
 
         // Std ratio via one sqrt
-        let mean_v  = self.sum_vis_std * self.inv_vis_std;
+        let mean_v = self.sum_vis_std * self.inv_vis_std;
         let mean2_v = self.sum_sq_vis_std * self.inv_vis_std;
-        let var_v   = (mean2_v - mean_v * mean_v).max(0.0);
+        let var_v = (mean2_v - mean_v * mean_v).max(0.0);
 
-        let mean_s  = self.sum_sed_std * self.inv_sed_std;
+        let mean_s = self.sum_sed_std * self.inv_sed_std;
         let mean2_s = self.sum_sq_sed_std * self.inv_sed_std;
-        let var_s   = (mean2_s - mean_s * mean_s).max(0.0);
+        let var_s = (mean2_s - mean_s * mean_s).max(0.0);
 
         let ratio = Self::sqrt_ratio(var_v, var_s);
         let anti_now = self.threshold - ratio;

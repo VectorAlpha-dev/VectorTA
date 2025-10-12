@@ -211,8 +211,8 @@ pub struct VpciStream {
     // Ring buffers for last `long_range` samples
     close_buf: Vec<f64>,
     volume_buf: Vec<f64>,
-    head: usize,   // next index to write in long ring
-    count: usize,  // total samples seen
+    head: usize,  // next index to write in long ring
+    count: usize, // total samples seen
 
     // Rolling sums for long window
     sum_c_long: f64,
@@ -240,7 +240,10 @@ impl VpciStream {
         let long_range = params.long_range.unwrap_or(25);
 
         if short_range == 0 || long_range == 0 {
-            return Err(VpciError::InvalidRange { period: 0, data_len: 0 });
+            return Err(VpciError::InvalidRange {
+                period: 0,
+                data_len: 0,
+            });
         }
         if short_range > long_range {
             return Err(VpciError::InvalidRange {
@@ -276,7 +279,11 @@ impl VpciStream {
 
     #[inline(always)]
     fn zf(x: f64) -> f64 {
-        if x.is_finite() { x } else { 0.0 }
+        if x.is_finite() {
+            x
+        } else {
+            0.0
+        }
     }
 
     /// Push one (close, volume). Returns (VPCI, VPCIS) once long window is filled.
@@ -530,7 +537,11 @@ fn vpci_scalar_into_from_psums(
 
     #[inline(always)]
     fn zf(x: f64) -> f64 {
-        if x.is_finite() { x } else { 0.0 }
+        if x.is_finite() {
+            x
+        } else {
+            0.0
+        }
     }
 
     // Hoisted invariants
@@ -577,8 +588,16 @@ fn vpci_scalar_into_from_psums(
 
             // Components
             let vpc = vwma_l - sma_l;
-            let vpr = if sma_s != 0.0 { vwma_s / sma_s } else { f64::NAN };
-            let vm = if sma_v_l != 0.0 { sma_v_s / sma_v_l } else { f64::NAN };
+            let vpr = if sma_s != 0.0 {
+                vwma_s / sma_s
+            } else {
+                f64::NAN
+            };
+            let vm = if sma_v_l != 0.0 {
+                sma_v_s / sma_v_l
+            } else {
+                f64::NAN
+            };
 
             // VPCI
             let vpci = vpc * vpr * vm;
@@ -623,45 +642,18 @@ fn vpci_compute_into(
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 => unsafe {
             vpci_avx512_into_from_psums(
-                close,
-                volume,
-                first,
-                short,
-                long,
-                &ps_c,
-                &ps_v,
-                &ps_cv,
-                vpci_out,
-                vpcis_out,
+                close, volume, first, short, long, &ps_c, &ps_v, &ps_cv, vpci_out, vpcis_out,
             );
         },
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 => unsafe {
             vpci_avx2_into_from_psums(
-                close,
-                volume,
-                first,
-                short,
-                long,
-                &ps_c,
-                &ps_v,
-                &ps_cv,
-                vpci_out,
-                vpcis_out,
+                close, volume, first, short, long, &ps_c, &ps_v, &ps_cv, vpci_out, vpcis_out,
             );
         },
         _ => {
             vpci_scalar_into_from_psums(
-                close,
-                volume,
-                first,
-                short,
-                long,
-                &ps_c,
-                &ps_v,
-                &ps_cv,
-                vpci_out,
-                vpcis_out,
+                close, volume, first, short, long, &ps_c, &ps_v, &ps_cv, vpci_out, vpcis_out,
             );
         }
     }
@@ -909,15 +901,29 @@ unsafe fn vpci_avx2_into_from_psums(
         let vwma_s = if sv_s != 0.0 { scv_s / sv_s } else { f64::NAN };
 
         let vpc = vwma_l - sma_l;
-        let vpr = if sma_s != 0.0 { vwma_s / sma_s } else { f64::NAN };
-        let vm = if sma_v_l != 0.0 { sma_v_s / sma_v_l } else { f64::NAN };
+        let vpr = if sma_s != 0.0 {
+            vwma_s / sma_s
+        } else {
+            f64::NAN
+        };
+        let vm = if sma_v_l != 0.0 {
+            sma_v_s / sma_v_l
+        } else {
+            f64::NAN
+        };
         *yptr.add(i) = vpc * vpr * vm;
         i += 1;
     }
 
     // Fast scalar pass for VPCIS (rolling)
     #[inline(always)]
-    fn zf(x: f64) -> f64 { if x.is_finite() { x } else { 0.0 } }
+    fn zf(x: f64) -> f64 {
+        if x.is_finite() {
+            x
+        } else {
+            0.0
+        }
+    }
 
     let inv_short_s = 1.0 / (short as f64);
     let vptr = volume.as_ptr();
@@ -964,7 +970,9 @@ unsafe fn vpci_avx512_into_from_psums(
 
     let n = close.len();
     let warmup = first + long - 1;
-    if warmup >= n { return; }
+    if warmup >= n {
+        return;
+    }
 
     let inv_long = _mm512_set1_pd(1.0 / (long as f64));
     let inv_short = _mm512_set1_pd(1.0 / (short as f64));
@@ -1046,15 +1054,29 @@ unsafe fn vpci_avx512_into_from_psums(
         let vwma_s = if sv_s != 0.0 { scv_s / sv_s } else { f64::NAN };
 
         let vpc = vwma_l - sma_l;
-        let vpr = if sma_s != 0.0 { vwma_s / sma_s } else { f64::NAN };
-        let vm = if sma_v_l != 0.0 { sma_v_s / sma_v_l } else { f64::NAN };
+        let vpr = if sma_s != 0.0 {
+            vwma_s / sma_s
+        } else {
+            f64::NAN
+        };
+        let vm = if sma_v_l != 0.0 {
+            sma_v_s / sma_v_l
+        } else {
+            f64::NAN
+        };
         *yptr.add(i) = vpc * vpr * vm;
         i += 1;
     }
 
     // Scalar pass for VPCIS (rolling)
     #[inline(always)]
-    fn zf(x: f64) -> f64 { if x.is_finite() { x } else { 0.0 } }
+    fn zf(x: f64) -> f64 {
+        if x.is_finite() {
+            x
+        } else {
+            0.0
+        }
+    }
 
     let inv_short_s = 1.0 / (short as f64);
     let vptr = volume.as_ptr();

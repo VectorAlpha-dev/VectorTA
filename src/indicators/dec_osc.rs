@@ -906,7 +906,10 @@ impl DecOscStream {
     pub fn try_new(params: DecOscParams) -> Result<Self, DecOscError> {
         let period = params.hp_period.unwrap_or(125);
         if period < 2 {
-            return Err(DecOscError::InvalidPeriod { period, data_len: 0 });
+            return Err(DecOscError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let k = params.k.unwrap_or(1.0);
         if k <= 0.0 || k.is_nan() {
@@ -1001,7 +1004,8 @@ impl DecOscStream {
 
         // Second 2‑pole HPF on decycled series: osc = c2*(dec - 2*dec1 + dec2) + 2*(1−α2)*osc1 − (1−α2)^2*osc2
         let decdx = dec - self.dec1 - self.dec1 + self.dec2;
-        let osc = (-self.oma2_sq).mul_add(self.osc2, self.c2.mul_add(decdx, self.two_oma2 * self.osc1));
+        let osc =
+            (-self.oma2_sq).mul_add(self.osc2, self.c2.mul_add(decdx, self.two_oma2 * self.osc1));
 
         // Output: percentage of price
         let out = (self.scale * osc) / value;

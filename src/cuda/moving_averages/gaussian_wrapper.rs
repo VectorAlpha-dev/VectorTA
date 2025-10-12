@@ -68,16 +68,25 @@ pub struct CudaGaussianPolicy {
 }
 
 impl Default for CudaGaussianPolicy {
-    fn default() -> Self { Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto } }
+    fn default() -> Self {
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
+    }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaGaussian {
     module: Module,
@@ -107,10 +116,12 @@ impl CudaGaussian {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaGaussianError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -131,17 +142,30 @@ impl CudaGaussian {
     }
 
     /// Create with explicit policy (tests/benches).
-    pub fn new_with_policy(device_id: usize, policy: CudaGaussianPolicy) -> Result<Self, CudaGaussianError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaGaussianPolicy,
+    ) -> Result<Self, CudaGaussianError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaGaussianPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaGaussianPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaGaussianPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaGaussianPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaGaussianError> {
-        self.stream.synchronize().map_err(|e| CudaGaussianError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))
     }
 
     pub fn gaussian_batch_dev(
@@ -379,10 +403,9 @@ impl CudaGaussian {
         let poles = params.poles.unwrap_or(4);
 
         // Optional: populate GAUSS_COEFFS64 constant if present in the module.
-        if let Ok(mut sym) = self
-            .module
-            .get_global::<[f64; COEFF_STRIDE]>(unsafe { CStr::from_bytes_with_nul_unchecked(b"GAUSS_COEFFS64\0") })
-        {
+        if let Ok(mut sym) = self.module.get_global::<[f64; COEFF_STRIDE]>(unsafe {
+            CStr::from_bytes_with_nul_unchecked(b"GAUSS_COEFFS64\0")
+        }) {
             let mut coeff64 = [0.0f64; COEFF_STRIDE];
             for i in 0..COEFF_STRIDE {
                 coeff64[i] = prepared.coeffs[i] as f64;
@@ -455,24 +478,24 @@ impl CudaGaussian {
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
             let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut poles_ptr   = d_poles.as_device_ptr().as_raw();
-            let mut coeffs_ptr  = d_coeffs.as_device_ptr().as_raw();
+            let mut poles_ptr = d_poles.as_device_ptr().as_raw();
+            let mut coeffs_ptr = d_coeffs.as_device_ptr().as_raw();
             let mut coeff_stride_i = COEFF_STRIDE as i32;
-            let mut series_len_i   = series_len as i32;
-            let mut combos_i       = n_combos as i32;
-            let mut first_valid_i  = first_valid as i32;
-            let mut out_ptr        = d_out.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut combos_i = n_combos as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
 
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
                 &mut periods_ptr as *mut _ as *mut c_void,
-                &mut poles_ptr   as *mut _ as *mut c_void,
-                &mut coeffs_ptr  as *mut _ as *mut c_void,
+                &mut poles_ptr as *mut _ as *mut c_void,
+                &mut coeffs_ptr as *mut _ as *mut c_void,
                 &mut coeff_stride_i as *mut _ as *mut c_void,
-                &mut series_len_i   as *mut _ as *mut c_void,
-                &mut combos_i       as *mut _ as *mut c_void,
-                &mut first_valid_i  as *mut _ as *mut c_void,
-                &mut out_ptr        as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
@@ -706,14 +729,19 @@ impl CudaGaussian {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] Gaussian batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaGaussian)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaGaussian)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -721,14 +749,19 @@ impl CudaGaussian {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] Gaussian many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaGaussian)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaGaussian)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -747,8 +780,14 @@ pub mod benches {
         crate::indicators::moving_averages::gaussian::GaussianParams,
         gaussian_batch_dev,
         gaussian_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::gaussian::GaussianBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), poles: (4, 4, 0) },
-        crate::indicators::moving_averages::gaussian::GaussianParams { period: Some(64), poles: Some(4) },
+        crate::indicators::moving_averages::gaussian::GaussianBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            poles: (4, 4, 0)
+        },
+        crate::indicators::moving_averages::gaussian::GaussianParams {
+            period: Some(64),
+            poles: Some(4)
+        },
         "gaussian",
         "gaussian"
     );

@@ -60,6 +60,8 @@ pub mod hma_wrapper;
 pub mod kama_wrapper;
 pub mod linreg_wrapper;
 #[cfg(feature = "cuda")]
+pub mod ma_selector;
+#[cfg(feature = "cuda")]
 pub mod nama_wrapper;
 pub mod nma_wrapper;
 #[cfg(feature = "cuda")]
@@ -77,18 +79,12 @@ pub mod vpwma_wrapper;
 #[cfg(feature = "cuda")]
 pub mod wma_wrapper;
 pub mod zlema_wrapper;
-#[cfg(feature = "cuda")]
-pub mod ma_selector;
 
 pub use alma_wrapper::{CudaAlma, DeviceArrayF32};
 pub use buff_averages_wrapper::{CudaBuffAverages, CudaBuffAveragesError};
 #[cfg(feature = "cuda")]
 pub use cwma_wrapper::{
-    CudaCwma,
-    CudaCwmaPolicy,
-    BatchKernelPolicy,
-    BatchThreadsPerOutput,
-    ManySeriesKernelPolicy,
+    BatchKernelPolicy, BatchThreadsPerOutput, CudaCwma, CudaCwmaPolicy, ManySeriesKernelPolicy,
 };
 #[cfg(feature = "cuda")]
 pub use dema_wrapper::{CudaDema, CudaDemaError};
@@ -98,11 +94,9 @@ pub use edcf_wrapper::CudaEdcf;
 pub use ehlers_ecema_wrapper::CudaEhlersEcema;
 #[cfg(feature = "cuda")]
 pub use ehlers_itrend_wrapper::{
-    CudaEhlersITrend,
-    CudaEhlersITrendError,
-    CudaEhlersITrendPolicy,
     BatchKernelPolicy as EhlersItrendBatchKernelPolicy,
-    BatchThreadsPerOutput as EhlersItrendBatchThreadsPerOutput,
+    BatchThreadsPerOutput as EhlersItrendBatchThreadsPerOutput, CudaEhlersITrend,
+    CudaEhlersITrendError, CudaEhlersITrendPolicy,
     ManySeriesKernelPolicy as EhlersItrendManySeriesKernelPolicy,
 };
 pub use ehlers_kama_wrapper::CudaEhlersKama;
@@ -127,6 +121,8 @@ pub use jsa_wrapper::{CudaJsa, CudaJsaError};
 #[cfg(feature = "cuda")]
 pub use kama_wrapper::CudaKama;
 pub use linreg_wrapper::{CudaLinreg, CudaLinregError};
+#[cfg(feature = "cuda")]
+pub use ma_selector::{CudaMaData, CudaMaSelector, CudaMaSelectorError};
 pub use maaq_wrapper::CudaMaaq;
 pub use mama_wrapper::{CudaMama, DeviceMamaPair};
 #[cfg(feature = "cuda")]
@@ -157,17 +153,12 @@ pub use tradjema_wrapper::CudaTradjema;
 pub use trendflex_wrapper::{CudaTrendflex, CudaTrendflexError};
 pub use trima_wrapper::CudaTrima;
 pub use uma_wrapper::{
-    CudaUma,
-    CudaUmaPolicy,
-    BatchKernelPolicy as UmaBatchKernelPolicy,
+    BatchKernelPolicy as UmaBatchKernelPolicy, CudaUma, CudaUmaPolicy,
     ManySeriesKernelPolicy as UmaManySeriesKernelPolicy,
 };
 #[cfg(feature = "cuda")]
 pub use vama_wrapper::{
-    BatchKernelPolicy as VamaBatchKernelPolicy,
-    CudaVama,
-    CudaVamaError,
-    CudaVamaPolicy,
+    BatchKernelPolicy as VamaBatchKernelPolicy, CudaVama, CudaVamaError, CudaVamaPolicy,
     ManySeriesKernelPolicy as VamaManySeriesKernelPolicy,
 };
 #[cfg(feature = "cuda")]
@@ -182,5 +173,3 @@ pub use wilders_wrapper::{CudaWilders, CudaWildersError};
 #[cfg(feature = "cuda")]
 pub use wma_wrapper::CudaWma;
 pub use zlema_wrapper::{CudaZlema, CudaZlemaError};
-#[cfg(feature = "cuda")]
-pub use ma_selector::{CudaMaData, CudaMaSelector, CudaMaSelectorError};

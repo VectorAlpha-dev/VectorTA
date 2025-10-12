@@ -411,11 +411,9 @@ pub fn ehlers_pma_scalar(
 
     // Trigger WMA4(predict)
     for i in warm_trigger..len {
-        trigger[i] = (4.0 * predict[i]
-            + 3.0 * predict[i - 1]
-            + 2.0 * predict[i - 2]
-            + 1.0 * predict[i - 3])
-            * inv10;
+        trigger[i] =
+            (4.0 * predict[i] + 3.0 * predict[i - 1] + 2.0 * predict[i - 2] + 1.0 * predict[i - 3])
+                * inv10;
     }
 }
 
@@ -984,7 +982,13 @@ struct RollingLwma<const N: usize> {
 impl<const N: usize> RollingLwma<N> {
     #[inline]
     fn new() -> Self {
-        Self { buf: [f64::NAN; N], head: 0, filled: 0, total: 0.0, num: 0.0 }
+        Self {
+            buf: [f64::NAN; N],
+            head: 0,
+            filled: 0,
+            total: 0.0,
+            num: 0.0,
+        }
     }
     #[inline]
     fn reset(&mut self) {
@@ -1013,7 +1017,9 @@ impl<const N: usize> RollingLwma<N> {
                     sum += v;
                     w += 1.0;
                     i += 1;
-                    if i == N { i = 0; }
+                    if i == N {
+                        i = 0;
+                    }
                 }
                 self.num = acc;
                 self.total = sum;

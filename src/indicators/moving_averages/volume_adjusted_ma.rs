@@ -1465,7 +1465,10 @@ impl VolumeAdjustedMaStream {
     pub fn try_new(p: VolumeAdjustedMaParams) -> Result<Self, VolumeAdjustedMaError> {
         let length = p.length.unwrap_or(13);
         if length == 0 {
-            return Err(VolumeAdjustedMaError::InvalidPeriod { period: length, data_len: 0 });
+            return Err(VolumeAdjustedMaError::InvalidPeriod {
+                period: length,
+                data_len: 0,
+            });
         }
         let vi = p.vi_factor.unwrap_or(0.67);
         if !vi.is_finite() || vi <= 0.0 {
@@ -1477,7 +1480,11 @@ impl VolumeAdjustedMaStream {
         // History capacity just big enough to replicate scalar p0 semantics:
         // strict=false => need p0 = data[i-length], so keep length+1
         // strict=true  => cap = min(i+1, 10*length), need p0 = data[i-cap], so keep 10*length+1
-        let hist_cap = if strict { length.saturating_mul(10) + 1 } else { length + 1 };
+        let hist_cap = if strict {
+            length.saturating_mul(10) + 1
+        } else {
+            length + 1
+        };
 
         Ok(Self {
             length,
@@ -1516,7 +1523,11 @@ impl VolumeAdjustedMaStream {
     pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
         // Treat non-finite volumes as zero contribution to weights (matches scalar)
         let v_fin = if volume.is_finite() { volume } else { 0.0 };
-        let pv_fin = if price.is_finite() { price.mul_add(v_fin, 0.0) } else { 0.0 };
+        let pv_fin = if price.is_finite() {
+            price.mul_add(v_fin, 0.0)
+        } else {
+            0.0
+        };
 
         // ---- advance global index and write into history ring (for p0) ----
         let pos = self.hist_pos;

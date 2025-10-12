@@ -9,16 +9,16 @@
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::wilders::{WildersBatchRange, WildersParams};
 use cust::context::{CacheConfig, Context};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
@@ -84,8 +84,9 @@ impl CudaWilders {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaWildersError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaWildersError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -132,7 +133,9 @@ impl CudaWilders {
         // CHANGE: cache parameter device buffers across identical sweeps
         let mut hasher = DefaultHasher::new();
         prepared.periods_i32.hash(&mut hasher);
-        for &a in &prepared.alphas_f32 { a.to_bits().hash(&mut hasher); }
+        for &a in &prepared.alphas_f32 {
+            a.to_bits().hash(&mut hasher);
+        }
         prepared.warm_indices.hash(&mut hasher);
         let params_hash = hasher.finish();
 
@@ -144,7 +147,9 @@ impl CudaWilders {
                         && cache.periods.len() == prepared.periods_i32.len()
                         && cache.alphas.len() == prepared.alphas_f32.len()
                         && cache.warm.len() == prepared.warm_indices.len() =>
-                { (&cache.periods, &cache.alphas, &cache.warm) }
+                {
+                    (&cache.periods, &cache.alphas, &cache.warm)
+                }
                 _ => {
                     let periods = DeviceBuffer::from_slice(&prepared.periods_i32)
                         .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
@@ -152,8 +157,12 @@ impl CudaWilders {
                         .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
                     let warm = DeviceBuffer::from_slice(&prepared.warm_indices)
                         .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
-                    (*(self as *const _ as *mut CudaWilders)).param_cache =
-                        Some(ParamCache { hash: params_hash, periods, alphas, warm });
+                    (*(self as *const _ as *mut CudaWilders)).param_cache = Some(ParamCache {
+                        hash: params_hash,
+                        periods,
+                        alphas,
+                        warm,
+                    });
                     let cache = (*(self as *const _ as *mut CudaWilders))
                         .param_cache
                         .as_ref()
@@ -252,7 +261,9 @@ impl CudaWilders {
         }
         let period = params.period.unwrap_or(0) as i32;
         if period <= 0 {
-            return Err(CudaWildersError::InvalidInput("period must be positive".into()));
+            return Err(CudaWildersError::InvalidInput(
+                "period must be positive".into(),
+            ));
         }
         if period as usize > rows {
             return Err(CudaWildersError::InvalidInput(format!(
@@ -379,7 +390,9 @@ impl CudaWilders {
         let block_threads = ((block_x_user / 32).max(1).min(32)) * 32; // 32..1024
         unsafe {
             (*(self as *const _ as *mut CudaWilders)).last_batch =
-                Some(BatchKernelSelected::Plain { block_x: block_threads });
+                Some(BatchKernelSelected::Plain {
+                    block_x: block_threads,
+                });
         }
         self.maybe_log_batch_debug();
 
@@ -434,7 +447,11 @@ impl CudaWilders {
         let block_x_user = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
             ManySeriesKernelPolicy::Auto => {
-                if num_series < 64 { 128 } else { 256 }
+                if num_series < 64 {
+                    128
+                } else {
+                    256
+                }
             }
         };
         let block_threads = ((block_x_user / 32).max(1).min(32)) * 32; // 32..1024
@@ -442,7 +459,9 @@ impl CudaWilders {
         let grid_x: u32 = ((num_series as u32) + (warps_per_block - 1)) / warps_per_block;
         unsafe {
             (*(self as *const _ as *mut CudaWilders)).last_many =
-                Some(ManySeriesKernelSelected::OneD { block_x: block_threads });
+                Some(ManySeriesKernelSelected::OneD {
+                    block_x: block_threads,
+                });
         }
         self.maybe_log_many_debug();
 
@@ -514,7 +533,11 @@ impl CudaWilders {
             &mut d_out_tm,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -533,7 +556,8 @@ impl CudaWilders {
                 "num_series and series_len must be positive".into(),
             ));
         }
-        if d_prices_tm.len() != num_series * series_len || d_out_tm.len() != num_series * series_len {
+        if d_prices_tm.len() != num_series * series_len || d_out_tm.len() != num_series * series_len
+        {
             return Err(CudaWildersError::InvalidInput(
                 "time-major buffer length mismatch".into(),
             ));
@@ -565,28 +589,36 @@ impl CudaWilders {
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 static ONCE: AtomicBool = AtomicBool::new(false);
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] WILDERS batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaWilders)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaWilders)).debug_batch_logged = true;
+                }
             }
         }
     }
 
     #[inline]
     fn maybe_log_many_debug(&self) {
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 static ONCE: AtomicBool = AtomicBool::new(false);
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] WILDERS many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaWilders)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaWilders)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -605,7 +637,9 @@ pub mod benches {
         crate::indicators::moving_averages::wilders::WildersParams,
         wilders_batch_dev,
         wilders_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::wilders::WildersBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::wilders::WildersBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::wilders::WildersParams { period: Some(64) },
         "wilders",
         "wilders"
@@ -635,18 +669,39 @@ fn expand_periods(range: &WildersBatchRange) -> Vec<WildersParams> {
 // --- Simple policy types (parity with ALMA/CWMA style) ---
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelPolicy { Auto, Plain { block_x: u32 } }
-impl Default for BatchKernelPolicy { fn default() -> Self { Self::Auto } }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+impl Default for BatchKernelPolicy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy { Auto, OneD { block_x: u32 } }
-impl Default for ManySeriesKernelPolicy { fn default() -> Self { Self::Auto } }
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct CudaWildersPolicy { pub batch: BatchKernelPolicy, pub many_series: ManySeriesKernelPolicy }
+pub struct CudaWildersPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}

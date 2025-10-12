@@ -549,13 +549,13 @@ pub struct VossStream {
     last_x1: f64,
     last_x2: f64,
     // O(1) predictor state for Voss feedback
-    ring: Vec<f64>,    // last `order` Voss values (nz = NaN->0)
-    rpos: usize,       // write position in `ring`
-    a_sum: f64,        // A_t = sum of last `order` Voss values
-    d_sum: f64,        // D_t = sum of k * Voss[t-k], k=1..order
-    ord_f: f64,        // m as f64
-    inv_order: f64,    // 1/m
-    scale: f64,        // (3 + m)/2
+    ring: Vec<f64>, // last `order` Voss values (nz = NaN->0)
+    rpos: usize,    // write position in `ring`
+    a_sum: f64,     // A_t = sum of last `order` Voss values
+    d_sum: f64,     // D_t = sum of k * Voss[t-k], k=1..order
+    ord_f: f64,     // m as f64
+    inv_order: f64, // 1/m
+    scale: f64,     // (3 + m)/2
 
     // optional flag preserved for compatibility
     filled: bool,
@@ -602,7 +602,11 @@ impl VossStream {
             prev_f2: 0.0,
             last_x1: f64::NAN,
             last_x2: f64::NAN,
-            ring: if order > 0 { vec![0.0; order] } else { Vec::new() },
+            ring: if order > 0 {
+                vec![0.0; order]
+            } else {
+                Vec::new()
+            },
             rpos: 0,
             a_sum: 0.0,
             d_sum: 0.0,
@@ -1170,7 +1174,9 @@ fn voss_row_scalar(
 
         ring[rpos] = v_new_nz;
         rpos += 1;
-        if rpos == order { rpos = 0; }
+        if rpos == order {
+            rpos = 0;
+        }
     }
 }
 
@@ -1259,7 +1265,9 @@ unsafe fn voss_row_scalar_unchecked(
 
         *ring.get_unchecked_mut(rpos) = v_new_nz;
         rpos += 1;
-        if rpos == order { rpos = 0; }
+        if rpos == order {
+            rpos = 0;
+        }
     }
 }
 

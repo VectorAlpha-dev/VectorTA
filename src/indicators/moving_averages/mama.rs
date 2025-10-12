@@ -733,50 +733,50 @@ pub unsafe fn mama_avx2_inplace(
         let smooth_val = W0.mul_add(price, W1.mul_add(s1, W2.mul_add(s2, s3))) * 0.1;
         smooth[idx] = smooth_val;
 
-    // amplitude correction per Ehlers
-    let amp = 0.075_f64.mul_add(prev_mesa, 0.54);
+        // amplitude correction per Ehlers
+        let amp = 0.075_f64.mul_add(prev_mesa, 0.54);
 
-    // ---------- 5.2 Hilbert detrender ------------------
-    let dt_val = amp
-        * hilbert4_avx2(
-            smooth[idx],
-            lag(&smooth, idx, 2),
-            lag(&smooth, idx, 4),
-            lag(&smooth, idx, 6),
-        );
-    detrender[idx] = dt_val;
+        // ---------- 5.2 Hilbert detrender ------------------
+        let dt_val = amp
+            * hilbert4_avx2(
+                smooth[idx],
+                lag(&smooth, idx, 2),
+                lag(&smooth, idx, 4),
+                lag(&smooth, idx, 6),
+            );
+        detrender[idx] = dt_val;
 
         // ---------- 5.3 In‑phase & quadrature --------------
         let i1 = lag(&detrender, idx, 3); // 3‑bar lag
         i1_buf[idx] = i1;
 
-    let q1 = amp
-        * hilbert4_avx2(
-            detrender[idx],
-            lag(&detrender, idx, 2),
-            lag(&detrender, idx, 4),
-            lag(&detrender, idx, 6),
-        );
-    q1_buf[idx] = q1;
+        let q1 = amp
+            * hilbert4_avx2(
+                detrender[idx],
+                lag(&detrender, idx, 2),
+                lag(&detrender, idx, 4),
+                lag(&detrender, idx, 6),
+            );
+        q1_buf[idx] = q1;
 
         // ---------- 5.4 90° leads --------------------------
-    let j_i = amp
-        * hilbert4_avx2(
-            i1_buf[idx],
-            lag(&i1_buf, idx, 2),
-            lag(&i1_buf, idx, 4),
-            lag(&i1_buf, idx, 6),
-        );
+        let j_i = amp
+            * hilbert4_avx2(
+                i1_buf[idx],
+                lag(&i1_buf, idx, 2),
+                lag(&i1_buf, idx, 4),
+                lag(&i1_buf, idx, 6),
+            );
         let j_q = amp
-        * hilbert4_avx2(
-            q1_buf[idx],
-            lag(&q1_buf, idx, 2),
-            lag(&q1_buf, idx, 4),
-            lag(&q1_buf, idx, 6),
-        );
+            * hilbert4_avx2(
+                q1_buf[idx],
+                lag(&q1_buf, idx, 2),
+                lag(&q1_buf, idx, 4),
+                lag(&q1_buf, idx, 6),
+            );
 
         // ---------- 5.5 Homodyne discriminator -------------
-    let i2 = i1 - j_q;
+        let i2 = i1 - j_q;
         let q2 = q1 + j_i;
         let old_i2 = prev_i2;
         let old_q2 = prev_q2;
@@ -895,45 +895,50 @@ pub fn mama_scalar_inplace(
         let s1 = if i >= 1 { data[i - 1] } else { price };
         let s2 = if i >= 2 { data[i - 2] } else { price };
         let s3 = if i >= 3 { data[i - 3] } else { price };
-        let smooth_val = 0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
+        let smooth_val =
+            0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
         smooth[idx] = smooth_val;
 
         // amplitude correction (per Ehlers): 0.075*Period + 0.54, using previous period
         let amp = 0.075_f64.mul_add(prev_mesa, 0.54);
 
         // Hilbert detrender
-        let dt = amp * hilbert4(
-            smooth[idx],
-            lag(&smooth, idx, 2),
-            lag(&smooth, idx, 4),
-            lag(&smooth, idx, 6),
-        );
+        let dt = amp
+            * hilbert4(
+                smooth[idx],
+                lag(&smooth, idx, 2),
+                lag(&smooth, idx, 4),
+                lag(&smooth, idx, 6),
+            );
         detrender[idx] = dt;
 
         // in‑phase & quadrature
         let i1 = lag(&detrender, idx, 3);
         i1_buf[idx] = i1;
-        let q1 = amp * hilbert4(
-            detrender[idx],
-            lag(&detrender, idx, 2),
-            lag(&detrender, idx, 4),
-            lag(&detrender, idx, 6),
-        );
+        let q1 = amp
+            * hilbert4(
+                detrender[idx],
+                lag(&detrender, idx, 2),
+                lag(&detrender, idx, 4),
+                lag(&detrender, idx, 6),
+            );
         q1_buf[idx] = q1;
 
         // 90° leads
-        let j_i = amp * hilbert4(
-            i1_buf[idx],
-            lag(&i1_buf, idx, 2),
-            lag(&i1_buf, idx, 4),
-            lag(&i1_buf, idx, 6),
-        );
-        let j_q = amp * hilbert4(
-            q1_buf[idx],
-            lag(&q1_buf, idx, 2),
-            lag(&q1_buf, idx, 4),
-            lag(&q1_buf, idx, 6),
-        );
+        let j_i = amp
+            * hilbert4(
+                i1_buf[idx],
+                lag(&i1_buf, idx, 2),
+                lag(&i1_buf, idx, 4),
+                lag(&i1_buf, idx, 6),
+            );
+        let j_q = amp
+            * hilbert4(
+                q1_buf[idx],
+                lag(&q1_buf, idx, 2),
+                lag(&q1_buf, idx, 4),
+                lag(&q1_buf, idx, 6),
+            );
 
         // homodyne discriminator (EMA smoothing)
         let i2 = i1 - j_q;
@@ -1342,7 +1347,8 @@ impl MamaStream {
         let s1 = if self.seen >= 1 { self.last1 } else { price };
         let s2 = if self.seen >= 2 { self.last2 } else { price };
         let s3 = if self.seen >= 3 { self.last3 } else { price };
-        let smooth_val = 0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
+        let smooth_val =
+            0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
         self.smooth[i] = smooth_val;
 
         // amplitude correction (Ehlers): 0.075 * Period + 0.54
@@ -1718,8 +1724,8 @@ fn mama_batch_inner(
                 let s1 = if i >= 1 { data[i - 1] } else { price };
                 let s2 = if i >= 2 { data[i - 2] } else { price };
                 let s3 = if i >= 3 { data[i - 3] } else { price };
-                let smooth_val = 0.1
-                    * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
+                let smooth_val =
+                    0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
                 smooth[idx] = smooth_val;
 
                 let amp = 0.075_f64.mul_add(prev_mesa, 0.54);

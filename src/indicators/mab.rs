@@ -1245,14 +1245,8 @@ fn mab_batch_inner_into(
             let first = input.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let fast = p0.fast_period.unwrap();
             let slow = p0.slow_period.unwrap();
-            let fast_ma_type = p0
-                .fast_ma_type
-                .as_deref()
-                .unwrap_or("sma");
-            let slow_ma_type = p0
-                .slow_ma_type
-                .as_deref()
-                .unwrap_or("sma");
+            let fast_ma_type = p0.fast_ma_type.as_deref().unwrap_or("sma");
+            let slow_ma_type = p0.slow_ma_type.as_deref().unwrap_or("sma");
 
             let fast_ma = match fast_ma_type {
                 "ema" => {
@@ -1303,7 +1297,9 @@ fn mab_batch_inner_into(
 
             if first_output < n {
                 let mut dev: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, n);
-                unsafe { dev.set_len(n); }
+                unsafe {
+                    dev.set_len(n);
+                }
 
                 unsafe {
                     let f_ptr = fast_ma.as_ptr();

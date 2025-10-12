@@ -428,7 +428,11 @@ pub unsafe fn wavetrend_avx2(
         &mut diff_out,
     );
 
-    Ok(WavetrendOutput { wt1: wt1_out, wt2: wt2_out, wt_diff: diff_out })
+    Ok(WavetrendOutput {
+        wt1: wt1_out,
+        wt2: wt2_out,
+        wt_diff: diff_out,
+    })
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1290,7 +1294,7 @@ pub struct WavetrendStream {
     // ─────────────────────────────────────────────────────────────────────────────────
     // Stage 4: “WT2” = SMA(ma_length) on the most recent WT1 values
     //   We keep a sliding window of length ma_length in wt1_buf and a running_sum.
-    wt1_buf: VecDeque<f64>,            // ring of length ≤ ma_length; push every bar (finite or NaN)
+    wt1_buf: VecDeque<f64>, // ring of length ≤ ma_length; push every bar (finite or NaN)
     running_sum: f64,
     // NEW: number of finite WT1s in the last ma_length positions (O(1) update)
     sma_count: usize,

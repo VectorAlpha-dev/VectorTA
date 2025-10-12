@@ -18,8 +18,8 @@ use crate::indicators::moving_averages::nma::{NmaBatchRange, NmaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::memory::AsyncCopyDestination;
+use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -53,7 +53,10 @@ pub struct CudaNmaPolicy {
 
 impl Default for CudaNmaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -115,7 +118,8 @@ impl CudaNma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaNmaError::Cuda(e.to_string()))?
@@ -156,14 +160,19 @@ impl CudaNma {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scn = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scn =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scn || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] NMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaNma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaNma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -171,14 +180,19 @@ impl CudaNma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scn = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scn =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scn || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] NMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaNma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaNma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -193,8 +207,14 @@ impl CudaNma {
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Ok((free, _total)) = mem_get_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Ok((free, _total)) = mem_get_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
     #[inline]
     fn grid_y_chunks(n_combos: usize) -> impl Iterator<Item = (usize, usize)> {
@@ -223,7 +243,9 @@ impl CudaNma {
     fn compute_abs_diffs(data: &[f32]) -> Vec<f32> {
         let len = data.len();
         let mut diffs = vec![0f32; len];
-        if len == 0 { return diffs; }
+        if len == 0 {
+            return diffs;
+        }
         let mut prev_ln = data[0].max(1e-10f32).ln();
         for i in 1..len {
             let ln = data[i].max(1e-10f32).ln();
@@ -280,7 +302,9 @@ impl CudaNma {
     // Upload constant-memory weights (c_sqrt_diffs) once per module
     #[inline]
     fn ensure_const_weights(&self, need: usize) -> Result<(), CudaNmaError> {
-        if need == 0 { return Ok(()); }
+        if need == 0 {
+            return Ok(());
+        }
         if need > NMA_MAX_PERIOD {
             return Err(CudaNmaError::InvalidInput(format!(
                 "period {} exceeds NMA_MAX_PERIOD ({})",
@@ -288,7 +312,9 @@ impl CudaNma {
             )));
         }
         let already = self.weights_len_uploaded.load(Ordering::Relaxed);
-        if already >= need { return Ok(()); }
+        if already >= need {
+            return Ok(());
+        }
 
         // Build host weights sqrt(i+1) - sqrt(i)
         let mut host = [0f32; NMA_MAX_PERIOD];
@@ -305,7 +331,8 @@ impl CudaNma {
             .get_global::<[f32; NMA_MAX_PERIOD]>(&name)
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
         unsafe {
-            sym.copy_from(&host).map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+            sym.copy_from(&host)
+                .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
         }
         self.weights_len_uploaded.store(need, Ordering::Relaxed);
         Ok(())
@@ -328,7 +355,10 @@ impl CudaNma {
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
 
         // Block size selection (default 256; good occupancy on Ada)
-        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            _ => 256,
+        };
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -399,8 +429,8 @@ impl CudaNma {
                 .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
         }
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        let d_periods =
+            DeviceBuffer::from_slice(&periods).map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
 
         // VRAM estimate and headroom (~64MB)
         let bytes_inputs = len * std::mem::size_of::<f32>();
@@ -477,7 +507,11 @@ impl CudaNma {
         // Use pinned DtoH for faster copy-back
         let mut h_out = unsafe { cust::memory::LockedBuffer::<f32>::uninitialized(expected) }
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
-        unsafe { dev.buf.async_copy_to(h_out.as_mut_slice(), &self.stream).map_err(|e| CudaNmaError::Cuda(e.to_string()))?; }
+        unsafe {
+            dev.buf
+                .async_copy_to(h_out.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        }
         self.stream
             .synchronize()
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
@@ -575,7 +609,10 @@ impl CudaNma {
             .get_function("nma_many_series_one_param_f32")
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 256 };
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            _ => 256,
+        };
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -631,8 +668,9 @@ impl CudaNma {
         // Pinned HtoD uploads with async copies
         let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized(num_series * series_len) }
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
-        let mut d_abs_diffs = unsafe { DeviceBuffer::<f32>::uninitialized(num_series * series_len) }
-            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        let mut d_abs_diffs =
+            unsafe { DeviceBuffer::<f32>::uninitialized(num_series * series_len) }
+                .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
         let h_prices = cust::memory::LockedBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
         let h_diffs = cust::memory::LockedBuffer::from_slice(abs_diffs_tm)
@@ -729,7 +767,11 @@ impl CudaNma {
         let expected = cols * rows;
         let mut h_out = unsafe { cust::memory::LockedBuffer::<f32>::uninitialized(expected) }
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
-        unsafe { dev.buf.async_copy_to(h_out.as_mut_slice(), &self.stream).map_err(|e| CudaNmaError::Cuda(e.to_string()))?; }
+        unsafe {
+            dev.buf
+                .async_copy_to(h_out.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        }
         self.stream
             .synchronize()
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
@@ -751,7 +793,9 @@ pub mod benches {
         crate::indicators::moving_averages::nma::NmaParams,
         nma_batch_dev,
         nma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::nma::NmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::nma::NmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::nma::NmaParams { period: Some(64) },
         "nma",
         "nma"

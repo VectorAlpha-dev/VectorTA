@@ -311,7 +311,14 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
     let inv_pf = 1.0 / (period as f64);
 
     #[inline(always)]
-    fn corr_from_sums(sum_h: f64, sum_h2: f64, sum_l: f64, sum_l2: f64, sum_hl: f64, inv_pf: f64) -> f64 {
+    fn corr_from_sums(
+        sum_h: f64,
+        sum_h2: f64,
+        sum_l: f64,
+        sum_l2: f64,
+        sum_hl: f64,
+        inv_pf: f64,
+    ) -> f64 {
         // Pearson r = cov / (std_x * std_y) with cov = E[xy] - E[x]E[y]
         let cov = sum_hl - (sum_h * sum_l) * inv_pf;
         let var_h = sum_h2 - (sum_h * sum_h) * inv_pf;
@@ -485,7 +492,14 @@ pub fn correl_hl_avx2(high: &[f64], low: &[f64], period: usize, first: usize, ou
         }
 
         #[inline(always)]
-        fn corr_from_sums(sum_h: f64, sum_h2: f64, sum_l: f64, sum_l2: f64, sum_hl: f64, inv_pf: f64) -> f64 {
+        fn corr_from_sums(
+            sum_h: f64,
+            sum_h2: f64,
+            sum_l: f64,
+            sum_l2: f64,
+            sum_hl: f64,
+            inv_pf: f64,
+        ) -> f64 {
             let cov = sum_hl - (sum_h * sum_l) * inv_pf;
             let varh = sum_h2 - (sum_h * sum_h) * inv_pf;
             let varl = sum_l2 - (sum_l * sum_l) * inv_pf;
@@ -639,7 +653,14 @@ pub unsafe fn correl_hl_avx512_long(
     }
 
     #[inline(always)]
-    fn corr_from_sums(sum_h: f64, sum_h2: f64, sum_l: f64, sum_l2: f64, sum_hl: f64, inv_pf: f64) -> f64 {
+    fn corr_from_sums(
+        sum_h: f64,
+        sum_h2: f64,
+        sum_l: f64,
+        sum_l2: f64,
+        sum_hl: f64,
+        inv_pf: f64,
+    ) -> f64 {
         let cov = sum_hl - (sum_h * sum_l) * inv_pf;
         let varh = sum_h2 - (sum_h * sum_h) * inv_pf;
         let varl = sum_l2 - (sum_l * sum_l) * inv_pf;
@@ -716,7 +737,10 @@ impl CorrelHlStream {
     pub fn try_new(params: CorrelHlParams) -> Result<Self, CorrelHlError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(CorrelHlError::InvalidPeriod { period, data_len: 0 });
+            return Err(CorrelHlError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         Ok(Self {
@@ -1164,7 +1188,8 @@ fn correl_hl_batch_inner_into(
     for i in 0..n {
         let h = high[i];
         let l = low[i];
-        let (prev_h, prev_h2, prev_l, prev_l2, prev_hl) = (ps_h[i], ps_h2[i], ps_l[i], ps_l2[i], ps_hl[i]);
+        let (prev_h, prev_h2, prev_l, prev_l2, prev_hl) =
+            (ps_h[i], ps_h2[i], ps_l[i], ps_l2[i], ps_hl[i]);
         if h.is_nan() || l.is_nan() {
             ps_h[i + 1] = prev_h;
             ps_h2[i + 1] = prev_h2;

@@ -662,7 +662,11 @@ fn dti_row_scalar_from_base(
         e1_r = alpha_r * axi + ar1 * e1_r;
         e1_s = alpha_s * e1_r + as1 * e1_s;
         e1_u = alpha_u * e1_s + au1 * e1_u;
-        out[i] = if !e1_u.is_nan() && e1_u != 0.0 { 100.0 * e0_u / e1_u } else { 0.0 };
+        out[i] = if !e1_u.is_nan() && e1_u != 0.0 {
+            100.0 * e0_u / e1_u
+        } else {
+            0.0
+        };
     }
 }
 
@@ -716,7 +720,11 @@ fn dti_row_avx2_from_base(
             _mm_storeu_pd(tmp.as_mut_ptr(), v_eu);
             let num = tmp[0];
             let den = tmp[1];
-            *po.add(i) = if !den.is_nan() && den != 0.0 { hundred * num / den } else { 0.0 };
+            *po.add(i) = if !den.is_nan() && den != 0.0 {
+                hundred * num / den
+            } else {
+                0.0
+            };
             i += 1;
         }
     }
@@ -1570,7 +1578,15 @@ fn dti_batch_inner(
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(kern, Kernel::Scalar | Kernel::Auto) {
-                dti_row_simd128(high, low, prm.r.unwrap(), prm.s.unwrap(), prm.u.unwrap(), first_valid, out_row);
+                dti_row_simd128(
+                    high,
+                    low,
+                    prm.r.unwrap(),
+                    prm.s.unwrap(),
+                    prm.u.unwrap(),
+                    first_valid,
+                    out_row,
+                );
                 return;
             }
         }

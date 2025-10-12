@@ -843,7 +843,10 @@ impl AlmaStream {
     pub fn try_new(params: AlmaParams) -> Result<Self, AlmaError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(AlmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(AlmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let offset = params.offset.unwrap_or(0.85);
         if !(0.0..=1.0).contains(&offset) || offset.is_nan() || offset.is_infinite() {
@@ -968,7 +971,9 @@ unsafe fn hsum256(v: __m256d) -> f64 {
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
-unsafe fn hsum512(v: __m512d) -> f64 { _mm512_reduce_add_pd(v) }
+unsafe fn hsum512(v: __m512d) -> f64 {
+    _mm512_reduce_add_pd(v)
+}
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -1016,8 +1021,12 @@ fn dot_contiguous(kernel: Kernel, x: &[f64], w: &[f64]) -> f64 {
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     {
         match kernel {
-            Kernel::Avx512 | Kernel::Avx512Batch => unsafe { return dot_avx512(x.as_ptr(), w.as_ptr(), x.len()) },
-            Kernel::Avx2 | Kernel::Avx2Batch => unsafe { return dot_avx2(x.as_ptr(), w.as_ptr(), x.len()) },
+            Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
+                return dot_avx512(x.as_ptr(), w.as_ptr(), x.len());
+            },
+            Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
+                return dot_avx2(x.as_ptr(), w.as_ptr(), x.len());
+            },
             _ => {}
         }
     }

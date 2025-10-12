@@ -452,15 +452,11 @@ pub unsafe fn sinwma_avx2(
             k += 4;
         }
 
-        let sum128 = _mm_add_pd(
-            _mm256_castpd256_pd128(acc),
-            _mm256_extractf128_pd(acc, 1),
-        );
+        let sum128 = _mm_add_pd(_mm256_castpd256_pd128(acc), _mm256_extractf128_pd(acc, 1));
         let mut sum = _mm_cvtsd_f64(_mm_hadd_pd(sum128, sum128));
 
         while k < period {
-            sum = (*data.get_unchecked(start + k))
-                .mul_add(*weights.get_unchecked(k), sum);
+            sum = (*data.get_unchecked(start + k)).mul_add(*weights.get_unchecked(k), sum);
             k += 1;
         }
 
@@ -665,7 +661,10 @@ impl SinWmaStream {
     pub fn try_new(params: SinWmaParams) -> Result<Self, SinWmaError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(SinWmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(SinWmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         // alpha = pi / (p+1)
@@ -785,7 +784,10 @@ impl SinWmaStream {
 
     #[inline(always)]
     fn rebuild_z(&mut self) {
-        debug_assert!(self.nan_count == 0, "rebuild_z called on NaN-contaminated window");
+        debug_assert!(
+            self.nan_count == 0,
+            "rebuild_z called on NaN-contaminated window"
+        );
         let newest = (self.head + self.period - 1) % self.period;
 
         // Accumulate Z = Σ r^j x_{t-j}; start with r^0=1
@@ -1240,10 +1242,7 @@ pub unsafe fn sinwma_row_avx2(
             k += 4;
         }
 
-        let sum128 = _mm_add_pd(
-            _mm256_castpd256_pd128(acc),
-            _mm256_extractf128_pd(acc, 1),
-        );
+        let sum128 = _mm_add_pd(_mm256_castpd256_pd128(acc), _mm256_extractf128_pd(acc, 1));
         let mut sum = _mm_cvtsd_f64(_mm_hadd_pd(sum128, sum128));
 
         while k < period {

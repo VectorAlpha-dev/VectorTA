@@ -654,7 +654,10 @@ impl KaufmanstopStream {
     pub fn try_new(params: KaufmanstopParams) -> Result<Self, KaufmanstopError> {
         let period = params.period.unwrap_or(22);
         if period == 0 {
-            return Err(KaufmanstopError::InvalidPeriod { period, data_len: 0 });
+            return Err(KaufmanstopError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         let mult = params.mult.unwrap_or(2.0);
@@ -703,7 +706,11 @@ impl KaufmanstopStream {
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
         // Compute current range (may be NaN)
-        let new = if high.is_nan() || low.is_nan() { f64::NAN } else { high - low };
+        let new = if high.is_nan() || low.is_nan() {
+            f64::NAN
+        } else {
+            high - low
+        };
 
         // Did we already have a full window before inserting this sample?
         let was_filled = self.filled;

@@ -45,10 +45,10 @@ use crate::utilities::kernel_validation::validate_kernel;
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
-use std::collections::HashMap;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for PpoInput<'a> {
@@ -1191,10 +1191,10 @@ enum StreamMode {
 
 #[derive(Debug)]
 struct SmaState {
-    started: bool,        // saw first finite value (mirrors `first` logic)
+    started: bool, // saw first finite value (mirrors `first` logic)
     fast: usize,
     slow: usize,
-    k: f64,               // slow / fast (precompute to reduce divisions)
+    k: f64, // slow / fast (precompute to reduce divisions)
     // rolling sums + rings
     fast_sum: f64,
     slow_sum: f64,
@@ -1212,8 +1212,10 @@ struct EmaState {
     fast: usize,
     slow: usize,
     // α/β for both EMAs
-    fa: f64, fb: f64,
-    sa: f64, sb: f64,
+    fa: f64,
+    fb: f64,
+    sa: f64,
+    sb: f64,
     // state
     fast_ema: f64,
     slow_ema: f64,
@@ -1263,7 +1265,12 @@ impl PpoStream {
             _ => StreamMode::Generic { data: Vec::new() },
         };
 
-        Ok(Self { fast_period: fast, slow_period: slow, ma_type, mode })
+        Ok(Self {
+            fast_period: fast,
+            slow_period: slow,
+            ma_type,
+            mode,
+        })
     }
 
     /// O(1) per call for SMA/EMA. For unknown MA types, preserves the old O(n) semantics.

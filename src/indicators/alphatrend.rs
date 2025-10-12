@@ -544,13 +544,25 @@ pub fn alphatrend_scalar(
             let m_check = momentum_values[i] >= 50.0;
 
             let cur = if i == warmup {
-                if m_check { up_t } else { down_t }
+                if m_check {
+                    up_t
+                } else {
+                    down_t
+                }
             } else if m_check {
                 // rising regime
-                if up_t < prev_alpha { prev_alpha } else { up_t }
+                if up_t < prev_alpha {
+                    prev_alpha
+                } else {
+                    up_t
+                }
             } else {
                 // falling regime
-                if down_t > prev_alpha { prev_alpha } else { down_t }
+                if down_t > prev_alpha {
+                    prev_alpha
+                } else {
+                    down_t
+                }
             };
 
             out_k1[i] = cur;
@@ -646,7 +658,9 @@ unsafe fn alphatrend_avx2(
 
     // --------- Momentum (RSI/MFI). Vectorize HLC3 if needed ----------
     let momentum_values: Vec<f64> = if no_volume {
-        let rsi_params = RsiParams { period: Some(period) };
+        let rsi_params = RsiParams {
+            period: Some(period),
+        };
         let rsi_input = RsiInput::from_slice(close, rsi_params);
         rsi_with_kernel(&rsi_input, Kernel::Avx2)
             .map_err(|e| AlphaTrendError::RsiError { msg: e.to_string() })?
@@ -674,7 +688,9 @@ unsafe fn alphatrend_avx2(
             j += 1;
         }
 
-        let mfi_params = MfiParams { period: Some(period) };
+        let mfi_params = MfiParams {
+            period: Some(period),
+        };
         let mfi_input = MfiInput::from_slices(hlc3, volume, mfi_params);
         mfi_with_kernel(&mfi_input, Kernel::Avx2)
             .map_err(|e| AlphaTrendError::MfiError { msg: e.to_string() })?
@@ -693,11 +709,19 @@ unsafe fn alphatrend_avx2(
 
     #[inline(always)]
     fn fast_max(a: f64, b: f64) -> f64 {
-        if a >= b { a } else { b }
+        if a >= b {
+            a
+        } else {
+            b
+        }
     }
     #[inline(always)]
     fn fast_min(a: f64, b: f64) -> f64 {
-        if a <= b { a } else { b }
+        if a <= b {
+            a
+        } else {
+            b
+        }
     }
 
     let mut prev2 = f64::NAN;
@@ -714,7 +738,11 @@ unsafe fn alphatrend_avx2(
         let m_ge_50 = *momentum_values.get_unchecked(k) >= 50.0;
 
         let alpha = if k == warmup {
-            if m_ge_50 { up } else { dn }
+            if m_ge_50 {
+                up
+            } else {
+                dn
+            }
         } else if m_ge_50 {
             fast_max(up, prev_alpha)
         } else {
@@ -722,7 +750,9 @@ unsafe fn alphatrend_avx2(
         };
 
         *out_k1.get_unchecked_mut(k) = alpha;
-        if k >= warmup + 2 { *out_k2.get_unchecked_mut(k) = prev2; }
+        if k >= warmup + 2 {
+            *out_k2.get_unchecked_mut(k) = prev2;
+        }
 
         prev2 = prev1;
         prev1 = alpha;
@@ -735,8 +765,12 @@ unsafe fn alphatrend_avx2(
         k += 1;
     }
 
-    for v in &mut out_k1[..warmup.min(len)] { *v = f64::NAN; }
-    for v in &mut out_k2[..(warmup + 2).min(len)] { *v = f64::NAN; }
+    for v in &mut out_k1[..warmup.min(len)] {
+        *v = f64::NAN;
+    }
+    for v in &mut out_k2[..(warmup + 2).min(len)] {
+        *v = f64::NAN;
+    }
 
     Ok(())
 }
@@ -806,7 +840,9 @@ unsafe fn alphatrend_avx512(
 
     // --------- Momentum (RSI/MFI). Vectorize HLC3 if needed ----------
     let momentum_values: Vec<f64> = if no_volume {
-        let rsi_params = RsiParams { period: Some(period) };
+        let rsi_params = RsiParams {
+            period: Some(period),
+        };
         let rsi_input = RsiInput::from_slice(close, rsi_params);
         rsi_with_kernel(&rsi_input, Kernel::Avx512)
             .map_err(|e| AlphaTrendError::RsiError { msg: e.to_string() })?
@@ -834,7 +870,9 @@ unsafe fn alphatrend_avx512(
             j += 1;
         }
 
-        let mfi_params = MfiParams { period: Some(period) };
+        let mfi_params = MfiParams {
+            period: Some(period),
+        };
         let mfi_input = MfiInput::from_slices(hlc3, volume, mfi_params);
         mfi_with_kernel(&mfi_input, Kernel::Avx512)
             .map_err(|e| AlphaTrendError::MfiError { msg: e.to_string() })?
@@ -852,9 +890,21 @@ unsafe fn alphatrend_avx512(
     }
 
     #[inline(always)]
-    fn fast_max(a: f64, b: f64) -> f64 { if a >= b { a } else { b } }
+    fn fast_max(a: f64, b: f64) -> f64 {
+        if a >= b {
+            a
+        } else {
+            b
+        }
+    }
     #[inline(always)]
-    fn fast_min(a: f64, b: f64) -> f64 { if a <= b { a } else { b } }
+    fn fast_min(a: f64, b: f64) -> f64 {
+        if a <= b {
+            a
+        } else {
+            b
+        }
+    }
 
     let mut prev2 = f64::NAN;
     let mut prev1 = f64::NAN;
@@ -870,7 +920,11 @@ unsafe fn alphatrend_avx512(
         let m_ge_50 = *momentum_values.get_unchecked(k) >= 50.0;
 
         let alpha = if k == warmup {
-            if m_ge_50 { up } else { dn }
+            if m_ge_50 {
+                up
+            } else {
+                dn
+            }
         } else if m_ge_50 {
             fast_max(up, prev_alpha)
         } else {
@@ -878,19 +932,27 @@ unsafe fn alphatrend_avx512(
         };
 
         *out_k1.get_unchecked_mut(k) = alpha;
-        if k >= warmup + 2 { *out_k2.get_unchecked_mut(k) = prev2; }
+        if k >= warmup + 2 {
+            *out_k2.get_unchecked_mut(k) = prev2;
+        }
 
         prev2 = prev1;
         prev1 = alpha;
         prev_alpha = alpha;
 
         let nxt = k + 1;
-        if nxt < len { sum += *tr.get_unchecked(nxt) - *tr.get_unchecked(nxt - period); }
+        if nxt < len {
+            sum += *tr.get_unchecked(nxt) - *tr.get_unchecked(nxt - period);
+        }
         k += 1;
     }
 
-    for v in &mut out_k1[..warmup.min(len)] { *v = f64::NAN; }
-    for v in &mut out_k2[..(warmup + 2).min(len)] { *v = f64::NAN; }
+    for v in &mut out_k1[..warmup.min(len)] {
+        *v = f64::NAN;
+    }
+    for v in &mut out_k2[..(warmup + 2).min(len)] {
+        *v = f64::NAN;
+    }
 
     Ok(())
 }
@@ -970,7 +1032,10 @@ impl AlphaTrendStream {
         let no_volume = params.no_volume.unwrap_or(false);
 
         if period == 0 {
-            return Err(AlphaTrendError::InvalidPeriod { period, data_len: 0 });
+            return Err(AlphaTrendError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         if coeff <= 0.0 || !coeff.is_finite() {
             return Err(AlphaTrendError::InvalidCoeff { coeff });
@@ -1031,9 +1096,17 @@ impl AlphaTrendStream {
             let hc = (high - self.prev_close).abs();
             let lc = (low - self.prev_close).abs();
             if hl >= hc {
-                if hl >= lc { hl } else { lc }
+                if hl >= lc {
+                    hl
+                } else {
+                    lc
+                }
             } else {
-                if hc >= lc { hc } else { lc }
+                if hc >= lc {
+                    hc
+                } else {
+                    lc
+                }
             }
         } else {
             high - low
@@ -1051,7 +1124,11 @@ impl AlphaTrendStream {
             self.tr_idx = (self.tr_idx + 1) % self.period;
         }
         let atr_ready = self.tr_filled == self.period;
-        let atr = if atr_ready { self.tr_sum * self.inv_period } else { f64::NAN };
+        let atr = if atr_ready {
+            self.tr_sum * self.inv_period
+        } else {
+            f64::NAN
+        };
 
         // ---------- Momentum regime: RSI or MFI (>=50 test without division) ----------
         let mut m_ge_50 = false;
@@ -1060,7 +1137,11 @@ impl AlphaTrendStream {
             // RSI path (Wilder RMA)
             let (gain, loss) = if self.have_prev {
                 let d = close - self.prev_close;
-                if d >= 0.0 { (d, 0.0) } else { (0.0, -d) }
+                if d >= 0.0 {
+                    (d, 0.0)
+                } else {
+                    (0.0, -d)
+                }
             } else {
                 (0.0, 0.0)
             };
@@ -1146,11 +1227,23 @@ impl AlphaTrendStream {
             let dn = self.coeff.mul_add(atr, high);
 
             cur = if self.alpha_count == 0 {
-                if m_ge_50 { up } else { dn }
+                if m_ge_50 {
+                    up
+                } else {
+                    dn
+                }
             } else if m_ge_50 {
-                if up < self.prev_alpha { self.prev_alpha } else { up }
+                if up < self.prev_alpha {
+                    self.prev_alpha
+                } else {
+                    up
+                }
             } else {
-                if dn > self.prev_alpha { self.prev_alpha } else { dn }
+                if dn > self.prev_alpha {
+                    self.prev_alpha
+                } else {
+                    dn
+                }
             };
 
             self.prev2 = self.prev1;
@@ -1831,9 +1924,8 @@ pub fn alphatrend_batch_inner_into_slices(
 
     // Precompute TR once for the whole dataset
     let mut tr_mu = make_uninit_matrix(1, cols);
-    let tr: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(tr_mu.as_mut_ptr() as *mut f64, cols)
-    };
+    let tr: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(tr_mu.as_mut_ptr() as *mut f64, cols) };
     if first < cols {
         tr[first] = high[first] - low[first];
     }
@@ -1850,9 +1942,8 @@ pub fn alphatrend_batch_inner_into_slices(
         None
     } else {
         let mut hlc3_mu = make_uninit_matrix(1, cols);
-        let hlc3: &mut [f64] = unsafe {
-            core::slice::from_raw_parts_mut(hlc3_mu.as_mut_ptr() as *mut f64, cols)
-        };
+        let hlc3: &mut [f64] =
+            unsafe { core::slice::from_raw_parts_mut(hlc3_mu.as_mut_ptr() as *mut f64, cols) };
         for i in 0..cols {
             hlc3[i] = (high[i] + low[i] + close[i]) / 3.0;
         }
@@ -1870,10 +1961,7 @@ pub fn alphatrend_batch_inner_into_slices(
 
     // Deduplicate periods across combos and precompute momentum per unique period
     use std::collections::HashMap;
-    let mut unique_periods: Vec<usize> = combos
-        .iter()
-        .map(|p| p.period.unwrap_or(14))
-        .collect();
+    let mut unique_periods: Vec<usize> = combos.iter().map(|p| p.period.unwrap_or(14)).collect();
     unique_periods.sort_unstable();
     unique_periods.dedup();
 
@@ -1881,7 +1969,10 @@ pub fn alphatrend_batch_inner_into_slices(
     for &p in &unique_periods {
         if p == 0 || p > cols {
             // Keep behavior consistent with single-row path
-            return Err(AlphaTrendError::InvalidPeriod { period: p, data_len: cols });
+            return Err(AlphaTrendError::InvalidPeriod {
+                period: p,
+                data_len: cols,
+            });
         }
         if use_rsi {
             let rsi_params = RsiParams { period: Some(p) };
@@ -1902,66 +1993,80 @@ pub fn alphatrend_batch_inner_into_slices(
     }
 
     // Row compute: streaming ATR + AlphaTrend using shared TR and per-period momentum
-    let do_row = |row: usize, k1_row: &mut [f64], k2_row: &mut [f64]| -> Result<(), AlphaTrendError> {
-        let params = &combos[row];
-        let coeff = params.coeff.unwrap_or(1.0);
-        if !coeff.is_finite() || coeff <= 0.0 {
-            return Err(AlphaTrendError::InvalidCoeff { coeff });
-        }
-        let period = params.period.unwrap_or(14);
-        if period == 0 || period > cols {
-            return Err(AlphaTrendError::InvalidPeriod { period, data_len: cols });
-        }
-        let warmup = first + period - 1;
-        if warmup >= cols {
-            // nothing to write; prefixes remain NaN as allocated by callers
-            return Ok(());
-        }
-
-        let mom = momentum_map
-            .get(&period)
-            .expect("momentum precomputed");
-
-        // initialize rolling sum for ATR SMA window
-        let mut sum = 0.0f64;
-        for j in first..=warmup {
-            sum += tr[j];
-        }
-
-        let mut prev_alpha = f64::NAN;
-        let mut prev1 = f64::NAN;
-        let mut prev2 = f64::NAN;
-
-        for i in warmup..cols {
-            let a = sum / period as f64;
-            let up = low[i] - a * coeff;
-            let dn = high[i] + a * coeff;
-            let m_ge_50 = mom[i] >= 50.0;
-
-            let cur = if i == warmup {
-                if m_ge_50 { up } else { dn }
-            } else if m_ge_50 {
-                if up < prev_alpha { prev_alpha } else { up }
-            } else {
-                if dn > prev_alpha { prev_alpha } else { dn }
-            };
-
-            k1_row[i] = cur;
-            if i >= warmup + 2 {
-                k2_row[i] = prev2;
+    let do_row =
+        |row: usize, k1_row: &mut [f64], k2_row: &mut [f64]| -> Result<(), AlphaTrendError> {
+            let params = &combos[row];
+            let coeff = params.coeff.unwrap_or(1.0);
+            if !coeff.is_finite() || coeff <= 0.0 {
+                return Err(AlphaTrendError::InvalidCoeff { coeff });
+            }
+            let period = params.period.unwrap_or(14);
+            if period == 0 || period > cols {
+                return Err(AlphaTrendError::InvalidPeriod {
+                    period,
+                    data_len: cols,
+                });
+            }
+            let warmup = first + period - 1;
+            if warmup >= cols {
+                // nothing to write; prefixes remain NaN as allocated by callers
+                return Ok(());
             }
 
-            prev2 = prev1;
-            prev1 = cur;
-            prev_alpha = cur;
+            let mom = momentum_map.get(&period).expect("momentum precomputed");
 
-            // slide ATR window if next exists
-            if i + 1 < cols {
-                sum += tr[i + 1] - tr[i + 1 - period];
+            // initialize rolling sum for ATR SMA window
+            let mut sum = 0.0f64;
+            for j in first..=warmup {
+                sum += tr[j];
             }
-        }
-        Ok(())
-    };
+
+            let mut prev_alpha = f64::NAN;
+            let mut prev1 = f64::NAN;
+            let mut prev2 = f64::NAN;
+
+            for i in warmup..cols {
+                let a = sum / period as f64;
+                let up = low[i] - a * coeff;
+                let dn = high[i] + a * coeff;
+                let m_ge_50 = mom[i] >= 50.0;
+
+                let cur = if i == warmup {
+                    if m_ge_50 {
+                        up
+                    } else {
+                        dn
+                    }
+                } else if m_ge_50 {
+                    if up < prev_alpha {
+                        prev_alpha
+                    } else {
+                        up
+                    }
+                } else {
+                    if dn > prev_alpha {
+                        prev_alpha
+                    } else {
+                        dn
+                    }
+                };
+
+                k1_row[i] = cur;
+                if i >= warmup + 2 {
+                    k2_row[i] = prev2;
+                }
+
+                prev2 = prev1;
+                prev1 = cur;
+                prev_alpha = cur;
+
+                // slide ATR window if next exists
+                if i + 1 < cols {
+                    sum += tr[i + 1] - tr[i + 1 - period];
+                }
+            }
+            Ok(())
+        };
 
     #[cfg(not(target_arch = "wasm32"))]
     if parallel {
@@ -2766,9 +2871,19 @@ mod tests {
             if i + 1 >= warmup + 3 {
                 // Expect values once k2 lag is available
                 let some = result.expect("streaming should emit after warmup+2");
-                assert!(some.0.is_finite() && some.1.is_finite(), "[{}] Non-finite streaming outputs at i={}", test_name, i);
+                assert!(
+                    some.0.is_finite() && some.1.is_finite(),
+                    "[{}] Non-finite streaming outputs at i={}",
+                    test_name,
+                    i
+                );
             } else {
-                assert!(result.is_none(), "[{}] Should not emit before warmup+2 at i={}", test_name, i);
+                assert!(
+                    result.is_none(),
+                    "[{}] Should not emit before warmup+2 at i={}",
+                    test_name,
+                    i
+                );
             }
         }
         Ok(())

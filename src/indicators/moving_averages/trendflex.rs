@@ -425,7 +425,11 @@ unsafe fn trendflex_scalar_into(
         ms_prev = ms_current;
 
         // Normalized output
-        let out_val = if ms_current != 0.0 { my_sum / ms_current.sqrt() } else { 0.0 };
+        let out_val = if ms_current != 0.0 {
+            my_sum / ms_current.sqrt()
+        } else {
+            0.0
+        };
         out[first_valid + i] = out_val;
 
         // Update ring/rolling sum
@@ -990,7 +994,11 @@ impl TrendFlexStream {
         self.last_raw = x;
         self.n_ssf += 1;
 
-        if will_emit { Some(out_val) } else { None }
+        if will_emit {
+            Some(out_val)
+        } else {
+            None
+        }
     }
 }
 

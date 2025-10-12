@@ -698,7 +698,10 @@ impl AoStream {
 
         // Emit AO when long window is ready
         if self.filled == self.long {
-            Some(self.short_sum.mul_add(self.inv_short, -(self.long_sum * self.inv_long)))
+            Some(
+                self.short_sum
+                    .mul_add(self.inv_short, -(self.long_sum * self.inv_long)),
+            )
         } else {
             None
         }

@@ -366,9 +366,9 @@ pub struct PrbStream {
     sumsq: f64,
 
     // Fixed-design precompute for (n, k)
-    m: usize,     // k + 1
-    l: Vec<f64>,  // lower triangular (from LU of normal matrix)
-    u: Vec<f64>,  // upper triangular
+    m: usize,    // k + 1
+    l: Vec<f64>, // lower triangular (from LU of normal matrix)
+    u: Vec<f64>, // upper triangular
     binom: Vec<f64>,
     n_pow: Vec<f64>,
 
@@ -399,10 +399,15 @@ impl PrbStream {
             return Err(PrbError::InvalidOrder { order: k });
         }
         if smooth_data && smooth_period < 2 {
-            return Err(PrbError::InvalidSmoothPeriod { period: smooth_period });
+            return Err(PrbError::InvalidSmoothPeriod {
+                period: smooth_period,
+            });
         }
         if n == 0 {
-            return Err(PrbError::InvalidPeriod { period: n, data_len: 0 });
+            return Err(PrbError::InvalidPeriod {
+                period: n,
+                data_len: 0,
+            });
         }
 
         // SSF coefficients (2‑pole) — Pine-compatible
@@ -467,7 +472,11 @@ impl PrbStream {
         }
         // Pine fallback: nz(y1, x) and nz(y2, nz(y1, x))
         let prev1 = if self.ssf_y1.is_nan() { x } else { self.ssf_y1 };
-        let prev2 = if self.ssf_y2.is_nan() { prev1 } else { self.ssf_y2 };
+        let prev2 = if self.ssf_y2.is_nan() {
+            prev1
+        } else {
+            self.ssf_y2
+        };
         let y = self.ssf_c1 * x + self.ssf_c2 * prev1 + self.ssf_c3 * prev2;
         self.ssf_y2 = self.ssf_y1;
         self.ssf_y1 = y;
@@ -509,7 +518,7 @@ impl PrbStream {
         // 2) Warmup: accumulate initial moments and stats until we have n
         if self.count < n {
             let j = (self.count + 1) as f64; // j in 1..=n
-            // S_0
+                                             // S_0
             self.moments[0] += y_new;
             // S_r
             let mut p = j; // j^1
@@ -1223,7 +1232,13 @@ fn build_fixed_design(n: usize, k: usize) -> Result<PrbFixedDesign, PrbError> {
         n_pow[r] = n_pow[r - 1] * n_f;
     }
 
-    Ok(PrbFixedDesign { m, l, u, binom, n_pow })
+    Ok(PrbFixedDesign {
+        m,
+        l,
+        u,
+        binom,
+        n_pow,
+    })
 }
 
 #[inline]
@@ -1310,11 +1325,15 @@ fn prb_run_with_fixed_design(
         out_upper[i] = reg + ndev * stdev;
         out_lower[i] = reg - ndev * stdev;
 
-        if i + 1 == len { break; }
+        if i + 1 == len {
+            break;
+        }
 
         let y_old = smoothed[start];
         let y_new_idx = start + n;
-        if y_new_idx >= len { break; }
+        if y_new_idx >= len {
+            break;
+        }
         let y_new = smoothed[y_new_idx];
 
         s_prev.copy_from_slice(&s_xy);
@@ -1821,7 +1840,8 @@ fn prb_batch_inner(
             c.polynomial_order.unwrap_or(2),
         ));
     }
-    let mut pre_map_local: HashMap<(usize, usize), PrbFixedDesign> = HashMap::with_capacity(keyset.len());
+    let mut pre_map_local: HashMap<(usize, usize), PrbFixedDesign> =
+        HashMap::with_capacity(keyset.len());
     for (n, k) in keyset {
         pre_map_local.insert((n, k), build_fixed_design(n, k)?);
     }

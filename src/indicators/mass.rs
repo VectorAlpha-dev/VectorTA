@@ -536,10 +536,10 @@ pub struct MassStream {
     ema2: f64,
 
     // progress counters / warmup thresholds
-    t: usize,         // bars seen since first valid
-    warm_ema2: usize, // == 8
+    t: usize,          // bars seen since first valid
+    warm_ema2: usize,  // == 8
     warm_ratio: usize, // == 16
-    warm_out: usize,  // == 16 + period - 1
+    warm_out: usize,   // == 16 + period - 1
 }
 
 impl MassStream {
@@ -547,12 +547,19 @@ impl MassStream {
     pub fn try_new(params: MassParams) -> Result<Self, MassError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(MassError::InvalidPeriod { period, data_len: 0 });
+            return Err(MassError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         let ring = vec![0.0; period].into_boxed_slice();
         // If period is a power of two, (i+1)&mask wraps branchlessly; else fall back to compare/reset.
-        let mask = if period.is_power_of_two() { period - 1 } else { usize::MAX };
+        let mask = if period.is_power_of_two() {
+            period - 1
+        } else {
+            usize::MAX
+        };
 
         Ok(Self {
             period,
@@ -561,7 +568,7 @@ impl MassStream {
             mask,
             sum_ratio: 0.0,
 
-            alpha: 2.0 / 10.0,          // EMA(9) => α = 2/(9+1)
+            alpha: 2.0 / 10.0, // EMA(9) => α = 2/(9+1)
             inv_alpha: 1.0 - (2.0 / 10.0),
 
             ema1: f64::NAN,

@@ -11,11 +11,11 @@
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::ehma::{expand_grid, EhmaBatchRange, EhmaParams};
 use cust::context::Context;
-use cust::device::Device;
-use cust::function::{BlockSize, GridSize, Function};
 use cust::context::{CacheConfig, SharedMemoryConfig};
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
+use cust::device::Device;
+use cust::function::{BlockSize, Function, GridSize};
 use cust::memory::AsyncCopyDestination;
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::module::Module;
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -42,13 +42,21 @@ impl fmt::Display for CudaEhmaError {
 impl std::error::Error for CudaEhmaError {}
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchThreadsPerOutput { One, Two }
+pub enum BatchThreadsPerOutput {
+    One,
+    Two,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    Plain { block_x: u32 },
-    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+    Plain {
+        block_x: u32,
+    },
+    Tiled {
+        tile: u32,
+        per_thread: BatchThreadsPerOutput,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -65,7 +73,10 @@ pub struct CudaEhmaPolicy {
 }
 impl Default for CudaEhmaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -129,46 +140,69 @@ impl CudaEhma {
     }
 
     /// Create with an explicit policy.
-    pub fn new_with_policy(device_id: usize, policy: CudaEhmaPolicy) -> Result<Self, CudaEhmaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaEhmaPolicy,
+    ) -> Result<Self, CudaEhmaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaEhmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaEhmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaEhmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaEhmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     /// Explicit synchronize for deterministic timing in benches
     pub fn synchronize(&self) -> Result<(), CudaEhmaError> {
-        self.stream.synchronize().map_err(|e| CudaEhmaError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))
     }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EHMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEhma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEhma)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EHMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEhma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEhma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -181,15 +215,25 @@ impl CudaEhma {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Some((free, _)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
 
     #[inline(always)]
-    fn align_up_16(bytes: usize) -> usize { (bytes + 15) & !15 }
+    fn align_up_16(bytes: usize) -> usize {
+        (bytes + 15) & !15
+    }
 
     #[inline]
     fn set_kernel_launch_prefs(&self, func: &mut Function, dyn_smem_bytes: usize) {
@@ -210,7 +254,9 @@ impl CudaEhma {
     }
 
     fn reserve_l2_persisting_quota_once(device_id: u32) {
-        if std::env::var("EHMA_L2_HINT").ok().as_deref() == Some("0") { return; }
+        if std::env::var("EHMA_L2_HINT").ok().as_deref() == Some("0") {
+            return;
+        }
         unsafe {
             if let Ok(dev) = cust::device::Device::get_device(device_id) {
                 let mut max_persist: i32 = 0;
@@ -231,7 +277,9 @@ impl CudaEhma {
     }
 
     fn hint_stream_access_policy_window(&self, base_dev_ptr: u64, num_bytes: usize) {
-        if std::env::var("EHMA_L2_HINT").ok().as_deref() == Some("0") { return; }
+        if std::env::var("EHMA_L2_HINT").ok().as_deref() == Some("0") {
+            return;
+        }
         unsafe {
             let mut max_window: i32 = num_bytes as i32;
             if let Ok(dev) = cust::device::Device::get_device(self.device_id) {
@@ -248,7 +296,7 @@ impl CudaEhma {
                 base_ptr: base_dev_ptr as usize as *mut std::ffi::c_void,
                 num_bytes: window,
                 hitRatio: 0.60f32,
-                hitProp:  cu::CUaccessProperty_enum::CU_ACCESS_PROPERTY_PERSISTING,
+                hitProp: cu::CUaccessProperty_enum::CU_ACCESS_PROPERTY_PERSISTING,
                 missProp: cu::CUaccessProperty_enum::CU_ACCESS_PROPERTY_NORMAL,
             };
             val.accessPolicyWindow = apw;
@@ -263,39 +311,93 @@ impl CudaEhma {
     #[inline]
     fn batch_tiled_symbol(&self, tile: u32) -> &'static str {
         match tile {
-            128 => if self.module.get_function("ehma_batch_tiled_f32_2x_tile128_async").is_ok() {
-                "ehma_batch_tiled_f32_2x_tile128_async"
-            } else { "ehma_batch_tiled_f32_2x_tile128" },
-            512 => if self.module.get_function("ehma_batch_tiled_f32_2x_tile512_async").is_ok() {
-                "ehma_batch_tiled_f32_2x_tile512_async"
-            } else { "ehma_batch_tiled_f32_2x_tile512" },
-            _ => if self.module.get_function("ehma_batch_tiled_f32_2x_tile256_async").is_ok() {
-                "ehma_batch_tiled_f32_2x_tile256_async"
-            } else { "ehma_batch_tiled_f32_2x_tile256" },
+            128 => {
+                if self
+                    .module
+                    .get_function("ehma_batch_tiled_f32_2x_tile128_async")
+                    .is_ok()
+                {
+                    "ehma_batch_tiled_f32_2x_tile128_async"
+                } else {
+                    "ehma_batch_tiled_f32_2x_tile128"
+                }
+            }
+            512 => {
+                if self
+                    .module
+                    .get_function("ehma_batch_tiled_f32_2x_tile512_async")
+                    .is_ok()
+                {
+                    "ehma_batch_tiled_f32_2x_tile512_async"
+                } else {
+                    "ehma_batch_tiled_f32_2x_tile512"
+                }
+            }
+            _ => {
+                if self
+                    .module
+                    .get_function("ehma_batch_tiled_f32_2x_tile256_async")
+                    .is_ok()
+                {
+                    "ehma_batch_tiled_f32_2x_tile256_async"
+                } else {
+                    "ehma_batch_tiled_f32_2x_tile256"
+                }
+            }
         }
     }
 
     #[inline]
     fn ms2d_symbol(&self, tx: u32, ty: u32) -> Result<&'static str, CudaEhmaError> {
         let (a, b) = match (tx, ty) {
-            (128, 4) => ("ehma_ms1p_tiled_f32_tx128_ty4_async", "ehma_ms1p_tiled_f32_tx128_ty4"),
-            (128, 2) => ("ehma_ms1p_tiled_f32_tx128_ty2_async", "ehma_ms1p_tiled_f32_tx128_ty2"),
-            _ => return Err(CudaEhmaError::InvalidInput(format!("unsupported 2D tile tx={}, ty={}", tx, ty))),
+            (128, 4) => (
+                "ehma_ms1p_tiled_f32_tx128_ty4_async",
+                "ehma_ms1p_tiled_f32_tx128_ty4",
+            ),
+            (128, 2) => (
+                "ehma_ms1p_tiled_f32_tx128_ty2_async",
+                "ehma_ms1p_tiled_f32_tx128_ty2",
+            ),
+            _ => {
+                return Err(CudaEhmaError::InvalidInput(format!(
+                    "unsupported 2D tile tx={}, ty={}",
+                    tx, ty
+                )))
+            }
         };
-        Ok(if self.module.get_function(a).is_ok() { a } else { b })
+        Ok(if self.module.get_function(a).is_ok() {
+            a
+        } else {
+            b
+        })
     }
 
     #[inline]
     fn pick_tiled_block(&self, series_len: usize) -> u32 {
         if let Ok(v) = std::env::var("EHMA_TILE") {
             if let Ok(tile) = v.parse::<u32>() {
-                let name = match tile { 128 => Some("ehma_batch_tiled_f32_2x_tile128"), 256 => Some("ehma_batch_tiled_f32_2x_tile256"), 512 => Some("ehma_batch_tiled_f32_2x_tile512"), _ => None };
-                if let Some(fname) = name { if self.module.get_function(fname).is_ok() { return tile; } }
+                let name = match tile {
+                    128 => Some("ehma_batch_tiled_f32_2x_tile128"),
+                    256 => Some("ehma_batch_tiled_f32_2x_tile256"),
+                    512 => Some("ehma_batch_tiled_f32_2x_tile512"),
+                    _ => None,
+                };
+                if let Some(fname) = name {
+                    if self.module.get_function(fname).is_ok() {
+                        return tile;
+                    }
+                }
             }
         }
         // Default: 256 unless very short series
         if series_len < 8192 {
-            if self.module.get_function("ehma_batch_tiled_f32_2x_tile128").is_ok() { return 128; }
+            if self
+                .module
+                .get_function("ehma_batch_tiled_f32_2x_tile128")
+                .is_ok()
+            {
+                return 128;
+            }
         }
         256
     }
@@ -303,7 +405,9 @@ impl CudaEhma {
     #[inline]
     fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
         const MAX_Y: usize = 65_535;
-        (0..n).step_by(MAX_Y).map(move |start| (start, (n - start).min(MAX_Y)))
+        (0..n)
+            .step_by(MAX_Y)
+            .map(move |start| (start, (n - start).min(MAX_Y)))
     }
 
     fn prepare_batch_inputs(
@@ -491,7 +595,10 @@ impl CudaEhma {
         }
 
         // Introspection/log
-        unsafe { (*(self as *const _ as *mut CudaEhma)).last_batch = Some(BatchKernelSelected::Plain { block_x: BLOCK_X }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaEhma)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x: BLOCK_X });
+        }
         self.maybe_log_batch_debug();
         Ok(())
     }
@@ -523,7 +630,10 @@ impl CudaEhma {
             ));
         }
 
-        let mut func = self.module.get_function("ehma_multi_series_one_param_f32").map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let mut func = self
+            .module
+            .get_function("ehma_multi_series_one_param_f32")
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
 
         const BLOCK_X: u32 = 256;
         let grid_x = ((series_len as u32) + BLOCK_X - 1) / BLOCK_X;
@@ -555,7 +665,10 @@ impl CudaEhma {
         }
 
         // Introspection/log
-        unsafe { (*(self as *const _ as *mut CudaEhma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x: BLOCK_X }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaEhma)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x: BLOCK_X });
+        }
         self.maybe_log_many_debug();
         Ok(())
     }
@@ -573,7 +686,10 @@ impl CudaEhma {
         ty: u32,
     ) -> Result<(), CudaEhmaError> {
         let fname = self.ms2d_symbol(tx, ty)?;
-        let mut func = self.module.get_function(fname).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let mut func = self
+            .module
+            .get_function(fname)
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
         let grid_x = ((series_len as u32) + tx - 1) / tx;
         let grid_y = ((num_series as u32) + ty - 1) / ty;
         let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
@@ -603,9 +719,14 @@ impl CudaEhma {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, shared_bytes, args).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, shared_bytes, args)
+                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
         }
-        unsafe { (*(self as *const _ as *mut CudaEhma)).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaEhma)).last_many =
+                Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
+        }
         self.maybe_log_many_debug();
         Ok(())
     }
@@ -630,7 +751,8 @@ impl CudaEhma {
         data_f32: &[f32],
         sweep: &EhmaBatchRange,
     ) -> Result<DeviceArrayF32, CudaEhmaError> {
-        let (combos, first_valid, series_len, max_period) = Self::prepare_batch_inputs(data_f32, sweep)?;
+        let (combos, first_valid, series_len, max_period) =
+            Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
         // VRAM preflight (prices + weights_flat + out)
@@ -646,7 +768,8 @@ impl CudaEhma {
         }
 
         // Upload prices once
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }.map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
 
         // Build per-combo weights (pre-normalized) and periods; warms for plain fallback
         let mut periods_i32 = vec![0i32; n_combos];
@@ -660,15 +783,23 @@ impl CudaEhma {
             let base = i * max_period;
             weights_flat[base..base + p].copy_from_slice(&w);
         }
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }.map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let d_warms   = unsafe { DeviceBuffer::from_slice_async(&warms_i32,   &self.stream) }.map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let d_weights = unsafe { DeviceBuffer::from_slice_async(&weights_flat,&self.stream) }.map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_warms = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream) }
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_weights = unsafe { DeviceBuffer::from_slice_async(&weights_flat, &self.stream) }
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
 
         // Output
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }.map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
+                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
 
         // Hint L2 persistence for the prices region (best-effort)
-        self.hint_stream_access_policy_window(d_prices.as_device_ptr().as_raw(), series_len * std::mem::size_of::<f32>());
+        self.hint_stream_access_policy_window(
+            d_prices.as_device_ptr().as_raw(),
+            series_len * std::mem::size_of::<f32>(),
+        );
 
         // Choose kernel per policy
         let mut use_tiled = series_len > 8192;
@@ -676,11 +807,14 @@ impl CudaEhma {
         match self.policy.batch {
             BatchKernelPolicy::Auto => {}
             BatchKernelPolicy::Plain { .. } => use_tiled = false,
-            BatchKernelPolicy::Tiled { tile, .. } => { use_tiled = true; force_tile = Some(tile); }
+            BatchKernelPolicy::Tiled { tile, .. } => {
+                use_tiled = true;
+                force_tile = Some(tile);
+            }
         }
 
         if use_tiled {
-            let tile  = force_tile.unwrap_or_else(|| self.pick_tiled_block(series_len));
+            let tile = force_tile.unwrap_or_else(|| self.pick_tiled_block(series_len));
             let fname = self.batch_tiled_symbol(tile);
             if let Ok(mut func) = self.module.get_function(fname) {
                 let grid_x = ((series_len as u32) + tile - 1) / tile;
@@ -691,8 +825,9 @@ impl CudaEhma {
                     let grid: GridSize = (grid_x.max(1), len as u32, 1).into();
                     // Exact dynamic shared memory layout
                     let period_aligned = Self::align_up_16(max_period * std::mem::size_of::<f32>());
-                    let tile_elems     = (tile as usize) + max_period - 1;
-                    let shared_bytes   = (period_aligned + tile_elems * std::mem::size_of::<f32>()) as u32;
+                    let tile_elems = (tile as usize) + max_period - 1;
+                    let shared_bytes =
+                        (period_aligned + tile_elems * std::mem::size_of::<f32>()) as u32;
                     self.set_kernel_launch_prefs(&mut func, shared_bytes as usize);
                     unsafe {
                         let out_ptr = d_out.as_device_ptr().add(start * series_len);
@@ -716,22 +851,37 @@ impl CudaEhma {
                             &mut fv_i as *mut _ as *mut c_void,
                             &mut out_raw as *mut _ as *mut c_void,
                         ];
-                        self.stream.launch(&func, grid, block, shared_bytes, args).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+                        self.stream
+                            .launch(&func, grid, block, shared_bytes, args)
+                            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
                     }
                 }
                 // Introspection
-                unsafe { (*(self as *const _ as *mut CudaEhma)).last_batch = Some(BatchKernelSelected::Tiled2x { tile }); }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEhma)).last_batch =
+                        Some(BatchKernelSelected::Tiled2x { tile });
+                }
                 self.maybe_log_batch_debug();
             } else {
                 // Fallback to plain
-                self.launch_batch_kernel_plain(&d_prices, &d_periods, &d_warms, series_len, n_combos, max_period, &mut d_out)?;
+                self.launch_batch_kernel_plain(
+                    &d_prices, &d_periods, &d_warms, series_len, n_combos, max_period, &mut d_out,
+                )?;
             }
         } else {
-            self.launch_batch_kernel_plain(&d_prices, &d_periods, &d_warms, series_len, n_combos, max_period, &mut d_out)?;
+            self.launch_batch_kernel_plain(
+                &d_prices, &d_periods, &d_warms, series_len, n_combos, max_period, &mut d_out,
+            )?;
         }
 
-        self.stream.synchronize().map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     /// Device input → VRAM output, avoids host price copies. Caller supplies first_valid.
@@ -742,7 +892,8 @@ impl CudaEhma {
         first_valid: usize,
         sweep: &EhmaBatchRange,
     ) -> Result<DeviceArrayF32, CudaEhmaError> {
-        let (combos, _fv, _len, max_period) = Self::prepare_batch_inputs(&vec![0f32; series_len], sweep)?;
+        let (combos, _fv, _len, max_period) =
+            Self::prepare_batch_inputs(&vec![0f32; series_len], sweep)?;
         let n_combos = combos.len();
         let mut periods_i32 = vec![0i32; n_combos];
         let mut warms_i32 = vec![0i32; n_combos];
@@ -756,15 +907,23 @@ impl CudaEhma {
             let base = i * max_period;
             weights_flat[base..base + p].copy_from_slice(&w);
         }
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }.map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let d_warms   = unsafe { DeviceBuffer::from_slice_async(&warms_i32,   &self.stream) }.map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let d_weights = unsafe { DeviceBuffer::from_slice_async(&weights_flat,&self.stream) }.map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }.map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_warms = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream) }
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_weights = unsafe { DeviceBuffer::from_slice_async(&weights_flat, &self.stream) }
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
+                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
         // Hint L2 persistence for the prices region (best-effort)
-        self.hint_stream_access_policy_window(d_prices.as_device_ptr().as_raw(), series_len * std::mem::size_of::<f32>());
+        self.hint_stream_access_policy_window(
+            d_prices.as_device_ptr().as_raw(),
+            series_len * std::mem::size_of::<f32>(),
+        );
 
         // Prefer tiled if available
-        let tile  = self.pick_tiled_block(series_len);
+        let tile = self.pick_tiled_block(series_len);
         let fname = self.batch_tiled_symbol(tile);
         if let Ok(mut func) = self.module.get_function(fname) {
             let grid_x = ((series_len as u32) + tile - 1) / tile;
@@ -773,8 +932,9 @@ impl CudaEhma {
             for (start, len) in Self::grid_y_chunks(n_combos) {
                 let grid: GridSize = (grid_x.max(1), len as u32, 1).into();
                 let period_aligned = Self::align_up_16(max_period * std::mem::size_of::<f32>());
-                let tile_elems     = (tile as usize) + max_period - 1;
-                let shared_bytes   = (period_aligned + tile_elems * std::mem::size_of::<f32>()) as u32;
+                let tile_elems = (tile as usize) + max_period - 1;
+                let shared_bytes =
+                    (period_aligned + tile_elems * std::mem::size_of::<f32>()) as u32;
                 self.set_kernel_launch_prefs(&mut func, shared_bytes as usize);
                 unsafe {
                     let out_ptr = d_out.as_device_ptr().add(start * series_len);
@@ -798,16 +958,29 @@ impl CudaEhma {
                         &mut fv_i as *mut _ as *mut c_void,
                         &mut out_raw as *mut _ as *mut c_void,
                     ];
-                        self.stream.launch(&func, grid, block, shared_bytes, args).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+                    self.stream
+                        .launch(&func, grid, block, shared_bytes, args)
+                        .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
                 }
             }
-            unsafe { (*(self as *const _ as *mut CudaEhma)).last_batch = Some(BatchKernelSelected::Tiled2x { tile }); }
+            unsafe {
+                (*(self as *const _ as *mut CudaEhma)).last_batch =
+                    Some(BatchKernelSelected::Tiled2x { tile });
+            }
             self.maybe_log_batch_debug();
         } else {
-            self.launch_batch_kernel_plain(d_prices, &d_periods, &d_warms, series_len, n_combos, max_period, &mut d_out)?;
+            self.launch_batch_kernel_plain(
+                d_prices, &d_periods, &d_warms, series_len, n_combos, max_period, &mut d_out,
+            )?;
         }
-        self.stream.synchronize().map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     pub fn ehma_batch_into_host_f32(
@@ -852,8 +1025,9 @@ impl CudaEhma {
             .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
         let d_warms = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream) }
             .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
+                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel_plain(
             &d_prices, &d_periods, &d_warms, series_len, n_combos, max_period, &mut d_out,
@@ -864,8 +1038,14 @@ impl CudaEhma {
 
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out.len()) }
             .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        unsafe { d_out.async_copy_to(pinned.as_mut_slice(), &self.stream).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?; }
-        self.stream.synchronize().map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        unsafe {
+            d_out
+                .async_copy_to(pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
         out.copy_from_slice(pinned.as_slice());
 
         Ok(combos)
@@ -923,7 +1103,10 @@ impl CudaEhma {
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
         // Hint L2 persistence for time-major prices if supported
-        self.hint_stream_access_policy_window(d_prices_tm.as_device_ptr().as_raw(), cols * rows * std::mem::size_of::<f32>());
+        self.hint_stream_access_policy_window(
+            d_prices_tm.as_device_ptr().as_raw(),
+            cols * rows * std::mem::size_of::<f32>(),
+        );
         let d_weights =
             DeviceBuffer::from_slice(&weights).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)
@@ -935,19 +1118,76 @@ impl CudaEhma {
         match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => {
                 // Prefer 2D tiled for larger problems
-                if cols >= 16 && rows >= 8192 && self.module.get_function("ehma_ms1p_tiled_f32_tx128_ty4").is_ok() {
-                    self.launch_many_series_kernel_2d(&d_prices_tm, &d_weights, period, cols, rows, &d_first_valids, &mut d_out_tm, 128, 4)?;
-                } else if self.module.get_function("ehma_ms1p_tiled_f32_tx128_ty2").is_ok() && (rows >= 8192) {
-                    self.launch_many_series_kernel_2d(&d_prices_tm, &d_weights, period, cols, rows, &d_first_valids, &mut d_out_tm, 128, 2)?;
+                if cols >= 16
+                    && rows >= 8192
+                    && self
+                        .module
+                        .get_function("ehma_ms1p_tiled_f32_tx128_ty4")
+                        .is_ok()
+                {
+                    self.launch_many_series_kernel_2d(
+                        &d_prices_tm,
+                        &d_weights,
+                        period,
+                        cols,
+                        rows,
+                        &d_first_valids,
+                        &mut d_out_tm,
+                        128,
+                        4,
+                    )?;
+                } else if self
+                    .module
+                    .get_function("ehma_ms1p_tiled_f32_tx128_ty2")
+                    .is_ok()
+                    && (rows >= 8192)
+                {
+                    self.launch_many_series_kernel_2d(
+                        &d_prices_tm,
+                        &d_weights,
+                        period,
+                        cols,
+                        rows,
+                        &d_first_valids,
+                        &mut d_out_tm,
+                        128,
+                        2,
+                    )?;
                 } else {
-                    self.launch_many_series_kernel_1d(&d_prices_tm, &d_weights, period, cols, rows, &d_first_valids, &mut d_out_tm)?;
+                    self.launch_many_series_kernel_1d(
+                        &d_prices_tm,
+                        &d_weights,
+                        period,
+                        cols,
+                        rows,
+                        &d_first_valids,
+                        &mut d_out_tm,
+                    )?;
                 }
             }
             ManySeriesKernelPolicy::OneD { .. } => {
-                self.launch_many_series_kernel_1d(&d_prices_tm, &d_weights, period, cols, rows, &d_first_valids, &mut d_out_tm)?;
+                self.launch_many_series_kernel_1d(
+                    &d_prices_tm,
+                    &d_weights,
+                    period,
+                    cols,
+                    rows,
+                    &d_first_valids,
+                    &mut d_out_tm,
+                )?;
             }
             ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
-                self.launch_many_series_kernel_2d(&d_prices_tm, &d_weights, period, cols, rows, &d_first_valids, &mut d_out_tm, tx, ty)?;
+                self.launch_many_series_kernel_2d(
+                    &d_prices_tm,
+                    &d_weights,
+                    period,
+                    cols,
+                    rows,
+                    &d_first_valids,
+                    &mut d_out_tm,
+                    tx,
+                    ty,
+                )?;
             }
         }
         self.stream
@@ -990,19 +1230,76 @@ impl CudaEhma {
 
         match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => {
-                if cols >= 16 && rows >= 8192 && self.module.get_function("ehma_ms1p_tiled_f32_tx128_ty4").is_ok() {
-                    self.launch_many_series_kernel_2d(&d_prices_tm, &d_weights, period, cols, rows, &d_first_valids, &mut d_out_tm, 128, 4)?;
-                } else if self.module.get_function("ehma_ms1p_tiled_f32_tx128_ty2").is_ok() && (rows >= 8192) {
-                    self.launch_many_series_kernel_2d(&d_prices_tm, &d_weights, period, cols, rows, &d_first_valids, &mut d_out_tm, 128, 2)?;
+                if cols >= 16
+                    && rows >= 8192
+                    && self
+                        .module
+                        .get_function("ehma_ms1p_tiled_f32_tx128_ty4")
+                        .is_ok()
+                {
+                    self.launch_many_series_kernel_2d(
+                        &d_prices_tm,
+                        &d_weights,
+                        period,
+                        cols,
+                        rows,
+                        &d_first_valids,
+                        &mut d_out_tm,
+                        128,
+                        4,
+                    )?;
+                } else if self
+                    .module
+                    .get_function("ehma_ms1p_tiled_f32_tx128_ty2")
+                    .is_ok()
+                    && (rows >= 8192)
+                {
+                    self.launch_many_series_kernel_2d(
+                        &d_prices_tm,
+                        &d_weights,
+                        period,
+                        cols,
+                        rows,
+                        &d_first_valids,
+                        &mut d_out_tm,
+                        128,
+                        2,
+                    )?;
                 } else {
-                    self.launch_many_series_kernel_1d(&d_prices_tm, &d_weights, period, cols, rows, &d_first_valids, &mut d_out_tm)?;
+                    self.launch_many_series_kernel_1d(
+                        &d_prices_tm,
+                        &d_weights,
+                        period,
+                        cols,
+                        rows,
+                        &d_first_valids,
+                        &mut d_out_tm,
+                    )?;
                 }
             }
             ManySeriesKernelPolicy::OneD { .. } => {
-                self.launch_many_series_kernel_1d(&d_prices_tm, &d_weights, period, cols, rows, &d_first_valids, &mut d_out_tm)?;
+                self.launch_many_series_kernel_1d(
+                    &d_prices_tm,
+                    &d_weights,
+                    period,
+                    cols,
+                    rows,
+                    &d_first_valids,
+                    &mut d_out_tm,
+                )?;
             }
             ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
-                self.launch_many_series_kernel_2d(&d_prices_tm, &d_weights, period, cols, rows, &d_first_valids, &mut d_out_tm, tx, ty)?;
+                self.launch_many_series_kernel_2d(
+                    &d_prices_tm,
+                    &d_weights,
+                    period,
+                    cols,
+                    rows,
+                    &d_first_valids,
+                    &mut d_out_tm,
+                    tx,
+                    ty,
+                )?;
             }
         }
         self.stream
@@ -1010,9 +1307,16 @@ impl CudaEhma {
             .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
 
         // Pinned D2H for determinism and throughput
-        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out_tm.len()) }.map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        unsafe { d_out_tm.async_copy_to(pinned.as_mut_slice(), &self.stream).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?; }
-        self.stream.synchronize().map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out_tm.len()) }
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        unsafe {
+            d_out_tm
+                .async_copy_to(pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
         out_tm.copy_from_slice(pinned.as_slice());
 
         Ok(())
@@ -1032,7 +1336,9 @@ pub mod benches {
         crate::indicators::moving_averages::ehma::EhmaParams,
         ehma_batch_dev,
         ehma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::ehma::EhmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::ehma::EhmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::ehma::EhmaParams { period: Some(64) },
         "ehma",
         "ehma"

@@ -352,8 +352,16 @@ fn fvg_ts_scalar(
         };
 
         // x-series inputs to smoothing
-        let x_bull = if !bull_avg.is_nan() { bull_avg } else { bull_sma };
-        let x_bear = if !bear_avg.is_nan() { bear_avg } else { bear_sma };
+        let x_bull = if !bull_avg.is_nan() {
+            bull_avg
+        } else {
+            bull_sma
+        };
+        let x_bear = if !bear_avg.is_nan() {
+            bear_avg
+        } else {
+            bear_sma
+        };
 
         // ---------- Fixed-window SMA over x-series via O(1) ring update ----------
         // Update bull ring
@@ -1125,34 +1133,64 @@ pub fn fvg_ts_batch_inner_into(
             let bull_sma = if bull_avg.is_nan() && (i + 1) >= bull_bs {
                 let s = pref_sum_close[i + 1] - pref_sum_close[i + 1 - bull_bs];
                 let nans = pref_nan_count[i + 1] - pref_nan_count[i + 1 - bull_bs];
-                if nans == 0 { s / (bull_bs as f64) } else { f64::NAN }
+                if nans == 0 {
+                    s / (bull_bs as f64)
+                } else {
+                    f64::NAN
+                }
             } else {
                 f64::NAN
             };
             let bear_sma = if bear_avg.is_nan() && (i + 1) >= bear_bs {
                 let s = pref_sum_close[i + 1] - pref_sum_close[i + 1 - bear_bs];
                 let nans = pref_nan_count[i + 1] - pref_nan_count[i + 1 - bear_bs];
-                if nans == 0 { s / (bear_bs as f64) } else { f64::NAN }
+                if nans == 0 {
+                    s / (bear_bs as f64)
+                } else {
+                    f64::NAN
+                }
             } else {
                 f64::NAN
             };
 
-            let x_bull = if !bull_avg.is_nan() { bull_avg } else { bull_sma };
-            let x_bear = if !bear_avg.is_nan() { bear_avg } else { bear_sma };
+            let x_bull = if !bull_avg.is_nan() {
+                bull_avg
+            } else {
+                bull_sma
+            };
+            let x_bear = if !bear_avg.is_nan() {
+                bear_avg
+            } else {
+                bear_sma
+            };
 
             // Ring update for smoothing
             if bull_ring_count < sm {
                 let is_nan = x_bull.is_nan();
                 bull_ring_nan[bull_ring_count] = is_nan;
                 bull_ring_vals[bull_ring_count] = if is_nan { 0.0 } else { x_bull };
-                if is_nan { bull_nan_cnt += 1 } else { bull_sum += x_bull }
+                if is_nan {
+                    bull_nan_cnt += 1
+                } else {
+                    bull_sum += x_bull
+                }
                 bull_ring_count += 1;
             } else {
                 let idx = bull_ring_idx;
-                if bull_ring_nan[idx] { bull_nan_cnt -= 1 } else { bull_sum -= bull_ring_vals[idx] }
+                if bull_ring_nan[idx] {
+                    bull_nan_cnt -= 1
+                } else {
+                    bull_sum -= bull_ring_vals[idx]
+                }
                 let is_nan = x_bull.is_nan();
                 bull_ring_nan[idx] = is_nan;
-                if is_nan { bull_ring_vals[idx] = 0.0; bull_nan_cnt += 1 } else { bull_ring_vals[idx] = x_bull; bull_sum += x_bull }
+                if is_nan {
+                    bull_ring_vals[idx] = 0.0;
+                    bull_nan_cnt += 1
+                } else {
+                    bull_ring_vals[idx] = x_bull;
+                    bull_sum += x_bull
+                }
                 bull_ring_idx = if idx + 1 == sm { 0 } else { idx + 1 };
             }
 
@@ -1160,14 +1198,28 @@ pub fn fvg_ts_batch_inner_into(
                 let is_nan = x_bear.is_nan();
                 bear_ring_nan[bear_ring_count] = is_nan;
                 bear_ring_vals[bear_ring_count] = if is_nan { 0.0 } else { x_bear };
-                if is_nan { bear_nan_cnt += 1 } else { bear_sum += x_bear }
+                if is_nan {
+                    bear_nan_cnt += 1
+                } else {
+                    bear_sum += x_bear
+                }
                 bear_ring_count += 1;
             } else {
                 let idx = bear_ring_idx;
-                if bear_ring_nan[idx] { bear_nan_cnt -= 1 } else { bear_sum -= bear_ring_vals[idx] }
+                if bear_ring_nan[idx] {
+                    bear_nan_cnt -= 1
+                } else {
+                    bear_sum -= bear_ring_vals[idx]
+                }
                 let is_nan = x_bear.is_nan();
                 bear_ring_nan[idx] = is_nan;
-                if is_nan { bear_ring_vals[idx] = 0.0; bear_nan_cnt += 1 } else { bear_ring_vals[idx] = x_bear; bear_sum += x_bear }
+                if is_nan {
+                    bear_ring_vals[idx] = 0.0;
+                    bear_nan_cnt += 1
+                } else {
+                    bear_ring_vals[idx] = x_bear;
+                    bear_sum += x_bear
+                }
                 bear_ring_idx = if idx + 1 == sm { 0 } else { idx + 1 };
             }
 
@@ -1199,22 +1251,44 @@ pub fn fvg_ts_batch_inner_into(
                 } else if cur == -1 && prev != -1 {
                     ts = Some(bear_disp);
                 } else if cur == 1 {
-                    if let Some(t) = ts { ts = Some(bull_disp.max(t)); }
+                    if let Some(t) = ts {
+                        ts = Some(bull_disp.max(t));
+                    }
                 } else if cur == -1 {
-                    if let Some(t) = ts { ts = Some(bear_disp.min(t)); }
+                    if let Some(t) = ts {
+                        ts = Some(bear_disp.min(t));
+                    }
                 }
             } else {
-                if os == Some(1) { if let Some(t) = ts { ts = Some(bull_disp.max(t)); } }
-                if os == Some(-1) { if let Some(t) = ts { ts = Some(bear_disp.min(t)); } }
+                if os == Some(1) {
+                    if let Some(t) = ts {
+                        ts = Some(bull_disp.max(t));
+                    }
+                }
+                if os == Some(-1) {
+                    if let Some(t) = ts {
+                        ts = Some(bear_disp.min(t));
+                    }
+                }
             }
 
             if rst {
                 if os == Some(1) {
-                    if let Some(t) = ts { if price < t { ts = None; } }
-                    else if !bear_disp.is_nan() && price > bear_disp { ts = Some(bull_disp); }
+                    if let Some(t) = ts {
+                        if price < t {
+                            ts = None;
+                        }
+                    } else if !bear_disp.is_nan() && price > bear_disp {
+                        ts = Some(bull_disp);
+                    }
                 } else if os == Some(-1) {
-                    if let Some(t) = ts { if price > t { ts = None; } }
-                    else if !bull_disp.is_nan() && price < bull_disp { ts = Some(bear_disp); }
+                    if let Some(t) = ts {
+                        if price > t {
+                            ts = None;
+                        }
+                    } else if !bull_disp.is_nan() && price < bull_disp {
+                        ts = Some(bear_disp);
+                    }
                 }
             }
 
@@ -1414,10 +1488,10 @@ struct Slot {
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 struct HeapItem {
-    bits: u64,   // order by numeric value (prices are non-negative)
-    slot: u32,   // slot index in the ring
-    stamp: u32,  // generation to avoid aliasing after overwrite
-    seq: u32,    // tie-breaker to stabilize Ord
+    bits: u64,  // order by numeric value (prices are non-negative)
+    slot: u32,  // slot index in the ring
+    stamp: u32, // generation to avoid aliasing after overwrite
+    seq: u32,   // tie-breaker to stabilize Ord
 }
 impl Ord for HeapItem {
     #[inline]
@@ -1442,13 +1516,13 @@ pub struct FvgTrailingStopStream {
     reset_on_cross: bool,
 
     // -------- Bull (max-heap drops values > close) --------
-    bull_slots: Vec<Slot>,               // fixed-size ring of size lookback
-    bull_head: usize,                    // next write position
-    bull_occ: usize,                     // how many slots currently in use (<= lookback)
-    bull_sum: f64,                       // sum of alive (unmitigated) levels
-    bull_cnt: u32,                       // count of alive levels
-    bull_heap: BinaryHeap<HeapItem>,     // max-heap by value
-    bull_seq: u32,                       // generation/tie
+    bull_slots: Vec<Slot>,           // fixed-size ring of size lookback
+    bull_head: usize,                // next write position
+    bull_occ: usize,                 // how many slots currently in use (<= lookback)
+    bull_sum: f64,                   // sum of alive (unmitigated) levels
+    bull_cnt: u32,                   // count of alive levels
+    bull_heap: BinaryHeap<HeapItem>, // max-heap by value
+    bull_seq: u32,                   // generation/tie
 
     // -------- Bear (min-heap drops values < close) --------
     bear_slots: Vec<Slot>,
@@ -1583,7 +1657,7 @@ impl FvgTrailingStopStream {
 
             pref_sum_ring,
             pref_nan_ring,
-            pref_idx: 0,           // rings start at prefix (0)
+            pref_idx: 0, // rings start at prefix (0)
             pref_sum_total: 0.0,
             pref_nan_total: 0,
 
@@ -1780,7 +1854,11 @@ impl FvgTrailingStopStream {
 
         // bump index and write current cumulative totals
         let ring_len = w + 1;
-        let next = if *pref_idx + 1 == ring_len { 0 } else { *pref_idx + 1 };
+        let next = if *pref_idx + 1 == ring_len {
+            0
+        } else {
+            *pref_idx + 1
+        };
         pref_sum_ring[next] = *pref_sum_total;
         pref_nan_ring[next] = *pref_nan_total;
         *pref_idx = next;
@@ -1818,7 +1896,11 @@ impl FvgTrailingStopStream {
         // 2) FVG detection using (i-2, i-1, i)
         //    Bull FVG: low[i]   > high[i-2] && close[i-1] > high[i-2]  -> track v = high[i-2]
         //    Bear FVG: high[i]  <  low[i-2] && close[i-1] <  low[i-2]  -> track v =  low[i-2]
-        if self.bar_count >= 2 && self.hi_m2.is_finite() && self.lo_m2.is_finite() && self.cl_m1.is_finite() {
+        if self.bar_count >= 2
+            && self.hi_m2.is_finite()
+            && self.lo_m2.is_finite()
+            && self.cl_m1.is_finite()
+        {
             if low > self.hi_m2 && self.cl_m1 > self.hi_m2 {
                 self.bull_push(self.hi_m2);
             }
@@ -1900,8 +1982,16 @@ impl FvgTrailingStopStream {
             f64::NAN
         };
 
-        let x_bull = if !bull_avg.is_nan() { bull_avg } else { bull_sma };
-        let x_bear = if !bear_avg.is_nan() { bear_avg } else { bear_sma };
+        let x_bull = if !bull_avg.is_nan() {
+            bull_avg
+        } else {
+            bull_sma
+        };
+        let x_bear = if !bear_avg.is_nan() {
+            bear_avg
+        } else {
+            bear_sma
+        };
 
         // 6) Fixed-window smoothing (true O(1) ring update, NaN-aware)
         let bull_disp = Self::push_x_and_smooth(

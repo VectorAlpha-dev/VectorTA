@@ -15,12 +15,12 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{AsyncCopyDestination, DeviceCopy, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::memory::{AsyncCopyDestination, LockedBuffer, DeviceCopy};
-use std::env;
 use std::convert::TryFrom;
+use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,13 +45,21 @@ impl std::error::Error for CudaEhlersITrendError {}
 // -------- Kernel policy + introspection (API parity with ALMA) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchThreadsPerOutput { One, Two }
+pub enum BatchThreadsPerOutput {
+    One,
+    Two,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    Plain { block_x: u32 },
-    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+    Plain {
+        block_x: u32,
+    },
+    Tiled {
+        tile: u32,
+        per_thread: BatchThreadsPerOutput,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,14 +76,21 @@ pub struct CudaEhlersITrendPolicy {
 }
 impl Default for CudaEhlersITrendPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaEhlersITrend {
     module: Module,
@@ -111,7 +126,8 @@ impl CudaEhlersITrend {
         cust::init(CudaFlags::empty()).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+        let context =
+            Context::new(device).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_itrend_kernel.ptx"));
         let jit_opts = &[
@@ -122,10 +138,12 @@ impl CudaEhlersITrend {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -145,49 +163,92 @@ impl CudaEhlersITrend {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaEhlersITrendPolicy) -> Result<Self, CudaEhlersITrendError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaEhlersITrendPolicy,
+    ) -> Result<Self, CudaEhlersITrendError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaEhlersITrendPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaEhlersITrendPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
-    pub fn synchronize(&self) -> Result<(), CudaEhlersITrendError> { self.stream.synchronize().map_err(|e| CudaEhlersITrendError::Cuda(e.to_string())) }
+    pub fn set_policy(&mut self, policy: CudaEhlersITrendPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaEhlersITrendPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
+    pub fn synchronize(&self) -> Result<(), CudaEhlersITrendError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))
+    }
 
     // VRAM helpers
     #[inline]
-    fn mem_check_enabled() -> bool { match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"), Err(_) => true } }
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
+    }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Some((free, _total)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) { eprintln!("[DEBUG] EHLERS_ITREND batch selected kernel: {:?}", sel); }
-                unsafe { (*(self as *const _ as *mut CudaEhlersITrend)).debug_batch_logged = true; }
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!("[DEBUG] EHLERS_ITREND batch selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEhlersITrend)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) { eprintln!("[DEBUG] EHLERS_ITREND many-series selected kernel: {:?}", sel); }
-                unsafe { (*(self as *const _ as *mut CudaEhlersITrend)).debug_many_logged = true; }
+                if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[DEBUG] EHLERS_ITREND many-series selected kernel: {:?}",
+                        sel
+                    );
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEhlersITrend)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -253,10 +314,22 @@ impl CudaEhlersITrend {
         first_valid: usize,
         sweep: &EhlersITrendBatchRange,
     ) -> Result<DeviceArrayF32, CudaEhlersITrendError> {
-        if series_len == 0 { return Err(CudaEhlersITrendError::InvalidInput("series_len is zero".into())); }
-        if first_valid >= series_len { return Err(CudaEhlersITrendError::InvalidInput("first_valid out of range".into())); }
+        if series_len == 0 {
+            return Err(CudaEhlersITrendError::InvalidInput(
+                "series_len is zero".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaEhlersITrendError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
         let combos = expand_grid_cuda(sweep)?;
-        if combos.is_empty() { return Err(CudaEhlersITrendError::InvalidInput("no parameter combinations".into())); }
+        if combos.is_empty() {
+            return Err(CudaEhlersITrendError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         let n_combos = combos.len();
         let mut warmups: Vec<i32> = Vec::with_capacity(n_combos);
         let mut max_dcs: Vec<i32> = Vec::with_capacity(n_combos);
@@ -264,22 +337,48 @@ impl CudaEhlersITrend {
         for prm in &combos {
             let w = prm.warmup_bars.unwrap_or(12);
             let m = prm.max_dc_period.unwrap_or(50);
-            if w == 0 || m == 0 { return Err(CudaEhlersITrendError::InvalidInput("warmup/max_dc must be positive".into())); }
-            if series_len - first_valid < w { return Err(CudaEhlersITrendError::InvalidInput(format!("not enough valid data for warmup {} (valid = {})", w, series_len - first_valid))); }
+            if w == 0 || m == 0 {
+                return Err(CudaEhlersITrendError::InvalidInput(
+                    "warmup/max_dc must be positive".into(),
+                ));
+            }
+            if series_len - first_valid < w {
+                return Err(CudaEhlersITrendError::InvalidInput(format!(
+                    "not enough valid data for warmup {} (valid = {})",
+                    w,
+                    series_len - first_valid
+                )));
+            }
             warmups.push(w as i32);
             max_dcs.push(m as i32);
             max_shared_dc = max_shared_dc.max(m);
         }
-        let d_warmups = DeviceBuffer::from_slice(&warmups).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
-        let d_max_dcs = DeviceBuffer::from_slice(&max_dcs).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+        let d_warmups = DeviceBuffer::from_slice(&warmups)
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
-        self.launch_batch_kernel(d_prices, &d_warmups, &d_max_dcs, series_len, first_valid, n_combos, max_shared_dc, &mut d_out)?;
+        let d_max_dcs = DeviceBuffer::from_slice(&max_dcs)
+            .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+                .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
+        self.launch_batch_kernel(
+            d_prices,
+            &d_warmups,
+            &d_max_dcs,
+            series_len,
+            first_valid,
+            n_combos,
+            max_shared_dc,
+            &mut d_out,
+        )?;
         // Single sync point at API boundary
         self.stream
             .synchronize()
             .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -467,7 +566,9 @@ impl CudaEhlersITrend {
         max_shared_dc: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEhlersITrendError> {
-        if n_combos == 0 { return Ok(()); }
+        if n_combos == 0 {
+            return Ok(());
+        }
 
         let func = self
             .module
@@ -479,30 +580,40 @@ impl CudaEhlersITrend {
         let block: BlockSize = (block_x, 1, 1).into();
         let shared_bytes = ((max_shared_dc + 1) * std::mem::size_of::<f32>()) as u32;
 
-        let mut series_len_i = i32::try_from(series_len)
-            .map_err(|_| CudaEhlersITrendError::InvalidInput("series_len exceeds i32::MAX".into()))?;
-        let mut first_valid_i = i32::try_from(first_valid)
-            .map_err(|_| CudaEhlersITrendError::InvalidInput("first_valid exceeds i32::MAX".into()))?;
-        let mut max_shared_dc_i = i32::try_from(max_shared_dc)
-            .map_err(|_| CudaEhlersITrendError::InvalidInput("max_shared_dc exceeds i32::MAX".into()))?;
+        let mut series_len_i = i32::try_from(series_len).map_err(|_| {
+            CudaEhlersITrendError::InvalidInput("series_len exceeds i32::MAX".into())
+        })?;
+        let mut first_valid_i = i32::try_from(first_valid).map_err(|_| {
+            CudaEhlersITrendError::InvalidInput("first_valid exceeds i32::MAX".into())
+        })?;
+        let mut max_shared_dc_i = i32::try_from(max_shared_dc).map_err(|_| {
+            CudaEhlersITrendError::InvalidInput("max_shared_dc exceeds i32::MAX".into())
+        })?;
 
         // Chunk grid.x to <= 65,535 by offsetting parameter/output pointers per chunk
         for (start, len) in Self::grid_x_chunks(n_combos) {
             let grid: GridSize = (len as u32, 1, 1).into();
 
-            let mut combos_i = i32::try_from(len)
-                .map_err(|_| CudaEhlersITrendError::InvalidInput("n_combos exceeds i32::MAX".into()))?;
+            let mut combos_i = i32::try_from(len).map_err(|_| {
+                CudaEhlersITrendError::InvalidInput("n_combos exceeds i32::MAX".into())
+            })?;
 
             // Compute raw device pointers for this chunk without creating temporary owners.
             let warm_ptr_raw = unsafe { d_warmups.as_device_ptr().offset(start as isize).as_raw() };
-            let maxdc_ptr_raw = unsafe { d_max_dcs.as_device_ptr().offset(start as isize).as_raw() };
-            let out_ptr_raw   = unsafe { d_out.as_device_ptr().offset((start * series_len) as isize).as_raw() };
+            let maxdc_ptr_raw =
+                unsafe { d_max_dcs.as_device_ptr().offset(start as isize).as_raw() };
+            let out_ptr_raw = unsafe {
+                d_out
+                    .as_device_ptr()
+                    .offset((start * series_len) as isize)
+                    .as_raw()
+            };
 
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                let mut warm_ptr   = warm_ptr_raw;
+                let mut warm_ptr = warm_ptr_raw;
                 let mut max_dc_ptr = maxdc_ptr_raw;
-                let mut out_ptr    = out_ptr_raw;
+                let mut out_ptr = out_ptr_raw;
                 let mut args: [*mut c_void; 8] = [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut warm_ptr as *mut _ as *mut c_void,
@@ -518,7 +629,10 @@ impl CudaEhlersITrend {
                     .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
             }
         }
-        unsafe { (*(self as *const _ as *mut CudaEhlersITrend)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaEhlersITrend)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
         Ok(())
     }
@@ -533,7 +647,9 @@ impl CudaEhlersITrend {
         max_dc: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEhlersITrendError> {
-        if num_series == 0 { return Ok(()); }
+        if num_series == 0 {
+            return Ok(());
+        }
 
         let func = self
             .module
@@ -545,10 +661,12 @@ impl CudaEhlersITrend {
         let block: BlockSize = (block_x, 1, 1).into();
         let shared_bytes = ((max_dc + 1) * std::mem::size_of::<f32>()) as u32;
 
-        let mut num_series_i = i32::try_from(num_series)
-            .map_err(|_| CudaEhlersITrendError::InvalidInput("num_series exceeds i32::MAX".into()))?;
-        let mut series_len_i = i32::try_from(series_len)
-            .map_err(|_| CudaEhlersITrendError::InvalidInput("series_len exceeds i32::MAX".into()))?;
+        let mut num_series_i = i32::try_from(num_series).map_err(|_| {
+            CudaEhlersITrendError::InvalidInput("num_series exceeds i32::MAX".into())
+        })?;
+        let mut series_len_i = i32::try_from(series_len).map_err(|_| {
+            CudaEhlersITrendError::InvalidInput("series_len exceeds i32::MAX".into())
+        })?;
         let mut warmup_i = i32::try_from(warmup)
             .map_err(|_| CudaEhlersITrendError::InvalidInput("warmup exceeds i32::MAX".into()))?;
         let mut max_dc_i = i32::try_from(max_dc)
@@ -558,15 +676,21 @@ impl CudaEhlersITrend {
         for (start, len) in Self::grid_x_chunks(num_series) {
             let grid: GridSize = (len as u32, 1, 1).into();
 
-            let first_ptr_raw  = unsafe { d_first_valids.as_device_ptr().offset(start as isize).as_raw() };
-            let out_ptr_raw    = unsafe { d_out_tm.as_device_ptr().offset(start as isize).as_raw() };
-            let prices_ptr_raw = unsafe { d_prices_tm.as_device_ptr().offset(start as isize).as_raw() };
+            let first_ptr_raw = unsafe {
+                d_first_valids
+                    .as_device_ptr()
+                    .offset(start as isize)
+                    .as_raw()
+            };
+            let out_ptr_raw = unsafe { d_out_tm.as_device_ptr().offset(start as isize).as_raw() };
+            let prices_ptr_raw =
+                unsafe { d_prices_tm.as_device_ptr().offset(start as isize).as_raw() };
 
             unsafe {
                 // time-major: base-pointer offset by `start` series is correct when passing full stride
                 let mut prices_ptr = prices_ptr_raw;
-                let mut first_ptr  = first_ptr_raw;
-                let mut out_ptr    = out_ptr_raw;
+                let mut first_ptr = first_ptr_raw;
+                let mut out_ptr = out_ptr_raw;
                 let mut args: [*mut c_void; 7] = [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut first_ptr as *mut _ as *mut c_void,
@@ -581,7 +705,10 @@ impl CudaEhlersITrend {
                     .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))?;
             }
         }
-        unsafe { (*(self as *const _ as *mut CudaEhlersITrend)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaEhlersITrend)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
         Ok(())
     }
@@ -754,8 +881,7 @@ impl CudaEhlersITrend {
             }
             Ok(dst)
         } else {
-            DeviceBuffer::from_slice(src)
-                .map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))
+            DeviceBuffer::from_slice(src).map_err(|e| CudaEhlersITrendError::Cuda(e.to_string()))
         }
     }
 }
@@ -773,8 +899,14 @@ pub mod benches {
         crate::indicators::moving_averages::ehlers_itrend::EhlersITrendParams,
         ehlers_itrend_batch_dev,
         ehlers_itrend_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange { warmup_bars: (12, 12 + PARAM_SWEEP - 1, 1), max_dc_period: (50, 50, 0) },
-        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendParams { warmup_bars: Some(32), max_dc_period: Some(50) },
+        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange {
+            warmup_bars: (12, 12 + PARAM_SWEEP - 1, 1),
+            max_dc_period: (50, 50, 0)
+        },
+        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendParams {
+            warmup_bars: Some(32),
+            max_dc_period: Some(50)
+        },
         "ehlers_itrend",
         "ehlers_itrend"
     );

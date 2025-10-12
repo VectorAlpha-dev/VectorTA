@@ -864,7 +864,11 @@ pub fn ott_scalar(
 
     // First output (MT = long_stop when dir == 1)
     let mt0 = long_stop;
-    let scale0 = if m > mt0 { scale_minus + fark } else { scale_minus };
+    let scale0 = if m > mt0 {
+        scale_minus + fark
+    } else {
+        scale_minus
+    };
     out[i] = mt0 * scale0;
     i += 1;
 
@@ -888,7 +892,11 @@ pub fn ott_scalar(
             }
             // Update short stop
             if mavg < sprev {
-                short_stop = if cand_short < sprev { cand_short } else { sprev };
+                short_stop = if cand_short < sprev {
+                    cand_short
+                } else {
+                    sprev
+                };
             } else {
                 short_stop = cand_short;
             }
@@ -902,7 +910,11 @@ pub fn ott_scalar(
 
             // MT and OTT
             let mt = if dir == 1 { long_stop } else { short_stop };
-            let scale = if mavg > mt { scale_minus + fark } else { scale_minus };
+            let scale = if mavg > mt {
+                scale_minus + fark
+            } else {
+                scale_minus
+            };
             out[i] = mt * scale;
         }
         i += 1;
@@ -965,8 +977,8 @@ pub struct OttStream {
 
     // generic ring buffer
     buf: Vec<f64>,
-    pos: usize,      // next write index
-    count: usize,    // how many values seen so far (<= buf.len())
+    pos: usize,   // next write index
+    count: usize, // how many values seen so far (<= buf.len())
 
     // OTT state
     long_stop: f64,
@@ -974,9 +986,9 @@ pub struct OttStream {
     dir: i32,
 
     // precomputed OTT constants
-    fark: f64,          // percent * 0.01
-    scale_plus: f64,    // 1.0 + percent/200.0
-    scale_minus: f64,   // 1.0 - percent/200.0
+    fark: f64,        // percent * 0.01
+    scale_plus: f64,  // 1.0 + percent/200.0
+    scale_minus: f64, // 1.0 - percent/200.0
 
     // ===== per-MA state (all O(1)) =====
     // SMA
@@ -1001,8 +1013,8 @@ pub struct OttStream {
     zlema_lag: usize,
 
     // VAR / VIDYA (CMO(9) with adaptive alpha) – fully O(1)
-    var_alpha_base: f64,   // 2/(period+1)
-    var_state: f64,        // Pine-compatible starts at 0.0
+    var_alpha_base: f64, // 2/(period+1)
+    var_state: f64,      // Pine-compatible starts at 0.0
     var_u_ring: [f64; 9],
     var_d_ring: [f64; 9],
     var_idx: usize,        // [0,9)
@@ -1018,7 +1030,10 @@ impl OttStream {
         let ma_type = params.ma_type.unwrap_or_else(|| "VAR".to_string());
 
         if period == 0 {
-            return Err(OttError::InvalidPeriod { period, data_len: 0 });
+            return Err(OttError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         if percent < 0.0 || !percent.is_finite() {
             return Err(OttError::InvalidPercent { percent });
@@ -1034,7 +1049,7 @@ impl OttStream {
         // Precompute OTT constants
         let fark = percent * 0.01;
         let scale_minus = 1.0 - (percent * 0.005); // 1 - percent/200
-        let scale_plus = 1.0 + (percent * 0.005);  // 1 + percent/200
+        let scale_plus = 1.0 + (percent * 0.005); // 1 + percent/200
 
         // Common alphas/precomputes
         let ema_alpha = 2.0 / (period as f64 + 1.0);
@@ -1044,7 +1059,11 @@ impl OttStream {
 
         // WMA precomputes
         let n = period as f64;
-        let wma_inv_norm = if period > 1 { 2.0 / (n * (n + 1.0)) } else { 1.0 };
+        let wma_inv_norm = if period > 1 {
+            2.0 / (n * (n + 1.0))
+        } else {
+            1.0
+        };
 
         Ok(Self {
             period,
@@ -1105,7 +1124,9 @@ impl OttStream {
         let old = self.buf[self.pos];
         self.buf[self.pos] = x;
         self.pos = (self.pos + 1) % cap;
-        if self.count < cap { self.count += 1; }
+        if self.count < cap {
+            self.count += 1;
+        }
 
         // compute MA
         let ma = self.calculate_ma(x, old);
@@ -1118,20 +1139,36 @@ impl OttStream {
         let offset = ma * self.fark;
 
         // previous stops
-        let lprev = if self.long_stop.is_nan() { ma - offset } else { self.long_stop };
-        let sprev = if self.short_stop.is_nan() { ma + offset } else { self.short_stop };
+        let lprev = if self.long_stop.is_nan() {
+            ma - offset
+        } else {
+            self.long_stop
+        };
+        let sprev = if self.short_stop.is_nan() {
+            ma + offset
+        } else {
+            self.short_stop
+        };
 
         // update stops (NaN-safe; avoid f64::max/min to not propagate NaN)
         let cand_long = ma - offset;
         self.long_stop = if ma > lprev {
-            if cand_long > lprev { cand_long } else { lprev }
+            if cand_long > lprev {
+                cand_long
+            } else {
+                lprev
+            }
         } else {
             cand_long
         };
 
         let cand_short = ma + offset;
         self.short_stop = if ma < sprev {
-            if cand_short < sprev { cand_short } else { sprev }
+            if cand_short < sprev {
+                cand_short
+            } else {
+                sprev
+            }
         } else {
             cand_short
         };
@@ -1144,8 +1181,16 @@ impl OttStream {
         }
 
         // MT and scale
-        let mt = if self.dir == 1 { self.long_stop } else { self.short_stop };
-        let scaled = if ma > mt { mt * self.scale_plus } else { mt * self.scale_minus };
+        let mt = if self.dir == 1 {
+            self.long_stop
+        } else {
+            self.short_stop
+        };
+        let scaled = if ma > mt {
+            mt * self.scale_plus
+        } else {
+            mt * self.scale_minus
+        };
 
         Some(scaled)
     }
@@ -1180,8 +1225,16 @@ impl OttStream {
 
     #[inline]
     fn update_sma(&mut self, x: f64, old: f64) -> f64 {
-        if old.is_finite() { self.sma_sum += x - old; } else { self.sma_sum += x; }
-        if self.count < self.period { f64::NAN } else { self.sma_sum / self.period as f64 }
+        if old.is_finite() {
+            self.sma_sum += x - old;
+        } else {
+            self.sma_sum += x;
+        }
+        if self.count < self.period {
+            f64::NAN
+        } else {
+            self.sma_sum / self.period as f64
+        }
     }
 
     #[inline]
@@ -1212,7 +1265,9 @@ impl OttStream {
             self.wma_simple_sum += x;
             self.wma_weighted_sum += w * x;
 
-            if self.count < self.period { return f64::NAN; }
+            if self.count < self.period {
+                return f64::NAN;
+            }
             return self.wma_weighted_sum * self.wma_inv_norm;
         }
 
@@ -1234,7 +1289,11 @@ impl OttStream {
         let lag_idx = (self.pos + cap - 1 - self.zlema_lag % cap) % cap;
         let lagged = self.buf[lag_idx];
 
-        let de_lagged = if lagged.is_finite() { x + (x - lagged) } else { x };
+        let de_lagged = if lagged.is_finite() {
+            x + (x - lagged)
+        } else {
+            x
+        };
         let z = match self.zlema_state {
             Some(prev) => self.zlema_alpha.mul_add(de_lagged - prev, prev),
             None => de_lagged,
@@ -1247,10 +1306,14 @@ impl OttStream {
     fn update_var(&mut self, x: f64) -> f64 {
         // Needs a previous sample for the diff; if not available return current state
         let cap = self.buf.len();
-        if self.count == 0 { return self.var_state; }
+        if self.count == 0 {
+            return self.var_state;
+        }
         let prev_idx = (self.pos + cap - 2) % cap; // last inserted was at pos-1
         let prev = self.buf[prev_idx];
-        if !x.is_finite() || !prev.is_finite() { return self.var_state; }
+        if !x.is_finite() || !prev.is_finite() {
+            return self.var_state;
+        }
 
         // New up/down
         let up = (x - prev).max(0.0);
@@ -1262,17 +1325,25 @@ impl OttStream {
         self.var_u_ring[self.var_idx] = up;
         self.var_d_ring[self.var_idx] = dn;
 
-        if self.var_seen_diffs < 9 { self.var_seen_diffs += 1; }
+        if self.var_seen_diffs < 9 {
+            self.var_seen_diffs += 1;
+        }
 
         self.var_u_sum += up - old_u;
         self.var_d_sum += dn - old_d;
         self.var_idx = (self.var_idx + 1) % 9;
 
         // If we haven't accumulated 9 diffs yet, keep returning current state (Pine-compatible zero start)
-        if self.count < 10 || self.var_seen_diffs < 9 { return self.var_state; }
+        if self.count < 10 || self.var_seen_diffs < 9 {
+            return self.var_state;
+        }
 
         let denom = self.var_u_sum + self.var_d_sum;
-        let cmo_abs = if denom != 0.0 { (self.var_u_sum - self.var_d_sum).abs() / denom } else { 0.0 };
+        let cmo_abs = if denom != 0.0 {
+            (self.var_u_sum - self.var_d_sum).abs() / denom
+        } else {
+            0.0
+        };
 
         let alpha = cmo_abs * self.var_alpha_base;
         // var = alpha*x + (1-alpha)*var
@@ -1511,9 +1582,7 @@ fn ott_batch_inner_into(
 
         // Lookup precomputed MA and warmup
         let key = (p, mt.to_uppercase());
-        let (ma, ma_first) = ma_cache
-            .get(&key)
-            .expect("missing MA cache entry");
+        let (ma, ma_first) = ma_cache.get(&key).expect("missing MA cache entry");
 
         // materialize row as &mut [f64]
         let row: &mut [f64] = unsafe {

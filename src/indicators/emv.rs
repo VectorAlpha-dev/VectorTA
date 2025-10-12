@@ -406,9 +406,7 @@ pub struct EmvStream {
 
 impl EmvStream {
     pub fn try_new() -> Result<Self, EmvError> {
-        Ok(Self {
-            last_mid: None,
-        })
+        Ok(Self { last_mid: None })
     }
 
     #[inline(always)]
@@ -469,7 +467,11 @@ fn newton_refine_recip(y0: f64, x: f64) -> f64 {
 
 #[inline(always)]
 fn fast_recip_f64(x: f64) -> f64 {
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx512f"))]
+    #[cfg(all(
+        feature = "nightly-avx",
+        target_arch = "x86_64",
+        target_feature = "avx512f"
+    ))]
     unsafe {
         use core::arch::x86_64::*;
         let vx = _mm512_set1_pd(x);

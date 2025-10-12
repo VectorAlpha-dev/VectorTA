@@ -668,7 +668,10 @@ impl EdcfStream {
     pub fn try_new(params: EdcfParams) -> Result<Self, EdcfError> {
         let period = params.period.unwrap_or(15);
         if period == 0 {
-            return Err(EdcfError::InvalidPeriod { period, data_len: 0 });
+            return Err(EdcfError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         // Keep parity with existing semantics: price buffer starts as NaN,
@@ -1879,10 +1882,13 @@ pub fn edcf_cuda_many_series_one_param_dev_py(
     let flat_in: &[f32] = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = EdcfParams { period: Some(period) };
+    let params = EdcfParams {
+        period: Some(period),
+    };
 
     let inner = py.allow_threads(|| {
-        let mut cuda = CudaEdcf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut cuda =
+            CudaEdcf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.edcf_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

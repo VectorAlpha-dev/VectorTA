@@ -61,10 +61,10 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-use thiserror::Error;
-use std::cmp::{Ordering};
+use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for RviInput<'a> {
     #[inline(always)]
@@ -438,7 +438,11 @@ pub fn rvi_scalar(
     let mut r_filled = false;
 
     // Scratch reused for median step
-    let mut scratch = if devtype == 2 { vec![0.0f64; period] } else { Vec::new() };
+    let mut scratch = if devtype == 2 {
+        vec![0.0f64; period]
+    } else {
+        Vec::new()
+    };
 
     // -------- smoothing state for up/down --------
     // SMA: ring + running sums; EMA: α + prev states with ALMA's "seed = SMA(period)" rule
@@ -462,7 +466,11 @@ pub fn rvi_scalar(
     let mut dn_cnt = 0usize;
 
     // EMA state
-    let alpha = if !use_sma { 2.0 / (ma_len as f64 + 1.0) } else { 0.0 };
+    let alpha = if !use_sma {
+        2.0 / (ma_len as f64 + 1.0)
+    } else {
+        0.0
+    };
     let one_m_alpha = 1.0 - alpha;
     let mut up_prev = 0.0f64;
     let mut dn_prev = 0.0f64;
@@ -503,13 +511,19 @@ pub fn rvi_scalar(
             // SMA smoothing
             for i in 0..n {
                 let x = data[i];
-                let d = if i == 0 || x.is_nan() || prev.is_nan() { f64::NAN } else { x - prev };
+                let d = if i == 0 || x.is_nan() || prev.is_nan() {
+                    f64::NAN
+                } else {
+                    x - prev
+                };
                 prev = x;
 
                 let dev = if i + 1 < period {
                     f64::NAN
                 } else if i == period - 1 {
-                    if sum.is_nan() { f64::NAN } else {
+                    if sum.is_nan() {
+                        f64::NAN
+                    } else {
                         let mean = sum * inv_p;
                         let mean_sq = sumsq * inv_p;
                         (mean_sq - mean * mean).sqrt()
@@ -518,16 +532,24 @@ pub fn rvi_scalar(
                     let leaving = data[i - period];
                     if leaving.is_nan() || x.is_nan() || sum.is_nan() || sumsq.is_nan() {
                         // rebuild window from scratch (handle NaNs)
-                        sum = 0.0; sumsq = 0.0;
+                        sum = 0.0;
+                        sumsq = 0.0;
                         let start = i + 1 - period;
                         let mut bad = false;
                         for k in start..=i {
                             let v = data[k];
-                            if v.is_nan() { bad = true; break; }
+                            if v.is_nan() {
+                                bad = true;
+                                break;
+                            }
                             sum += v;
                             sumsq += v * v;
                         }
-                        if bad { sum = f64::NAN; sumsq = f64::NAN; f64::NAN } else {
+                        if bad {
+                            sum = f64::NAN;
+                            sumsq = f64::NAN;
+                            f64::NAN
+                        } else {
                             let mean = sum * inv_p;
                             let mean_sq = sumsq * inv_p;
                             (mean_sq - mean * mean).sqrt()
@@ -553,27 +575,57 @@ pub fn rvi_scalar(
 
                 // SMA rings
                 let up_s = if up_i.is_nan() {
-                    up_sum = 0.0; up_cnt = 0; up_h = 0; f64::NAN
+                    up_sum = 0.0;
+                    up_cnt = 0;
+                    up_h = 0;
+                    f64::NAN
                 } else if up_cnt < ma_len {
-                    unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; }
-                    up_sum += up_i; up_h = (up_h + 1) % ma_len; up_cnt += 1;
-                    if up_cnt == ma_len { up_sum * inv_m } else { f64::NAN }
+                    unsafe {
+                        *up_ring.get_unchecked_mut(up_h) = up_i;
+                    }
+                    up_sum += up_i;
+                    up_h = (up_h + 1) % ma_len;
+                    up_cnt += 1;
+                    if up_cnt == ma_len {
+                        up_sum * inv_m
+                    } else {
+                        f64::NAN
+                    }
                 } else {
                     let old = unsafe { *up_ring.get_unchecked(up_h) };
-                    unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; }
-                    up_h = (up_h + 1) % ma_len; up_sum += up_i - old; up_sum * inv_m
+                    unsafe {
+                        *up_ring.get_unchecked_mut(up_h) = up_i;
+                    }
+                    up_h = (up_h + 1) % ma_len;
+                    up_sum += up_i - old;
+                    up_sum * inv_m
                 };
 
                 let dn_s = if dn_i.is_nan() {
-                    dn_sum = 0.0; dn_cnt = 0; dn_h = 0; f64::NAN
+                    dn_sum = 0.0;
+                    dn_cnt = 0;
+                    dn_h = 0;
+                    f64::NAN
                 } else if dn_cnt < ma_len {
-                    unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; }
-                    dn_sum += dn_i; dn_h = (dn_h + 1) % ma_len; dn_cnt += 1;
-                    if dn_cnt == ma_len { dn_sum * inv_m } else { f64::NAN }
+                    unsafe {
+                        *dn_ring.get_unchecked_mut(dn_h) = dn_i;
+                    }
+                    dn_sum += dn_i;
+                    dn_h = (dn_h + 1) % ma_len;
+                    dn_cnt += 1;
+                    if dn_cnt == ma_len {
+                        dn_sum * inv_m
+                    } else {
+                        f64::NAN
+                    }
                 } else {
                     let old = unsafe { *dn_ring.get_unchecked(dn_h) };
-                    unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; }
-                    dn_h = (dn_h + 1) % ma_len; dn_sum += dn_i - old; dn_sum * inv_m
+                    unsafe {
+                        *dn_ring.get_unchecked_mut(dn_h) = dn_i;
+                    }
+                    dn_h = (dn_h + 1) % ma_len;
+                    dn_sum += dn_i - old;
+                    dn_sum * inv_m
                 };
 
                 if i >= warmup {
@@ -581,7 +633,11 @@ pub fn rvi_scalar(
                         out[i] = f64::NAN;
                     } else {
                         let denom = up_s + dn_s;
-                        out[i] = if denom.abs() < f64::EPSILON { f64::NAN } else { 100.0 * (up_s / denom) };
+                        out[i] = if denom.abs() < f64::EPSILON {
+                            f64::NAN
+                        } else {
+                            100.0 * (up_s / denom)
+                        };
                     }
                 }
             }
@@ -589,13 +645,19 @@ pub fn rvi_scalar(
             // EMA smoothing (with SMA seed)
             for i in 0..n {
                 let x = data[i];
-                let d = if i == 0 || x.is_nan() || prev.is_nan() { f64::NAN } else { x - prev };
+                let d = if i == 0 || x.is_nan() || prev.is_nan() {
+                    f64::NAN
+                } else {
+                    x - prev
+                };
                 prev = x;
 
                 let dev = if i + 1 < period {
                     f64::NAN
                 } else if i == period - 1 {
-                    if sum.is_nan() { f64::NAN } else {
+                    if sum.is_nan() {
+                        f64::NAN
+                    } else {
                         let mean = sum * inv_p;
                         let mean_sq = sumsq * inv_p;
                         (mean_sq - mean * mean).sqrt()
@@ -603,38 +665,85 @@ pub fn rvi_scalar(
                 } else {
                     let leaving = data[i - period];
                     if leaving.is_nan() || x.is_nan() || sum.is_nan() || sumsq.is_nan() {
-                        sum = 0.0; sumsq = 0.0; let start = i + 1 - period; let mut bad = false;
+                        sum = 0.0;
+                        sumsq = 0.0;
+                        let start = i + 1 - period;
+                        let mut bad = false;
                         for k in start..=i {
-                            let v = data[k]; if v.is_nan() { bad = true; break; }
-                            sum += v; sumsq += v * v;
+                            let v = data[k];
+                            if v.is_nan() {
+                                bad = true;
+                                break;
+                            }
+                            sum += v;
+                            sumsq += v * v;
                         }
-                        if bad { sum = f64::NAN; sumsq = f64::NAN; f64::NAN } else {
-                            let mean = sum * inv_p; let mean_sq = sumsq * inv_p; (mean_sq - mean * mean).sqrt()
+                        if bad {
+                            sum = f64::NAN;
+                            sumsq = f64::NAN;
+                            f64::NAN
+                        } else {
+                            let mean = sum * inv_p;
+                            let mean_sq = sumsq * inv_p;
+                            (mean_sq - mean * mean).sqrt()
                         }
                     } else {
-                        sum += x - leaving; sumsq += x * x - leaving * leaving;
-                        let mean = sum * inv_p; let mean_sq = sumsq * inv_p; (mean_sq - mean * mean).sqrt()
+                        sum += x - leaving;
+                        sumsq += x * x - leaving * leaving;
+                        let mean = sum * inv_p;
+                        let mean_sq = sumsq * inv_p;
+                        (mean_sq - mean * mean).sqrt()
                     }
                 };
 
                 let (up_i, dn_i) = if d.is_nan() || dev.is_nan() {
                     (f64::NAN, f64::NAN)
-                } else if d > 0.0 { (dev, 0.0) } else if d < 0.0 { (0.0, dev) } else { (0.0, 0.0) };
+                } else if d > 0.0 {
+                    (dev, 0.0)
+                } else if d < 0.0 {
+                    (0.0, dev)
+                } else {
+                    (0.0, 0.0)
+                };
 
                 let up_s = if up_i.is_nan() {
-                    up_started = false; up_seed_sum = 0.0; up_seed_cnt = 0; f64::NAN
+                    up_started = false;
+                    up_seed_sum = 0.0;
+                    up_seed_cnt = 0;
+                    f64::NAN
                 } else if !up_started {
-                    up_seed_sum += up_i; up_seed_cnt += 1; if up_seed_cnt == ma_len { up_prev = up_seed_sum * inv_m; up_started = true; up_prev } else { f64::NAN }
+                    up_seed_sum += up_i;
+                    up_seed_cnt += 1;
+                    if up_seed_cnt == ma_len {
+                        up_prev = up_seed_sum * inv_m;
+                        up_started = true;
+                        up_prev
+                    } else {
+                        f64::NAN
+                    }
                 } else {
-                    up_prev = alpha.mul_add(up_i, one_m_alpha * up_prev); up_prev
+                    up_prev = alpha.mul_add(up_i, one_m_alpha * up_prev);
+                    up_prev
                 };
 
                 let dn_s = if dn_i.is_nan() {
-                    dn_started = false; dn_seed_sum = 0.0; dn_seed_cnt = 0; f64::NAN
+                    dn_started = false;
+                    dn_seed_sum = 0.0;
+                    dn_seed_cnt = 0;
+                    f64::NAN
                 } else if !dn_started {
-                    dn_seed_sum += dn_i; dn_seed_cnt += 1; if dn_seed_cnt == ma_len { dn_prev = dn_seed_sum * inv_m; dn_started = true; dn_prev } else { f64::NAN }
+                    dn_seed_sum += dn_i;
+                    dn_seed_cnt += 1;
+                    if dn_seed_cnt == ma_len {
+                        dn_prev = dn_seed_sum * inv_m;
+                        dn_started = true;
+                        dn_prev
+                    } else {
+                        f64::NAN
+                    }
                 } else {
-                    dn_prev = alpha.mul_add(dn_i, one_m_alpha * dn_prev); dn_prev
+                    dn_prev = alpha.mul_add(dn_i, one_m_alpha * dn_prev);
+                    dn_prev
                 };
 
                 if i >= warmup {
@@ -642,7 +751,11 @@ pub fn rvi_scalar(
                         out[i] = f64::NAN;
                     } else {
                         let denom = up_s + dn_s;
-                        out[i] = if denom.abs() < f64::EPSILON { f64::NAN } else { 100.0 * (up_s / denom) };
+                        out[i] = if denom.abs() < f64::EPSILON {
+                            f64::NAN
+                        } else {
+                            100.0 * (up_s / denom)
+                        };
                     }
                 }
             }
@@ -753,7 +866,9 @@ pub fn rvi_scalar(
                             f64::NAN
                         } else {
                             // slide
-                            unsafe { *ring.get_unchecked_mut(r_head) = incoming; }
+                            unsafe {
+                                *ring.get_unchecked_mut(r_head) = incoming;
+                            }
                             r_head = (r_head + 1) % period;
                             r_filled = true;
                             // compute mean + MAD
@@ -819,7 +934,9 @@ pub fn rvi_scalar(
                             }
                             f64::NAN
                         } else {
-                            unsafe { *ring.get_unchecked_mut(r_head) = incoming; }
+                            unsafe {
+                                *ring.get_unchecked_mut(r_head) = incoming;
+                            }
                             r_head = (r_head + 1) % period;
                             r_filled = true;
 
@@ -842,8 +959,8 @@ pub fn rvi_scalar(
                             // Calculate deviations from original ring values, not sorted scratch
                             unsafe {
                                 for k in 0..period {
-                                    abs_sum += (*ring.get_unchecked((r_head + k) % period) - median)
-                                        .abs();
+                                    abs_sum +=
+                                        (*ring.get_unchecked((r_head + k) % period) - median).abs();
                                 }
                             }
                             abs_sum * inv_p
@@ -875,7 +992,9 @@ pub fn rvi_scalar(
                 f64::NAN
             } else {
                 if up_cnt < ma_len {
-                    unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; }
+                    unsafe {
+                        *up_ring.get_unchecked_mut(up_h) = up_i;
+                    }
                     up_sum += up_i;
                     up_h = (up_h + 1) % ma_len;
                     up_cnt += 1;
@@ -886,7 +1005,9 @@ pub fn rvi_scalar(
                     }
                 } else {
                     let old = unsafe { *up_ring.get_unchecked(up_h) };
-                    unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; }
+                    unsafe {
+                        *up_ring.get_unchecked_mut(up_h) = up_i;
+                    }
                     up_h = (up_h + 1) % ma_len;
                     up_sum += up_i - old;
                     up_sum * inv_m
@@ -900,7 +1021,9 @@ pub fn rvi_scalar(
                 f64::NAN
             } else {
                 if dn_cnt < ma_len {
-                    unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; }
+                    unsafe {
+                        *dn_ring.get_unchecked_mut(dn_h) = dn_i;
+                    }
                     dn_sum += dn_i;
                     dn_h = (dn_h + 1) % ma_len;
                     dn_cnt += 1;
@@ -911,7 +1034,9 @@ pub fn rvi_scalar(
                     }
                 } else {
                     let old = unsafe { *dn_ring.get_unchecked(dn_h) };
-                    unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; }
+                    unsafe {
+                        *dn_ring.get_unchecked_mut(dn_h) = dn_i;
+                    }
                     dn_h = (dn_h + 1) % ma_len;
                     dn_sum += dn_i - old;
                     dn_sum * inv_m
@@ -1022,7 +1147,9 @@ pub fn rvi_scalar_opt(
 ) {
     debug_assert_eq!(out.len(), data.len());
     let n = data.len();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
 
     let warmup = first + period.saturating_sub(1) + ma_len.saturating_sub(1);
     let inv_p = 1.0 / (period as f64);
@@ -1030,39 +1157,223 @@ pub fn rvi_scalar_opt(
     let use_sma = matype == 0;
 
     // Smoothing state
-    let mut up_sum = 0.0f64; let mut dn_sum = 0.0f64;
-    let mut up_ring = if use_sma { vec![0.0f64; ma_len] } else { Vec::new() };
-    let mut dn_ring = if use_sma { vec![0.0f64; ma_len] } else { Vec::new() };
-    let mut up_h: usize = 0; let mut dn_h: usize = 0; let mut up_cnt: usize = 0; let mut dn_cnt: usize = 0;
-    let alpha = if !use_sma { 2.0 / (ma_len as f64 + 1.0) } else { 0.0 }; let one_m_alpha = 1.0 - alpha;
-    let mut up_prev = 0.0f64; let mut dn_prev = 0.0f64; let mut up_started = false; let mut dn_started = false;
-    let mut up_seed_sum = 0.0f64; let mut dn_seed_sum = 0.0f64; let mut up_seed_cnt = 0usize; let mut dn_seed_cnt = 0usize;
+    let mut up_sum = 0.0f64;
+    let mut dn_sum = 0.0f64;
+    let mut up_ring = if use_sma {
+        vec![0.0f64; ma_len]
+    } else {
+        Vec::new()
+    };
+    let mut dn_ring = if use_sma {
+        vec![0.0f64; ma_len]
+    } else {
+        Vec::new()
+    };
+    let mut up_h: usize = 0;
+    let mut dn_h: usize = 0;
+    let mut up_cnt: usize = 0;
+    let mut dn_cnt: usize = 0;
+    let alpha = if !use_sma {
+        2.0 / (ma_len as f64 + 1.0)
+    } else {
+        0.0
+    };
+    let one_m_alpha = 1.0 - alpha;
+    let mut up_prev = 0.0f64;
+    let mut dn_prev = 0.0f64;
+    let mut up_started = false;
+    let mut dn_started = false;
+    let mut up_seed_sum = 0.0f64;
+    let mut dn_seed_sum = 0.0f64;
+    let mut up_seed_cnt = 0usize;
+    let mut dn_seed_cnt = 0usize;
 
     #[inline(always)]
-    fn bump_idx(idx: &mut usize, len: usize) { *idx += 1; if *idx == len { *idx = 0; } }
+    fn bump_idx(idx: &mut usize, len: usize) {
+        *idx += 1;
+        if *idx == len {
+            *idx = 0;
+        }
+    }
 
     // StdDev fast path: O(1) with NaN-aware valid ring
     if devtype == 0 {
-        let mut prev = data[0]; let mut sum = 0.0f64; let mut sumsq = 0.0f64;
-        let mut vflag = vec![0u8; period]; let mut vcnt: usize = 0; let mut head: usize = 0;
-        for i in 0..period.min(n) { let x = unsafe { *data.get_unchecked(i) }; if !x.is_nan() { sum += x; sumsq += x * x; vflag[i] = 1; vcnt += 1; } }
+        let mut prev = data[0];
+        let mut sum = 0.0f64;
+        let mut sumsq = 0.0f64;
+        let mut vflag = vec![0u8; period];
+        let mut vcnt: usize = 0;
+        let mut head: usize = 0;
+        for i in 0..period.min(n) {
+            let x = unsafe { *data.get_unchecked(i) };
+            if !x.is_nan() {
+                sum += x;
+                sumsq += x * x;
+                vflag[i] = 1;
+                vcnt += 1;
+            }
+        }
         for i in 0..n {
             let x = unsafe { *data.get_unchecked(i) };
-            let d = if i == 0 || x.is_nan() || prev.is_nan() { f64::NAN } else { x - prev }; prev = x;
-            let dev = if i + 1 < period { f64::NAN } else if i == period - 1 {
-                if vcnt == period { let mean = sum * inv_p; let mean_sq = sumsq * inv_p; (mean_sq - mean * mean).sqrt() } else { f64::NAN }
+            let d = if i == 0 || x.is_nan() || prev.is_nan() {
+                f64::NAN
+            } else {
+                x - prev
+            };
+            prev = x;
+            let dev = if i + 1 < period {
+                f64::NAN
+            } else if i == period - 1 {
+                if vcnt == period {
+                    let mean = sum * inv_p;
+                    let mean_sq = sumsq * inv_p;
+                    (mean_sq - mean * mean).sqrt()
+                } else {
+                    f64::NAN
+                }
             } else {
                 let leaving_valid = unsafe { *vflag.get_unchecked(head) } != 0;
-                if leaving_valid { let leaving = unsafe { *data.get_unchecked(i - period) }; sum -= leaving; sumsq -= leaving * leaving; vcnt -= 1; }
-                if !x.is_nan() { sum += x; sumsq += x * x; unsafe { *vflag.get_unchecked_mut(head) = 1 }; vcnt += 1; } else { unsafe { *vflag.get_unchecked_mut(head) = 0 }; }
+                if leaving_valid {
+                    let leaving = unsafe { *data.get_unchecked(i - period) };
+                    sum -= leaving;
+                    sumsq -= leaving * leaving;
+                    vcnt -= 1;
+                }
+                if !x.is_nan() {
+                    sum += x;
+                    sumsq += x * x;
+                    unsafe { *vflag.get_unchecked_mut(head) = 1 };
+                    vcnt += 1;
+                } else {
+                    unsafe { *vflag.get_unchecked_mut(head) = 0 };
+                }
                 bump_idx(&mut head, period);
-                if vcnt == period { let mean = sum * inv_p; let mean_sq = sumsq * inv_p; (mean_sq - mean * mean).sqrt() } else { f64::NAN }
+                if vcnt == period {
+                    let mean = sum * inv_p;
+                    let mean_sq = sumsq * inv_p;
+                    (mean_sq - mean * mean).sqrt()
+                } else {
+                    f64::NAN
+                }
             };
 
-            let (up_i, dn_i) = if d.is_nan() || dev.is_nan() { (f64::NAN, f64::NAN) } else if d > 0.0 { (dev, 0.0) } else if d < 0.0 { (0.0, dev) } else { (0.0, 0.0) };
-            let up_s = if use_sma { if up_i.is_nan() { up_sum = 0.0; up_cnt = 0; up_h = 0; f64::NAN } else if up_cnt < ma_len { unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; } up_sum += up_i; bump_idx(&mut up_h, ma_len); up_cnt += 1; if up_cnt == ma_len { up_sum * inv_m } else { f64::NAN } } else { let old = unsafe { *up_ring.get_unchecked(up_h) }; unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; } up_sum += up_i - old; bump_idx(&mut up_h, ma_len); up_sum * inv_m } } else { if up_i.is_nan() { up_started = false; up_seed_sum = 0.0; up_seed_cnt = 0; f64::NAN } else if !up_started { up_seed_sum += up_i; up_seed_cnt += 1; if up_seed_cnt == ma_len { up_prev = up_seed_sum * inv_m; up_started = true; up_prev } else { f64::NAN } } else { up_prev = alpha.mul_add(up_i, one_m_alpha * up_prev); up_prev } };
-            let dn_s = if use_sma { if dn_i.is_nan() { dn_sum = 0.0; dn_cnt = 0; dn_h = 0; f64::NAN } else if dn_cnt < ma_len { unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; } dn_sum += dn_i; bump_idx(&mut dn_h, ma_len); dn_cnt += 1; if dn_cnt == ma_len { dn_sum * inv_m } else { f64::NAN } } else { let old = unsafe { *dn_ring.get_unchecked(dn_h) }; unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; } dn_sum += dn_i - old; bump_idx(&mut dn_h, ma_len); dn_sum * inv_m } } else { if dn_i.is_nan() { dn_started = false; dn_seed_sum = 0.0; dn_seed_cnt = 0; f64::NAN } else if !dn_started { dn_seed_sum += dn_i; dn_seed_cnt += 1; if dn_seed_cnt == ma_len { dn_prev = dn_seed_sum * inv_m; dn_started = true; dn_prev } else { f64::NAN } } else { dn_prev = alpha.mul_add(dn_i, one_m_alpha * dn_prev); dn_prev } };
-            if i >= warmup { if up_s.is_nan() || dn_s.is_nan() { out[i] = f64::NAN; } else { let denom = up_s + dn_s; out[i] = if denom.abs() < f64::EPSILON { f64::NAN } else { 100.0 * (up_s / denom) }; } }
+            let (up_i, dn_i) = if d.is_nan() || dev.is_nan() {
+                (f64::NAN, f64::NAN)
+            } else if d > 0.0 {
+                (dev, 0.0)
+            } else if d < 0.0 {
+                (0.0, dev)
+            } else {
+                (0.0, 0.0)
+            };
+            let up_s = if use_sma {
+                if up_i.is_nan() {
+                    up_sum = 0.0;
+                    up_cnt = 0;
+                    up_h = 0;
+                    f64::NAN
+                } else if up_cnt < ma_len {
+                    unsafe {
+                        *up_ring.get_unchecked_mut(up_h) = up_i;
+                    }
+                    up_sum += up_i;
+                    bump_idx(&mut up_h, ma_len);
+                    up_cnt += 1;
+                    if up_cnt == ma_len {
+                        up_sum * inv_m
+                    } else {
+                        f64::NAN
+                    }
+                } else {
+                    let old = unsafe { *up_ring.get_unchecked(up_h) };
+                    unsafe {
+                        *up_ring.get_unchecked_mut(up_h) = up_i;
+                    }
+                    up_sum += up_i - old;
+                    bump_idx(&mut up_h, ma_len);
+                    up_sum * inv_m
+                }
+            } else {
+                if up_i.is_nan() {
+                    up_started = false;
+                    up_seed_sum = 0.0;
+                    up_seed_cnt = 0;
+                    f64::NAN
+                } else if !up_started {
+                    up_seed_sum += up_i;
+                    up_seed_cnt += 1;
+                    if up_seed_cnt == ma_len {
+                        up_prev = up_seed_sum * inv_m;
+                        up_started = true;
+                        up_prev
+                    } else {
+                        f64::NAN
+                    }
+                } else {
+                    up_prev = alpha.mul_add(up_i, one_m_alpha * up_prev);
+                    up_prev
+                }
+            };
+            let dn_s = if use_sma {
+                if dn_i.is_nan() {
+                    dn_sum = 0.0;
+                    dn_cnt = 0;
+                    dn_h = 0;
+                    f64::NAN
+                } else if dn_cnt < ma_len {
+                    unsafe {
+                        *dn_ring.get_unchecked_mut(dn_h) = dn_i;
+                    }
+                    dn_sum += dn_i;
+                    bump_idx(&mut dn_h, ma_len);
+                    dn_cnt += 1;
+                    if dn_cnt == ma_len {
+                        dn_sum * inv_m
+                    } else {
+                        f64::NAN
+                    }
+                } else {
+                    let old = unsafe { *dn_ring.get_unchecked(dn_h) };
+                    unsafe {
+                        *dn_ring.get_unchecked_mut(dn_h) = dn_i;
+                    }
+                    dn_sum += dn_i - old;
+                    bump_idx(&mut dn_h, ma_len);
+                    dn_sum * inv_m
+                }
+            } else {
+                if dn_i.is_nan() {
+                    dn_started = false;
+                    dn_seed_sum = 0.0;
+                    dn_seed_cnt = 0;
+                    f64::NAN
+                } else if !dn_started {
+                    dn_seed_sum += dn_i;
+                    dn_seed_cnt += 1;
+                    if dn_seed_cnt == ma_len {
+                        dn_prev = dn_seed_sum * inv_m;
+                        dn_started = true;
+                        dn_prev
+                    } else {
+                        f64::NAN
+                    }
+                } else {
+                    dn_prev = alpha.mul_add(dn_i, one_m_alpha * dn_prev);
+                    dn_prev
+                }
+            };
+            if i >= warmup {
+                if up_s.is_nan() || dn_s.is_nan() {
+                    out[i] = f64::NAN;
+                } else {
+                    let denom = up_s + dn_s;
+                    out[i] = if denom.abs() < f64::EPSILON {
+                        f64::NAN
+                    } else {
+                        100.0 * (up_s / denom)
+                    };
+                }
+            }
         }
         return;
     }
@@ -1070,28 +1381,71 @@ pub fn rvi_scalar_opt(
     // MAD / MEDAD path
     let mut prev = data[0];
     let mut ring = vec![0.0f64; period];
-    let mut head: usize = 0; let mut filled_cnt: usize = 0; let mut ring_sum = 0.0f64;
-    let mut scratch = if devtype == 2 { vec![0.0f64; period] } else { Vec::new() };
+    let mut head: usize = 0;
+    let mut filled_cnt: usize = 0;
+    let mut ring_sum = 0.0f64;
+    let mut scratch = if devtype == 2 {
+        vec![0.0f64; period]
+    } else {
+        Vec::new()
+    };
 
     #[inline(always)]
     fn abs_dev_mean_unrolled(r: &[f64], mean: f64) -> f64 {
-        let mut acc = 0.0f64; let len = r.len(); let mut k = 0usize;
-        while k + 4 <= len { unsafe { let a0 = *r.get_unchecked(k) - mean; let a1 = *r.get_unchecked(k + 1) - mean; let a2 = *r.get_unchecked(k + 2) - mean; let a3 = *r.get_unchecked(k + 3) - mean; acc += a0.abs() + a1.abs() + a2.abs() + a3.abs(); } k += 4; }
-        while k < len { unsafe { acc += (*r.get_unchecked(k) - mean).abs(); } k += 1; }
+        let mut acc = 0.0f64;
+        let len = r.len();
+        let mut k = 0usize;
+        while k + 4 <= len {
+            unsafe {
+                let a0 = *r.get_unchecked(k) - mean;
+                let a1 = *r.get_unchecked(k + 1) - mean;
+                let a2 = *r.get_unchecked(k + 2) - mean;
+                let a3 = *r.get_unchecked(k + 3) - mean;
+                acc += a0.abs() + a1.abs() + a2.abs() + a3.abs();
+            }
+            k += 4;
+        }
+        while k < len {
+            unsafe {
+                acc += (*r.get_unchecked(k) - mean).abs();
+            }
+            k += 1;
+        }
         acc
     }
 
     for i in 0..n {
         let x = unsafe { *data.get_unchecked(i) };
-        let d = if i == 0 || x.is_nan() || prev.is_nan() { f64::NAN } else { x - prev }; prev = x;
+        let d = if i == 0 || x.is_nan() || prev.is_nan() {
+            f64::NAN
+        } else {
+            x - prev
+        };
+        prev = x;
         let dev = if filled_cnt < period {
-            if !x.is_nan() { unsafe { *ring.get_unchecked_mut(head) = x; } ring_sum += x; bump_idx(&mut head, period); filled_cnt += 1;
+            if !x.is_nan() {
+                unsafe {
+                    *ring.get_unchecked_mut(head) = x;
+                }
+                ring_sum += x;
+                bump_idx(&mut head, period);
+                filled_cnt += 1;
                 if filled_cnt == period {
-                    if devtype == 1 { let mean = ring_sum * inv_p; abs_dev_mean_unrolled(&ring, mean) * inv_p }
-                    else {
-                        unsafe { core::ptr::copy_nonoverlapping(ring.as_ptr(), scratch.as_mut_ptr(), period); }
+                    if devtype == 1 {
+                        let mean = ring_sum * inv_p;
+                        abs_dev_mean_unrolled(&ring, mean) * inv_p
+                    } else {
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                ring.as_ptr(),
+                                scratch.as_mut_ptr(),
+                                period,
+                            );
+                        }
                         let mid = period >> 1;
-                        let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+                        let cmp = |a: &f64, b: &f64| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        };
                         let median = if period & 1 == 1 {
                             let (_lt, m, _gt) = scratch.select_nth_unstable_by(mid, cmp);
                             *m
@@ -1109,16 +1463,38 @@ pub fn rvi_scalar_opt(
                         };
                         abs_dev_mean_unrolled(&ring, median) * inv_p
                     }
-                } else { f64::NAN }
-            } else { head = 0; filled_cnt = 0; ring_sum = 0.0; f64::NAN }
+                } else {
+                    f64::NAN
+                }
+            } else {
+                head = 0;
+                filled_cnt = 0;
+                ring_sum = 0.0;
+                f64::NAN
+            }
         } else {
-            if x.is_nan() { head = 0; filled_cnt = 0; ring_sum = 0.0; f64::NAN } else {
-                let leaving = unsafe { *ring.get_unchecked(head) }; unsafe { *ring.get_unchecked_mut(head) = x; } bump_idx(&mut head, period); ring_sum += x - leaving;
-                if devtype == 1 { let mean = ring_sum * inv_p; abs_dev_mean_unrolled(&ring, mean) * inv_p }
-                else {
-                    unsafe { core::ptr::copy_nonoverlapping(ring.as_ptr(), scratch.as_mut_ptr(), period); }
+            if x.is_nan() {
+                head = 0;
+                filled_cnt = 0;
+                ring_sum = 0.0;
+                f64::NAN
+            } else {
+                let leaving = unsafe { *ring.get_unchecked(head) };
+                unsafe {
+                    *ring.get_unchecked_mut(head) = x;
+                }
+                bump_idx(&mut head, period);
+                ring_sum += x - leaving;
+                if devtype == 1 {
+                    let mean = ring_sum * inv_p;
+                    abs_dev_mean_unrolled(&ring, mean) * inv_p
+                } else {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(ring.as_ptr(), scratch.as_mut_ptr(), period);
+                    }
                     let mid = period >> 1;
-                    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+                    let cmp =
+                        |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
                     let median = if period & 1 == 1 {
                         let (_lt, m, _gt) = scratch.select_nth_unstable_by(mid, cmp);
                         *m
@@ -1139,10 +1515,123 @@ pub fn rvi_scalar_opt(
             }
         };
 
-        let (up_i, dn_i) = if d.is_nan() || dev.is_nan() { (f64::NAN, f64::NAN) } else if d > 0.0 { (dev, 0.0) } else if d < 0.0 { (0.0, dev) } else { (0.0, 0.0) };
-        let up_s = if use_sma { if up_i.is_nan() { up_sum = 0.0; up_cnt = 0; up_h = 0; f64::NAN } else if up_cnt < ma_len { unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; } up_sum += up_i; bump_idx(&mut up_h, ma_len); up_cnt += 1; if up_cnt == ma_len { up_sum * inv_m } else { f64::NAN } } else { let old = unsafe { *up_ring.get_unchecked(up_h) }; unsafe { *up_ring.get_unchecked_mut(up_h) = up_i; } up_sum += up_i - old; bump_idx(&mut up_h, ma_len); up_sum * inv_m } } else { if up_i.is_nan() { up_started = false; up_seed_sum = 0.0; up_seed_cnt = 0; f64::NAN } else if !up_started { up_seed_sum += up_i; up_seed_cnt += 1; if up_seed_cnt == ma_len { up_prev = up_seed_sum * inv_m; up_started = true; up_prev } else { f64::NAN } } else { up_prev = alpha.mul_add(up_i, one_m_alpha * up_prev); up_prev } };
-        let dn_s = if use_sma { if dn_i.is_nan() { dn_sum = 0.0; dn_cnt = 0; dn_h = 0; f64::NAN } else if dn_cnt < ma_len { unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; } dn_sum += dn_i; bump_idx(&mut dn_h, ma_len); dn_cnt += 1; if dn_cnt == ma_len { dn_sum * inv_m } else { f64::NAN } } else { let old = unsafe { *dn_ring.get_unchecked(dn_h) }; unsafe { *dn_ring.get_unchecked_mut(dn_h) = dn_i; } dn_sum += dn_i - old; bump_idx(&mut dn_h, ma_len); dn_sum * inv_m } } else { if dn_i.is_nan() { dn_started = false; dn_seed_sum = 0.0; dn_seed_cnt = 0; f64::NAN } else if !dn_started { dn_seed_sum += dn_i; dn_seed_cnt += 1; if dn_seed_cnt == ma_len { dn_prev = dn_seed_sum * inv_m; dn_started = true; dn_prev } else { f64::NAN } } else { dn_prev = alpha.mul_add(dn_i, one_m_alpha * dn_prev); dn_prev } };
-        if i >= warmup { if up_s.is_nan() || dn_s.is_nan() { out[i] = f64::NAN; } else { let denom = up_s + dn_s; out[i] = if denom.abs() < f64::EPSILON { f64::NAN } else { 100.0 * (up_s / denom) }; } }
+        let (up_i, dn_i) = if d.is_nan() || dev.is_nan() {
+            (f64::NAN, f64::NAN)
+        } else if d > 0.0 {
+            (dev, 0.0)
+        } else if d < 0.0 {
+            (0.0, dev)
+        } else {
+            (0.0, 0.0)
+        };
+        let up_s = if use_sma {
+            if up_i.is_nan() {
+                up_sum = 0.0;
+                up_cnt = 0;
+                up_h = 0;
+                f64::NAN
+            } else if up_cnt < ma_len {
+                unsafe {
+                    *up_ring.get_unchecked_mut(up_h) = up_i;
+                }
+                up_sum += up_i;
+                bump_idx(&mut up_h, ma_len);
+                up_cnt += 1;
+                if up_cnt == ma_len {
+                    up_sum * inv_m
+                } else {
+                    f64::NAN
+                }
+            } else {
+                let old = unsafe { *up_ring.get_unchecked(up_h) };
+                unsafe {
+                    *up_ring.get_unchecked_mut(up_h) = up_i;
+                }
+                up_sum += up_i - old;
+                bump_idx(&mut up_h, ma_len);
+                up_sum * inv_m
+            }
+        } else {
+            if up_i.is_nan() {
+                up_started = false;
+                up_seed_sum = 0.0;
+                up_seed_cnt = 0;
+                f64::NAN
+            } else if !up_started {
+                up_seed_sum += up_i;
+                up_seed_cnt += 1;
+                if up_seed_cnt == ma_len {
+                    up_prev = up_seed_sum * inv_m;
+                    up_started = true;
+                    up_prev
+                } else {
+                    f64::NAN
+                }
+            } else {
+                up_prev = alpha.mul_add(up_i, one_m_alpha * up_prev);
+                up_prev
+            }
+        };
+        let dn_s = if use_sma {
+            if dn_i.is_nan() {
+                dn_sum = 0.0;
+                dn_cnt = 0;
+                dn_h = 0;
+                f64::NAN
+            } else if dn_cnt < ma_len {
+                unsafe {
+                    *dn_ring.get_unchecked_mut(dn_h) = dn_i;
+                }
+                dn_sum += dn_i;
+                bump_idx(&mut dn_h, ma_len);
+                dn_cnt += 1;
+                if dn_cnt == ma_len {
+                    dn_sum * inv_m
+                } else {
+                    f64::NAN
+                }
+            } else {
+                let old = unsafe { *dn_ring.get_unchecked(dn_h) };
+                unsafe {
+                    *dn_ring.get_unchecked_mut(dn_h) = dn_i;
+                }
+                dn_sum += dn_i - old;
+                bump_idx(&mut dn_h, ma_len);
+                dn_sum * inv_m
+            }
+        } else {
+            if dn_i.is_nan() {
+                dn_started = false;
+                dn_seed_sum = 0.0;
+                dn_seed_cnt = 0;
+                f64::NAN
+            } else if !dn_started {
+                dn_seed_sum += dn_i;
+                dn_seed_cnt += 1;
+                if dn_seed_cnt == ma_len {
+                    dn_prev = dn_seed_sum * inv_m;
+                    dn_started = true;
+                    dn_prev
+                } else {
+                    f64::NAN
+                }
+            } else {
+                dn_prev = alpha.mul_add(dn_i, one_m_alpha * dn_prev);
+                dn_prev
+            }
+        };
+        if i >= warmup {
+            if up_s.is_nan() || dn_s.is_nan() {
+                out[i] = f64::NAN;
+            } else {
+                let denom = up_s + dn_s;
+                out[i] = if denom.abs() < f64::EPSILON {
+                    f64::NAN
+                } else {
+                    100.0 * (up_s / denom)
+                };
+            }
+        }
     }
 }
 
@@ -1212,8 +1701,8 @@ pub struct RviStream {
     // Params
     period: usize,
     ma_len: usize,
-    matype: usize,   // 0=SMA, 1=EMA
-    devtype: usize,  // 0=StdDev, 1=MeanAbsDev, 2=MedianAbsDev
+    matype: usize,  // 0=SMA, 1=EMA
+    devtype: usize, // 0=StdDev, 1=MeanAbsDev, 2=MedianAbsDev
 
     // Constants
     inv_p: f64,
@@ -1227,9 +1716,9 @@ pub struct RviStream {
     have_prev: bool,
 
     // ---- Sliding window (shared across devtypes) ----
-    win: Vec<f64>,     // last `period` values (ring)
-    head: usize,       // next index to overwrite
-    filled: usize,     // number of valid values in `win` (<= period)
+    win: Vec<f64>, // last `period` values (ring)
+    head: usize,   // next index to overwrite
+    filled: usize, // number of valid values in `win` (<= period)
 
     // ---- devtype=0 (StdDev) ----
     sum: f64,
@@ -1241,10 +1730,10 @@ pub struct RviStream {
 
     // ---- devtype=2 (Median-based mean abs dev) ----
     // Two-heaps + deletable entries (lazy pop) + sums & sizes of valid elements
-    left: BinaryHeap<HeapItem>,             // max-heap (lower half)
-    right: BinaryHeap<Reverse<HeapItem>>,   // min-heap (upper half)
-    side_of_id: Vec<u8>,                    // 0 => left, 1 => right
-    deleted: Vec<u8>,                       // mark obsolete entries (by id)
+    left: BinaryHeap<HeapItem>,           // max-heap (lower half)
+    right: BinaryHeap<Reverse<HeapItem>>, // min-heap (upper half)
+    side_of_id: Vec<u8>,                  // 0 => left, 1 => right
+    deleted: Vec<u8>,                     // mark obsolete entries (by id)
     n_left: usize,
     n_right: usize,
     s_left: f64,
@@ -1289,14 +1778,25 @@ impl RviStream {
         let inv_p = 1.0 / period as f64;
         let inv_m = 1.0 / ma_len as f64;
         let use_sma = matype == 0;
-        let alpha = if use_sma { 0.0 } else { 2.0 / (ma_len as f64 + 1.0) };
+        let alpha = if use_sma {
+            0.0
+        } else {
+            2.0 / (ma_len as f64 + 1.0)
+        };
         let one_m_alpha = 1.0 - alpha;
 
         Ok(Self {
             // params
-            period, ma_len, matype, devtype,
+            period,
+            ma_len,
+            matype,
+            devtype,
             // consts
-            inv_p, inv_m, use_sma, alpha, one_m_alpha,
+            inv_p,
+            inv_m,
+            use_sma,
+            alpha,
+            one_m_alpha,
             // diff state
             prev_x: f64::NAN,
             have_prev: false,
@@ -1319,27 +1819,51 @@ impl RviStream {
             s_left: 0.0,
             s_right: 0.0,
             // smoothing
-            up_ring: if use_sma { vec![0.0; ma_len] } else { Vec::new() },
-            dn_ring: if use_sma { vec![0.0; ma_len] } else { Vec::new() },
-            up_sum: 0.0, dn_sum: 0.0, up_h: 0, dn_h: 0, up_cnt: 0, dn_cnt: 0,
-            up_prev: 0.0, dn_prev: 0.0,
-            up_started: false, dn_started: false,
-            up_seed_sum: 0.0, dn_seed_sum: 0.0,
-            up_seed_cnt: 0, dn_seed_cnt: 0,
+            up_ring: if use_sma {
+                vec![0.0; ma_len]
+            } else {
+                Vec::new()
+            },
+            dn_ring: if use_sma {
+                vec![0.0; ma_len]
+            } else {
+                Vec::new()
+            },
+            up_sum: 0.0,
+            dn_sum: 0.0,
+            up_h: 0,
+            dn_h: 0,
+            up_cnt: 0,
+            dn_cnt: 0,
+            up_prev: 0.0,
+            dn_prev: 0.0,
+            up_started: false,
+            dn_started: false,
+            up_seed_sum: 0.0,
+            dn_seed_sum: 0.0,
+            up_seed_cnt: 0,
+            dn_seed_cnt: 0,
         })
     }
 
     #[inline(always)]
     fn reset_smoothing(&mut self) {
         if self.use_sma {
-            self.up_sum = 0.0; self.dn_sum = 0.0;
-            self.up_h = 0; self.dn_h = 0;
-            self.up_cnt = 0; self.dn_cnt = 0;
+            self.up_sum = 0.0;
+            self.dn_sum = 0.0;
+            self.up_h = 0;
+            self.dn_h = 0;
+            self.up_cnt = 0;
+            self.dn_cnt = 0;
         }
-        self.up_prev = 0.0; self.dn_prev = 0.0;
-        self.up_started = false; self.dn_started = false;
-        self.up_seed_sum = 0.0; self.dn_seed_sum = 0.0;
-        self.up_seed_cnt = 0; self.dn_seed_cnt = 0;
+        self.up_prev = 0.0;
+        self.dn_prev = 0.0;
+        self.up_started = false;
+        self.dn_started = false;
+        self.up_seed_sum = 0.0;
+        self.dn_seed_sum = 0.0;
+        self.up_seed_cnt = 0;
+        self.dn_seed_cnt = 0;
     }
 
     #[inline(always)]
@@ -1357,8 +1881,10 @@ impl RviStream {
         }
         self.left.clear();
         self.right.clear();
-        self.n_left = 0; self.n_right = 0;
-        self.s_left = 0.0; self.s_right = 0.0;
+        self.n_left = 0;
+        self.n_right = 0;
+        self.s_left = 0.0;
+        self.s_right = 0.0;
         self.reset_smoothing();
     }
 
@@ -1366,31 +1892,44 @@ impl RviStream {
     #[inline(always)]
     fn prune_left(&mut self) {
         while let Some(top) = self.left.peek() {
-            if self.deleted[top.id] != 0 { self.left.pop(); } else { break; }
+            if self.deleted[top.id] != 0 {
+                self.left.pop();
+            } else {
+                break;
+            }
         }
     }
     #[inline(always)]
     fn prune_right(&mut self) {
         while let Some(Reverse(top)) = self.right.peek() {
-            if self.deleted[top.id] != 0 { self.right.pop(); } else { break; }
+            if self.deleted[top.id] != 0 {
+                self.right.pop();
+            } else {
+                break;
+            }
         }
     }
     #[inline(always)]
     fn rebalance(&mut self) {
-        self.prune_left(); self.prune_right();
+        self.prune_left();
+        self.prune_right();
         if self.n_left > self.n_right + 1 {
             let item = self.left.pop().unwrap();
             self.prune_left();
-            self.n_left -= 1; self.s_left -= item.val;
-            self.n_right += 1; self.s_right += item.val;
+            self.n_left -= 1;
+            self.s_left -= item.val;
+            self.n_right += 1;
+            self.s_right += item.val;
             self.side_of_id[item.id] = 1;
             self.right.push(Reverse(item));
             self.prune_right();
         } else if self.n_left < self.n_right {
             let Reverse(item) = self.right.pop().unwrap();
             self.prune_right();
-            self.n_right -= 1; self.s_right -= item.val;
-            self.n_left += 1; self.s_left += item.val;
+            self.n_right -= 1;
+            self.s_right -= item.val;
+            self.n_left += 1;
+            self.s_left += item.val;
             self.side_of_id[item.id] = 0;
             self.left.push(item);
             self.prune_left();
@@ -1401,12 +1940,16 @@ impl RviStream {
         self.prune_left();
         if self.n_left == 0 || self.left.peek().map(|t| val <= t.val).unwrap_or(true) {
             self.left.push(HeapItem { val, id });
-            self.side_of_id[id] = 0; self.deleted[id] = 0;
-            self.n_left += 1; self.s_left += val;
+            self.side_of_id[id] = 0;
+            self.deleted[id] = 0;
+            self.n_left += 1;
+            self.s_left += val;
         } else {
             self.right.push(Reverse(HeapItem { val, id }));
-            self.side_of_id[id] = 1; self.deleted[id] = 0;
-            self.n_right += 1; self.s_right += val;
+            self.side_of_id[id] = 1;
+            self.deleted[id] = 0;
+            self.n_right += 1;
+            self.s_right += val;
         }
         self.rebalance();
     }
@@ -1414,9 +1957,15 @@ impl RviStream {
     fn median_remove(&mut self, id: usize, val: f64) {
         self.deleted[id] = 1;
         if self.side_of_id[id] == 0 {
-            if self.n_left > 0 { self.n_left -= 1; self.s_left -= val; }
+            if self.n_left > 0 {
+                self.n_left -= 1;
+                self.s_left -= val;
+            }
         } else {
-            if self.n_right > 0 { self.n_right -= 1; self.s_right -= val; }
+            if self.n_right > 0 {
+                self.n_right -= 1;
+                self.s_right -= val;
+            }
         }
         self.rebalance();
     }
@@ -1442,27 +1991,61 @@ impl RviStream {
 
     // smoothing helpers
     #[inline(always)]
-    fn push_sma(sum: &mut f64, ring: &mut [f64], head: &mut usize, cnt: &mut usize, inv_m: f64, x: f64) -> Option<f64> {
+    fn push_sma(
+        sum: &mut f64,
+        ring: &mut [f64],
+        head: &mut usize,
+        cnt: &mut usize,
+        inv_m: f64,
+        x: f64,
+    ) -> Option<f64> {
         if *cnt < ring.len() {
             ring[*head] = x;
             *sum += x;
-            *head += 1; if *head == ring.len() { *head = 0; }
+            *head += 1;
+            if *head == ring.len() {
+                *head = 0;
+            }
             *cnt += 1;
-            if *cnt == ring.len() { Some(*sum * inv_m) } else { None }
+            if *cnt == ring.len() {
+                Some(*sum * inv_m)
+            } else {
+                None
+            }
         } else {
             let old = ring[*head];
             ring[*head] = x;
-            *head += 1; if *head == ring.len() { *head = 0; }
+            *head += 1;
+            if *head == ring.len() {
+                *head = 0;
+            }
             *sum += x - old;
             Some(*sum * inv_m)
         }
     }
 
     #[inline(always)]
-    fn push_ema(prev: &mut f64, started: &mut bool, seed_sum: &mut f64, seed_cnt: &mut usize, ma_len: usize, inv_m: f64, alpha: f64, one_m_alpha: f64, x: f64) -> Option<f64> {
+    fn push_ema(
+        prev: &mut f64,
+        started: &mut bool,
+        seed_sum: &mut f64,
+        seed_cnt: &mut usize,
+        ma_len: usize,
+        inv_m: f64,
+        alpha: f64,
+        one_m_alpha: f64,
+        x: f64,
+    ) -> Option<f64> {
         if !*started {
-            *seed_sum += x; *seed_cnt += 1;
-            if *seed_cnt == ma_len { *prev = *seed_sum * inv_m; *started = true; Some(*prev) } else { None }
+            *seed_sum += x;
+            *seed_cnt += 1;
+            if *seed_cnt == ma_len {
+                *prev = *seed_sum * inv_m;
+                *started = true;
+                Some(*prev)
+            } else {
+                None
+            }
         } else {
             *prev = alpha.mul_add(x, one_m_alpha * *prev);
             Some(*prev)
@@ -1470,14 +2053,20 @@ impl RviStream {
     }
 
     #[inline(always)]
-    fn reset_smoothers_on_gap(&mut self) { self.reset_smoothing(); }
+    fn reset_smoothers_on_gap(&mut self) {
+        self.reset_smoothing();
+    }
 
     #[inline(always)]
     fn combine_rvi(us: Option<f64>, ds: Option<f64>) -> Option<f64> {
         match (us, ds) {
             (Some(u), Some(d)) => {
                 let denom = u + d;
-                if denom.abs() < f64::EPSILON { None } else { Some(100.0 * (u / denom)) }
+                if denom.abs() < f64::EPSILON {
+                    None
+                } else {
+                    Some(100.0 * (u / denom))
+                }
             }
             _ => None,
         }
@@ -1491,7 +2080,11 @@ impl RviStream {
         }
 
         // diff
-        let d = if self.have_prev { value - self.prev_x } else { f64::NAN };
+        let d = if self.have_prev {
+            value - self.prev_x
+        } else {
+            f64::NAN
+        };
         self.prev_x = value;
         self.have_prev = true;
 
@@ -1499,58 +2092,135 @@ impl RviStream {
         let id = self.head;
         if self.filled < self.period {
             self.win[id] = value;
-            self.head += 1; if self.head == self.period { self.head = 0; }
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
+            }
             self.filled += 1;
             match self.devtype {
-                0 => { self.sum += value; self.sumsq += value * value; }
-                1 => { self.mad_sum += value; }
-                2 => { self.median_insert(id, value); }
+                0 => {
+                    self.sum += value;
+                    self.sumsq += value * value;
+                }
+                1 => {
+                    self.mad_sum += value;
+                }
+                2 => {
+                    self.median_insert(id, value);
+                }
                 _ => {}
             }
         } else {
             let leaving = self.win[id];
             self.win[id] = value;
-            self.head += 1; if self.head == self.period { self.head = 0; }
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
+            }
             match self.devtype {
-                0 => { self.sum += value - leaving; self.sumsq += value * value - leaving * leaving; }
-                1 => { self.mad_sum += value - leaving; }
-                2 => { self.median_remove(id, leaving); self.median_insert(id, value); }
+                0 => {
+                    self.sum += value - leaving;
+                    self.sumsq += value * value - leaving * leaving;
+                }
+                1 => {
+                    self.mad_sum += value - leaving;
+                }
+                2 => {
+                    self.median_remove(id, leaving);
+                    self.median_insert(id, value);
+                }
                 _ => {}
             }
         }
 
-        if self.filled < self.period { self.reset_smoothers_on_gap(); return None; }
+        if self.filled < self.period {
+            self.reset_smoothers_on_gap();
+            return None;
+        }
 
         // deviation
         let dev = match self.devtype {
             0 => {
                 let sd = self.stddev_current();
-                if !sd.is_finite() { self.reset_smoothers_on_gap(); return None; }
+                if !sd.is_finite() {
+                    self.reset_smoothers_on_gap();
+                    return None;
+                }
                 sd
             }
             1 => {
                 let mean = self.mad_sum * self.inv_p;
                 let mut abs_sum = 0.0;
-                for k in 0..self.period { abs_sum += (self.win[k] - mean).abs(); }
+                for k in 0..self.period {
+                    abs_sum += (self.win[k] - mean).abs();
+                }
                 abs_sum * self.inv_p
             }
             2 => {
-                if let Some(med) = self.median_value() { self.mean_abs_dev_about_median(med) } else { self.reset_smoothers_on_gap(); return None }
+                if let Some(med) = self.median_value() {
+                    self.mean_abs_dev_about_median(med)
+                } else {
+                    self.reset_smoothers_on_gap();
+                    return None;
+                }
             }
             _ => unreachable!(),
         };
 
-        if !d.is_finite() || !dev.is_finite() { self.reset_smoothers_on_gap(); return None; }
-        let (up_i, dn_i) = if d > 0.0 { (dev, 0.0) } else if d < 0.0 { (0.0, dev) } else { (0.0, 0.0) };
+        if !d.is_finite() || !dev.is_finite() {
+            self.reset_smoothers_on_gap();
+            return None;
+        }
+        let (up_i, dn_i) = if d > 0.0 {
+            (dev, 0.0)
+        } else if d < 0.0 {
+            (0.0, dev)
+        } else {
+            (0.0, 0.0)
+        };
 
         // smoothing
         let (up_s, dn_s) = if self.use_sma {
-            let up_s = Self::push_sma(&mut self.up_sum, &mut self.up_ring, &mut self.up_h, &mut self.up_cnt, self.inv_m, up_i);
-            let dn_s = Self::push_sma(&mut self.dn_sum, &mut self.dn_ring, &mut self.dn_h, &mut self.dn_cnt, self.inv_m, dn_i);
+            let up_s = Self::push_sma(
+                &mut self.up_sum,
+                &mut self.up_ring,
+                &mut self.up_h,
+                &mut self.up_cnt,
+                self.inv_m,
+                up_i,
+            );
+            let dn_s = Self::push_sma(
+                &mut self.dn_sum,
+                &mut self.dn_ring,
+                &mut self.dn_h,
+                &mut self.dn_cnt,
+                self.inv_m,
+                dn_i,
+            );
             (up_s, dn_s)
         } else {
-            let up_s = Self::push_ema(&mut self.up_prev, &mut self.up_started, &mut self.up_seed_sum, &mut self.up_seed_cnt, self.ma_len, self.inv_m, self.alpha, self.one_m_alpha, up_i);
-            let dn_s = Self::push_ema(&mut self.dn_prev, &mut self.dn_started, &mut self.dn_seed_sum, &mut self.dn_seed_cnt, self.ma_len, self.inv_m, self.alpha, self.one_m_alpha, dn_i);
+            let up_s = Self::push_ema(
+                &mut self.up_prev,
+                &mut self.up_started,
+                &mut self.up_seed_sum,
+                &mut self.up_seed_cnt,
+                self.ma_len,
+                self.inv_m,
+                self.alpha,
+                self.one_m_alpha,
+                up_i,
+            );
+            let dn_s = Self::push_ema(
+                &mut self.dn_prev,
+                &mut self.dn_started,
+                &mut self.dn_seed_sum,
+                &mut self.dn_seed_cnt,
+                self.ma_len,
+                self.inv_m,
+                self.alpha,
+                self.one_m_alpha,
+                dn_i,
+            );
             (up_s, dn_s)
         };
 

@@ -354,10 +354,10 @@ pub unsafe fn sma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
         k += 4;
     }
     // horizontal reduce acc256 to scalar
-    let hadd = _mm256_hadd_pd(acc256, acc256);                       // [x0+x1, x2+x3, x0+x1, x2+x3]
-    let lo = _mm256_castpd256_pd128(hadd);                           // lower 128
-    let hi = _mm256_extractf128_pd(hadd, 1);                          // upper 128
-    let sum128 = _mm_add_sd(lo, hi);                                  // (x0+x1)+(x2+x3)
+    let hadd = _mm256_hadd_pd(acc256, acc256); // [x0+x1, x2+x3, x0+x1, x2+x3]
+    let lo = _mm256_castpd256_pd128(hadd); // lower 128
+    let hi = _mm256_extractf128_pd(hadd, 1); // upper 128
+    let sum128 = _mm_add_sd(lo, hi); // (x0+x1)+(x2+x3)
     let mut sum = _mm_cvtsd_f64(sum128);
     // leftovers
     while k < period {
@@ -383,20 +383,20 @@ pub unsafe fn sma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
 
         // inclusive scan of d across 4 lanes:
         // do two 128-bit scans and add cross-carry
-        let d_lo = _mm256_castpd256_pd128(d);           // [d0, d1]
-        let d_hi = _mm256_extractf128_pd(d, 1);         // [d2, d3]
+        let d_lo = _mm256_castpd256_pd128(d); // [d0, d1]
+        let d_hi = _mm256_extractf128_pd(d, 1); // [d2, d3]
 
         // prefix for low 128: [d0, d0+d1]
         let t_lo = _mm_unpacklo_pd(_mm_setzero_pd(), d_lo); // [0, d0]
-        let p_lo = _mm_add_pd(d_lo, t_lo);                   // [d0, d0+d1]
+        let p_lo = _mm_add_pd(d_lo, t_lo); // [d0, d0+d1]
 
         // prefix for high 128: [d2, d2+d3]
-        let t_hi = _mm_unpacklo_pd(_mm_setzero_pd(), d_hi);  // [0, d2]
-        let mut p_hi = _mm_add_pd(d_hi, t_hi);               // [d2, d2+d3]
+        let t_hi = _mm_unpacklo_pd(_mm_setzero_pd(), d_hi); // [0, d2]
+        let mut p_hi = _mm_add_pd(d_hi, t_hi); // [d2, d2+d3]
 
         // carry from low (replicate high lane of p_lo)
-        let carry = _mm_permute_pd(p_lo, 0b11);              // [p_lo[1], p_lo[1]]
-        p_hi = _mm_add_pd(p_hi, carry);                      // [d0+d1+d2, d0+d1+d2+d3]
+        let carry = _mm_permute_pd(p_lo, 0b11); // [p_lo[1], p_lo[1]]
+        p_hi = _mm_add_pd(p_hi, carry); // [d0+d1+d2, d0+d1+d2+d3]
 
         // combine back into 256
         let mut prefix = _mm256_castpd128_pd256(p_lo);
@@ -534,7 +534,7 @@ pub unsafe fn sma_avx512_long(data: &[f64], period: usize, first: usize, out: &m
         _mm512_storeu_pd(op.add(i), out_v);
 
         // update running sum with last lane
-        let sums_hi256 = _mm512_extractf64x4_pd(sums, 1);     // lanes 4..7
+        let sums_hi256 = _mm512_extractf64x4_pd(sums, 1); // lanes 4..7
         let sums_hi128 = _mm256_extractf128_pd(sums_hi256, 1); // lanes 6..7
         let last = _mm_unpackhi_pd(sums_hi128, sums_hi128);
         sum = _mm_cvtsd_f64(last);
@@ -568,7 +568,10 @@ impl SmaStream {
     pub fn try_new(params: SmaParams) -> Result<Self, SmaError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(SmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(SmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let use_mask = period.is_power_of_two();
         Ok(Self {
@@ -902,7 +905,9 @@ fn sma_batch_inner_into(
         let inv = 1.0 / (period as f64);
         // cast this row to &mut [f64]
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
-        if warm >= cols { return; }
+        if warm >= cols {
+            return;
+        }
         // Fill valid outputs using prefix sums
         let mut i = warm;
         while i < cols {

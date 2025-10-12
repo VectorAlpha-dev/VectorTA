@@ -498,12 +498,12 @@ pub unsafe fn ttm_trend_avx512_long(
 #[derive(Debug, Clone)]
 pub struct TtmTrendStream {
     period: usize,
-    inv_period: f64,   // precomputed 1/period
-    buffer: Vec<f64>,  // ring buffer of last `period` source values
-    sum: f64,          // rolling sum of the window
-    head: usize,       // write index
-    len: usize,        // number of values seen so far (capped at `period`)
-    pow2_mask: usize,  // period-1 if power-of-two, else 0
+    inv_period: f64,  // precomputed 1/period
+    buffer: Vec<f64>, // ring buffer of last `period` source values
+    sum: f64,         // rolling sum of the window
+    head: usize,      // write index
+    len: usize,       // number of values seen so far (capped at `period`)
+    pow2_mask: usize, // period-1 if power-of-two, else 0
 }
 
 impl TtmTrendStream {
@@ -511,9 +511,16 @@ impl TtmTrendStream {
     pub fn try_new(params: TtmTrendParams) -> Result<Self, TtmTrendError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(TtmTrendError::InvalidPeriod { period, data_len: 0 });
+            return Err(TtmTrendError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
-        let pow2_mask = if period.is_power_of_two() { period - 1 } else { 0 };
+        let pow2_mask = if period.is_power_of_two() {
+            period - 1
+        } else {
+            0
+        };
         Ok(Self {
             period,
             inv_period: 1.0 / (period as f64),
@@ -544,7 +551,7 @@ impl TtmTrendStream {
             self.buffer[self.head] = src_val;
             self.sum += src_val - old; // keeps `sum` as last src
             self.len = 1; // becomes and stays full
-            // head stays 0 (bump would also keep it 0 via mask path)
+                          // head stays 0 (bump would also keep it 0 via mask path)
             return Some(close_val > src_val);
         }
 
@@ -1805,20 +1812,17 @@ pub fn ttm_trend_into_slice(
     let (source, close, period, first, chosen) = ttm_prepare(input, kern)?;
     let len = source.len().min(close.len());
     if dst.len() != len {
-        return Err(TtmTrendError::OutputLenMismatch { expected: len, got: dst.len() });
+        return Err(TtmTrendError::OutputLenMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
     match chosen {
-        Kernel::Scalar | Kernel::ScalarBatch => {
-            ttm_trend_scalar(source, close, period, first, dst)
-        }
+        Kernel::Scalar | Kernel::ScalarBatch => ttm_trend_scalar(source, close, period, first, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 | Kernel::Avx2Batch => {
-            ttm_trend_avx2(source, close, period, first, dst)
-        }
+        Kernel::Avx2 | Kernel::Avx2Batch => ttm_trend_avx2(source, close, period, first, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 | Kernel::Avx512Batch => {
-            ttm_trend_avx512(source, close, period, first, dst)
-        }
+        Kernel::Avx512 | Kernel::Avx512Batch => ttm_trend_avx512(source, close, period, first, dst),
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
             ttm_trend_scalar(source, close, period, first, dst)

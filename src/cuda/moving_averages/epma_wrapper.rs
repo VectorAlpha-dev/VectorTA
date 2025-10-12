@@ -17,7 +17,9 @@ use crate::indicators::moving_averages::epma::{EpmaBatchRange, EpmaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
+use cust::memory::{
+    mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer,
+};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -51,17 +53,24 @@ pub struct CudaEpmaPolicy {
 
 impl Default for CudaEpmaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaEpmaError {
@@ -108,11 +117,11 @@ impl CudaEpma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaEpmaError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -133,15 +142,26 @@ impl CudaEpma {
     }
 
     /// Create using an explicit policy.
-    pub fn new_with_policy(device_id: usize, policy: CudaEpmaPolicy) -> Result<Self, CudaEpmaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaEpmaPolicy,
+    ) -> Result<Self, CudaEpmaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaEpmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaEpmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaEpmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaEpmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     /// Expose synchronize for benches/tests that pre-stage device buffers.
     pub fn synchronize(&self) -> Result<(), CudaEpmaError> {
@@ -157,7 +177,9 @@ impl CudaEpma {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
@@ -173,14 +195,18 @@ impl CudaEpma {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_s = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_s || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EPMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEpma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEpma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -188,14 +214,18 @@ impl CudaEpma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per_s = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_s || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EPMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEpma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEpma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -203,12 +233,10 @@ impl CudaEpma {
     #[inline]
     fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
         const MAX_GRID_Y: usize = 65_535;
-        (0..n)
-            .step_by(MAX_GRID_Y)
-            .map(move |start| {
-                let len = (n - start).min(MAX_GRID_Y);
-                (start, len)
-            })
+        (0..n).step_by(MAX_GRID_Y).map(move |start| {
+            let len = (n - start).min(MAX_GRID_Y);
+            (start, len)
+        })
     }
 
     fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
@@ -613,9 +641,14 @@ impl CudaEpma {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEpmaError> {
-        if period < 2 { return Err(CudaEpmaError::InvalidInput("period must be >= 2".into())); }
+        if period < 2 {
+            return Err(CudaEpmaError::InvalidInput("period must be >= 2".into()));
+        }
         if offset >= period {
-            return Err(CudaEpmaError::InvalidInput(format!("offset {} must be < period {}", offset, period)));
+            return Err(CudaEpmaError::InvalidInput(format!(
+                "offset {} must be < period {}",
+                offset, period
+            )));
         }
 
         let block_x = match self.policy.many_series {
@@ -794,8 +827,14 @@ pub mod benches {
         crate::indicators::moving_averages::epma::EpmaParams,
         epma_batch_dev,
         epma_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::epma::EpmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), offset: (4, 4, 0) },
-        crate::indicators::moving_averages::epma::EpmaParams { period: Some(64), offset: Some(4) },
+        crate::indicators::moving_averages::epma::EpmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            offset: (4, 4, 0)
+        },
+        crate::indicators::moving_averages::epma::EpmaParams {
+            period: Some(64),
+            offset: Some(4)
+        },
         "epma",
         "epma"
     );

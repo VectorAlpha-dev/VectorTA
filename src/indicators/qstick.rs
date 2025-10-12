@@ -322,16 +322,13 @@ pub fn qstick_scalar(
         sum = (sum + (close[i_new] - open[i_new])) - (close[i_old] - open[i_old]);
         out[i_new] = sum * inv_p;
         // 1
-        sum = (sum + (close[i_new + 1] - open[i_new + 1]))
-            - (close[i_old + 1] - open[i_old + 1]);
+        sum = (sum + (close[i_new + 1] - open[i_new + 1])) - (close[i_old + 1] - open[i_old + 1]);
         out[i_new + 1] = sum * inv_p;
         // 2
-        sum = (sum + (close[i_new + 2] - open[i_new + 2]))
-            - (close[i_old + 2] - open[i_old + 2]);
+        sum = (sum + (close[i_new + 2] - open[i_new + 2])) - (close[i_old + 2] - open[i_old + 2]);
         out[i_new + 2] = sum * inv_p;
         // 3
-        sum = (sum + (close[i_new + 3] - open[i_new + 3]))
-            - (close[i_old + 3] - open[i_old + 3]);
+        sum = (sum + (close[i_new + 3] - open[i_new + 3])) - (close[i_old + 3] - open[i_old + 3]);
         out[i_new + 3] = sum * inv_p;
 
         i_new += 4;
@@ -463,18 +460,15 @@ unsafe fn qstick_avx2_impl(
             - (*close.get_unchecked(i_old) - *open.get_unchecked(i_old));
         *out.get_unchecked_mut(i_new) = sum * inv_p;
         // 1
-        sum = (sum
-            + (*close.get_unchecked(i_new + 1) - *open.get_unchecked(i_new + 1)))
+        sum = (sum + (*close.get_unchecked(i_new + 1) - *open.get_unchecked(i_new + 1)))
             - (*close.get_unchecked(i_old + 1) - *open.get_unchecked(i_old + 1));
         *out.get_unchecked_mut(i_new + 1) = sum * inv_p;
         // 2
-        sum = (sum
-            + (*close.get_unchecked(i_new + 2) - *open.get_unchecked(i_new + 2)))
+        sum = (sum + (*close.get_unchecked(i_new + 2) - *open.get_unchecked(i_new + 2)))
             - (*close.get_unchecked(i_old + 2) - *open.get_unchecked(i_old + 2));
         *out.get_unchecked_mut(i_new + 2) = sum * inv_p;
         // 3
-        sum = (sum
-            + (*close.get_unchecked(i_new + 3) - *open.get_unchecked(i_new + 3)))
+        sum = (sum + (*close.get_unchecked(i_new + 3) - *open.get_unchecked(i_new + 3)))
             - (*close.get_unchecked(i_old + 3) - *open.get_unchecked(i_old + 3));
         *out.get_unchecked_mut(i_new + 3) = sum * inv_p;
 
@@ -568,18 +562,15 @@ unsafe fn qstick_avx512_impl(
             - (*close.get_unchecked(i_old) - *open.get_unchecked(i_old));
         *out.get_unchecked_mut(i_new) = sum * inv_p;
 
-        sum = (sum
-            + (*close.get_unchecked(i_new + 1) - *open.get_unchecked(i_new + 1)))
+        sum = (sum + (*close.get_unchecked(i_new + 1) - *open.get_unchecked(i_new + 1)))
             - (*close.get_unchecked(i_old + 1) - *open.get_unchecked(i_old + 1));
         *out.get_unchecked_mut(i_new + 1) = sum * inv_p;
 
-        sum = (sum
-            + (*close.get_unchecked(i_new + 2) - *open.get_unchecked(i_new + 2)))
+        sum = (sum + (*close.get_unchecked(i_new + 2) - *open.get_unchecked(i_new + 2)))
             - (*close.get_unchecked(i_old + 2) - *open.get_unchecked(i_old + 2));
         *out.get_unchecked_mut(i_new + 2) = sum * inv_p;
 
-        sum = (sum
-            + (*close.get_unchecked(i_new + 3) - *open.get_unchecked(i_new + 3)))
+        sum = (sum + (*close.get_unchecked(i_new + 3) - *open.get_unchecked(i_new + 3)))
             - (*close.get_unchecked(i_old + 3) - *open.get_unchecked(i_old + 3));
         *out.get_unchecked_mut(i_new + 3) = sum * inv_p;
 
@@ -1054,12 +1045,12 @@ pub struct QstickStream {
     /// Decision: streaming kernel uses O(1) ring buffer with length counter and reciprocal.
     /// Same warmup semantics; avoids NaN sentinel and uses bitmask wrap when period is power-of-two.
     period: usize,
-    inv_p: f64,        // 1.0 / period, avoids a division every tick
-    buffer: Vec<f64>,  // ring buffer of last `period` diffs (close - open)
-    head: usize,       // write index
-    len: usize,        // number of valid elements in buffer, clamped to period
-    sum: f64,          // rolling sum of diffs in the current window
-    mask: usize,       // period - 1 if period is power-of-two, else 0
+    inv_p: f64,       // 1.0 / period, avoids a division every tick
+    buffer: Vec<f64>, // ring buffer of last `period` diffs (close - open)
+    head: usize,      // write index
+    len: usize,       // number of valid elements in buffer, clamped to period
+    sum: f64,         // rolling sum of diffs in the current window
+    mask: usize,      // period - 1 if period is power-of-two, else 0
 }
 
 impl QstickStream {
@@ -1067,9 +1058,16 @@ impl QstickStream {
     pub fn try_new(params: QstickParams) -> Result<Self, QstickError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(QstickError::InvalidPeriod { period, data_len: 0 });
+            return Err(QstickError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
-        let mask = if period.is_power_of_two() { period - 1 } else { 0 };
+        let mask = if period.is_power_of_two() {
+            period - 1
+        } else {
+            0
+        };
         Ok(Self {
             period,
             inv_p: 1.0 / (period as f64),
@@ -1145,7 +1143,11 @@ impl QstickStream {
                 h + 1
             };
             self.len += 1;
-            if self.len == self.period { Some(self.sum * self.inv_p) } else { None }
+            if self.len == self.period {
+                Some(self.sum * self.inv_p)
+            } else {
+                None
+            }
         } else {
             let old = self.buffer[h];
             self.sum += diff - old;

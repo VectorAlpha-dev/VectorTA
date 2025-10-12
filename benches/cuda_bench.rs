@@ -1,9 +1,9 @@
 #![cfg(feature = "cuda")]
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use std::time::{Duration, Instant};
 use cust::memory::mem_get_info;
 use my_project::cuda::{self, CudaBenchScenario};
+use std::time::{Duration, Instant};
 
 fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     let mut v = Vec::new();
@@ -27,7 +27,9 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::moving_averages::ehlers_ecema_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::vpwma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::vama_wrapper::benches::bench_profiles());
-    v.extend(my_project::cuda::moving_averages::volume_adjusted_ma_wrapper::benches::bench_profiles());
+    v.extend(
+        my_project::cuda::moving_averages::volume_adjusted_ma_wrapper::benches::bench_profiles(),
+    );
     v.extend(my_project::cuda::moving_averages::vwma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::vwap_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::edcf_wrapper::benches::bench_profiles());
@@ -49,7 +51,9 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::moving_averages::highpass2_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::trendflex_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::supersmoother_wrapper::benches::bench_profiles());
-    v.extend(my_project::cuda::moving_averages::supersmoother_3_pole_wrapper::benches::bench_profiles());
+    v.extend(
+        my_project::cuda::moving_averages::supersmoother_3_pole_wrapper::benches::bench_profiles(),
+    );
     v.extend(my_project::cuda::moving_averages::mama_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::ehlers_pma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::linreg_wrapper::benches::bench_profiles());
@@ -77,7 +81,9 @@ fn run_registered_benches(c: &mut Criterion) {
     if !cuda::cuda_available() {
         // No device; register a tiny no-op bench so Criterion runs cleanly.
         let mut group = c.benchmark_group("cuda_unavailable");
-        group.bench_with_input(BenchmarkId::new("skip", "no_device"), &0, |b, _| b.iter(|| 0));
+        group.bench_with_input(BenchmarkId::new("skip", "no_device"), &0, |b, _| {
+            b.iter(|| 0)
+        });
         group.finish();
         return;
     }
@@ -94,7 +100,9 @@ fn run_registered_benches(c: &mut Criterion) {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(1500);
-        if warm_ms == 0 { return; }
+        if warm_ms == 0 {
+            return;
+        }
         let t0 = Instant::now();
         while t0.elapsed().as_millis() < warm_ms as u128 {
             state.launch();
@@ -122,11 +130,12 @@ fn run_registered_benches(c: &mut Criterion) {
         if let Some(req) = scen.mem_required {
             if let Ok((free, _total)) = mem_get_info() {
                 if req > free {
-                    let id = scen
-                        .skip_label
-                        .unwrap_or_else(|| scen.group)
-                        .to_string();
-                    group.bench_with_input(BenchmarkId::new("skipped_insufficient_vram", id), &0, |b, _| b.iter(|| 0));
+                    let id = scen.skip_label.unwrap_or_else(|| scen.group).to_string();
+                    group.bench_with_input(
+                        BenchmarkId::new("skipped_insufficient_vram", id),
+                        &0,
+                        |b, _| b.iter(|| 0),
+                    );
                     group.finish();
                     continue;
                 }
@@ -143,7 +152,9 @@ fn run_registered_benches(c: &mut Criterion) {
                 b.iter_custom(|iters| {
                     let total = iters.saturating_mul(inner as u64);
                     let start = Instant::now();
-                    for _ in 0..total { state.launch(); }
+                    for _ in 0..total {
+                        state.launch();
+                    }
                     let elapsed = start.elapsed();
                     // Return average per-iteration time, which we scale down by `inner`
                     // so Criterion reports time per single kernel launch.

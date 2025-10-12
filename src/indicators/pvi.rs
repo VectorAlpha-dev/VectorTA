@@ -413,7 +413,9 @@ pub fn pvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, initial: f64,
     }
 
     #[inline(always)]
-    fn not_nan(x: f64) -> bool { x == x }
+    fn not_nan(x: f64) -> bool {
+        x == x
+    }
 
     unsafe {
         let mut pvi = initial;
@@ -884,7 +886,9 @@ fn pvi_batch_inner_into(
     scale[first_valid_idx] = 1.0;
 
     #[inline(always)]
-    fn not_nan(x: f64) -> bool { x == x }
+    fn not_nan(x: f64) -> bool {
+        x == x
+    }
 
     unsafe {
         let mut prev_close = *close.get_unchecked(first_valid_idx);

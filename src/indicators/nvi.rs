@@ -162,9 +162,9 @@ impl NviStream {
     #[inline]
     pub fn try_new() -> Result<Self, NviError> {
         Ok(Self {
-            prev_close: 0.0,   // initialized on the first valid sample
-            prev_volume: 0.0,  // initialized on the first valid sample
-            nvi_val: 1000.0,   // StockCharts/Fosback convention
+            prev_close: 0.0,  // initialized on the first valid sample
+            prev_volume: 0.0, // initialized on the first valid sample
+            nvi_val: 1000.0,  // StockCharts/Fosback convention
             started: false,
         })
     }

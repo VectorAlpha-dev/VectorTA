@@ -479,10 +479,17 @@ impl CudaSqwma {
         let bx = Self::block_x() as u64;
         let opt = Self::out_per_thread() as u64;
         let tile = bx * opt;
-        let need = if tile == 0 { 1 } else { ((series_len as u64) + tile - 1) / tile };
+        let need = if tile == 0 {
+            1
+        } else {
+            ((series_len as u64) + tile - 1) / tile
+        };
         // target many resident blocks per SM to hide latency
         let target = (self.sm_count.max(1) as u32) * 32;
-        let gx = std::cmp::max(1, std::cmp::min(need.min(self.max_grid_x as u64) as u32, target));
+        let gx = std::cmp::max(
+            1,
+            std::cmp::min(need.min(self.max_grid_x as u64) as u32, target),
+        );
         gx
     }
 
@@ -600,8 +607,8 @@ impl CudaSqwma {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;

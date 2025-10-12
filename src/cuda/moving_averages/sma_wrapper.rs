@@ -13,10 +13,10 @@
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::sma::{expand_grid_sma, SmaBatchRange, SmaParams};
-use cust::context::{Context, CacheConfig};
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
-use cust::function::{BlockSize, GridSize, Function};
-use cust::memory::{DeviceBuffer, LockedBuffer, AsyncCopyDestination};
+use cust::function::{BlockSize, Function, GridSize};
+use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -71,7 +71,8 @@ impl CudaSma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaSmaError::Cuda(e.to_string()))?
@@ -203,11 +204,7 @@ impl CudaSma {
                     .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
                 suggested
             }
-            Some(s) => s
-                .parse::<u32>()
-                .ok()
-                .filter(|&v| v > 0)
-                .unwrap_or(128),
+            Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
             None => {
                 let (_min_grid, suggested) = func
                     .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
@@ -255,7 +252,7 @@ impl CudaSma {
         let rows = combos.len();
         let bytes_required = len * std::mem::size_of::<f32>()   // prices
             + rows * std::mem::size_of::<i32>()                 // periods
-            + rows * len * std::mem::size_of::<f32>();          // outputs
+            + rows * len * std::mem::size_of::<f32>(); // outputs
         let headroom = env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -276,19 +273,16 @@ impl CudaSma {
             let h_periods = LockedBuffer::from_slice(&periods)
                 .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
 
-            let mut d_prices = unsafe {
-                DeviceBuffer::<f32>::uninitialized_async(len, &self.stream)
-            }
-            .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
-            let mut d_periods = unsafe {
-                DeviceBuffer::<i32>::uninitialized_async(combos.len(), &self.stream)
-            }
-            .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
+            let mut d_prices =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
+                    .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
+            let mut d_periods =
+                unsafe { DeviceBuffer::<i32>::uninitialized_async(combos.len(), &self.stream) }
+                    .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
             let elems = combos.len() * len;
-            let mut d_out = unsafe {
-                DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream)
-            }
-            .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
+            let mut d_out =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+                    .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
 
             unsafe {
                 d_prices
@@ -463,11 +457,7 @@ impl CudaSma {
                     .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
                 suggested
             }
-            Some(s) => s
-                .parse::<u32>()
-                .ok()
-                .filter(|&v| v > 0)
-                .unwrap_or(128),
+            Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
             None => {
                 let (_min_grid, suggested) = func
                     .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
@@ -519,19 +509,16 @@ impl CudaSma {
             let h_first = LockedBuffer::from_slice(first_valids)
                 .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
 
-            let mut d_prices = unsafe {
-                DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream)
-            }
-            .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
-            let mut d_first = unsafe {
-                DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream)
-            }
-            .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
+            let mut d_prices =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                    .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
+            let mut d_first =
+                unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
+                    .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
             let elems = cols * rows;
-            let mut d_out = unsafe {
-                DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream)
-            }
-            .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
+            let mut d_out =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+                    .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
 
             unsafe {
                 d_prices
@@ -548,7 +535,11 @@ impl CudaSma {
                 .synchronize()
                 .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
 
-            Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+            Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols,
+            })
         } else {
             // Synchronous fallback
             let d_prices = DeviceBuffer::from_slice(data_tm_f32)
@@ -561,7 +552,11 @@ impl CudaSma {
 
             self.launch_many_series_kernel(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
 
-            Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+            Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols,
+            })
         }
     }
 
@@ -613,7 +608,8 @@ impl CudaSma {
         if out_pinned.len() != expected {
             return Err(CudaSmaError::InvalidInput(format!(
                 "output length mismatch: expected {}, got {}",
-                expected, out_pinned.len()
+                expected,
+                out_pinned.len()
             )));
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len)?;
@@ -666,13 +662,24 @@ impl CudaSma {
         first_valid: usize,
     ) -> Result<DeviceArrayF32, CudaSmaError> {
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
+        let d_periods =
+            DeviceBuffer::from_slice(&periods).map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
         let elems = combos.len() * len;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
             .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
-        self.launch_batch_kernel(d_prices, &d_periods, len, combos.len(), first_valid, &mut d_out)?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
+        self.launch_batch_kernel(
+            d_prices,
+            &d_periods,
+            len,
+            combos.len(),
+            first_valid,
+            &mut d_out,
+        )?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
     }
 
     pub fn sma_multi_series_one_param_time_major_dev_from_device(
@@ -686,8 +693,19 @@ impl CudaSma {
         let elems = cols * rows;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
             .map_err(|e| CudaSmaError::Cuda(e.to_string()))?;
-        self.launch_many_series_kernel(d_prices_tm, d_first_valids, cols, rows, period, &mut d_out)?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        self.launch_many_series_kernel(
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            &mut d_out,
+        )?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
 
@@ -704,7 +722,9 @@ pub mod benches {
         crate::indicators::moving_averages::sma::SmaParams,
         sma_batch_dev,
         sma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::sma::SmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::sma::SmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::sma::SmaParams { period: Some(64) },
         "sma",
         "sma"

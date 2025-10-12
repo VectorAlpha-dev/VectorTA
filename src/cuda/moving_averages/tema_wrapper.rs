@@ -18,7 +18,7 @@ use crate::indicators::moving_averages::tema::{TemaBatchRange, TemaParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer, AsyncCopyDestination};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -38,7 +38,9 @@ fn env_warps_per_block() -> u32 {
         .unwrap_or(4)
 }
 #[inline]
-const fn qnan_u32() -> u32 { 0x7fc0_0000 }
+const fn qnan_u32() -> u32 {
+    0x7fc0_0000
+}
 
 // ---------------- Kernel policy & selection (mirrors ALMA structure) ----------------
 
@@ -64,16 +66,23 @@ pub struct CudaTemaPolicy {
 
 impl Default for CudaTemaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 // Introspection (selected at last launch)
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaTemaError {
@@ -125,7 +134,8 @@ impl CudaTema {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaTemaError::Cuda(e.to_string()))?
@@ -153,27 +163,43 @@ impl CudaTema {
     }
 
     /// Create with explicit policy (useful for tests/benches)
-    pub fn new_with_policy(device_id: usize, policy: CudaTemaPolicy) -> Result<Self, CudaTemaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaTemaPolicy,
+    ) -> Result<Self, CudaTemaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaTemaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaTemaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaTemaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaTemaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TEMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTema)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTema)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -181,14 +207,19 @@ impl CudaTema {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TEMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTema)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTema)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -202,7 +233,9 @@ impl CudaTema {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -217,7 +250,9 @@ impl CudaTema {
     }
 
     #[inline]
-    fn grid_x_chunks(_n: usize) -> impl Iterator<Item = (usize, usize)> { std::iter::empty() }
+    fn grid_x_chunks(_n: usize) -> impl Iterator<Item = (usize, usize)> {
+        std::iter::empty()
+    }
 
     #[inline]
     fn chunk_items_by_grid_x(&self, items: usize) -> impl Iterator<Item = (usize, usize)> {
@@ -409,8 +444,10 @@ impl CudaTema {
 
         // Chunk by real grid.x capacity under warp mapping when needed
         for (start, len) in self.chunk_items_by_grid_x(n_combos) {
-            let periods_ptr_raw = d_periods.as_device_ptr().as_raw() + (start * core::mem::size_of::<i32>()) as u64;
-            let out_ptr_raw = d_out.as_device_ptr().as_raw() + (start * series_len * core::mem::size_of::<f32>()) as u64;
+            let periods_ptr_raw =
+                d_periods.as_device_ptr().as_raw() + (start * core::mem::size_of::<i32>()) as u64;
+            let out_ptr_raw = d_out.as_device_ptr().as_raw()
+                + (start * series_len * core::mem::size_of::<f32>()) as u64;
 
             self.launch_batch_kernel_chunk(
                 &d_prices,
@@ -528,7 +565,10 @@ impl CudaTema {
             .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
 
         let (grid, block, block_x) = self.warp_launch_dims(n_combos);
-        unsafe { (*(self as *const _ as *mut CudaTema)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaTema)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
 
         unsafe {
@@ -568,7 +608,10 @@ impl CudaTema {
             .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
 
         let (grid, block, block_x) = self.warp_launch_dims(num_series);
-        unsafe { (*(self as *const _ as *mut CudaTema)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaTema)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         unsafe {
@@ -713,7 +756,9 @@ pub mod benches {
         CudaTema,
         crate::indicators::moving_averages::tema::TemaBatchRange,
         tema_batch_dev,
-        crate::indicators::moving_averages::tema::TemaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::tema::TemaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         "tema",
         "tema"
     );
@@ -728,10 +773,8 @@ impl CudaTema {
             use cust::sys::{
                 cuCtxSetLimit, cuDeviceGetAttribute, cuStreamSetAttribute,
                 CUaccessPolicyWindow_v1 as CUaccessPolicyWindow,
-                CUaccessProperty_enum as AccessProp,
-                CUdevice_attribute_enum as DevAttr,
-                CUlimit_enum as CULimit,
-                CUstreamAttrID_enum as StreamAttrId,
+                CUaccessProperty_enum as AccessProp, CUdevice_attribute_enum as DevAttr,
+                CUlimit_enum as CULimit, CUstreamAttrID_enum as StreamAttrId,
                 CUstreamAttrValue_v1 as CUstreamAttrValue,
             };
 
@@ -745,7 +788,9 @@ impl CudaTema {
                 );
             }
             let max_bytes = (max_win_i32.max(0) as usize).min(bytes);
-            if max_bytes == 0 { return; }
+            if max_bytes == 0 {
+                return;
+            }
 
             // Best-effort set-aside for L2 persistence
             let _ = cuCtxSetLimit(CULimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, max_bytes);

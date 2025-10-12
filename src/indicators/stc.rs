@@ -599,8 +599,16 @@ pub unsafe fn stc_scalar_classic_ema(
     }
 
     // Seed EMAs to SMA of first 'period' points (matching prior behavior)
-    let mut fast_ema = if fast <= n { fast_sum / fast as f64 } else { f64::NAN };
-    let mut slow_ema = if slow <= n { slow_sum / slow as f64 } else { f64::NAN };
+    let mut fast_ema = if fast <= n {
+        fast_sum / fast as f64
+    } else {
+        f64::NAN
+    };
+    let mut slow_ema = if slow <= n {
+        slow_sum / slow as f64
+    } else {
+        f64::NAN
+    };
 
     // ===== Fixed-size rings for MACD and d-EMA with branch-light scans =====
     // We store the last k values in rings and, when full, scan them to get min/max.
@@ -650,7 +658,11 @@ pub unsafe fn stc_scalar_classic_ema(
         }
 
         // --- MACD value at i ---
-        let macd = if i >= slow_thr { fast_ema - slow_ema } else { f64::NAN };
+        let macd = if i >= slow_thr {
+            fast_ema - slow_ema
+        } else {
+            f64::NAN
+        };
 
         // --- Maintain MACD validity and ring ---
         if i >= k {
@@ -1404,9 +1416,9 @@ pub struct StcStream {
     slow_ma_type: String,
 
     // common counters
-    started: bool,        // have we seen the first non-NaN input?
-    poisoned: bool,       // if a NaN appears after start, we poison (match offline behavior)
-    ticks: usize,         // number of samples since the first valid (non-NaN)
+    started: bool,  // have we seen the first non-NaN input?
+    poisoned: bool, // if a NaN appears after start, we poison (match offline behavior)
+    ticks: usize,   // number of samples since the first valid (non-NaN)
 
     // warmup policy: we return None until ticks >= min_data to match existing stream contract
     min_data: usize,
@@ -1424,7 +1436,7 @@ pub struct StcStream {
     macd_valid_flags: Vec<u8>, // last k samples, 1 if MACD was valid on that sample
     macd_vpos: usize,
     macd_valid_sum: usize,
-    macd_min: MonoMin,         // monotonic deque over valid MACD values in window
+    macd_min: MonoMin, // monotonic deque over valid MACD values in window
     macd_max: MonoMax,
 
     // ---- EMA(d) of first stochastic ----
@@ -1434,7 +1446,7 @@ pub struct StcStream {
     d_valid_flags: Vec<u8>, // last k samples, 1 if d_ema value was valid on that sample
     d_vpos: usize,
     d_valid_sum: usize,
-    d_min: MonoMin,         // monotonic deque over valid d-ema values in window
+    d_min: MonoMin, // monotonic deque over valid d-ema values in window
     d_max: MonoMax,
 
     // ---- final EMA(d) smoothing of kd ----
@@ -1488,9 +1500,13 @@ impl EmaSeed {
         }
     }
     #[inline(always)]
-    fn is_seeded(&self) -> bool { self.seeded }
+    fn is_seeded(&self) -> bool {
+        self.seeded
+    }
     #[inline(always)]
-    fn current(&self) -> f64 { self.ema }
+    fn current(&self) -> f64 {
+        self.ema
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1504,7 +1520,13 @@ struct SmaState {
 impl SmaState {
     #[inline(always)]
     fn new(period: usize) -> Self {
-        Self { period, sum: 0.0, ring: vec![0.0; period], pos: 0, cnt: 0 }
+        Self {
+            period,
+            sum: 0.0,
+            ring: vec![0.0; period],
+            pos: 0,
+            cnt: 0,
+        }
     }
     /// Step with value x. Returns (value, seeded).
     /// If not yet seeded (cnt < period), value = partial mean (sum/cnt), seeded=false.
@@ -1513,7 +1535,10 @@ impl SmaState {
     fn step(&mut self, x: f64) -> (f64, bool) {
         if self.cnt < self.period {
             self.ring[self.pos] = x;
-            self.pos += 1; if self.pos == self.period { self.pos = 0; }
+            self.pos += 1;
+            if self.pos == self.period {
+                self.pos = 0;
+            }
             self.sum += x;
             self.cnt += 1;
             (self.sum / self.cnt as f64, false)
@@ -1521,27 +1546,42 @@ impl SmaState {
             // full window
             let old = self.ring[self.pos];
             self.ring[self.pos] = x;
-            self.pos += 1; if self.pos == self.period { self.pos = 0; }
+            self.pos += 1;
+            if self.pos == self.period {
+                self.pos = 0;
+            }
             self.sum += x - old;
             (self.sum / self.period as f64, true)
         }
     }
     #[inline(always)]
-    fn is_seeded(&self) -> bool { self.cnt >= self.period }
+    fn is_seeded(&self) -> bool {
+        self.cnt >= self.period
+    }
 }
 
 #[derive(Debug, Clone)]
-struct MonoMin { q: VecDeque<(usize, f64)> }
+struct MonoMin {
+    q: VecDeque<(usize, f64)>,
+}
 #[derive(Debug, Clone)]
-struct MonoMax { q: VecDeque<(usize, f64)> }
+struct MonoMax {
+    q: VecDeque<(usize, f64)>,
+}
 
 impl MonoMin {
     #[inline(always)]
-    fn with_capacity(c: usize) -> Self { Self { q: VecDeque::with_capacity(c + 1) } }
+    fn with_capacity(c: usize) -> Self {
+        Self {
+            q: VecDeque::with_capacity(c + 1),
+        }
+    }
     #[inline(always)]
     fn push(&mut self, idx: usize, v: f64) {
         while let Some(&(_, back_v)) = self.q.back() {
-            if back_v <= v { break; } // keep increasing
+            if back_v <= v {
+                break;
+            } // keep increasing
             self.q.pop_back();
         }
         self.q.push_back((idx, v));
@@ -1550,19 +1590,31 @@ impl MonoMin {
     fn evict_older_than(&mut self, cutoff_exclusive: usize, k: usize) {
         // Remove while front.idx + k <= current_idx  => front.idx <= current_idx - k
         while let Some(&(j, _)) = self.q.front() {
-            if j + k <= cutoff_exclusive { self.q.pop_front(); } else { break; }
+            if j + k <= cutoff_exclusive {
+                self.q.pop_front();
+            } else {
+                break;
+            }
         }
     }
     #[inline(always)]
-    fn min(&self) -> f64 { self.q.front().map(|x| x.1).unwrap_or(f64::NAN) }
+    fn min(&self) -> f64 {
+        self.q.front().map(|x| x.1).unwrap_or(f64::NAN)
+    }
 }
 impl MonoMax {
     #[inline(always)]
-    fn with_capacity(c: usize) -> Self { Self { q: VecDeque::with_capacity(c + 1) } }
+    fn with_capacity(c: usize) -> Self {
+        Self {
+            q: VecDeque::with_capacity(c + 1),
+        }
+    }
     #[inline(always)]
     fn push(&mut self, idx: usize, v: f64) {
         while let Some(&(_, back_v)) = self.q.back() {
-            if back_v >= v { break; } // keep decreasing
+            if back_v >= v {
+                break;
+            } // keep decreasing
             self.q.pop_back();
         }
         self.q.push_back((idx, v));
@@ -1570,28 +1622,38 @@ impl MonoMax {
     #[inline(always)]
     fn evict_older_than(&mut self, cutoff_exclusive: usize, k: usize) {
         while let Some(&(j, _)) = self.q.front() {
-            if j + k <= cutoff_exclusive { self.q.pop_front(); } else { break; }
+            if j + k <= cutoff_exclusive {
+                self.q.pop_front();
+            } else {
+                break;
+            }
         }
     }
     #[inline(always)]
-    fn max(&self) -> f64 { self.q.front().map(|x| x.1).unwrap_or(f64::NAN) }
+    fn max(&self) -> f64 {
+        self.q.front().map(|x| x.1).unwrap_or(f64::NAN)
+    }
 }
 
 impl StcStream {
     pub fn try_new(params: StcParams) -> Result<Self, StcError> {
         let fast = params.fast_period.unwrap_or(23);
         let slow = params.slow_period.unwrap_or(50);
-        let k    = params.k_period.unwrap_or(10);
-        let d    = params.d_period.unwrap_or(3);
+        let k = params.k_period.unwrap_or(10);
+        let d = params.d_period.unwrap_or(3);
         if fast == 0 || slow == 0 || k == 0 || d == 0 {
-            return Err(StcError::NotEnoughValidData { needed: 1, valid: 0 });
+            return Err(StcError::NotEnoughValidData {
+                needed: 1,
+                valid: 0,
+            });
         }
 
         let fast_ma = params.fast_ma_type.as_deref().unwrap_or("ema").to_string();
         let slow_ma = params.slow_ma_type.as_deref().unwrap_or("ema").to_string();
         let min_data = fast.max(slow).max(k).max(d); // stream contract: None until this many samples
 
-        let fallback = !((fast_ma == "ema" && slow_ma == "ema") || (fast_ma == "sma" && slow_ma == "sma"));
+        let fallback =
+            !((fast_ma == "ema" && slow_ma == "ema") || (fast_ma == "sma" && slow_ma == "sma"));
 
         Ok(Self {
             fast_period: fast,
@@ -1657,7 +1719,11 @@ impl StcStream {
         if self.poisoned {
             // Keep contract: None before min_data, else Some(NaN)
             self.ticks += 1;
-            return if self.ticks < self.min_data { None } else { Some(f64::NAN) };
+            return if self.ticks < self.min_data {
+                None
+            } else {
+                Some(f64::NAN)
+            };
         }
 
         // === 1) Fast/Slow MAs -> MACD ===
@@ -1665,18 +1731,28 @@ impl StcStream {
             let _f = self.fast_ema.step(value);
             let _s = self.slow_ema.step(value);
             let valid = self.slow_ema.is_seeded(); // MACD only valid once slow EMA is seeded
-            let macd = if valid { self.fast_ema.current() - self.slow_ema.current() } else { f64::NAN };
+            let macd = if valid {
+                self.fast_ema.current() - self.slow_ema.current()
+            } else {
+                f64::NAN
+            };
             (macd, valid)
         } else if self.fast_ma_type == "sma" && self.slow_ma_type == "sma" {
             let (fast_val, _fast_seeded_or_partial) = self.fast_sma.step(value);
             let (slow_val, slow_seeded) = self.slow_sma.step(value);
             // MACD valid only after slow SMA seeded (to match scalar SMA path)
-            let macd = if slow_seeded { fast_val - slow_val } else { f64::NAN };
+            let macd = if slow_seeded {
+                fast_val - slow_val
+            } else {
+                f64::NAN
+            };
             (macd, slow_seeded)
         } else {
             // Fallback to O(n) exact recompute path for exotic MA types (rare)
             self.buffer.push(value);
-            if self.buffer.len() < self.min_data { return None; }
+            if self.buffer.len() < self.min_data {
+                return None;
+            }
             let input = StcInput::from_slice(&self.buffer, self.params.clone());
             match stc(&input) {
                 Ok(res) => return res.values.last().cloned(),
@@ -1690,7 +1766,11 @@ impl StcStream {
         if self.ticks >= self.k_period {
             self.macd_valid_sum -= self.macd_valid_flags[self.macd_vpos] as usize;
         }
-        let macd_is_valid = if macd_valid && !macd.is_nan() { 1u8 } else { 0u8 };
+        let macd_is_valid = if macd_valid && !macd.is_nan() {
+            1u8
+        } else {
+            0u8
+        };
         self.macd_valid_flags[self.macd_vpos] = macd_is_valid;
         self.macd_valid_sum += macd_is_valid as usize;
 
@@ -1702,7 +1782,10 @@ impl StcStream {
         self.macd_min.evict_older_than(self.ticks, self.k_period);
         self.macd_max.evict_older_than(self.ticks, self.k_period);
 
-        self.macd_vpos += 1; if self.macd_vpos == self.k_period { self.macd_vpos = 0; }
+        self.macd_vpos += 1;
+        if self.macd_vpos == self.k_period {
+            self.macd_vpos = 0;
+        }
 
         // === 2) First stochastic over MACD ===
         let stok = if self.macd_valid_sum == self.k_period && macd_is_valid == 1 {
@@ -1722,7 +1805,11 @@ impl StcStream {
         };
 
         // === 3) EMA(d) of stok ===
-        let d_val = if !stok.is_nan() { self.d_ema.step(stok) } else { f64::NAN };
+        let d_val = if !stok.is_nan() {
+            self.d_ema.step(stok)
+        } else {
+            f64::NAN
+        };
 
         // Maintain d-ema valid ring and min/max deques
         let d_is_valid = (!d_val.is_nan()) as u8;
@@ -1739,7 +1826,10 @@ impl StcStream {
         self.d_min.evict_older_than(self.ticks, self.k_period);
         self.d_max.evict_older_than(self.ticks, self.k_period);
 
-        self.d_vpos += 1; if self.d_vpos == self.k_period { self.d_vpos = 0; }
+        self.d_vpos += 1;
+        if self.d_vpos == self.k_period {
+            self.d_vpos = 0;
+        }
 
         // === 4) Second stochastic over d-EMA ===
         let kd = if self.d_valid_sum == self.k_period && d_is_valid == 1 {
@@ -1758,11 +1848,19 @@ impl StcStream {
         };
 
         // === 5) Final EMA(d) smoothing ===
-        let out = if !kd.is_nan() { self.final_ema.step(kd) } else { f64::NAN };
+        let out = if !kd.is_nan() {
+            self.final_ema.step(kd)
+        } else {
+            f64::NAN
+        };
 
         // increment tick; enforce stream warmup contract
         self.ticks += 1;
-        if self.ticks < self.min_data { None } else { Some(out) }
+        if self.ticks < self.min_data {
+            None
+        } else {
+            Some(out)
+        }
     }
 }
 

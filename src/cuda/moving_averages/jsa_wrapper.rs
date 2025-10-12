@@ -19,7 +19,7 @@ use crate::indicators::moving_averages::jsa::{JsaBatchRange, JsaParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -31,13 +31,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // -------- Kernel selection policy (mirrors ALMA; only Plain used here) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchThreadsPerOutput { One, Two }
+pub enum BatchThreadsPerOutput {
+    One,
+    Two,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    Plain { block_x: u32 },
-    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+    Plain {
+        block_x: u32,
+    },
+    Tiled {
+        tile: u32,
+        per_thread: BatchThreadsPerOutput,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -55,17 +63,25 @@ pub struct CudaJsaPolicy {
 
 impl Default for CudaJsaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 }, Tiled2D { tx: u32, ty: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+    Tiled2D { tx: u32, ty: u32 },
+}
 
 #[derive(Debug)]
 pub enum CudaJsaError {
@@ -128,11 +144,11 @@ impl CudaJsa {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaJsaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaJsaError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -163,12 +179,27 @@ impl CudaJsa {
         s.policy = policy;
         Ok(s)
     }
-    #[inline] pub fn set_policy(&mut self, policy: CudaJsaPolicy) { self.policy = policy; }
-    #[inline] pub fn policy(&self) -> &CudaJsaPolicy { &self.policy }
-    #[inline] pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    #[inline] pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
-    #[inline] pub fn synchronize(&self) -> Result<(), CudaJsaError> {
-        self.stream.synchronize().map_err(|e| CudaJsaError::Cuda(e.to_string()))
+    #[inline]
+    pub fn set_policy(&mut self, policy: CudaJsaPolicy) {
+        self.policy = policy;
+    }
+    #[inline]
+    pub fn policy(&self) -> &CudaJsaPolicy {
+        &self.policy
+    }
+    #[inline]
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    #[inline]
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaJsaError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaJsaError::Cuda(e.to_string()))
     }
 
     // ---------- VRAM helpers ----------
@@ -180,41 +211,57 @@ impl CudaJsa {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     // ---------- Debug logging (once per scenario when BENCH_DEBUG=1) ----------
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] JSA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaJsa)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaJsa)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] JSA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaJsa)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaJsa)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -232,15 +279,15 @@ impl CudaJsa {
     /// Best-effort: request an L2 persisting cache window for read-mostly spans.
     /// Enabled by default; opt-out via JSA_L2_PERSIST=0.
     fn try_enable_persisting_l2(&self, base_dev_ptr: u64, bytes: usize) {
-        if std::env::var("JSA_L2_PERSIST").ok().as_deref() == Some("0") { return; }
+        if std::env::var("JSA_L2_PERSIST").ok().as_deref() == Some("0") {
+            return;
+        }
         unsafe {
             use cust::sys::{
                 cuCtxSetLimit, cuDeviceGetAttribute, cuStreamSetAttribute,
                 CUaccessPolicyWindow_v1 as CUaccessPolicyWindow,
-                CUaccessProperty_enum as AccessProp,
-                CUdevice_attribute_enum as DevAttr,
-                CUlimit_enum as CULimit,
-                CUstreamAttrID_enum as StreamAttrId,
+                CUaccessProperty_enum as AccessProp, CUdevice_attribute_enum as DevAttr,
+                CUlimit_enum as CULimit, CUstreamAttrID_enum as StreamAttrId,
                 CUstreamAttrValue_v1 as CUstreamAttrValue,
             };
 
@@ -252,7 +299,9 @@ impl CudaJsa {
                 self.device_id as i32,
             );
             let max_window_bytes = (max_window_bytes_i32.max(0) as usize).min(bytes);
-            if max_window_bytes == 0 { return; }
+            if max_window_bytes == 0 {
+                return;
+            }
 
             // Best-effort set-aside for L2 persistence
             let _ = cuCtxSetLimit(CULimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, max_window_bytes);
@@ -298,10 +347,12 @@ impl CudaJsa {
         // Async allocations and copies on NON_BLOCKING stream; sync at method end.
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
             .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
-        let d_warm = unsafe { DeviceBuffer::from_slice_async(&prepared.warm_indices, &self.stream) }
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        let d_periods =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }
+                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        let d_warm =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.warm_indices, &self.stream) }
+                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(prepared.series_len * n_combos, &self.stream)
                 .map_err(|e| CudaJsaError::Cuda(e.to_string()))?
@@ -438,10 +489,12 @@ impl CudaJsa {
             .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
         // Hint: persist the input price window in L2 when supported (default on)
         self.try_enable_persisting_l2(d_prices_tm.as_device_ptr().as_raw() as u64, input_bytes);
-        let d_first = unsafe { DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream) }
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
-        let d_warm = unsafe { DeviceBuffer::from_slice_async(&prepared.warm_indices, &self.stream) }
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        let d_first =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream) }
+                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        let d_warm =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.warm_indices, &self.stream) }
+                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)
                 .map_err(|e| CudaJsaError::Cuda(e.to_string()))?
@@ -462,7 +515,11 @@ impl CudaJsa {
             .synchronize()
             .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows: series_len, cols: num_series })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows: series_len,
+            cols: num_series,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -563,7 +620,10 @@ impl CudaJsa {
         params: &JsaParams,
     ) -> Result<LockedBuffer<f32>, CudaJsaError> {
         let dev = self.jsa_many_series_one_param_time_major_dev(
-            data_tm_f32, num_series, series_len, params,
+            data_tm_f32,
+            num_series,
+            series_len,
+            params,
         )?;
         let mut pinned: LockedBuffer<f32> = unsafe {
             LockedBuffer::uninitialized(num_series * series_len)
@@ -651,9 +711,13 @@ impl CudaJsa {
         // Heuristic: use coalesced 2D mapping when wide in series and deep enough in time,
         // or when policy explicitly requests Tiled2D.
         const TIME_TILE: u32 = 64; // must match JSA_TIME_TILE in PTX
-        let prefer_coalesced = matches!(self.policy.many_series, ManySeriesKernelPolicy::Tiled2D { .. })
-            || (matches!(self.policy.many_series, ManySeriesKernelPolicy::Auto)
-                && num_series >= 128 && series_len >= 512);
+        let prefer_coalesced =
+            matches!(
+                self.policy.many_series,
+                ManySeriesKernelPolicy::Tiled2D { .. }
+            ) || (matches!(self.policy.many_series, ManySeriesKernelPolicy::Auto)
+                && num_series >= 128
+                && series_len >= 512);
 
         if prefer_coalesced {
             // Coalesced 2D mapping: threads span series at fixed t tile.
@@ -876,7 +940,9 @@ pub mod benches {
         crate::indicators::moving_averages::jsa::JsaParams,
         jsa_batch_dev,
         jsa_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::jsa::JsaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::jsa::JsaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::jsa::JsaParams { period: Some(64) },
         "jsa",
         "jsa"

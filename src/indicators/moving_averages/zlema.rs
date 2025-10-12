@@ -233,11 +233,15 @@ pub fn zlema_with_kernel(input: &ZlemaInput, kernel: Kernel) -> Result<ZlemaOutp
             // Keep Auto on scalar by policy
             (Kernel::Auto, _) => zlema_scalar(data, period, first, &mut out),
             // Route all explicit kernels to scalar since it’s faster here
-            (_, Kernel::Scalar | Kernel::ScalarBatch) => zlema_scalar(data, period, first, &mut out),
+            (_, Kernel::Scalar | Kernel::ScalarBatch) => {
+                zlema_scalar(data, period, first, &mut out)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             (_, Kernel::Avx2 | Kernel::Avx2Batch) => zlema_scalar(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            (_, Kernel::Avx512 | Kernel::Avx512Batch) => zlema_scalar(data, period, first, &mut out),
+            (_, Kernel::Avx512 | Kernel::Avx512Batch) => {
+                zlema_scalar(data, period, first, &mut out)
+            }
             _ => unreachable!(),
         }
     }
@@ -295,7 +299,11 @@ pub fn zlema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 
     // Phase A: scalar
     let mut i = first + 1;
-    let phase_a_end = if lag > 0 { core::cmp::min(len, first + lag) } else { i };
+    let phase_a_end = if lag > 0 {
+        core::cmp::min(len, first + lag)
+    } else {
+        i
+    };
     unsafe {
         while i < phase_a_end {
             let xi = *data.get_unchecked(i);
@@ -308,7 +316,11 @@ pub fn zlema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     }
 
     // Phase B: vectorized de-lagging
-    let start_b = if lag > 0 { first + lag } else { core::cmp::min(first + 1, len) };
+    let start_b = if lag > 0 {
+        first + lag
+    } else {
+        core::cmp::min(first + 1, len)
+    };
     if start_b >= len {
         return;
     }
@@ -497,8 +509,8 @@ pub struct ZlemaStream {
     // state
     last_ema: f64, // current EMA state (NaN until first finite)
     ring: Vec<f64>,
-    head: usize, // write index in ring [0 .. ring.len())
-    idx: usize,  // total samples seen since construction (absolute index)
+    head: usize,              // write index in ring [0 .. ring.len())
+    idx: usize,               // total samples seen since construction (absolute index)
     first_idx: Option<usize>, // absolute index of first non-NaN sample
     warm_idx: Option<usize>,  // absolute index where outputs become valid: first + period - 1
 }
@@ -585,7 +597,11 @@ impl ZlemaStream {
             // with ring.len() = lag + 1, the slot holding x[i - lag] is:
             //  - pos >= lag : pos - lag
             //  - else       : pos + 1   (since ring_len - lag == 1)
-            let lag_pos = if pos >= self.lag { pos - self.lag } else { pos + 1 };
+            let lag_pos = if pos >= self.lag {
+                pos - self.lag
+            } else {
+                pos + 1
+            };
             let x_lag = self.ring[lag_pos];
             2.0 * x - x_lag
         };
@@ -1783,9 +1799,10 @@ pub fn zlema_cuda_many_series_one_param_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaZlema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let params = ZlemaParams { period: Some(period) };
-        cuda
-            .zlema_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+        let params = ZlemaParams {
+            period: Some(period),
+        };
+        cuda.zlema_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 

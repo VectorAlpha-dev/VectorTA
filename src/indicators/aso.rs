@@ -567,7 +567,11 @@ pub fn aso_scalar(
         let ci = unsafe { *close.get_unchecked(i) };
 
         while min_len > 0 {
-            let back = if min_tail == 0 { period - 1 } else { min_tail - 1 };
+            let back = if min_tail == 0 {
+                period - 1
+            } else {
+                min_tail - 1
+            };
             let j = unsafe { *dq_min.get_unchecked(back) };
             let lj = unsafe { *low.get_unchecked(j) };
             if li <= lj {
@@ -584,7 +588,9 @@ pub fn aso_scalar(
             }
             min_len -= 1;
         }
-        unsafe { *dq_min.get_unchecked_mut(min_tail) = i; }
+        unsafe {
+            *dq_min.get_unchecked_mut(min_tail) = i;
+        }
         min_tail += 1;
         if min_tail == period {
             min_tail = 0;
@@ -592,7 +598,11 @@ pub fn aso_scalar(
         min_len += 1;
 
         while max_len > 0 {
-            let back = if max_tail == 0 { period - 1 } else { max_tail - 1 };
+            let back = if max_tail == 0 {
+                period - 1
+            } else {
+                max_tail - 1
+            };
             let j = unsafe { *dq_max.get_unchecked(back) };
             let hj = unsafe { *high.get_unchecked(j) };
             if hi >= hj {
@@ -609,7 +619,9 @@ pub fn aso_scalar(
             }
             max_len -= 1;
         }
-        unsafe { *dq_max.get_unchecked_mut(max_tail) = i; }
+        unsafe {
+            *dq_max.get_unchecked_mut(max_tail) = i;
+        }
         max_tail += 1;
         if max_tail == period {
             max_tail = 0;
@@ -646,7 +658,11 @@ pub fn aso_scalar(
             let gopen = unsafe { *open.get_unchecked(start) };
 
             let intrarange = hi - li;
-            let inv_k1 = if intrarange != 0.0 { 1.0 / intrarange } else { 1.0 };
+            let inv_k1 = if intrarange != 0.0 {
+                1.0 / intrarange
+            } else {
+                1.0
+            };
             let scale1 = 50.0 * inv_k1;
             let intrabarbulls = ((ci - li) + (hi - oi)) * scale1;
             let intrabarbears = ((hi - ci) + (oi - li)) * scale1;
@@ -1252,7 +1268,10 @@ impl AsoStream {
         let mode = params.mode.unwrap_or(0);
 
         if period == 0 {
-            return Err(AsoError::InvalidPeriod { period, data_len: 0 });
+            return Err(AsoError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         if mode > 2 {
             return Err(AsoError::InvalidMode { mode });
@@ -1293,7 +1312,11 @@ impl AsoStream {
     /// Multiply by the reciprocal; guard zero to avoid NaNs
     #[inline(always)]
     fn inv_or_one(x: f64) -> f64 {
-        if x != 0.0 { x.recip() } else { 1.0 }
+        if x != 0.0 {
+            x.recip()
+        } else {
+            1.0
+        }
     }
 
     #[inline]
@@ -1310,7 +1333,11 @@ impl AsoStream {
 
         // ---- push `low` into monotonic-min deque (nondecreasing by value) ----
         while self.min_len > 0 {
-            let back = if self.min_tail == 0 { p - 1 } else { self.min_tail - 1 };
+            let back = if self.min_tail == 0 {
+                p - 1
+            } else {
+                self.min_tail - 1
+            };
             if low <= self.dq_min_val[back] {
                 // pop back
                 self.min_tail = back;
@@ -1322,18 +1349,26 @@ impl AsoStream {
         if self.min_len == p {
             // Capacity guard (shouldn't trigger in steady state but keep it safe)
             self.min_head += 1;
-            if self.min_head == p { self.min_head = 0; }
+            if self.min_head == p {
+                self.min_head = 0;
+            }
             self.min_len -= 1;
         }
         self.dq_min_idx[self.min_tail] = i;
         self.dq_min_val[self.min_tail] = low;
         self.min_tail += 1;
-        if self.min_tail == p { self.min_tail = 0; }
+        if self.min_tail == p {
+            self.min_tail = 0;
+        }
         self.min_len += 1;
 
         // ---- push `high` into monotonic-max deque (nonincreasing by value) ----
         while self.max_len > 0 {
-            let back = if self.max_tail == 0 { p - 1 } else { self.max_tail - 1 };
+            let back = if self.max_tail == 0 {
+                p - 1
+            } else {
+                self.max_tail - 1
+            };
             if high >= self.dq_max_val[back] {
                 // pop back
                 self.max_tail = back;
@@ -1344,18 +1379,24 @@ impl AsoStream {
         }
         if self.max_len == p {
             self.max_head += 1;
-            if self.max_head == p { self.max_head = 0; }
+            if self.max_head == p {
+                self.max_head = 0;
+            }
             self.max_len -= 1;
         }
         self.dq_max_idx[self.max_tail] = i;
         self.dq_max_val[self.max_tail] = high;
         self.max_tail += 1;
-        if self.max_tail == p { self.max_tail = 0; }
+        if self.max_tail == p {
+            self.max_tail = 0;
+        }
         self.max_len += 1;
 
         // Advance bar counter and readiness
         self.i = i + 1;
-        if self.i >= p { self.ready = true; }
+        if self.i >= p {
+            self.ready = true;
+        }
         if !self.ready {
             return None;
         }
@@ -1366,12 +1407,16 @@ impl AsoStream {
         // Evict elements that left the window from deque fronts
         while self.min_len > 0 && self.dq_min_idx[self.min_head] < start_abs {
             self.min_head += 1;
-            if self.min_head == p { self.min_head = 0; }
+            if self.min_head == p {
+                self.min_head = 0;
+            }
             self.min_len -= 1;
         }
         while self.max_len > 0 && self.dq_max_idx[self.max_head] < start_abs {
             self.max_head += 1;
-            if self.max_head == p { self.max_head = 0; }
+            if self.max_head == p {
+                self.max_head = 0;
+            }
             self.max_len -= 1;
         }
 
@@ -1409,8 +1454,16 @@ impl AsoStream {
         };
 
         // -------- O(1) rolling SMA ramp of bulls/bears (matches batch/scalar) --------
-        let old_b = if self.filled_be == p { self.rb[self.head_be] } else { 0.0 };
-        let old_e = if self.filled_be == p { self.re[self.head_be] } else { 0.0 };
+        let old_b = if self.filled_be == p {
+            self.rb[self.head_be]
+        } else {
+            0.0
+        };
+        let old_e = if self.filled_be == p {
+            self.re[self.head_be]
+        } else {
+            0.0
+        };
 
         self.sum_b += b - old_b;
         self.sum_e += e - old_e;
@@ -1419,8 +1472,12 @@ impl AsoStream {
         self.re[self.head_be] = e;
 
         self.head_be += 1;
-        if self.head_be == p { self.head_be = 0; }
-        if self.filled_be < p { self.filled_be += 1; }
+        if self.head_be == p {
+            self.head_be = 0;
+        }
+        if self.filled_be < p {
+            self.filled_be += 1;
+        }
 
         let n = self.filled_be as f64;
         Some((self.sum_b / n, self.sum_e / n))
@@ -1835,8 +1892,6 @@ mod tests {
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
     use std::error::Error;
-
-    
 
     fn check_aso_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

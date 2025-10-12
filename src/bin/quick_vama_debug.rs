@@ -1,7 +1,7 @@
-use my_project::cuda::moving_averages::CudaVama;
 use cust::memory::CopyDestination;
+use my_project::cuda::moving_averages::CudaVama;
 use my_project::indicators::moving_averages::volatility_adjusted_ma::{
-    vama_batch_with_kernel, VamaBatchRange, VamaParams, VamaInput,
+    vama_batch_with_kernel, VamaBatchRange, VamaInput, VamaParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -13,7 +13,10 @@ fn main() {
         data[i] = (x * 0.00123).sin() + 0.00017 * x;
     }
 
-    let sweep = VamaBatchRange { base_period: (9, 9, 0), vol_period: (5, 5, 0) };
+    let sweep = VamaBatchRange {
+        base_period: (9, 9, 0),
+        vol_period: (5, 5, 0),
+    };
     let cpu = vama_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch).unwrap();
     let cpu_row = &cpu.values[0..series_len];
 
@@ -36,8 +39,12 @@ fn main() {
         for j in start..=i {
             let v = data[j];
             if v.is_finite() {
-                if v > mx { mx = v; }
-                if v < mn { mn = v; }
+                if v > mx {
+                    mx = v;
+                }
+                if v < mn {
+                    mn = v;
+                }
             }
         }
         if mx.is_finite() && mn.is_finite() {
@@ -45,7 +52,10 @@ fn main() {
         }
     }
     for i in 0..32 {
-        println!("i={:02} cpu={:.8} gpu={:.8} mid(hl/2)={:.8}", i, cpu_row[i], gpu_row[i] as f64, ref_simple[i]);
+        println!(
+            "i={:02} cpu={:.8} gpu={:.8} mid(hl/2)={:.8}",
+            i, cpu_row[i], gpu_row[i] as f64, ref_simple[i]
+        );
     }
 
     // Recompute EMA + band exactly as in CUDA kernel (double mean warmup + double recurrence)
@@ -89,8 +99,12 @@ fn main() {
             let p = data[j];
             if e.is_finite() && p.is_finite() {
                 let d = p - e;
-                if d > up { up = d; }
-                if d < dn { dn = d; }
+                if d > up {
+                    up = d;
+                }
+                if d < dn {
+                    dn = d;
+                }
             }
         }
         if up.is_finite() && dn.is_finite() {
@@ -100,13 +114,10 @@ fn main() {
         }
     }
     println!("\nCUDA-style recompute vs CPU and GPU (first 20 valid):");
-    for i in warm..(warm+20).min(series_len) {
+    for i in warm..(warm + 20).min(series_len) {
         println!(
             "i={:02} cpu={:.8} gpu={:.8} cuda_style={:.8}",
-            i,
-            cpu_row[i],
-            gpu_row[i] as f64,
-            out_cuda_style[i]
+            i, cpu_row[i], gpu_row[i] as f64, out_cuda_style[i]
         );
     }
 }

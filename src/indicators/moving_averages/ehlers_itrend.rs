@@ -850,11 +850,8 @@ impl EhlersITrendStream {
 
         // ── 1) 4-tap WMA pre-smoother of raw price (isolated from max_dc) ────
         // FIR: (4*x0 + 3*x1 + 2*x2 + 1*x3)/10
-        let fir_val = (4.0 * x0
-            + 3.0 * self.wma_hist[0]
-            + 2.0 * self.wma_hist[1]
-            + self.wma_hist[2])
-            * DIV10;
+        let fir_val =
+            (4.0 * x0 + 3.0 * self.wma_hist[0] + 2.0 * self.wma_hist[1] + self.wma_hist[2]) * DIV10;
 
         // roll the 4-tap history: x3 <- x2 <- x1 <- x0
         self.wma_hist[2] = self.wma_hist[1];
@@ -922,13 +919,19 @@ impl EhlersITrendStream {
         // use exact atan for stability; reintroduce other fast-path micro-opts
         let mut new_mesa = if re_smooth != 0.0 && im_smooth != 0.0 {
             2.0 * core::f64::consts::PI / (im_smooth / re_smooth).atan()
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         // clamp to Ehlers' bounds
         let up_lim = 1.5 * self.prev_mesa;
-        if new_mesa > up_lim { new_mesa = up_lim; }
+        if new_mesa > up_lim {
+            new_mesa = up_lim;
+        }
         let low_lim = 0.67 * self.prev_mesa;
-        if new_mesa < low_lim { new_mesa = low_lim; }
+        if new_mesa < low_lim {
+            new_mesa = low_lim;
+        }
         new_mesa = new_mesa.clamp(6.0, 50.0);
 
         let final_mesa = 0.2 * new_mesa + 0.8 * self.prev_mesa;
@@ -938,18 +941,30 @@ impl EhlersITrendStream {
 
         // integer dominant cycle period in [1, max_dc]
         let mut dcp = (sp_val + 0.5).floor() as usize;
-        if dcp == 0 { dcp = 1; } else if dcp > self.max_dc { dcp = self.max_dc; }
+        if dcp == 0 {
+            dcp = 1;
+        } else if dcp > self.max_dc {
+            dcp = self.max_dc;
+        }
 
         // ── 3) O(1) rolling mean over the last `dcp` prices via prefix-sum ring ─
         // cum[head] = cum[head-1] + x0  (ring length = max_dc+1)
         let n = self.max_dc + 1;
-        let next = if self.cum_idx + 1 == n { 0 } else { self.cum_idx + 1 };
+        let next = if self.cum_idx + 1 == n {
+            0
+        } else {
+            self.cum_idx + 1
+        };
         let cur_sum = self.cum_ring[self.cum_idx] + x0;
         self.cum_ring[next] = cur_sum;
         self.cum_idx = next;
 
         // sum(last dcp) = cum[head] - cum[head - dcp]  (with wrap)
-        let back = if self.cum_idx >= dcp { self.cum_idx - dcp } else { self.cum_idx + n - dcp };
+        let back = if self.cum_idx >= dcp {
+            self.cum_idx - dcp
+        } else {
+            self.cum_idx + n - dcp
+        };
         let it_val = (cur_sum - self.cum_ring[back]) / dcp as f64;
 
         // ── 4) 4-tap WMA of IT (same numerator/denominator as before) ────────
@@ -968,7 +983,11 @@ impl EhlersITrendStream {
         self.ring_ptr = (self.ring_ptr + 1) % 7;
 
         // warmup gating (unchanged behavior)
-        let result = if self.bar < self.warmup_bars { None } else { Some(eit_val) };
+        let result = if self.bar < self.warmup_bars {
+            None
+        } else {
+            Some(eit_val)
+        };
         self.bar += 1;
         result
     }
@@ -1450,7 +1469,10 @@ pub fn ehlers_itrend_py<'py>(
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     let kern = validate_kernel(kernel, false)?;
-    let params = EhlersITrendParams { warmup_bars: Some(warmup_bars), max_dc_period: Some(max_dc_period) };
+    let params = EhlersITrendParams {
+        warmup_bars: Some(warmup_bars),
+        max_dc_period: Some(max_dc_period),
+    };
     // Prefer zero-copy for contiguous input; fallback to a minimal copy for non-contiguous views.
     let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
         let input = EhlersITrendInput::from_slice(slice_in, params);

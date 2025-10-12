@@ -18,10 +18,10 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
-use std::mem::{size_of, zeroed};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::mem::{size_of, zeroed};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // -------- Kernel selection policy (mirrors ALMA shape) --------
@@ -35,9 +35,14 @@ pub enum BatchThreadsPerOutput {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
     // For DMA, tiled means 1D tiling across parameter combos; `tile` = threads/block
-    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+    Tiled {
+        tile: u32,
+        per_thread: BatchThreadsPerOutput,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -124,8 +129,8 @@ impl CudaDma {
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))
             .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        let stream =
-            Stream::new(StreamFlags::NON_BLOCKING, None).map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
+            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
 
         Ok(Self {
             module,
@@ -146,10 +151,18 @@ impl CudaDma {
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaDmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaDmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaDmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaDmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     /// Synchronize the stream (deterministic timings in benches/tests).
     pub fn synchronize(&self) -> Result<(), CudaDmaError> {
@@ -159,13 +172,19 @@ impl CudaDma {
     }
 
     #[inline]
-    fn maybe_enable_l2_persist_for_prices(&self, d_prices_bytes: usize, d_prices_ptr: u64) -> Result<(), CudaDmaError> {
+    fn maybe_enable_l2_persist_for_prices(
+        &self,
+        d_prices_bytes: usize,
+        d_prices_ptr: u64,
+    ) -> Result<(), CudaDmaError> {
         // Default-on best-effort: if unsupported, quietly no-op.
         unsafe {
             // Get current device from context
             let mut dev: cu::CUdevice = 0;
             let rc_dev = cu::cuCtxGetDevice(&mut dev as *mut _);
-            if rc_dev != cu::CUresult::CUDA_SUCCESS { return Ok(()); }
+            if rc_dev != cu::CUresult::CUDA_SUCCESS {
+                return Ok(());
+            }
 
             // Query device caps
             let mut max_persist_bytes: i32 = 0;
@@ -174,7 +193,9 @@ impl CudaDma {
                 cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_PERSISTING_L2_CACHE_SIZE,
                 dev,
             );
-            if max_persist_bytes <= 0 { return Ok(()); }
+            if max_persist_bytes <= 0 {
+                return Ok(());
+            }
 
             let mut max_window: i32 = 0;
             let _ = cu::cuDeviceGetAttribute(
@@ -182,7 +203,9 @@ impl CudaDma {
                 cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_ACCESS_POLICY_WINDOW_SIZE,
                 dev,
             );
-            if max_window <= 0 { return Ok(()); }
+            if max_window <= 0 {
+                return Ok(());
+            }
 
             // Set context limit (set-aside)
             let set_aside = d_prices_bytes.min(max_persist_bytes as usize);
@@ -212,7 +235,9 @@ impl CudaDma {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_scenario =
@@ -220,14 +245,18 @@ impl CudaDma {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] DMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaDma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaDma)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per_scenario =
@@ -235,7 +264,9 @@ impl CudaDma {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] DMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaDma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaDma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -250,10 +281,14 @@ impl CudaDma {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else {
@@ -306,7 +341,8 @@ impl CudaDma {
         if out.len() != expected {
             return Err(CudaDmaError::InvalidInput(format!(
                 "out slice wrong length: got {}, expected {}",
-                out.len(), expected
+                out.len(),
+                expected
             )));
         }
         let arr = self.run_batch_with_prices_host(data_f32, &inputs)?;
@@ -491,7 +527,10 @@ impl CudaDma {
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
         };
         // Enable L2 persisting cache hint for prices (best-effort)
-        let _ = self.maybe_enable_l2_persist_for_prices(series_len * size_of::<f32>(), d_prices.as_device_ptr().as_raw());
+        let _ = self.maybe_enable_l2_persist_for_prices(
+            series_len * size_of::<f32>(),
+            d_prices.as_device_ptr().as_raw(),
+        );
         let d_hulls = unsafe {
             DeviceBuffer::from_slice_async(&inputs.hull_lengths, &self.stream)
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
@@ -528,7 +567,11 @@ impl CudaDma {
         self.stream
             .synchronize()
             .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     fn run_batch_with_prices_device(
@@ -594,7 +637,10 @@ impl CudaDma {
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
         };
         // Hint L2 persistence for device-resident prices
-        let _ = self.maybe_enable_l2_persist_for_prices(series_len * size_of::<f32>(), d_prices.as_device_ptr().as_raw());
+        let _ = self.maybe_enable_l2_persist_for_prices(
+            series_len * size_of::<f32>(),
+            d_prices.as_device_ptr().as_raw(),
+        );
         self.launch_batch_kernels(
             d_prices,
             &d_hulls,
@@ -610,7 +656,11 @@ impl CudaDma {
         self.stream
             .synchronize()
             .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     fn launch_batch_kernels(
@@ -627,7 +677,10 @@ impl CudaDma {
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaDmaError> {
         // Prefer 1D tiled across combos when available and combos are large
-        let has_tx128 = self.module.get_function("dma_batch_tiled_f32_tx128").is_ok();
+        let has_tx128 = self
+            .module
+            .get_function("dma_batch_tiled_f32_tx128")
+            .is_ok();
         let has_tx64 = self.module.get_function("dma_batch_tiled_f32_tx64").is_ok();
         let prefer_tiled = match self.policy.batch {
             BatchKernelPolicy::Tiled { .. } => true,
@@ -644,7 +697,9 @@ impl CudaDma {
                     .filter(|&v| v == 64 || v == 128)
                     .unwrap_or(128),
             };
-            if tx == 128 && !has_tx128 { tx = 64; }
+            if tx == 128 && !has_tx128 {
+                tx = 64;
+            }
             let func_name = if tx == 128 {
                 "dma_batch_tiled_f32_tx128"
             } else {
@@ -766,7 +821,10 @@ impl CudaDma {
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
         };
         // Hint L2 persist for entire slab (time-major)
-        let _ = self.maybe_enable_l2_persist_for_prices(elems * size_of::<f32>(), d_prices.as_device_ptr().as_raw());
+        let _ = self.maybe_enable_l2_persist_for_prices(
+            elems * size_of::<f32>(),
+            d_prices.as_device_ptr().as_raw(),
+        );
         let d_first = unsafe {
             DeviceBuffer::from_slice_async(first_valids, &self.stream)
                 .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
@@ -790,7 +848,11 @@ impl CudaDma {
         self.stream
             .synchronize()
             .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: series_len, cols: num_series })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: series_len,
+            cols: num_series,
+        })
     }
 
     fn launch_many_series_kernels(

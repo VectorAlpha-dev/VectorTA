@@ -48,11 +48,11 @@ use crate::utilities::kernel_validation::validate_kernel;
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::collections::VecDeque;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-use std::collections::VecDeque;
 
 impl<'a> FisherInput<'a> {
     #[inline(always)]
@@ -644,9 +644,7 @@ fn fisher_batch_inner(
     };
 
     // Shared precompute: HL2 midpoints reused across parameter rows
-    let hl: Vec<f64> = (0..data_len)
-        .map(|i| 0.5 * (high[i] + low[i]))
-        .collect();
+    let hl: Vec<f64> = (0..data_len).map(|i| 0.5 * (high[i] + low[i])).collect();
 
     let do_row = |row: usize, out_fish: &mut [f64], out_signal: &mut [f64]| {
         let period = combos[row].period.unwrap();
@@ -666,9 +664,7 @@ fn fisher_batch_inner(
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
             }
-            Kernel::Auto => {
-                fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal)
-            } // Should be resolved before here
+            Kernel::Auto => fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal), // Should be resolved before here
         }
     };
 
@@ -783,9 +779,7 @@ fn fisher_batch_inner_into(
     }
 
     // Shared precompute: HL2 midpoints reused across parameter rows
-    let hl: Vec<f64> = (0..data_len)
-        .map(|i| 0.5 * (high[i] + low[i]))
-        .collect();
+    let hl: Vec<f64> = (0..data_len).map(|i| 0.5 * (high[i] + low[i])).collect();
 
     let do_row = |row: usize, out_fish: &mut [f64], out_signal: &mut [f64]| {
         let period = combos[row].period.unwrap();
@@ -805,9 +799,7 @@ fn fisher_batch_inner_into(
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
             }
-            Kernel::Auto => {
-                fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal)
-            } // Should be resolved before here
+            Kernel::Auto => fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal), // Should be resolved before here
         }
     };
 
@@ -984,7 +976,10 @@ impl FisherStream {
     pub fn try_new(params: FisherParams) -> Result<Self, FisherError> {
         let period = params.period.unwrap_or(9);
         if period == 0 {
-            return Err(FisherError::InvalidPeriod { period, data_len: 0 });
+            return Err(FisherError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         Ok(Self {
             period,
@@ -1004,23 +999,39 @@ impl FisherStream {
 
         // ---- monotonic min queue (non-decreasing)
         while let Some(&(last_v, _)) = self.minq.back() {
-            if last_v >= v { self.minq.pop_back(); } else { break; }
+            if last_v >= v {
+                self.minq.pop_back();
+            } else {
+                break;
+            }
         }
         self.minq.push_back((v, k));
 
         // ---- monotonic max queue (non-increasing)
         while let Some(&(last_v, _)) = self.maxq.back() {
-            if last_v <= v { self.maxq.pop_back(); } else { break; }
+            if last_v <= v {
+                self.maxq.pop_back();
+            } else {
+                break;
+            }
         }
         self.maxq.push_back((v, k));
 
         // evict indices that fell out of the window [idx - period + 1, idx]
         let start = k.saturating_sub(self.period - 1);
         while let Some(&(_, i)) = self.minq.front() {
-            if i < start { self.minq.pop_front(); } else { break; }
+            if i < start {
+                self.minq.pop_front();
+            } else {
+                break;
+            }
         }
         while let Some(&(_, i)) = self.maxq.front() {
-            if i < start { self.maxq.pop_front(); } else { break; }
+            if i < start {
+                self.maxq.pop_front();
+            } else {
+                break;
+            }
         }
 
         // advance the stream index

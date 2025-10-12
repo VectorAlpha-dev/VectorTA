@@ -343,7 +343,11 @@ pub fn kama_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f
 
         // Efficiency ratio + smoothing constant
         let direction = (price - trailing_value).abs();
-        let er = if sum_roc1 == 0.0 { 0.0 } else { direction / sum_roc1 };
+        let er = if sum_roc1 == 0.0 {
+            0.0
+        } else {
+            direction / sum_roc1
+        };
         let t = er.mul_add(const_diff, const_max);
         let sc = t * t; // cheaper than powi(2)
 
@@ -596,7 +600,10 @@ impl KamaStream {
     pub fn try_new(params: KamaParams) -> Result<Self, KamaError> {
         let period = params.period.unwrap_or(30);
         if period == 0 {
-            return Err(KamaError::InvalidPeriod { period, data_len: 0 });
+            return Err(KamaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         Ok(Self {
             period,
@@ -678,10 +685,18 @@ impl KamaStream {
 
         // Slide rings
         self.diffs[self.head_d] = new_diff;
-        self.head_d = if self.head_d + 1 == self.period { 0 } else { self.head_d + 1 };
+        self.head_d = if self.head_d + 1 == self.period {
+            0
+        } else {
+            self.head_d + 1
+        };
 
         self.prices[self.head_p] = value;
-        self.head_p = if self.head_p + 1 == self.period { 0 } else { self.head_p + 1 };
+        self.head_p = if self.head_p + 1 == self.period {
+            0
+        } else {
+            self.head_p + 1
+        };
 
         self.prev_price = value;
         Some(self.prev_kama)
@@ -946,8 +961,9 @@ fn kama_batch_inner_into(
 
         match kern {
             // Use row-specific scalar that leverages shared prefix sums for the initial Σ|Δp|
-            Kernel::Scalar | Kernel::ScalarBatch =>
-                kama_row_scalar_prefixed(data, &prefix, first, period, dst),
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                kama_row_scalar_prefixed(data, &prefix, first, period, dst)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => kama_row_avx2(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1029,7 +1045,11 @@ unsafe fn kama_row_scalar_prefixed(
 
         // Efficiency ratio and smoothing constant
         let direction = (price - trailing_value).abs();
-        let er = if sum_roc1 == 0.0 { 0.0 } else { direction / sum_roc1 };
+        let er = if sum_roc1 == 0.0 {
+            0.0
+        } else {
+            direction / sum_roc1
+        };
         let t = er.mul_add(const_diff, const_max);
         let sc = t * t;
 

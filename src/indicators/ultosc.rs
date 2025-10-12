@@ -501,9 +501,17 @@ unsafe fn ultosc_scalar_impl(
             let d1 = (hi - prev_c).abs();
             let d2 = (lo - prev_c).abs();
             let tr = if d1 > tr1 {
-                if d2 > d1 { d2 } else { d1 }
+                if d2 > d1 {
+                    d2
+                } else {
+                    d1
+                }
             } else {
-                if d2 > tr1 { d2 } else { tr1 }
+                if d2 > tr1 {
+                    d2
+                } else {
+                    tr1
+                }
             };
             (ci - tl, tr)
         } else {
@@ -554,9 +562,21 @@ unsafe fn ultosc_scalar_impl(
         count += 1;
         if i >= start_idx {
             // Use reciprocal multiply for ratios
-            let t1 = if sum1_b != 0.0 { sum1_a * sum1_b.recip() } else { 0.0 };
-            let t2 = if sum2_b != 0.0 { sum2_a * sum2_b.recip() } else { 0.0 };
-            let t3 = if sum3_b != 0.0 { sum3_a * sum3_b.recip() } else { 0.0 };
+            let t1 = if sum1_b != 0.0 {
+                sum1_a * sum1_b.recip()
+            } else {
+                0.0
+            };
+            let t2 = if sum2_b != 0.0 {
+                sum2_a * sum2_b.recip()
+            } else {
+                0.0
+            };
+            let t3 = if sum3_b != 0.0 {
+                sum3_a * sum3_b.recip()
+            } else {
+                0.0
+            };
 
             // out[i] = w1*t1 + w2*t2 + w3*t3 (use FMA chain)
             let acc = f64::mul_add(w2, t2, w3 * t3);
@@ -1877,7 +1897,12 @@ impl UltOscStream {
         let p3 = params.timeperiod3.unwrap_or(28);
 
         if p1 == 0 || p2 == 0 || p3 == 0 {
-            return Err(UltOscError::InvalidPeriods { p1, p2, p3, data_len: 0 });
+            return Err(UltOscError::InvalidPeriods {
+                p1,
+                p2,
+                p3,
+                data_len: 0,
+            });
         }
 
         let max_period = p1.max(p2).max(p3);
@@ -1953,9 +1978,17 @@ impl UltOscStream {
             let d1 = (high - prev_close).abs();
             let d2 = (low - prev_close).abs();
             let tr = if d1 > base {
-                if d2 > d1 { d2 } else { d1 }
+                if d2 > d1 {
+                    d2
+                } else {
+                    d1
+                }
             } else {
-                if d2 > base { d2 } else { base }
+                if d2 > base {
+                    d2
+                } else {
+                    base
+                }
             };
 
             (close - true_low, tr)
@@ -2008,9 +2041,21 @@ impl UltOscStream {
         }
 
         // Ratios via reciprocal multiply + FMA chain (same as scalar path)
-        let t1 = if self.sum1_b != 0.0 { self.sum1_a * self.sum1_b.recip() } else { 0.0 };
-        let t2 = if self.sum2_b != 0.0 { self.sum2_a * self.sum2_b.recip() } else { 0.0 };
-        let t3 = if self.sum3_b != 0.0 { self.sum3_a * self.sum3_b.recip() } else { 0.0 };
+        let t1 = if self.sum1_b != 0.0 {
+            self.sum1_a * self.sum1_b.recip()
+        } else {
+            0.0
+        };
+        let t2 = if self.sum2_b != 0.0 {
+            self.sum2_a * self.sum2_b.recip()
+        } else {
+            0.0
+        };
+        let t3 = if self.sum3_b != 0.0 {
+            self.sum3_a * self.sum3_b.recip()
+        } else {
+            0.0
+        };
 
         let acc = f64::mul_add(self.w2, t2, self.w3 * t3);
         Some(f64::mul_add(self.w1, t1, acc))

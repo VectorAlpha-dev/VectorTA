@@ -351,7 +351,11 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
     let price0 = data[first_out];
     out[first_out] = {
         let denom = 0.015 * (sum_abs * inv_p);
-        if denom == 0.0 { 0.0 } else { (price0 - sma) / denom }
+        if denom == 0.0 {
+            0.0
+        } else {
+            (price0 - sma) / denom
+        }
     };
 
     // ---- rolling steps ----
@@ -370,7 +374,11 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 
         out[i] = {
             let denom = 0.015 * (sabs * inv_p);
-            if denom == 0.0 { 0.0 } else { (entering - sma) / denom }
+            if denom == 0.0 {
+                0.0
+            } else {
+                (entering - sma) / denom
+            }
         };
     }
 }
@@ -453,7 +461,11 @@ unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
         }
         let price0 = *data.get_unchecked(first_out);
         let denom = 0.015 * (sum_abs * inv_p);
-        *out.get_unchecked_mut(first_out) = if denom == 0.0 { 0.0 } else { (price0 - sma) / denom };
+        *out.get_unchecked_mut(first_out) = if denom == 0.0 {
+            0.0
+        } else {
+            (price0 - sma) / denom
+        };
     }
 
     // Rolling
@@ -468,7 +480,7 @@ unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
         let wptr = data.as_ptr().add(start);
 
         let vmean = _mm256_set1_pd(sma);
-        let vsgn  = _mm256_set1_pd(-0.0f64);
+        let vsgn = _mm256_set1_pd(-0.0f64);
         let mut k = 0usize;
         let mut sum_abs = 0.0f64;
         let mut comp = 0.0f64;
@@ -496,7 +508,11 @@ unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
         }
 
         let denom = 0.015 * (sum_abs * inv_p);
-        *out.get_unchecked_mut(i) = if denom == 0.0 { 0.0 } else { (entering - sma) / denom };
+        *out.get_unchecked_mut(i) = if denom == 0.0 {
+            0.0
+        } else {
+            (entering - sma) / denom
+        };
         i += 1;
     }
 }
@@ -515,12 +531,7 @@ pub unsafe fn cci_avx512_long(data: &[f64], period: usize, first_valid: usize, o
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
-unsafe fn cci_avx512_impl(
-    data: &[f64],
-    period: usize,
-    first_valid: usize,
-    out: &mut [f64],
-) {
+unsafe fn cci_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     debug_assert!(data.len() == out.len());
     debug_assert!(period >= 1 && first_valid + period <= data.len());
 
@@ -584,7 +595,11 @@ unsafe fn cci_avx512_impl(
         }
         let price0 = *data.get_unchecked(first_out);
         let denom = 0.015 * (sum_abs * inv_p);
-        *out.get_unchecked_mut(first_out) = if denom == 0.0 { 0.0 } else { (price0 - sma) / denom };
+        *out.get_unchecked_mut(first_out) = if denom == 0.0 {
+            0.0
+        } else {
+            (price0 - sma) / denom
+        };
     }
 
     // Rolling
@@ -625,7 +640,11 @@ unsafe fn cci_avx512_impl(
             k += 1;
         }
         let denom = 0.015 * (sum_abs * inv_p);
-        *out.get_unchecked_mut(i) = if denom == 0.0 { 0.0 } else { (entering - sma) / denom };
+        *out.get_unchecked_mut(i) = if denom == 0.0 {
+            0.0
+        } else {
+            (entering - sma) / denom
+        };
         i += 1;
     }
 }
@@ -744,11 +763,11 @@ struct OrderStatsTreap {
 
 #[derive(Debug, Clone)]
 struct Node {
-    key: f64,       // value
-    prio: u64,      // heap priority
-    cnt: u32,       // multiplicity of key
-    size: usize,    // total count in subtree (including multiplicities)
-    sum: f64,       // sum of all values in subtree
+    key: f64,    // value
+    prio: u64,   // heap priority
+    cnt: u32,    // multiplicity of key
+    size: usize, // total count in subtree (including multiplicities)
+    sum: f64,    // sum of all values in subtree
     left: Option<Box<Node>>,
     right: Option<Box<Node>>,
 }
@@ -936,7 +955,10 @@ impl CciStream {
     pub fn try_new(params: CciParams) -> Result<Self, CciError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(CciError::InvalidPeriod { period, data_len: 0 });
+            return Err(CciError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         // Initialize ring buffer with NaNs to match warmup behavior
         let buffer = alloc_with_nan_prefix(period, period);
@@ -1858,8 +1880,6 @@ mod tests {
         check_cci_empty_input,
         check_cci_no_poison
     );
-
-    
 
     #[cfg(feature = "proptest")]
     generate_all_cci_tests!(check_cci_property);

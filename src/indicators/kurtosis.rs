@@ -387,7 +387,6 @@ pub unsafe fn kurtosis_avx512_short(data: &[f64], period: usize, first: usize, o
 pub unsafe fn kurtosis_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     kurtosis_scalar(data, period, first, out)
 }
- 
 
 #[inline(always)]
 pub fn kurtosis_batch_with_kernel(
@@ -743,12 +742,12 @@ pub struct KurtosisStream {
     filled: bool,
 
     // O(1) state
-    nan_count: usize,   // count of NaNs currently in the window
-    mean: f64,          // current window mean
-    c2: f64,            // Σ (x - mean)^2 over the window
-    c3: f64,            // Σ (x - mean)^3 over the window
-    c4: f64,            // Σ (x - mean)^4 over the window
-    inv_n: f64,         // 1.0 / period (mul is faster than div)
+    nan_count: usize,    // count of NaNs currently in the window
+    mean: f64,           // current window mean
+    c2: f64,             // Σ (x - mean)^2 over the window
+    c3: f64,             // Σ (x - mean)^3 over the window
+    c4: f64,             // Σ (x - mean)^4 over the window
+    inv_n: f64,          // 1.0 / period (mul is faster than div)
     moments_valid: bool, // false when state is dirty (e.g., NaN entered)
     rebuild_ctr: usize,  // periodic exact rebuild to bound drift
 }
@@ -905,8 +904,8 @@ impl KurtosisStream {
             let d = v - mean;
             let d2 = d * d;
             c2 += d2;
-            c3 += d * d2;      // d^3
-            c4 += d2 * d2;     // d^4
+            c3 += d * d2; // d^3
+            c4 += d2 * d2; // d^4
         }
         self.mean = mean;
         self.c2 = c2;

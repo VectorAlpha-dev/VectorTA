@@ -734,7 +734,8 @@ fn wma_batch_inner_into(
         let warm_end = first + period - 1;
 
         // Re-interpret this row as &mut [f64] so the kernel can write directly.
-        let out_row = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
+        let out_row =
+            core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         // Compute only valid outputs; warmup prefix already initialized.
         for i in warm_end..cols {

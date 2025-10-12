@@ -295,8 +295,8 @@ impl CudaWillr {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::gen_series;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;
@@ -356,17 +356,15 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        vec![
-            CudaBenchScenario::new(
-                "willr",
-                "one_series_many_params",
-                "willr_cuda_batch_dev",
-                "1m_x_250",
-                prep_one_series_many_params,
-            )
-            .with_sample_size(10)
-            .with_mem_required(bytes_one_series_many_params()),
-        ]
+        vec![CudaBenchScenario::new(
+            "willr",
+            "one_series_many_params",
+            "willr_cuda_batch_dev",
+            "1m_x_250",
+            prep_one_series_many_params,
+        )
+        .with_sample_size(10)
+        .with_mem_required(bytes_one_series_many_params())]
     }
 }
 

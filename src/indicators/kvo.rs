@@ -465,7 +465,8 @@ pub unsafe fn kvo_scalar(
     let mut trend: i32 = -1;
     let mut cm: f64 = 0.0;
 
-    let mut prev_hlc = *hp.add(first_valid_idx) + *lp.add(first_valid_idx) + *cp.add(first_valid_idx);
+    let mut prev_hlc =
+        *hp.add(first_valid_idx) + *lp.add(first_valid_idx) + *cp.add(first_valid_idx);
     let mut prev_dm = *hp.add(first_valid_idx) - *lp.add(first_valid_idx);
 
     // EMA state
@@ -1066,7 +1067,10 @@ impl KvoStream {
         let short_period = params.short_period.unwrap_or(2);
         let long_period = params.long_period.unwrap_or(5);
         if short_period < 1 || long_period < short_period {
-            return Err(KvoError::InvalidPeriod { short: short_period, long: long_period });
+            return Err(KvoError::InvalidPeriod {
+                short: short_period,
+                long: long_period,
+            });
         }
         Ok(Self {
             short_period,
@@ -1076,8 +1080,8 @@ impl KvoStream {
             prev_hlc: 0.0,
             prev_dm: 0.0,
             cm: 0.0,
-            trend: -1,   // unknown at start
-            sign: -1.0,  // matches trend = -1 default (tie -> -1)
+            trend: -1,  // unknown at start
+            sign: -1.0, // matches trend = -1 default (tie -> -1)
             short_ema: 0.0,
             long_ema: 0.0,
             first: true,
@@ -2151,7 +2155,13 @@ fn kvo_batch_inner_into(
     // Precompute VF once for all rows (shared across parameter sets)
     // Warmup semantics: indices 0..=first are considered warmup; VF is only consumed from first+1.
     #[inline(always)]
-    fn precompute_vf(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], first: usize) -> Vec<f64> {
+    fn precompute_vf(
+        high: &[f64],
+        low: &[f64],
+        close: &[f64],
+        volume: &[f64],
+        first: usize,
+    ) -> Vec<f64> {
         let len = high.len();
         let mut vf = vec![f64::NAN; len];
         if len <= first + 1 {
@@ -2211,7 +2221,9 @@ fn kvo_batch_inner_into(
         let long_alpha = 2.0 / (l as f64 + 1.0);
 
         // Cast row to &mut [f64] once; we only write into it
-        let dst = unsafe { std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len()) };
+        let dst = unsafe {
+            std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
+        };
 
         // EMA over shared VF stream
         let mut short_ema = 0.0f64;

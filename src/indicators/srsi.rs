@@ -52,11 +52,11 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::collections::VecDeque;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-use std::collections::VecDeque;
 
 impl<'a> AsRef<[f64]> for SrsiInput<'a> {
     #[inline(always)]
@@ -424,7 +424,9 @@ pub unsafe fn srsi_scalar(
         for b in 0..blocks {
             let start = b * sp;
             let end = core::cmp::min(start + sp, m);
-            if start >= end { break; }
+            if start >= end {
+                break;
+            }
             unsafe {
                 let v0 = *p_rsi.add(start);
                 *p_pref_max.add(start) = v0;
@@ -445,7 +447,9 @@ pub unsafe fn srsi_scalar(
         let p_suff_min = suff_min.as_mut_ptr();
         for b in 0..blocks {
             let block_end_excl = core::cmp::min((b + 1) * sp, m);
-            if block_end_excl == 0 { break; }
+            if block_end_excl == 0 {
+                break;
+            }
             let block_start = block_end_excl - core::cmp::min(sp, block_end_excl);
             unsafe {
                 let last = block_end_excl - 1;
@@ -485,21 +489,35 @@ pub unsafe fn srsi_scalar(
             let hi = if hi_l > hi_r { hi_l } else { hi_r };
             let lo = if lo_l < lo_r { lo_l } else { lo_r };
             let x = *rsi_vals.get_unchecked(i);
-            let fk = if hi > lo { ((x - lo) * 100.0) / (hi - lo) } else { 50.0 };
+            let fk = if hi > lo {
+                ((x - lo) * 100.0) / (hi - lo)
+            } else {
+                50.0
+            };
 
             sum_k += fk;
-            if i >= i0 + kp { sum_k -= *fk_ring.get_unchecked(fk_pos); }
+            if i >= i0 + kp {
+                sum_k -= *fk_ring.get_unchecked(fk_pos);
+            }
             *fk_ring.get_unchecked_mut(fk_pos) = fk;
-            fk_pos += 1; if fk_pos == kp { fk_pos = 0; }
+            fk_pos += 1;
+            if fk_pos == kp {
+                fk_pos = 0;
+            }
 
             if i >= k_warmup {
                 let sk = sum_k / (kp as f64);
                 *k_out.get_unchecked_mut(i) = sk;
 
                 sum_d += sk;
-                if i >= k_warmup + dp { sum_d -= *sk_ring.get_unchecked(sk_pos); }
+                if i >= k_warmup + dp {
+                    sum_d -= *sk_ring.get_unchecked(sk_pos);
+                }
                 *sk_ring.get_unchecked_mut(sk_pos) = sk;
-                sk_pos += 1; if sk_pos == dp { sk_pos = 0; }
+                sk_pos += 1;
+                if sk_pos == dp {
+                    sk_pos = 0;
+                }
 
                 if i >= d_warmup {
                     *d_out.get_unchecked_mut(i) = sum_d / (dp as f64);
@@ -805,16 +823,16 @@ pub struct SrsiStream {
     d_period: usize,
 
     // --- Wilder RSI state ---
-    prev: f64,            // last price
+    prev: f64, // last price
     has_prev: bool,
-    init_count: usize,    // number of deltas accumulated for initial avg
+    init_count: usize, // number of deltas accumulated for initial avg
     sum_gain: f64,
     sum_loss: f64,
     avg_gain: f64,
     avg_loss: f64,
-    alpha: f64,           // 1 / rsi_period
+    alpha: f64, // 1 / rsi_period
     rsi_ready: bool,
-    rsi_index: usize,     // 0-based index of produced RSI samples since ready
+    rsi_index: usize, // 0-based index of produced RSI samples since ready
     last_rsi: f64,
 
     // --- Stoch(RSI): window min/max via monotonic deques (amortized O(1)) ---
@@ -931,7 +949,11 @@ impl SrsiStream {
 
         // Warmup: accumulate first rsi_period deltas to form initial averages.
         if !self.rsi_ready {
-            if ch > 0.0 { self.sum_gain += ch; } else { self.sum_loss += -ch; }
+            if ch > 0.0 {
+                self.sum_gain += ch;
+            } else {
+                self.sum_loss += -ch;
+            }
             self.init_count += 1;
 
             if self.init_count < self.rsi_period {
@@ -985,10 +1007,18 @@ impl SrsiStream {
         let start = self.rsi_index + 1 - self.stoch_period;
         // Evict expired from front (strictly less than window start)
         while let Some(&(j, _)) = self.max_q.front() {
-            if j < start { self.max_q.pop_front(); } else { break; }
+            if j < start {
+                self.max_q.pop_front();
+            } else {
+                break;
+            }
         }
         while let Some(&(j, _)) = self.min_q.front() {
-            if j < start { self.min_q.pop_front(); } else { break; }
+            if j < start {
+                self.min_q.pop_front();
+            } else {
+                break;
+            }
         }
 
         debug_assert!(!self.max_q.is_empty() && !self.min_q.is_empty());
@@ -1038,16 +1068,28 @@ impl SrsiStream {
     fn push_rsi_to_deques(&mut self, idx: usize, rsi: f64) {
         // Insert into max deque: keep values non-increasing
         while let Some(&(_, v)) = self.max_q.back() {
-            if v <= rsi { self.max_q.pop_back(); } else { break; }
+            if v <= rsi {
+                self.max_q.pop_back();
+            } else {
+                break;
+            }
         }
-        if self.max_q.len() == self.stoch_period { self.max_q.pop_front(); } // keep <= capacity
+        if self.max_q.len() == self.stoch_period {
+            self.max_q.pop_front();
+        } // keep <= capacity
         self.max_q.push_back((idx, rsi));
 
         // Insert into min deque: keep values non-decreasing
         while let Some(&(_, v)) = self.min_q.back() {
-            if v >= rsi { self.min_q.pop_back(); } else { break; }
+            if v >= rsi {
+                self.min_q.pop_back();
+            } else {
+                break;
+            }
         }
-        if self.min_q.len() == self.stoch_period { self.min_q.pop_front(); } // keep <= capacity
+        if self.min_q.len() == self.stoch_period {
+            self.min_q.pop_front();
+        } // keep <= capacity
         self.min_q.push_back((idx, rsi));
     }
 
@@ -1065,7 +1107,9 @@ impl SrsiStream {
             *sum += new_val;
             ring[*pos] = new_val;
             *pos += 1;
-            if *pos == period { *pos = 0; }
+            if *pos == period {
+                *pos = 0;
+            }
             *count += 1;
             if *count == period {
                 Some(*sum * inv_period)
@@ -1076,7 +1120,9 @@ impl SrsiStream {
             *sum += new_val - ring[*pos];
             ring[*pos] = new_val;
             *pos += 1;
-            if *pos == period { *pos = 0; }
+            if *pos == period {
+                *pos = 0;
+            }
             Some(*sum * inv_period)
         }
     }
@@ -1384,39 +1430,47 @@ fn srsi_batch_inner(
             match kern {
                 Kernel::Avx512 | Kernel::Avx512Batch => {
                     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    { srsi_avx512(
-                        data,
-                        prm.rsi_period.unwrap(),
-                        prm.stoch_period.unwrap(),
-                        prm.k.unwrap(),
-                        prm.d.unwrap(),
-                    ) }
+                    {
+                        srsi_avx512(
+                            data,
+                            prm.rsi_period.unwrap(),
+                            prm.stoch_period.unwrap(),
+                            prm.k.unwrap(),
+                            prm.d.unwrap(),
+                        )
+                    }
                     #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-                    { srsi_scalar(
-                        data,
-                        prm.rsi_period.unwrap(),
-                        prm.stoch_period.unwrap(),
-                        prm.k.unwrap(),
-                        prm.d.unwrap(),
-                    ) }
+                    {
+                        srsi_scalar(
+                            data,
+                            prm.rsi_period.unwrap(),
+                            prm.stoch_period.unwrap(),
+                            prm.k.unwrap(),
+                            prm.d.unwrap(),
+                        )
+                    }
                 }
                 Kernel::Avx2 | Kernel::Avx2Batch => {
                     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                    { srsi_avx2(
-                        data,
-                        prm.rsi_period.unwrap(),
-                        prm.stoch_period.unwrap(),
-                        prm.k.unwrap(),
-                        prm.d.unwrap(),
-                    ) }
+                    {
+                        srsi_avx2(
+                            data,
+                            prm.rsi_period.unwrap(),
+                            prm.stoch_period.unwrap(),
+                            prm.k.unwrap(),
+                            prm.d.unwrap(),
+                        )
+                    }
                     #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-                    { srsi_scalar(
-                        data,
-                        prm.rsi_period.unwrap(),
-                        prm.stoch_period.unwrap(),
-                        prm.k.unwrap(),
-                        prm.d.unwrap(),
-                    ) }
+                    {
+                        srsi_scalar(
+                            data,
+                            prm.rsi_period.unwrap(),
+                            prm.stoch_period.unwrap(),
+                            prm.k.unwrap(),
+                            prm.d.unwrap(),
+                        )
+                    }
                 }
                 _ => srsi_scalar(
                     data,
@@ -1459,12 +1513,10 @@ fn srsi_batch_inner(
     // Create writable views
     let mut k_guard = core::mem::ManuallyDrop::new(k_vals);
     let mut d_guard = core::mem::ManuallyDrop::new(d_vals);
-    let k_out: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(k_guard.as_mut_ptr() as *mut f64, k_guard.len())
-    };
-    let d_out: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len())
-    };
+    let k_out: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(k_guard.as_mut_ptr() as *mut f64, k_guard.len()) };
+    let d_out: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len()) };
 
     // Fill rows using the RSI cache + Stoch path (shared precompute across rows)
     let combos = srsi_batch_inner_into(data, sweep, kern, parallel, k_out, d_out)?;
@@ -1486,7 +1538,13 @@ fn srsi_batch_inner(
         )
     };
 
-    Ok(SrsiBatchOutput { k: k_values, d: d_values, combos, rows, cols })
+    Ok(SrsiBatchOutput {
+        k: k_values,
+        d: d_values,
+        combos,
+        rows,
+        cols,
+    })
 }
 
 #[inline(always)]

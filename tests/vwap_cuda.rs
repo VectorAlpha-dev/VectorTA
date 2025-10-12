@@ -1,8 +1,8 @@
 // Integration tests for CUDA VWAP kernels
 
 use my_project::indicators::moving_averages::vwap::{vwap_batch_with_kernel, VwapBatchRange};
+use my_project::indicators::moving_averages::vwap::{vwap_with_kernel, VwapInput, VwapParams};
 use my_project::utilities::enums::Kernel;
-use my_project::indicators::moving_averages::vwap::{VwapInput, VwapParams, vwap_with_kernel};
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
@@ -98,7 +98,9 @@ fn vwap_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let cols = 16usize;
     let rows = 2048usize;
     let mut timestamps = vec![0i64; rows];
-    for t in 0..rows { timestamps[t] = 1_600_000_000_000i64 + (t as i64) * 60_000; }
+    for t in 0..rows {
+        timestamps[t] = 1_600_000_000_000i64 + (t as i64) * 60_000;
+    }
 
     let mut price_tm = vec![f64::NAN; rows * cols];
     let mut volume_tm = vec![f64::NAN; rows * cols];
@@ -121,10 +123,14 @@ fn vwap_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             p[t] = price_tm[t * cols + s];
             v[t] = volume_tm[t * cols + s];
         }
-        let params = VwapParams { anchor: Some(anchor.clone()) };
+        let params = VwapParams {
+            anchor: Some(anchor.clone()),
+        };
         let input = VwapInput::from_slice(&timestamps, &v, &p, params);
         let out = vwap_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let cuda = CudaVwap::new(0).expect("CudaVwap::new");

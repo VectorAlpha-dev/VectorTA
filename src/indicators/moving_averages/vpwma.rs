@@ -600,33 +600,33 @@ enum StreamMode {
     /// Keeps {M_j} = sum_{k=0}^{m-1} k^j x_{t-k} and updates them with:
     /// M_j' = [j==0 ? x_new : 0] + sum_{q=0}^j C(j,q) * (M_q - (m-1)^q * x_out)
     PolyInt {
-        deg: usize,                 // integer power (degree)
-        coeff: Vec<f64>,            // a_j for j=0..deg  (numerator = dot(coeff, moments))
+        deg: usize,                   // integer power (degree)
+        coeff: Vec<f64>,              // a_j for j=0..deg  (numerator = dot(coeff, moments))
         binom_row_starts: Vec<usize>, // CSR-style offsets into `binom_vals`
-        binom_vals: Vec<f64>,       // concatenated C(j,q) for 0<=q<=j, j=0..deg
-        pow_m1: Vec<f64>,           // (m-1)^q for q=0..deg
-        moments: Vec<f64>,          // M_j, j=0..deg
-        moments_ready: bool,        // lazily built at first full window
+        binom_vals: Vec<f64>,         // concatenated C(j,q) for 0<=q<=j, j=0..deg
+        pow_m1: Vec<f64>,             // (m-1)^q for q=0..deg
+        moments: Vec<f64>,            // M_j, j=0..deg
+        moments_ready: bool,          // lazily built at first full window
     },
 
     /// Exact, O(n) per update for general (fractional) powers,
     /// but with a much faster contiguous two-slice dot (no per-element modulo).
     ExactDot {
-        weights_rev: Vec<f64>,      // reverse(weights) so index 0 multiplies oldest in window
-        win_len: usize,              // m = period - 1
+        weights_rev: Vec<f64>, // reverse(weights) so index 0 multiplies oldest in window
+        win_len: usize,        // m = period - 1
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct VpwmaStream {
-    period: usize,         // ring length = m+1
-    inv_norm: f64,         // 1 / sum(weights)
-    buffer: Vec<f64>,      // length = period
-    head: usize,           // next write index
-    filled: bool,          // becomes true when head cycles to 0
+    period: usize,    // ring length = m+1
+    inv_norm: f64,    // 1 / sum(weights)
+    buffer: Vec<f64>, // length = period
+    head: usize,      // next write index
+    filled: bool,     // becomes true when head cycles to 0
 
     // kept for introspection/back-compat
-    weights: Vec<f64>,     // original weights (length = m)
+    weights: Vec<f64>, // original weights (length = m)
     mode: StreamMode,
 }
 
@@ -634,7 +634,10 @@ impl VpwmaStream {
     pub fn try_new(params: VpwmaParams) -> Result<Self, VpwmaError> {
         let period = params.period.unwrap_or(14);
         if period < 2 {
-            return Err(VpwmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(VpwmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let power = params.power.unwrap_or(0.382);
         if power.is_nan() || power.is_infinite() {
@@ -657,7 +660,8 @@ impl VpwmaStream {
         // If `power` is an integer in [0..=8], use exact O(1) polynomial moments.
         // Else use the exact (faster) O(n) contiguous dot.
         let p_rounded = power.round();
-        let is_near_int = (power - p_rounded).abs() <= 1e-12 && p_rounded >= 0.0 && p_rounded <= 8.0;
+        let is_near_int =
+            (power - p_rounded).abs() <= 1e-12 && p_rounded >= 0.0 && p_rounded <= 8.0;
         let mode = if is_near_int {
             let deg = p_rounded as usize;
 
@@ -791,7 +795,13 @@ impl VpwmaStream {
                 win_len,
             } => {
                 // Dot(weights_rev, window_oldest_to_newest)
-                let y = Self::dot_window_fast_from(&self.buffer, self.head, self.period, weights_rev, *win_len);
+                let y = Self::dot_window_fast_from(
+                    &self.buffer,
+                    self.head,
+                    self.period,
+                    weights_rev,
+                    *win_len,
+                );
                 Some(y * self.inv_norm)
             }
         }
@@ -803,7 +813,13 @@ impl VpwmaStream {
     /// Window of length m = period-1 includes indices: [(head+1) .. (head+1)+m-1] modulo period,
     /// where (head+period-1) points to the NEWEST included.
     #[inline(always)]
-    fn init_moments_from(buffer: &[f64], head: usize, period: usize, deg: usize, moments: &mut [f64]) {
+    fn init_moments_from(
+        buffer: &[f64],
+        head: usize,
+        period: usize,
+        deg: usize,
+        moments: &mut [f64],
+    ) {
         let m = period - 1;
         let oldest = (head + 1) % period; // oldest included index
 
@@ -902,7 +918,9 @@ impl VpwmaStream {
 #[inline(always)]
 fn binom(n: usize, k: usize) -> f64 {
     // small n (<=8) used; compute exactly in f64
-    if k == 0 || k == n { return 1.0; }
+    if k == 0 || k == n {
+        return 1.0;
+    }
     let k = k.min(n - k);
     let mut num = 1u128;
     let mut den = 1u128;

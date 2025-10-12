@@ -1758,18 +1758,28 @@ impl RangeFilterStream {
 
         let range_period = params.range_period.unwrap_or(14);
         if range_period == 0 {
-            return Err(RangeFilterError::InvalidPeriod { period: range_period, data_len: 0 });
+            return Err(RangeFilterError::InvalidPeriod {
+                period: range_period,
+                data_len: 0,
+            });
         }
 
         let smooth_range = params.smooth_range.unwrap_or(true);
         let smooth_period = params.smooth_period.unwrap_or(27);
         if smooth_range && smooth_period == 0 {
-            return Err(RangeFilterError::InvalidPeriod { period: smooth_period, data_len: 0 });
+            return Err(RangeFilterError::InvalidPeriod {
+                period: smooth_period,
+                data_len: 0,
+            });
         }
 
         // EMA coefficients
         let alpha_ac = 2.0 / (range_period as f64 + 1.0);
-        let alpha_range = if smooth_range { 2.0 / (smooth_period as f64 + 1.0) } else { 0.0 };
+        let alpha_range = if smooth_range {
+            2.0 / (smooth_period as f64 + 1.0)
+        } else {
+            0.0
+        };
 
         Ok(Self {
             range_size,
@@ -1879,7 +1889,11 @@ impl RangeFilterStream {
         } else {
             self.ac_ema * self.range_size
         };
-        Some((self.prev_filter, self.prev_filter + range, self.prev_filter - range))
+        Some((
+            self.prev_filter,
+            self.prev_filter + range,
+            self.prev_filter - range,
+        ))
     }
 }
 

@@ -68,11 +68,11 @@ impl CudaKama {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaKamaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaKamaError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -118,30 +118,35 @@ impl CudaKama {
     }
 
     #[inline]
-    fn has_function(&self, name: &str) -> bool { self.module.get_function(name).is_ok() }
+    fn has_function(&self, name: &str) -> bool {
+        self.module.get_function(name).is_ok()
+    }
 
     #[inline]
     fn grid_chunks(total: usize) -> impl Iterator<Item = (usize, usize)> {
         const MAX: usize = 65_535; // launch limit per grid dimension
-        (0..total)
-            .step_by(MAX)
-            .map(move |start| {
-                let len = (total - start).min(MAX);
-                (start, len)
-            })
+        (0..total).step_by(MAX).map(move |start| {
+            let len = (total - start).min(MAX);
+            (start, len)
+        })
     }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] KAMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaKama)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaKama)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -149,14 +154,19 @@ impl CudaKama {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] KAMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaKama)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaKama)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -348,10 +358,15 @@ impl CudaKama {
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
 
         let have_prefix_kernel = self.has_function("kama_batch_prefix_f32");
-        let use_prefix = have_prefix_kernel && Self::should_use_prefix(n_combos, series_len, max_period);
+        let use_prefix =
+            have_prefix_kernel && Self::should_use_prefix(n_combos, series_len, max_period);
 
         // Only budget prefix memory when we actually use the prefix path.
-        let prefix_bytes = if use_prefix { Self::build_roc1_prefix_bytes(series_len) } else { 0 };
+        let prefix_bytes = if use_prefix {
+            Self::build_roc1_prefix_bytes(series_len)
+        } else {
+            0
+        };
         let required = prices_bytes + periods_bytes + out_bytes + prefix_bytes;
         let headroom = 64 * 1024 * 1024; // 64MB cushion (match ALMA default)
         if !Self::will_fit(required, headroom) {
@@ -378,7 +393,11 @@ impl CudaKama {
             let mut prev = data_f32.get(0).copied().unwrap_or(f32::NAN);
             for i in 1..series_len {
                 let cur = data_f32[i];
-                let diff = if prev.is_nan() || cur.is_nan() { 0.0f32 } else { (cur - prev).abs() };
+                let diff = if prev.is_nan() || cur.is_nan() {
+                    0.0f32
+                } else {
+                    (cur - prev).abs()
+                };
                 acc += diff;
                 prefix.push(acc);
                 prev = cur;
@@ -696,7 +715,9 @@ pub mod benches {
         crate::indicators::moving_averages::kama::KamaParams,
         kama_batch_dev,
         kama_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::kama::KamaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::kama::KamaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::kama::KamaParams { period: Some(64) },
         "kama",
         "kama"
@@ -721,7 +742,9 @@ pub enum ManySeriesKernelSelected {
 pub enum BatchKernelPolicy {
     Auto,
     /// For completeness; the KAMA batch kernel is always 1D
-    OneD { block_x: u32 },
+    OneD {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -737,20 +760,35 @@ pub struct CudaKamaPolicy {
 }
 
 impl Default for BatchKernelPolicy {
-    fn default() -> Self { BatchKernelPolicy::Auto }
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
 }
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
 }
 
 impl CudaKama {
-    pub fn new_with_policy(device_id: usize, policy: CudaKamaPolicy) -> Result<Self, CudaKamaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaKamaPolicy,
+    ) -> Result<Self, CudaKamaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaKamaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaKamaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaKamaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaKamaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 }

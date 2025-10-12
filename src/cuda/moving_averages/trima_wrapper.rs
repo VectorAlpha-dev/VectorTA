@@ -105,7 +105,8 @@ impl CudaTrima {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaTrimaError::Cuda(e.to_string()))?
@@ -147,7 +148,9 @@ impl CudaTrima {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TRIMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTrima)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTrima)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -165,16 +168,26 @@ impl CudaTrima {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TRIMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTrima)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTrima)).debug_many_logged = true;
+                }
             }
         }
     }
 
     // Policy controls/inspection
-    pub fn set_policy(&mut self, policy: CudaTrimaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaTrimaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaTrimaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaTrimaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     fn expand_periods(range: &TrimaBatchRange) -> Vec<usize> {
         let (start, end, step) = range.period;
@@ -342,7 +355,10 @@ impl CudaTrima {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        unsafe { (*(self as *const _ as *mut CudaTrima)).last_batch = Some(BatchKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaTrima)).last_batch =
+                Some(BatchKernelSelected::OneD { block_x });
+        }
         self.maybe_log_batch_debug();
 
         // Chunk grid.y to <= 65_535
@@ -418,7 +434,10 @@ impl CudaTrima {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 128,
         };
-        unsafe { (*(self as *const _ as *mut CudaTrima)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaTrima)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
@@ -654,7 +673,9 @@ pub mod benches {
         crate::indicators::moving_averages::trima::TrimaParams,
         trima_batch_dev,
         trima_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::trima::TrimaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::trima::TrimaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::trima::TrimaParams { period: Some(64) },
         "trima",
         "trima"

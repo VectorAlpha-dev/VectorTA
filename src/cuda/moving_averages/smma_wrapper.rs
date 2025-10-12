@@ -40,24 +40,42 @@ impl std::error::Error for CudaSmmaError {}
 // -------- Kernel selection policy (mirrors ALMA/CWMA shape) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelPolicy { Auto, Plain { block_x: u32 } }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy { Auto, OneD { block_x: u32 } }
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub struct CudaSmmaPolicy { pub batch: BatchKernelPolicy, pub many_series: ManySeriesKernelPolicy }
+pub struct CudaSmmaPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
 impl Default for CudaSmmaPolicy {
-    fn default() -> Self { Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto } }
+    fn default() -> Self {
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
+    }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { OneD { block_x: u32 } }
+pub enum BatchKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaSmma {
     module: Module,
@@ -86,7 +104,8 @@ impl CudaSmma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaSmmaError::Cuda(e.to_string()))?
@@ -111,14 +130,19 @@ impl CudaSmma {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] SMMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaSmma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaSmma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -126,22 +150,35 @@ impl CudaSmma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] SMMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaSmma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaSmma)).debug_many_logged = true;
+                }
             }
         }
     }
 
-    pub fn set_policy(&mut self, policy: CudaSmmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaSmmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaSmmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaSmmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -216,11 +253,17 @@ impl CudaSmma {
             .get_function("smma_batch_f32")
             .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
 
-        let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x, _ => 128 };
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
+            _ => 128,
+        };
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        unsafe { (*(self as *const _ as *mut CudaSmma)).last_batch = Some(BatchKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaSmma)).last_batch =
+                Some(BatchKernelSelected::OneD { block_x });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -431,11 +474,17 @@ impl CudaSmma {
             .get_function("smma_multi_series_one_param_f32")
             .map_err(|e| CudaSmmaError::Cuda(e.to_string()))?;
 
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x, _ => 128 };
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
+            _ => 128,
+        };
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        unsafe { (*(self as *const _ as *mut CudaSmma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaSmma)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -593,7 +642,9 @@ pub mod benches {
         crate::indicators::moving_averages::smma::SmmaParams,
         smma_batch_dev,
         smma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::smma::SmmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::smma::SmmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::smma::SmmaParams { period: Some(64) },
         "smma",
         "smma"

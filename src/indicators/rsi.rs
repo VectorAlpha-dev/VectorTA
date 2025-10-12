@@ -357,7 +357,11 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
         avg_loss *= inv_p;
         if idx0 < len {
             let denom = avg_gain + avg_loss;
-            out[idx0] = if denom == 0.0 { 50.0 } else { 100.0 * avg_gain / denom };
+            out[idx0] = if denom == 0.0 {
+                50.0
+            } else {
+                100.0 * avg_gain / denom
+            };
         }
     }
 
@@ -371,7 +375,11 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
         avg_gain = avg_gain.mul_add(beta, inv_p * g1);
         avg_loss = avg_loss.mul_add(beta, inv_p * l1);
         let denom1 = avg_gain + avg_loss;
-        out[j] = if denom1 == 0.0 { 50.0 } else { 100.0 * avg_gain / denom1 };
+        out[j] = if denom1 == 0.0 {
+            50.0
+        } else {
+            100.0 * avg_gain / denom1
+        };
 
         // step j + 1
         let d2 = data[j + 1] - data[j];
@@ -380,7 +388,11 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
         avg_gain = avg_gain.mul_add(beta, inv_p * g2);
         avg_loss = avg_loss.mul_add(beta, inv_p * l2);
         let denom2 = avg_gain + avg_loss;
-        out[j + 1] = if denom2 == 0.0 { 50.0 } else { 100.0 * avg_gain / denom2 };
+        out[j + 1] = if denom2 == 0.0 {
+            50.0
+        } else {
+            100.0 * avg_gain / denom2
+        };
 
         j += 2;
     }
@@ -393,7 +405,11 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
         avg_gain = avg_gain.mul_add(beta, inv_p * g);
         avg_loss = avg_loss.mul_add(beta, inv_p * l);
         let denom = avg_gain + avg_loss;
-        out[j] = if denom == 0.0 { 50.0 } else { 100.0 * avg_gain / denom };
+        out[j] = if denom == 0.0 {
+            50.0
+        } else {
+            100.0 * avg_gain / denom
+        };
     }
 }
 
@@ -609,7 +625,11 @@ fn rsi_batch_inner(
                         out_row[idx0] = f64::NAN;
                     } else {
                         let denom = avg_g + avg_l;
-                        out_row[idx0] = if denom == 0.0 { 50.0 } else { 100.0 * avg_g / denom };
+                        out_row[idx0] = if denom == 0.0 {
+                            50.0
+                        } else {
+                            100.0 * avg_g / denom
+                        };
                     }
                     let mut j = idx0 + 1;
                     while j + 1 < cols {
@@ -619,7 +639,11 @@ fn rsi_batch_inner(
                         avg_g = avg_g.mul_add(beta, inv_p * g1);
                         avg_l = avg_l.mul_add(beta, inv_p * l1);
                         let denom1 = avg_g + avg_l;
-                        out_row[j] = if denom1 == 0.0 { 50.0 } else { 100.0 * avg_g / denom1 };
+                        out_row[j] = if denom1 == 0.0 {
+                            50.0
+                        } else {
+                            100.0 * avg_g / denom1
+                        };
 
                         // j+1
                         let g2 = gains[j + 1];
@@ -627,7 +651,11 @@ fn rsi_batch_inner(
                         avg_g = avg_g.mul_add(beta, inv_p * g2);
                         avg_l = avg_l.mul_add(beta, inv_p * l2);
                         let denom2 = avg_g + avg_l;
-                        out_row[j + 1] = if denom2 == 0.0 { 50.0 } else { 100.0 * avg_g / denom2 };
+                        out_row[j + 1] = if denom2 == 0.0 {
+                            50.0
+                        } else {
+                            100.0 * avg_g / denom2
+                        };
                         j += 2;
                     }
                     if j < cols {
@@ -636,7 +664,11 @@ fn rsi_batch_inner(
                         avg_g = avg_g.mul_add(beta, inv_p * g);
                         avg_l = avg_l.mul_add(beta, inv_p * l);
                         let denom = avg_g + avg_l;
-                        out_row[j] = if denom == 0.0 { 50.0 } else { 100.0 * avg_g / denom };
+                        out_row[j] = if denom == 0.0 {
+                            50.0
+                        } else {
+                            100.0 * avg_g / denom
+                        };
                     }
                 }
             }
@@ -777,7 +809,11 @@ pub fn rsi_batch_inner_into(
                         out_row[idx0] = f64::NAN;
                     } else {
                         let denom = avg_g + avg_l;
-                        out_row[idx0] = if denom == 0.0 { 50.0 } else { 100.0 * avg_g / denom };
+                        out_row[idx0] = if denom == 0.0 {
+                            50.0
+                        } else {
+                            100.0 * avg_g / denom
+                        };
                     }
                     let mut j = idx0 + 1;
                     while j + 1 < cols {
@@ -787,7 +823,11 @@ pub fn rsi_batch_inner_into(
                         avg_g = avg_g.mul_add(beta, inv_p * g1);
                         avg_l = avg_l.mul_add(beta, inv_p * l1);
                         let denom1 = avg_g + avg_l;
-                        out_row[j] = if denom1 == 0.0 { 50.0 } else { 100.0 * avg_g / denom1 };
+                        out_row[j] = if denom1 == 0.0 {
+                            50.0
+                        } else {
+                            100.0 * avg_g / denom1
+                        };
 
                         // j+1
                         let g2 = gains[j + 1];
@@ -795,7 +835,11 @@ pub fn rsi_batch_inner_into(
                         avg_g = avg_g.mul_add(beta, inv_p * g2);
                         avg_l = avg_l.mul_add(beta, inv_p * l2);
                         let denom2 = avg_g + avg_l;
-                        out_row[j + 1] = if denom2 == 0.0 { 50.0 } else { 100.0 * avg_g / denom2 };
+                        out_row[j + 1] = if denom2 == 0.0 {
+                            50.0
+                        } else {
+                            100.0 * avg_g / denom2
+                        };
                         j += 2;
                     }
                     if j < cols {
@@ -804,7 +848,11 @@ pub fn rsi_batch_inner_into(
                         avg_g = avg_g.mul_add(beta, inv_p * g);
                         avg_l = avg_l.mul_add(beta, inv_p * l);
                         let denom = avg_g + avg_l;
-                        out_row[j] = if denom == 0.0 { 50.0 } else { 100.0 * avg_g / denom };
+                        out_row[j] = if denom == 0.0 {
+                            50.0
+                        } else {
+                            100.0 * avg_g / denom
+                        };
                     }
                 }
             }
@@ -878,7 +926,11 @@ unsafe fn rsi_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
         avg_loss *= inv_p;
         if idx0 < len {
             let denom = avg_gain + avg_loss;
-            out[idx0] = if denom == 0.0 { 50.0 } else { 100.0 * avg_gain / denom };
+            out[idx0] = if denom == 0.0 {
+                50.0
+            } else {
+                100.0 * avg_gain / denom
+            };
         }
     }
 
@@ -891,7 +943,11 @@ unsafe fn rsi_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
         avg_gain = avg_gain.mul_add(beta, inv_p * g1);
         avg_loss = avg_loss.mul_add(beta, inv_p * l1);
         let denom1 = avg_gain + avg_loss;
-        out[j] = if denom1 == 0.0 { 50.0 } else { 100.0 * avg_gain / denom1 };
+        out[j] = if denom1 == 0.0 {
+            50.0
+        } else {
+            100.0 * avg_gain / denom1
+        };
 
         // step j + 1
         let d2 = data[j + 1] - data[j];
@@ -900,7 +956,11 @@ unsafe fn rsi_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
         avg_gain = avg_gain.mul_add(beta, inv_p * g2);
         avg_loss = avg_loss.mul_add(beta, inv_p * l2);
         let denom2 = avg_gain + avg_loss;
-        out[j + 1] = if denom2 == 0.0 { 50.0 } else { 100.0 * avg_gain / denom2 };
+        out[j + 1] = if denom2 == 0.0 {
+            50.0
+        } else {
+            100.0 * avg_gain / denom2
+        };
 
         j += 2;
     }
@@ -911,7 +971,11 @@ unsafe fn rsi_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
         avg_gain = avg_gain.mul_add(beta, inv_p * g);
         avg_loss = avg_loss.mul_add(beta, inv_p * l);
         let denom = avg_gain + avg_loss;
-        out[j] = if denom == 0.0 { 50.0 } else { 100.0 * avg_gain / denom };
+        out[j] = if denom == 0.0 {
+            50.0
+        } else {
+            100.0 * avg_gain / denom
+        };
     }
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -968,7 +1032,10 @@ impl RsiStream {
     pub fn try_new(params: RsiParams) -> Result<Self, RsiError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(RsiError::InvalidPeriod { period, data_len: 0 });
+            return Err(RsiError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let inv_p = 1.0 / (period as f64);
         Ok(Self {
@@ -1049,7 +1116,11 @@ impl RsiStream {
         self.avg_gain = self.avg_gain.mul_add(self.beta, self.inv_p * gain);
         self.avg_loss = self.avg_loss.mul_add(self.beta, self.inv_p * loss);
         let denom = self.avg_gain + self.avg_loss;
-        Some(if denom == 0.0 { 50.0 } else { 100.0 * self.avg_gain / denom })
+        Some(if denom == 0.0 {
+            50.0
+        } else {
+            100.0 * self.avg_gain / denom
+        })
     }
 }
 

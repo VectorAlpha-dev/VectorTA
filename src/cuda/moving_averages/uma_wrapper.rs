@@ -70,15 +70,22 @@ pub struct CudaUmaPolicy {
 
 impl Default for CudaUmaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaUma {
     module: Module,
@@ -110,8 +117,9 @@ impl CudaUma {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaUmaError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaUmaError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -136,8 +144,12 @@ impl CudaUma {
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaUmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaUmaPolicy { &self.policy }
+    pub fn set_policy(&mut self, policy: CudaUmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaUmaPolicy {
+        &self.policy
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -148,7 +160,9 @@ impl CudaUma {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -170,14 +184,19 @@ impl CudaUma {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] UMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaUma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaUma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -185,14 +204,19 @@ impl CudaUma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] UMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaUma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaUma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -645,7 +669,10 @@ impl CudaUma {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaUmaError::Cuda(e.to_string()))?
         }
-        unsafe { (*(self as *const _ as *mut CudaUma)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaUma)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
         Ok(())
     }
@@ -722,7 +749,10 @@ impl CudaUma {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaUmaError::Cuda(e.to_string()))?
         }
-        unsafe { (*(self as *const _ as *mut CudaUma)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaUma)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
         Ok(())
     }
@@ -793,7 +823,10 @@ impl CudaUma {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaUmaError::Cuda(e.to_string()))?
         }
-        unsafe { (*(self as *const _ as *mut CudaUma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaUma)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
         Ok(())
     }
@@ -865,7 +898,10 @@ impl CudaUma {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaUmaError::Cuda(e.to_string()))?
         }
-        unsafe { (*(self as *const _ as *mut CudaUma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaUma)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
         Ok(())
     }
@@ -1084,8 +1120,8 @@ impl CudaUma {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;

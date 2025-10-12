@@ -41,14 +41,22 @@ impl fmt::Display for CudaDemaError {
 impl std::error::Error for CudaDemaError {}
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchThreadsPerOutput { One, Two }
+pub enum BatchThreadsPerOutput {
+    One,
+    Two,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
     // DEMA does not benefit from tiled dot-product kernels; keep variant for API parity
-    Tiled { tile: u32, per_thread: BatchThreadsPerOutput },
+    Tiled {
+        tile: u32,
+        per_thread: BatchThreadsPerOutput,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -66,15 +74,22 @@ pub struct CudaDemaPolicy {
 }
 impl Default for CudaDemaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaDema {
     module: Module,
@@ -127,27 +142,43 @@ impl CudaDema {
             .map_err(|e| CudaDemaError::Cuda(e.to_string()))
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaDemaPolicy) -> Result<Self, CudaDemaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaDemaPolicy,
+    ) -> Result<Self, CudaDemaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaDemaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaDemaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaDemaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaDemaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] DEMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaDema)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaDema)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -155,14 +186,19 @@ impl CudaDema {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] DEMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaDema)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaDema)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -252,14 +288,24 @@ impl CudaDema {
         first_valid: usize,
         sweep: &DemaBatchRange,
     ) -> Result<DeviceArrayF32, CudaDemaError> {
-        if series_len == 0 { return Err(CudaDemaError::InvalidInput("series_len is zero".into())); }
+        if series_len == 0 {
+            return Err(CudaDemaError::InvalidInput("series_len is zero".into()));
+        }
         let combos = expand_periods(sweep);
-        if combos.is_empty() { return Err(CudaDemaError::InvalidInput("no period combinations provided".into())); }
+        if combos.is_empty() {
+            return Err(CudaDemaError::InvalidInput(
+                "no period combinations provided".into(),
+            ));
+        }
         let periods: Vec<i32> = combos
             .iter()
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
-        let max_period = combos.iter().map(|p| p.period.unwrap_or(0)).max().unwrap_or(0) as usize;
+        let max_period = combos
+            .iter()
+            .map(|p| p.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0) as usize;
         if max_period == 0 || series_len.saturating_sub(first_valid) < max_period {
             return Err(CudaDemaError::InvalidInput(format!(
                 "not enough valid data (needed >= {}, valid = {})",
@@ -273,11 +319,13 @@ impl CudaDema {
         let out_bytes = series_len * periods.len() * std::mem::size_of::<f32>();
         let required = periods_bytes + out_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaDemaError::InvalidInput("insufficient device memory for DEMA batch".into()));
+            return Err(CudaDemaError::InvalidInput(
+                "insufficient device memory for DEMA batch".into(),
+            ));
         }
 
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
+        let d_periods =
+            DeviceBuffer::from_slice(&periods).map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(series_len * combos.len())
                 .map_err(|e| CudaDemaError::Cuda(e.to_string()))?
@@ -293,7 +341,11 @@ impl CudaDema {
         )?;
         self.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: series_len,
+        })
     }
 
     pub fn dema_batch_into_host_f32(
@@ -302,9 +354,12 @@ impl CudaDema {
         sweep: &DemaBatchRange,
         out_flat: &mut [f32],
     ) -> Result<(), CudaDemaError> {
-        let (combos, _first_valid, series_len, _max_p) = Self::prepare_batch_inputs(data_f32, sweep)?;
+        let (combos, _first_valid, series_len, _max_p) =
+            Self::prepare_batch_inputs(data_f32, sweep)?;
         if out_flat.len() != combos.len() * series_len {
-            return Err(CudaDemaError::InvalidInput("output slice length mismatch".into()));
+            return Err(CudaDemaError::InvalidInput(
+                "output slice length mismatch".into(),
+            ));
         }
         let handle = self.dema_batch_dev(data_f32, sweep)?;
         handle
@@ -371,7 +426,9 @@ impl CudaDema {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaDemaError> {
-        if n_combos == 0 { return Ok(()); }
+        if n_combos == 0 {
+            return Ok(());
+        }
 
         // Prefill outputs with canonical qNaN on this stream
         memset_f32_qnan_async(&self.stream, d_out)?;
@@ -383,7 +440,9 @@ impl CudaDema {
 
         // Single-threaded sequential recurrence per combo
         let mut block_x: u32 = 1;
-        if let BatchKernelPolicy::Plain { block_x: bx } = self.policy.batch { block_x = bx.max(1); }
+        if let BatchKernelPolicy::Plain { block_x: bx } = self.policy.batch {
+            block_x = bx.max(1);
+        }
         unsafe {
             let this = self as *const _ as *mut CudaDema;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
@@ -425,11 +484,13 @@ impl CudaDema {
         series_len: usize,
         params: &DemaParams,
     ) -> Result<DeviceArrayF32, CudaDemaError> {
-        let (first_valids, period) = Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
+        let (first_valids, period) =
+            Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
         // VRAM estimate and guard (~64MB headroom like ALMA)
         let elems = num_series * series_len;
-        let required = elems * 2 * std::mem::size_of::<f32>() + num_series * std::mem::size_of::<i32>();
+        let required =
+            elems * 2 * std::mem::size_of::<f32>() + num_series * std::mem::size_of::<i32>();
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaDemaError::InvalidInput(
                 "insufficient device memory for DEMA many-series".into(),
@@ -441,8 +502,7 @@ impl CudaDema {
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(elems)
-                .map_err(|e| CudaDemaError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(elems).map_err(|e| CudaDemaError::Cuda(e.to_string()))?
         };
 
         self.launch_many_series_kernel(
@@ -456,7 +516,11 @@ impl CudaDema {
 
         self.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows: series_len, cols: num_series })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows: series_len,
+            cols: num_series,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -474,11 +538,22 @@ impl CudaDema {
                 "num_series and series_len must be positive".into(),
             ));
         }
-        if period <= 0 { return Err(CudaDemaError::InvalidInput("period must be positive".into())); }
-        if d_prices_tm.len() != num_series * series_len || d_out_tm.len() != num_series * series_len {
-            return Err(CudaDemaError::InvalidInput("time-major buffer length mismatch".into()));
+        if period <= 0 {
+            return Err(CudaDemaError::InvalidInput(
+                "period must be positive".into(),
+            ));
         }
-        if d_first_valids.len() != num_series { return Err(CudaDemaError::InvalidInput("first_valids length mismatch".into())); }
+        if d_prices_tm.len() != num_series * series_len || d_out_tm.len() != num_series * series_len
+        {
+            return Err(CudaDemaError::InvalidInput(
+                "time-major buffer length mismatch".into(),
+            ));
+        }
+        if d_first_valids.len() != num_series {
+            return Err(CudaDemaError::InvalidInput(
+                "first_valids length mismatch".into(),
+            ));
+        }
 
         self.launch_many_series_kernel(
             d_prices_tm,
@@ -500,7 +575,9 @@ impl CudaDema {
         out_tm: &mut [f32],
     ) -> Result<(), CudaDemaError> {
         if out_tm.len() != num_series * series_len {
-            return Err(CudaDemaError::InvalidInput("output slice length mismatch".into()));
+            return Err(CudaDemaError::InvalidInput(
+                "output slice length mismatch".into(),
+            ));
         }
         let handle = self.dema_many_series_one_param_time_major_dev(
             data_tm_f32,
@@ -583,7 +660,9 @@ impl CudaDema {
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         mem_get_info()
             .map(|(free, _)| required_bytes.saturating_add(headroom_bytes) <= free)
             .unwrap_or(true)
@@ -596,13 +675,21 @@ impl CudaDema {
         params: &DemaParams,
     ) -> Result<(Vec<i32>, usize), CudaDemaError> {
         if num_series == 0 || series_len == 0 {
-            return Err(CudaDemaError::InvalidInput("num_series and series_len must be positive".into()));
+            return Err(CudaDemaError::InvalidInput(
+                "num_series and series_len must be positive".into(),
+            ));
         }
         if data_tm_f32.len() != num_series * series_len {
-            return Err(CudaDemaError::InvalidInput("time-major slice length mismatch".into()));
+            return Err(CudaDemaError::InvalidInput(
+                "time-major slice length mismatch".into(),
+            ));
         }
         let period = params.period.unwrap_or(0);
-        if period == 0 { return Err(CudaDemaError::InvalidInput("period must be positive".into())); }
+        if period == 0 {
+            return Err(CudaDemaError::InvalidInput(
+                "period must be positive".into(),
+            ));
+        }
 
         let mut first_valids = Vec::with_capacity(num_series);
         let needed = 2usize.saturating_mul(period.saturating_sub(1));
@@ -610,9 +697,14 @@ impl CudaDema {
             let mut found = None;
             for t in 0..series_len {
                 let v = data_tm_f32[t * num_series + s];
-                if v.is_finite() { found = Some(t as i32); break; }
+                if v.is_finite() {
+                    found = Some(t as i32);
+                    break;
+                }
             }
-            let fv = found.ok_or_else(|| CudaDemaError::InvalidInput(format!("series {} contains only NaNs", s)))?;
+            let fv = found.ok_or_else(|| {
+                CudaDemaError::InvalidInput(format!("series {} contains only NaNs", s))
+            })?;
             let remaining = series_len - fv as usize;
             // Match CPU acceptance: require >= 2*(period - 1) valid samples
             if remaining < needed {
@@ -629,7 +721,10 @@ impl CudaDema {
 
 // --- utility: async memset to canonical quiet-NaN (0x7FC0_0000) ---
 #[inline]
-fn memset_f32_qnan_async(stream: &Stream, buf: &mut DeviceBuffer<f32>) -> Result<(), CudaDemaError> {
+fn memset_f32_qnan_async(
+    stream: &Stream,
+    buf: &mut DeviceBuffer<f32>,
+) -> Result<(), CudaDemaError> {
     const QNAN_BITS: u32 = 0x7FC0_0000;
     unsafe {
         let ptr: cu::CUdeviceptr = buf.as_device_ptr().as_raw();
@@ -638,7 +733,10 @@ fn memset_f32_qnan_async(stream: &Stream, buf: &mut DeviceBuffer<f32>) -> Result
         let res = cu::cuMemsetD32Async(ptr, QNAN_BITS, n, st);
         match res {
             cu::CUresult::CUDA_SUCCESS => Ok(()),
-            e => Err(CudaDemaError::Cuda(format!("cuMemsetD32Async failed: {:?}", e))),
+            e => Err(CudaDemaError::Cuda(format!(
+                "cuMemsetD32Async failed: {:?}",
+                e
+            ))),
         }
     }
 }
@@ -675,7 +773,9 @@ pub mod benches {
         crate::indicators::moving_averages::dema::DemaParams,
         dema_batch_dev,
         dema_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::dema::DemaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::dema::DemaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::dema::DemaParams { period: Some(64) },
         "dema",
         "dema"

@@ -416,7 +416,11 @@ fn dvdiqqe_compute_into(
             tick_vol
         } else if let Some(vs) = volume_opt {
             let vv = vs[i];
-            if vv.is_finite() { vv } else { tick_vol }
+            if vv.is_finite() {
+                vv
+            } else {
+                tick_vol
+            }
         } else {
             tick_vol
         };
@@ -438,12 +442,16 @@ fn dvdiqqe_compute_into(
 
     // Phase 2: EMA(pvi), EMA(nvi)
     let pvi_ema = {
-        let prm = EmaParams { period: Some(period) };
+        let prm = EmaParams {
+            period: Some(period),
+        };
         let inp = EmaInput::from_slice(&pvi, prm);
         ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
     let nvi_ema = {
-        let prm = EmaParams { period: Some(period) };
+        let prm = EmaParams {
+            period: Some(period),
+        };
         let inp = EmaInput::from_slice(&nvi, prm);
         ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
@@ -455,12 +463,16 @@ fn dvdiqqe_compute_into(
     }
 
     let pdiv_ema = {
-        let prm = EmaParams { period: Some(smoothing_period) };
+        let prm = EmaParams {
+            period: Some(smoothing_period),
+        };
         let inp = EmaInput::from_slice(&pvi, prm);
         ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
     let ndiv_ema = {
-        let prm = EmaParams { period: Some(smoothing_period) };
+        let prm = EmaParams {
+            period: Some(smoothing_period),
+        };
         let inp = EmaInput::from_slice(&nvi, prm);
         ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
@@ -504,19 +516,35 @@ fn dvdiqqe_compute_into(
             // fast TL
             if dvdi_out[i] > fast_out[i - 1] {
                 let nv = dvdi_out[i] - fr;
-                fast_out[i] = if nv < fast_out[i - 1] { fast_out[i - 1] } else { nv };
+                fast_out[i] = if nv < fast_out[i - 1] {
+                    fast_out[i - 1]
+                } else {
+                    nv
+                };
             } else {
                 let nv = dvdi_out[i] + fr;
-                fast_out[i] = if nv > fast_out[i - 1] { fast_out[i - 1] } else { nv };
+                fast_out[i] = if nv > fast_out[i - 1] {
+                    fast_out[i - 1]
+                } else {
+                    nv
+                };
             }
 
             // slow TL
             if dvdi_out[i] > slow_out[i - 1] {
                 let nv = dvdi_out[i] - sr;
-                slow_out[i] = if nv < slow_out[i - 1] { slow_out[i - 1] } else { nv };
+                slow_out[i] = if nv < slow_out[i - 1] {
+                    slow_out[i - 1]
+                } else {
+                    nv
+                };
             } else {
                 let nv = dvdi_out[i] + sr;
-                slow_out[i] = if nv > slow_out[i - 1] { slow_out[i - 1] } else { nv };
+                slow_out[i] = if nv > slow_out[i - 1] {
+                    slow_out[i - 1]
+                } else {
+                    nv
+                };
             }
         }
     }
@@ -608,7 +636,14 @@ unsafe fn dvdiqqe_avx2(
     center_dst: &mut [f64],
     input: &DvdiqqeInput,
 ) -> Result<(), DvdiqqeError> {
-    dvdiqqe_into_slices(dvdi_dst, fast_dst, slow_dst, center_dst, input, Kernel::Avx2)
+    dvdiqqe_into_slices(
+        dvdi_dst,
+        fast_dst,
+        slow_dst,
+        center_dst,
+        input,
+        Kernel::Avx2,
+    )
 }
 
 /// AVX512 implementation: same rationale as AVX2
@@ -621,7 +656,14 @@ unsafe fn dvdiqqe_avx512(
     center_dst: &mut [f64],
     input: &DvdiqqeInput,
 ) -> Result<(), DvdiqqeError> {
-    dvdiqqe_into_slices(dvdi_dst, fast_dst, slow_dst, center_dst, input, Kernel::Avx512)
+    dvdiqqe_into_slices(
+        dvdi_dst,
+        fast_dst,
+        slow_dst,
+        center_dst,
+        input,
+        Kernel::Avx512,
+    )
 }
 
 /// Calculate tick volume identical to Pine Script
@@ -1626,12 +1668,16 @@ fn dvdiqqe_batch_inner_flat(
 
         // Compute EMAs on precomputed PVI/NVI for this row
         let pvi_ema = {
-            let prm = EmaParams { period: Some(period) };
+            let prm = EmaParams {
+                period: Some(period),
+            };
             let inp = EmaInput::from_slice(&pvi_stream, prm);
             ema_with_kernel(&inp, kern).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
         };
         let nvi_ema = {
-            let prm = EmaParams { period: Some(period) };
+            let prm = EmaParams {
+                period: Some(period),
+            };
             let inp = EmaInput::from_slice(&nvi_stream, prm);
             ema_with_kernel(&inp, kern).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
         };
@@ -1644,12 +1690,16 @@ fn dvdiqqe_batch_inner_flat(
             ndiv[i] = nvi_stream[i] - nvi_ema.values[i];
         }
         let pdiv_ema = {
-            let prm = EmaParams { period: Some(smoothing) };
+            let prm = EmaParams {
+                period: Some(smoothing),
+            };
             let inp = EmaInput::from_slice(&pdiv, prm);
             ema_with_kernel(&inp, kern).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
         };
         let ndiv_ema = {
-            let prm = EmaParams { period: Some(smoothing) };
+            let prm = EmaParams {
+                period: Some(smoothing),
+            };
             let inp = EmaInput::from_slice(&ndiv, prm);
             ema_with_kernel(&inp, kern).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
         };
@@ -1680,12 +1730,14 @@ fn dvdiqqe_batch_inner_flat(
         let avg_range = {
             let prm = EmaParams { period: Some(wper) };
             let inp = EmaInput::from_slice(&ranges, prm);
-            ema_with_kernel(&inp, Kernel::Auto).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+            ema_with_kernel(&inp, Kernel::Auto)
+                .map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
         };
         let smooth_range = {
             let prm = EmaParams { period: Some(wper) };
             let inp = EmaInput::from_slice(&avg_range.values, prm);
-            ema_with_kernel(&inp, Kernel::Auto).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+            ema_with_kernel(&inp, Kernel::Auto)
+                .map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
         };
 
         // trailing levels
@@ -1697,18 +1749,34 @@ fn dvdiqqe_batch_inner_flat(
                 let sr = smooth_range.values[i] * slow;
                 if dvdi_dst[i] > fast_dst[i - 1] {
                     let nv = dvdi_dst[i] - fr;
-                    fast_dst[i] = if nv < fast_dst[i - 1] { fast_dst[i - 1] } else { nv };
+                    fast_dst[i] = if nv < fast_dst[i - 1] {
+                        fast_dst[i - 1]
+                    } else {
+                        nv
+                    };
                 } else {
                     let nv = dvdi_dst[i] + fr;
-                    fast_dst[i] = if nv > fast_dst[i - 1] { fast_dst[i - 1] } else { nv };
+                    fast_dst[i] = if nv > fast_dst[i - 1] {
+                        fast_dst[i - 1]
+                    } else {
+                        nv
+                    };
                 }
 
                 if dvdi_dst[i] > slow_dst[i - 1] {
                     let nv = dvdi_dst[i] - sr;
-                    slow_dst[i] = if nv < slow_dst[i - 1] { slow_dst[i - 1] } else { nv };
+                    slow_dst[i] = if nv < slow_dst[i - 1] {
+                        slow_dst[i - 1]
+                    } else {
+                        nv
+                    };
                 } else {
                     let nv = dvdi_dst[i] + sr;
-                    slow_dst[i] = if nv > slow_dst[i - 1] { slow_dst[i - 1] } else { nv };
+                    slow_dst[i] = if nv > slow_dst[i - 1] {
+                        slow_dst[i - 1]
+                    } else {
+                        nv
+                    };
                 }
             }
         }
@@ -1871,10 +1939,10 @@ pub struct DvdiqqeStream {
     tick_size: f64,
 
     // --- precomputed constants ---
-    alpha_pvi: f64,     // 2/(period+1) for PVI/NVI EMA
-    alpha_div: f64,     // 2/(smoothing_period+1) for divergence EMA
-    alpha_rng: f64,     // 1/period for range EMAs (since wper = 2*period-1)
-    inv_tick: f64,      // 1/tick_size
+    alpha_pvi: f64, // 2/(period+1) for PVI/NVI EMA
+    alpha_div: f64, // 2/(smoothing_period+1) for divergence EMA
+    alpha_rng: f64, // 1/period for range EMAs (since wper = 2*period-1)
+    inv_tick: f64,  // 1/tick_size
     use_tick_only: bool,
     warmup_needed: usize, // streaming warmup gate: 2*period
 
@@ -1917,7 +1985,10 @@ impl DvdiqqeStream {
         let period = params.period.unwrap_or(13);
         let smoothing_period = params.smoothing_period.unwrap_or(6);
         if period == 0 {
-            return Err(DvdiqqeError::InvalidPeriod { period, data_len: 0 });
+            return Err(DvdiqqeError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         if smoothing_period == 0 {
             return Err(DvdiqqeError::InvalidSmoothing { smoothing: 0 });
@@ -1926,10 +1997,16 @@ impl DvdiqqeStream {
         let fast_mult = params.fast_multiplier.unwrap_or(2.618);
         let slow_mult = params.slow_multiplier.unwrap_or(4.236);
         if !(fast_mult.is_finite() && fast_mult > 0.0) {
-            return Err(DvdiqqeError::InvalidMultiplier { multiplier: fast_mult, which: "fast".into() });
+            return Err(DvdiqqeError::InvalidMultiplier {
+                multiplier: fast_mult,
+                which: "fast".into(),
+            });
         }
         if !(slow_mult.is_finite() && slow_mult > 0.0) {
-            return Err(DvdiqqeError::InvalidMultiplier { multiplier: slow_mult, which: "slow".into() });
+            return Err(DvdiqqeError::InvalidMultiplier {
+                multiplier: slow_mult,
+                which: "slow".into(),
+            });
         }
 
         let volume_type = params.volume_type.unwrap_or_else(|| "default".to_string());
@@ -1999,7 +2076,11 @@ impl DvdiqqeStream {
     ) -> Option<DvdiqqeStreamOutput> {
         // ---- 1) Pine‑like tick volume selection ----
         let rng = close - open;
-        let tickrng = if rng.abs() < self.tick_size { self.tickrng_prev } else { rng };
+        let tickrng = if rng.abs() < self.tick_size {
+            self.tickrng_prev
+        } else {
+            rng
+        };
         let tick_vol = (tickrng.abs() * self.inv_tick).max(0.0);
         self.tickrng_prev = tickrng;
 
@@ -2099,19 +2180,35 @@ impl DvdiqqeStream {
         // Fast TL
         let fast_tl = if dvdi > self.fast_tl_prev {
             let nv = dvdi - fr;
-            if nv < self.fast_tl_prev { self.fast_tl_prev } else { nv }
+            if nv < self.fast_tl_prev {
+                self.fast_tl_prev
+            } else {
+                nv
+            }
         } else {
             let nv = dvdi + fr;
-            if nv > self.fast_tl_prev { self.fast_tl_prev } else { nv }
+            if nv > self.fast_tl_prev {
+                self.fast_tl_prev
+            } else {
+                nv
+            }
         };
 
         // Slow TL
         let slow_tl = if dvdi > self.slow_tl_prev {
             let nv = dvdi - sr;
-            if nv < self.slow_tl_prev { self.slow_tl_prev } else { nv }
+            if nv < self.slow_tl_prev {
+                self.slow_tl_prev
+            } else {
+                nv
+            }
         } else {
             let nv = dvdi + sr;
-            if nv > self.slow_tl_prev { self.slow_tl_prev } else { nv }
+            if nv > self.slow_tl_prev {
+                self.slow_tl_prev
+            } else {
+                nv
+            }
         };
 
         self.fast_tl_prev = fast_tl;

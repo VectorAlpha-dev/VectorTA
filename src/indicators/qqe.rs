@@ -390,15 +390,7 @@ pub fn qqe_into_slices(
             *v = f64::NAN;
         }
         unsafe {
-            qqe_scalar_classic(
-                data,
-                rsi_p,
-                ema_p,
-                fast_k,
-                first,
-                dst_fast,
-                dst_slow,
-            )?;
+            qqe_scalar_classic(data, rsi_p, ema_p, fast_k, first, dst_fast, dst_slow)?;
         }
         return Ok(());
     }
@@ -717,7 +709,6 @@ pub unsafe fn qqe_scalar_classic(
 
     Ok(())
 }
- 
 
 // ==================== STREAMING SUPPORT (drop-in replacement) ====================
 /// Streaming calculator for real-time updates (O(1) per tick).
@@ -742,8 +733,8 @@ pub struct QqeStream {
 
     // Running state
     have_prev: bool,
-    prev_price: f64,  // last input
-    deltas: usize,    // how many deltas processed (bars-1)
+    prev_price: f64, // last input
+    deltas: usize,   // how many deltas processed (bars-1)
 
     // RSI warmup (seed)
     sum_gain: f64,
@@ -754,16 +745,16 @@ pub struct QqeStream {
     avg_loss: f64,
 
     // EMA-of-RSI warmup & phase
-    rsi_count: usize,   // # of RSI samples seen since first RSI
-    running_mean: f64,  // running mean during EMA warmup
-    prev_ema: f64,      // EMA-of-RSI (fast) after warmup begins
+    rsi_count: usize,  // # of RSI samples seen since first RSI
+    running_mean: f64, // running mean during EMA warmup
+    prev_ema: f64,     // EMA-of-RSI (fast) after warmup begins
 
     // Slow-line (QQE) state
-    anchored: bool,     // whether slow has been anchored
-    prev_fast: f64,     // fast(t-1)
-    prev_slow: f64,     // slow(t-1)
-    wwma: f64,          // Wilder smoothing of |Δfast|
-    atrrsi: f64,        // double-smoothed ATR-of-RSI
+    anchored: bool, // whether slow has been anchored
+    prev_fast: f64, // fast(t-1)
+    prev_slow: f64, // slow(t-1)
+    wwma: f64,      // Wilder smoothing of |Δfast|
+    atrrsi: f64,    // double-smoothed ATR-of-RSI
 }
 
 impl QqeStream {
@@ -774,7 +765,10 @@ impl QqeStream {
         let fast_factor = params.fast_factor.unwrap_or(4.236);
 
         if rsi_period == 0 || smoothing_factor == 0 {
-            return Err(QqeError::InvalidPeriod { period: 0, data_len: 0 });
+            return Err(QqeError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            });
         }
 
         let rsi_alpha = 1.0 / rsi_period as f64;
@@ -852,7 +846,11 @@ impl QqeStream {
             self.avg_loss = self.sum_loss * self.rsi_alpha;
 
             let denom = self.avg_gain + self.avg_loss;
-            let rsi = if denom == 0.0 { 50.0 } else { 100.0 * self.avg_gain / denom };
+            let rsi = if denom == 0.0 {
+                50.0
+            } else {
+                100.0 * self.avg_gain / denom
+            };
 
             // first RSI -> first fast
             self.rsi_count = 1;
@@ -877,7 +875,11 @@ impl QqeStream {
         self.avg_loss = self.rsi_beta.mul_add(self.avg_loss, self.rsi_alpha * loss);
 
         let denom = self.avg_gain + self.avg_loss;
-        let rsi = if denom == 0.0 { 50.0 } else { 100.0 * self.avg_gain / denom };
+        let rsi = if denom == 0.0 {
+            50.0
+        } else {
+            100.0 * self.avg_gain / denom
+        };
 
         self.rsi_count += 1;
 
@@ -908,7 +910,9 @@ impl QqeStream {
             // true range over fast, double Wilder smoothing
             let tr = (fast - self.prev_fast).abs();
             self.wwma = self.atr_beta.mul_add(self.wwma, self.atr_alpha * tr);
-            self.atrrsi = self.atr_beta.mul_add(self.atrrsi, self.atr_alpha * self.wwma);
+            self.atrrsi = self
+                .atr_beta
+                .mul_add(self.atrrsi, self.atr_alpha * self.wwma);
 
             let qup = fast + self.atrrsi * self.fast_factor;
             let qdn = fast - self.atrrsi * self.fast_factor;

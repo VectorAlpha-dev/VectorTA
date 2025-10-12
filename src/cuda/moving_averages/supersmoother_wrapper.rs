@@ -12,8 +12,8 @@ use crate::indicators::moving_averages::supersmoother::{
 };
 use cust::context::{CacheConfig, Context};
 use cust::device::Device;
-use cust::function::{BlockSize, GridSize, Function};
-use cust::memory::{CopyDestination, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
+use cust::function::{BlockSize, Function, GridSize};
+use cust::memory::{AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -49,7 +49,8 @@ impl CudaSuperSmoother {
         cust::init(CudaFlags::empty()).map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let context =
+            Context::new(device).map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/supersmoother_kernel.ptx"));
 
@@ -67,10 +68,12 @@ impl CudaSuperSmoother {
         let module = match Module::from_ptx(ptx, &jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])
+                        .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -78,7 +81,11 @@ impl CudaSuperSmoother {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
 
-        Ok(Self { module, stream, _context: context })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+        })
     }
 
     fn prepare_batch_inputs(
@@ -427,7 +434,9 @@ impl CudaSuperSmoother {
             )));
         }
         if combos.is_empty() {
-            return Err(CudaSuperSmootherError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaSuperSmootherError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)
@@ -435,8 +444,19 @@ impl CudaSuperSmoother {
         let elems = combos.len() * len;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
             .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
-        self.launch_batch_kernel(d_prices, &d_periods, len, combos.len(), first_valid, &mut d_out)?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
+        self.launch_batch_kernel(
+            d_prices,
+            &d_periods,
+            len,
+            combos.len(),
+            first_valid,
+            &mut d_out,
+        )?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
     }
 
     /// Batch into pinned host memory using async D2H for maximum bandwidth.
@@ -451,7 +471,8 @@ impl CudaSuperSmoother {
         if out_pinned.len() != expected {
             return Err(CudaSuperSmootherError::InvalidInput(format!(
                 "output pinned buffer length mismatch: expected {}, got {}",
-                expected, out_pinned.len()
+                expected,
+                out_pinned.len()
             )));
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len)?;
@@ -509,7 +530,9 @@ pub mod benches {
         crate::indicators::moving_averages::supersmoother::SuperSmootherParams,
         supersmoother_batch_dev,
         supersmoother_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::supersmoother::SuperSmootherBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::supersmoother::SuperSmootherBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::supersmoother::SuperSmootherParams { period: Some(64) },
         "supersmoother",
         "supersmoother"

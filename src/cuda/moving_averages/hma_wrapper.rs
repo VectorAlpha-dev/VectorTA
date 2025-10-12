@@ -16,7 +16,7 @@ use crate::indicators::moving_averages::hma::{HmaBatchRange, HmaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -27,9 +27,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Reuse ALMA/CWMA policy enums for a consistent public API.
-use super::cwma_wrapper::{
-    BatchKernelPolicy, BatchThreadsPerOutput, ManySeriesKernelPolicy,
-};
+use super::cwma_wrapper::{BatchKernelPolicy, BatchThreadsPerOutput, ManySeriesKernelPolicy};
 
 #[derive(Debug)]
 pub enum CudaHmaError {
@@ -78,19 +76,26 @@ pub struct CudaHmaPolicy {
 }
 impl Default for CudaHmaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 impl CudaHma {
     #[inline]
-    fn ring_in_shared() -> bool { true }
+    fn ring_in_shared() -> bool {
+        true
+    }
     #[inline]
-    fn assume_out_prefilled() -> bool { true }
+    fn assume_out_prefilled() -> bool {
+        true
+    }
     pub fn new(device_id: usize) -> Result<Self, CudaHmaError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/hma_kernel.ptx"));
@@ -101,7 +106,8 @@ impl CudaHma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaHmaError::Cuda(e.to_string()))?
@@ -129,25 +135,40 @@ impl CudaHma {
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaHmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaHmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaHmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaHmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaHmaError> {
-        self.stream.synchronize().map_err(|e| CudaHmaError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaHmaError::Cuda(e.to_string()))
     }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] HMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaHma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaHma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -155,14 +176,19 @@ impl CudaHma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] HMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaHma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaHma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -357,8 +383,9 @@ impl CudaHma {
             .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
 
         let elems = n * len;
-        let mut d_ring: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n * max_sqrt_len) }
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        let mut d_ring: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n * max_sqrt_len) }
+                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
 
@@ -370,7 +397,10 @@ impl CudaHma {
                 let st: cu::CUstream = self.stream.as_inner();
                 let res = cu::cuMemsetD32Async(ptr, 0x7FFF_FFFFu32, n32, st);
                 if res != cu::CUresult::CUDA_SUCCESS {
-                    return Err(CudaHmaError::Cuda(format!("cuMemsetD32Async failed: {:?}", res)));
+                    return Err(CudaHmaError::Cuda(format!(
+                        "cuMemsetD32Async failed: {:?}",
+                        res
+                    )));
                 }
             }
         }
@@ -378,7 +408,10 @@ impl CudaHma {
         // Policy: currently only Plain batch kernel; allow user override of block_x
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
-            _ => match std::env::var("HMA_BLOCK_X").ok().and_then(|s| s.parse::<u32>().ok()) {
+            _ => match std::env::var("HMA_BLOCK_X")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
                 Some(v) if v == 128 || v == 256 || v == 512 => v,
                 _ => 256,
             },
@@ -395,7 +428,9 @@ impl CudaHma {
         let out_ptr = unsafe { d_out.as_device_ptr().as_raw() };
         let shared_bytes: usize = if Self::ring_in_shared() {
             max_sqrt_len * (block_x as usize) * std::mem::size_of::<f32>()
-        } else { 0 };
+        } else {
+            0
+        };
 
         self.launch_batch_kernel(
             &d_prices,
@@ -410,7 +445,11 @@ impl CudaHma {
             shared_bytes,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n,
+            cols: len,
+        })
     }
 
     pub fn hma_batch_dev(
@@ -614,7 +653,10 @@ impl CudaHma {
                 let st: cu::CUstream = self.stream.as_inner();
                 let res = cu::cuMemsetD32Async(ptr, 0x7FFF_FFFFu32, n32, st);
                 if res != cu::CUresult::CUDA_SUCCESS {
-                    return Err(CudaHmaError::Cuda(format!("cuMemsetD32Async failed: {:?}", res)));
+                    return Err(CudaHmaError::Cuda(format!(
+                        "cuMemsetD32Async failed: {:?}",
+                        res
+                    )));
                 }
             }
         }
@@ -622,7 +664,10 @@ impl CudaHma {
         // Policy: currently only 1D many-series kernel; allow override of block_x
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
-            _ => match std::env::var("HMA_MS_BLOCK_X").ok().and_then(|s| s.parse::<u32>().ok()) {
+            _ => match std::env::var("HMA_MS_BLOCK_X")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
                 Some(v) if v == 128 || v == 256 || v == 512 => v,
                 _ => 256,
             },
@@ -637,7 +682,9 @@ impl CudaHma {
         let out_ptr = unsafe { d_out.as_device_ptr().as_raw() };
         let shared_bytes: usize = if Self::ring_in_shared() {
             sqrt_len * (block_x as usize) * std::mem::size_of::<f32>()
-        } else { 0 };
+        } else {
+            0
+        };
 
         self.launch_many_series_kernel(
             &d_prices,
@@ -652,7 +699,11 @@ impl CudaHma {
             shared_bytes,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn hma_multi_series_one_param_time_major_dev(
@@ -684,7 +735,8 @@ impl CudaHma {
         }
         let (first_valids, period, sqrt_len) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
-        let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period, sqrt_len)?;
+        let dev =
+            self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period, sqrt_len)?;
         // Async D2H with optional pinned staging
         let n_elems = out_tm.len();
         if n_elems >= (1 << 20) {
@@ -728,7 +780,9 @@ pub mod benches {
         crate::indicators::moving_averages::hma::HmaParams,
         hma_batch_dev,
         hma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::hma::HmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::hma::HmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::hma::HmaParams { period: Some(64) },
         "hma",
         "hma"

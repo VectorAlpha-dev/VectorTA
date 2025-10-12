@@ -433,11 +433,19 @@ pub fn minmax_scalar(
 ) {
     #[inline(always)]
     fn fmin(a: f64, b: f64) -> f64 {
-        if a < b { a } else { b }
+        if a < b {
+            a
+        } else {
+            b
+        }
     }
     #[inline(always)]
     fn fmax(a: f64, b: f64) -> f64 {
-        if a > b { a } else { b }
+        if a > b {
+            a
+        } else {
+            b
+        }
     }
 
     let len = high.len();
@@ -551,14 +559,10 @@ pub fn minmax_scalar(
                 *left_all_high.get_unchecked_mut(i) = hf;
             } else {
                 let p = i - 1;
-                *left_min_low.get_unchecked_mut(i) =
-                    fmin(*left_min_low.get_unchecked(p), l);
-                *left_max_high.get_unchecked_mut(i) =
-                    fmax(*left_max_high.get_unchecked(p), h);
-                *left_all_low.get_unchecked_mut(i) =
-                    *left_all_low.get_unchecked(p) & lf;
-                *left_all_high.get_unchecked_mut(i) =
-                    *left_all_high.get_unchecked(p) & hf;
+                *left_min_low.get_unchecked_mut(i) = fmin(*left_min_low.get_unchecked(p), l);
+                *left_max_high.get_unchecked_mut(i) = fmax(*left_max_high.get_unchecked(p), h);
+                *left_all_low.get_unchecked_mut(i) = *left_all_low.get_unchecked(p) & lf;
+                *left_all_high.get_unchecked_mut(i) = *left_all_high.get_unchecked(p) & hf;
             }
         }
     }
@@ -578,14 +582,10 @@ pub fn minmax_scalar(
                 *right_all_high.get_unchecked_mut(i) = hf;
             } else {
                 let n1 = i + 1;
-                *right_min_low.get_unchecked_mut(i) =
-                    fmin(*right_min_low.get_unchecked(n1), l);
-                *right_max_high.get_unchecked_mut(i) =
-                    fmax(*right_max_high.get_unchecked(n1), h);
-                *right_all_low.get_unchecked_mut(i) =
-                    *right_all_low.get_unchecked(n1) & lf;
-                *right_all_high.get_unchecked_mut(i) =
-                    *right_all_high.get_unchecked(n1) & hf;
+                *right_min_low.get_unchecked_mut(i) = fmin(*right_min_low.get_unchecked(n1), l);
+                *right_max_high.get_unchecked_mut(i) = fmax(*right_max_high.get_unchecked(n1), h);
+                *right_all_low.get_unchecked_mut(i) = *right_all_low.get_unchecked(n1) & lf;
+                *right_all_high.get_unchecked_mut(i) = *right_all_high.get_unchecked(n1) & hf;
             }
         }
     }
@@ -777,36 +777,36 @@ use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub struct MinmaxStream {
-    order: usize,           // k
-    len: usize,             // 2k + 1
-    idx: usize,             // logical time index t
-    seen: usize,            // number of samples ingested
+    order: usize, // k
+    len: usize,   // 2k + 1
+    idx: usize,   // logical time index t
+    seen: usize,  // number of samples ingested
     filled: bool,
 
     // ---- center access: last (k+1) samples as a ring ----
-    kplus1: usize,          // k + 1
-    ring_pos: usize,        // 0..k
-    ring_high: Vec<f64>,    // size k+1; write at ring_pos; center at (ring_pos+1)% (k+1)
-    ring_low:  Vec<f64>,
+    kplus1: usize,       // k + 1
+    ring_pos: usize,     // 0..k
+    ring_high: Vec<f64>, // size k+1; write at ring_pos; center at (ring_pos+1)% (k+1)
+    ring_low: Vec<f64>,
 
     // ---- right window (length k) running aggregates via monotonic deques ----
     // deques hold (index, value) for finite values only
-    rq_min_low:  VecDeque<(usize, f64)>,  // monotone increasing -> front is min over last k lows
-    rq_max_high: VecDeque<(usize, f64)>,  // monotone decreasing -> front is max over last k highs
+    rq_min_low: VecDeque<(usize, f64)>, // monotone increasing -> front is min over last k lows
+    rq_max_high: VecDeque<(usize, f64)>, // monotone decreasing -> front is max over last k highs
 
     // Finite-counters for the right window (must be exactly k to be valid)
-    right_flags_pos: usize,            // ring index 0..k-1 for the finite flags
-    right_low_flags:  Vec<u8>,         // len k, stores {0,1} finiteness of lows
-    right_high_flags: Vec<u8>,         // len k, stores {0,1} finiteness of highs
-    right_low_count:  usize,
+    right_flags_pos: usize,    // ring index 0..k-1 for the finite flags
+    right_low_flags: Vec<u8>,  // len k, stores {0,1} finiteness of lows
+    right_high_flags: Vec<u8>, // len k, stores {0,1} finiteness of highs
+    right_low_count: usize,
     right_high_count: usize,
 
     // ---- delay line: reuse past right-window stats as current left-window stats ----
     // At step t, read hist[*] at ring_pos to get aggregates from (t - (k+1)).
     // Then overwrite hist[*] at ring_pos with the current right aggregates for future use.
-    hist_rmin_low:         Vec<f64>,   // len k+1
-    hist_rmax_high:        Vec<f64>,   // len k+1
-    hist_right_low_count:  Vec<usize>, // len k+1
+    hist_rmin_low: Vec<f64>,           // len k+1
+    hist_rmax_high: Vec<f64>,          // len k+1
+    hist_right_low_count: Vec<usize>,  // len k+1
     hist_right_high_count: Vec<usize>, // len k+1
 
     // ---- forward-filled outputs ----
@@ -832,20 +832,20 @@ impl MinmaxStream {
             kplus1,
             ring_pos: 0,
             ring_high: vec![f64::NAN; kplus1],
-            ring_low:  vec![f64::NAN; kplus1],
+            ring_low: vec![f64::NAN; kplus1],
 
-            rq_min_low:  VecDeque::with_capacity(k),
+            rq_min_low: VecDeque::with_capacity(k),
             rq_max_high: VecDeque::with_capacity(k),
 
             right_flags_pos: 0,
-            right_low_flags:  vec![0; k],
+            right_low_flags: vec![0; k],
             right_high_flags: vec![0; k],
-            right_low_count:  0,
+            right_low_count: 0,
             right_high_count: 0,
 
-            hist_rmin_low:         vec![f64::NAN; kplus1],
-            hist_rmax_high:        vec![f64::NAN; kplus1],
-            hist_right_low_count:  vec![0; kplus1],
+            hist_rmin_low: vec![f64::NAN; kplus1],
+            hist_rmax_high: vec![f64::NAN; kplus1],
+            hist_right_low_count: vec![0; kplus1],
             hist_right_high_count: vec![0; kplus1],
 
             last_min: f64::NAN,
@@ -858,10 +858,18 @@ impl MinmaxStream {
         // Window for the RIGHT side is [t-k+1 .. t] inclusive ⇒ evict indices <= t-k
         let cutoff = self.idx.saturating_sub(self.order);
         while let Some(&(j, _)) = self.rq_min_low.front() {
-            if j <= cutoff { self.rq_min_low.pop_front(); } else { break; }
+            if j <= cutoff {
+                self.rq_min_low.pop_front();
+            } else {
+                break;
+            }
         }
         while let Some(&(j, _)) = self.rq_max_high.front() {
-            if j <= cutoff { self.rq_max_high.pop_front(); } else { break; }
+            if j <= cutoff {
+                self.rq_max_high.pop_front();
+            } else {
+                break;
+            }
         }
     }
 
@@ -870,7 +878,11 @@ impl MinmaxStream {
         // Only finite values participate in the monotonic structure
         if val.is_finite() {
             while let Some(&(_, v)) = self.rq_min_low.back() {
-                if v >= val { self.rq_min_low.pop_back(); } else { break; }
+                if v >= val {
+                    self.rq_min_low.pop_back();
+                } else {
+                    break;
+                }
             }
             self.rq_min_low.push_back((idx, val));
         }
@@ -880,7 +892,11 @@ impl MinmaxStream {
     fn push_right_high(&mut self, idx: usize, val: f64) {
         if val.is_finite() {
             while let Some(&(_, v)) = self.rq_max_high.back() {
-                if v <= val { self.rq_max_high.pop_back(); } else { break; }
+                if v <= val {
+                    self.rq_max_high.pop_back();
+                } else {
+                    break;
+                }
             }
             self.rq_max_high.push_back((idx, val));
         }
@@ -888,38 +904,43 @@ impl MinmaxStream {
 
     #[inline(always)]
     fn update_right_counts(&mut self, high: f64, low: f64) {
-        let pos = self.right_flags_pos;    // 0..k-1
-        let old_low  = self.right_low_flags[pos]  as isize;
+        let pos = self.right_flags_pos; // 0..k-1
+        let old_low = self.right_low_flags[pos] as isize;
         let old_high = self.right_high_flags[pos] as isize;
-        let new_low  = low.is_finite()  as u8;
+        let new_low = low.is_finite() as u8;
         let new_high = high.is_finite() as u8;
-        self.right_low_flags[pos]  = new_low;
+        self.right_low_flags[pos] = new_low;
         self.right_high_flags[pos] = new_high;
-        self.right_low_count  = (self.right_low_count  as isize + (new_low as isize - old_low))  as usize;
-        self.right_high_count = (self.right_high_count as isize + (new_high as isize - old_high)) as usize;
+        self.right_low_count =
+            (self.right_low_count as isize + (new_low as isize - old_low)) as usize;
+        self.right_high_count =
+            (self.right_high_count as isize + (new_high as isize - old_high)) as usize;
 
         // advance flag ring
-        if self.right_flags_pos + 1 == self.order { self.right_flags_pos = 0; }
-        else { self.right_flags_pos += 1; }
+        if self.right_flags_pos + 1 == self.order {
+            self.right_flags_pos = 0;
+        } else {
+            self.right_flags_pos += 1;
+        }
     }
 
     /// O(1) amortized update. Returns (is_min, is_max, last_min, last_max)
     /// - `is_min`/`is_max` are `Some(value)` only when the center (t - k) is a strict local extremum with all neighbors finite.
     /// - `last_min`/`last_max` forward-fill the most recent extrema.
     pub fn update(&mut self, high: f64, low: f64) -> (Option<f64>, Option<f64>, f64, f64) {
-        let k  = self.order;
+        let k = self.order;
         let kp = self.kplus1;
         let pos = self.ring_pos; // write index for rings AND read index for (k+1)-delayed left stats
 
         // 1) Read LEFT aggregates from (t - (k+1)) before overwriting them.
-        let left_min_low     = self.hist_rmin_low[pos];
-        let left_max_high    = self.hist_rmax_high[pos];
-        let left_low_count   = self.hist_right_low_count[pos];
-        let left_high_count  = self.hist_right_high_count[pos];
+        let left_min_low = self.hist_rmin_low[pos];
+        let left_max_high = self.hist_rmax_high[pos];
+        let left_low_count = self.hist_right_low_count[pos];
+        let left_high_count = self.hist_right_high_count[pos];
 
         // 2) Write current sample into the (k+1)-ring (so center is always at (pos+1) mod (k+1)).
         self.ring_high[pos] = high;
-        self.ring_low[pos]  = low;
+        self.ring_low[pos] = low;
 
         // 3) Maintain RIGHT window structures (evict, push, update counts).
         self.evict_old();
@@ -928,19 +949,29 @@ impl MinmaxStream {
         self.update_right_counts(high, low);
 
         let right_min_low = self.rq_min_low.front().map(|&(_, v)| v).unwrap_or(f64::NAN);
-        let right_max_high = self.rq_max_high.front().map(|&(_, v)| v).unwrap_or(f64::NAN);
+        let right_max_high = self
+            .rq_max_high
+            .front()
+            .map(|&(_, v)| v)
+            .unwrap_or(f64::NAN);
 
         // 4) Store RIGHT aggregates into delay line at 'pos' (to be used as LEFT k+1 steps later).
-        self.hist_rmin_low[pos]         = right_min_low;
-        self.hist_rmax_high[pos]        = right_max_high;
-        self.hist_right_low_count[pos]  = self.right_low_count;
+        self.hist_rmin_low[pos] = right_min_low;
+        self.hist_rmax_high[pos] = right_max_high;
+        self.hist_right_low_count[pos] = self.right_low_count;
         self.hist_right_high_count[pos] = self.right_high_count;
 
         // 5) Advance time and ring positions.
-        self.idx  = self.idx.wrapping_add(1);
+        self.idx = self.idx.wrapping_add(1);
         self.seen = self.seen.saturating_add(1);
-        if self.ring_pos + 1 == kp { self.ring_pos = 0; } else { self.ring_pos += 1; }
-        if !self.filled && self.seen >= self.len { self.filled = true; }
+        if self.ring_pos + 1 == kp {
+            self.ring_pos = 0;
+        } else {
+            self.ring_pos += 1;
+        }
+        if !self.filled && self.seen >= self.len {
+            self.filled = true;
+        }
 
         // 6) If the full window (2k+1) isn't available yet, we can't evaluate a center.
         if !self.filled {
@@ -960,11 +991,19 @@ impl MinmaxStream {
         // - Min: cl < min(LEFT lows) && cl < min(RIGHT lows), and all k neighbors on both sides are finite.
         // - Max: ch > max(LEFT highs) && ch > max(RIGHT highs), and all k neighbors on both sides are finite.
         if ch.is_finite() & cl.is_finite() {
-            if left_low_count == k && self.right_low_count == k && cl < left_min_low && cl < right_min_low {
+            if left_low_count == k
+                && self.right_low_count == k
+                && cl < left_min_low
+                && cl < right_min_low
+            {
                 out_min = Some(cl);
                 self.last_min = cl;
             }
-            if left_high_count == k && self.right_high_count == k && ch > left_max_high && ch > right_max_high {
+            if left_high_count == k
+                && self.right_high_count == k
+                && ch > left_max_high
+                && ch > right_max_high
+            {
                 out_max = Some(ch);
                 self.last_max = ch;
             }

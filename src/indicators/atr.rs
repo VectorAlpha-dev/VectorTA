@@ -802,8 +802,16 @@ impl AtrStream {
         let tr = if self.prev_close.is_nan() {
             high - low
         } else {
-            let up = if high > self.prev_close { high } else { self.prev_close };
-            let dn = if low < self.prev_close { low } else { self.prev_close };
+            let up = if high > self.prev_close {
+                high
+            } else {
+                self.prev_close
+            };
+            let dn = if low < self.prev_close {
+                low
+            } else {
+                self.prev_close
+            };
             up - dn
         };
 
@@ -994,7 +1002,9 @@ fn atr_batch_inner_into(
 
     // Precompute TR series once and its prefix sums for fast per-row seeds
     let mut tr = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols);
-    unsafe { tr.set_len(cols); }
+    unsafe {
+        tr.set_len(cols);
+    }
     // Fill with zeros up front to avoid reading uninit in prefix sums
     for v in &mut tr[..] {
         *v = 0.0;
@@ -1017,7 +1027,9 @@ fn atr_batch_inner_into(
 
     // Prefix sums of TR to seed RMA in O(1) per row
     let mut ps = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols + 1);
-    unsafe { ps.set_len(cols + 1); }
+    unsafe {
+        ps.set_len(cols + 1);
+    }
     ps[0] = 0.0;
     // Keep prefix align with indices: ps[i+1] = sum_{j=0..i} tr[j]
     for i in 0..cols {
@@ -1115,13 +1127,17 @@ fn atr_batch_inner(
 
     // Precompute TR once + prefix sums
     let mut tr = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols);
-    unsafe { tr.set_len(cols); }
+    unsafe {
+        tr.set_len(cols);
+    }
     for v in &mut tr[..] {
         *v = 0.0;
     }
     match kern {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 => unsafe { precompute_tr_into_avx512(high, low, close, first_valid, &mut tr) },
+        Kernel::Avx512 => unsafe {
+            precompute_tr_into_avx512(high, low, close, first_valid, &mut tr)
+        },
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 => unsafe { precompute_tr_into_avx2(high, low, close, first_valid, &mut tr) },
         _ => precompute_tr_into_scalar(high, low, close, first_valid, &mut tr),

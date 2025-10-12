@@ -612,19 +612,19 @@ pub struct CfoStream {
 
     // circular buffer
     buf: Vec<f64>,
-    idx: usize,    // next write position (holds the oldest sample)
+    idx: usize, // next write position (holds the oldest sample)
     filled: bool,
 
     // rolling accumulators for the current full window
-    sum_y: f64,    // S_y = sum of y
-    sum_xy: f64,   // S_xy = sum of k*y_k with k=1..n (oldest -> newest)
+    sum_y: f64,  // S_y = sum of y
+    sum_xy: f64, // S_xy = sum of k*y_k with k=1..n (oldest -> newest)
 
     // precomputed OLS constants for x = 1..n
     n: f64,
     inv_n: f64,
-    sx: f64,          // Σx
-    inv_denom: f64,   // 1 / ( n*Σx^2 - (Σx)^2 )
-    half_nm1: f64,    // (n-1)/2 for forecasting at x=n
+    sx: f64,        // Σx
+    inv_denom: f64, // 1 / ( n*Σx^2 - (Σx)^2 )
+    half_nm1: f64,  // (n-1)/2 for forecasting at x=n
 }
 
 impl CfoStream {
@@ -1010,7 +1010,7 @@ fn cfo_batch_prefix_scalar_rows(
         let start_idx = first + period - 1;
         for di in start_idx..cols {
             let idx = di - first; // 0-based within valid segment
-            // Window [idx - (period-1) .. idx] in 0-based valid coordinates
+                                  // Window [idx - (period-1) .. idx] in 0-based valid coordinates
             let r1 = idx + 1; // 1-based right
             let l1_minus1 = idx + 1 - period; // (left1 - 1)
 
@@ -1107,9 +1107,8 @@ pub fn cfo_batch_inner_into(
     init_matrix_prefixes(out_mu, cols, &warm);
 
     // Use shared prefix sums to compute all rows efficiently
-    let values: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64, out_mu.len())
-    };
+    let values: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64, out_mu.len()) };
     cfo_batch_prefix_scalar_rows(data, first, &combos, values, rows, cols, parallel);
 
     Ok(combos)

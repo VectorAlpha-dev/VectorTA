@@ -46,10 +46,10 @@ use crate::utilities::kernel_validation::validate_kernel;
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::collections::VecDeque;
 use std::convert::AsRef;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
-use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub enum AroonData<'a> {
@@ -293,7 +293,13 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
 
     #[inline(always)]
     fn aroon_percent(dist: usize, length: usize, scale_100: f64) -> f64 {
-        if dist == 0 { 100.0 } else if dist >= length { 0.0 } else { (-(dist as f64)).mul_add(scale_100, 100.0) }
+        if dist == 0 {
+            100.0
+        } else if dist >= length {
+            0.0
+        } else {
+            (-(dist as f64)).mul_add(scale_100, 100.0)
+        }
     }
 
     // For each bar i from `length` up to `len - 1`, scan a window of size `length + 1`.
@@ -364,7 +370,9 @@ pub fn aroon_avx512(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
         debug_assert_eq!(low.len(), len);
         debug_assert_eq!(up.len(), len);
         debug_assert_eq!(down.len(), len);
-        if length == 0 || length > len { return; }
+        if length == 0 || length > len {
+            return;
+        }
 
         let hi_ptr = high.as_ptr();
         let lo_ptr = low.as_ptr();
@@ -378,7 +386,12 @@ pub fn aroon_avx512(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
         let max_finite = _mm512_set1_pd(f64::MAX);
 
         #[inline(always)]
-        unsafe fn lanes_all_finite_512(h: __m512d, l: __m512d, sign_mask: __m512d, max_finite: __m512d) -> bool {
+        unsafe fn lanes_all_finite_512(
+            h: __m512d,
+            l: __m512d,
+            sign_mask: __m512d,
+            max_finite: __m512d,
+        ) -> bool {
             let h_abs = _mm512_andnot_pd(sign_mask, h);
             let l_abs = _mm512_andnot_pd(sign_mask, l);
             let ok_h: __mmask8 = _mm512_cmp_pd_mask(h_abs, max_finite, _CMP_LE_OQ);
@@ -413,22 +426,70 @@ pub fn aroon_avx512(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                 _mm512_storeu_pd(hv.as_mut_ptr(), h8);
                 _mm512_storeu_pd(lv.as_mut_ptr(), l8);
 
-                if hv[0] > best_h { best_h = hv[0]; best_h_off = j;     }
-                if lv[0] < best_l { best_l = lv[0]; best_l_off = j;     }
-                if hv[1] > best_h { best_h = hv[1]; best_h_off = j + 1; }
-                if lv[1] < best_l { best_l = lv[1]; best_l_off = j + 1; }
-                if hv[2] > best_h { best_h = hv[2]; best_h_off = j + 2; }
-                if lv[2] < best_l { best_l = lv[2]; best_l_off = j + 2; }
-                if hv[3] > best_h { best_h = hv[3]; best_h_off = j + 3; }
-                if lv[3] < best_l { best_l = lv[3]; best_l_off = j + 3; }
-                if hv[4] > best_h { best_h = hv[4]; best_h_off = j + 4; }
-                if lv[4] < best_l { best_l = lv[4]; best_l_off = j + 4; }
-                if hv[5] > best_h { best_h = hv[5]; best_h_off = j + 5; }
-                if lv[5] < best_l { best_l = lv[5]; best_l_off = j + 5; }
-                if hv[6] > best_h { best_h = hv[6]; best_h_off = j + 6; }
-                if lv[6] < best_l { best_l = lv[6]; best_l_off = j + 6; }
-                if hv[7] > best_h { best_h = hv[7]; best_h_off = j + 7; }
-                if lv[7] < best_l { best_l = lv[7]; best_l_off = j + 7; }
+                if hv[0] > best_h {
+                    best_h = hv[0];
+                    best_h_off = j;
+                }
+                if lv[0] < best_l {
+                    best_l = lv[0];
+                    best_l_off = j;
+                }
+                if hv[1] > best_h {
+                    best_h = hv[1];
+                    best_h_off = j + 1;
+                }
+                if lv[1] < best_l {
+                    best_l = lv[1];
+                    best_l_off = j + 1;
+                }
+                if hv[2] > best_h {
+                    best_h = hv[2];
+                    best_h_off = j + 2;
+                }
+                if lv[2] < best_l {
+                    best_l = lv[2];
+                    best_l_off = j + 2;
+                }
+                if hv[3] > best_h {
+                    best_h = hv[3];
+                    best_h_off = j + 3;
+                }
+                if lv[3] < best_l {
+                    best_l = lv[3];
+                    best_l_off = j + 3;
+                }
+                if hv[4] > best_h {
+                    best_h = hv[4];
+                    best_h_off = j + 4;
+                }
+                if lv[4] < best_l {
+                    best_l = lv[4];
+                    best_l_off = j + 4;
+                }
+                if hv[5] > best_h {
+                    best_h = hv[5];
+                    best_h_off = j + 5;
+                }
+                if lv[5] < best_l {
+                    best_l = lv[5];
+                    best_l_off = j + 5;
+                }
+                if hv[6] > best_h {
+                    best_h = hv[6];
+                    best_h_off = j + 6;
+                }
+                if lv[6] < best_l {
+                    best_l = lv[6];
+                    best_l_off = j + 6;
+                }
+                if hv[7] > best_h {
+                    best_h = hv[7];
+                    best_h_off = j + 7;
+                }
+                if lv[7] < best_l {
+                    best_l = lv[7];
+                    best_l_off = j + 7;
+                }
 
                 j += 8;
             }
@@ -445,8 +506,14 @@ pub fn aroon_avx512(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                         invalid = true;
                         break;
                     }
-                    if h > best_h { best_h = h; best_h_off = j; }
-                    if l < best_l { best_l = l; best_l_off = j; }
+                    if h > best_h {
+                        best_h = h;
+                        best_h_off = j;
+                    }
+                    if l < best_l {
+                        best_l = l;
+                        best_l_off = j;
+                    }
                     j += 1;
                 }
             }
@@ -460,8 +527,20 @@ pub fn aroon_avx512(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                 let dist_lo = length - best_l_off;
                 let up_val = (-(dist_hi as f64)).mul_add(scale, 100.0);
                 let dn_val = (-(dist_lo as f64)).mul_add(scale, 100.0);
-                *up_ptr.add(i) = if dist_hi == 0 { 100.0 } else if dist_hi >= length { 0.0 } else { up_val };
-                *dn_ptr.add(i) = if dist_lo == 0 { 100.0 } else if dist_lo >= length { 0.0 } else { dn_val };
+                *up_ptr.add(i) = if dist_hi == 0 {
+                    100.0
+                } else if dist_hi >= length {
+                    0.0
+                } else {
+                    up_val
+                };
+                *dn_ptr.add(i) = if dist_lo == 0 {
+                    100.0
+                } else if dist_lo >= length {
+                    0.0
+                } else {
+                    dn_val
+                };
             }
         }
     }
@@ -476,7 +555,9 @@ pub fn aroon_avx2(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down
         debug_assert_eq!(low.len(), len);
         debug_assert_eq!(up.len(), len);
         debug_assert_eq!(down.len(), len);
-        if length == 0 || length > len { return; }
+        if length == 0 || length > len {
+            return;
+        }
 
         let hi_ptr = high.as_ptr();
         let lo_ptr = low.as_ptr();
@@ -490,7 +571,12 @@ pub fn aroon_avx2(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down
         let max_finite = _mm256_set1_pd(f64::MAX);
 
         #[inline(always)]
-        unsafe fn lanes_all_finite(h: __m256d, l: __m256d, sign_mask: __m256d, max_finite: __m256d) -> bool {
+        unsafe fn lanes_all_finite(
+            h: __m256d,
+            l: __m256d,
+            sign_mask: __m256d,
+            max_finite: __m256d,
+        ) -> bool {
             let h_abs = _mm256_andnot_pd(sign_mask, h);
             let l_abs = _mm256_andnot_pd(sign_mask, l);
             let ok_h = _mm256_cmp_pd(h_abs, max_finite, _CMP_LE_OQ);
@@ -526,14 +612,38 @@ pub fn aroon_avx2(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down
                 _mm256_storeu_pd(hv.as_mut_ptr(), h4);
                 _mm256_storeu_pd(lv.as_mut_ptr(), l4);
 
-                if hv[0] > best_h { best_h = hv[0]; best_h_off = j;     }
-                if lv[0] < best_l { best_l = lv[0]; best_l_off = j;     }
-                if hv[1] > best_h { best_h = hv[1]; best_h_off = j + 1; }
-                if lv[1] < best_l { best_l = lv[1]; best_l_off = j + 1; }
-                if hv[2] > best_h { best_h = hv[2]; best_h_off = j + 2; }
-                if lv[2] < best_l { best_l = lv[2]; best_l_off = j + 2; }
-                if hv[3] > best_h { best_h = hv[3]; best_h_off = j + 3; }
-                if lv[3] < best_l { best_l = lv[3]; best_l_off = j + 3; }
+                if hv[0] > best_h {
+                    best_h = hv[0];
+                    best_h_off = j;
+                }
+                if lv[0] < best_l {
+                    best_l = lv[0];
+                    best_l_off = j;
+                }
+                if hv[1] > best_h {
+                    best_h = hv[1];
+                    best_h_off = j + 1;
+                }
+                if lv[1] < best_l {
+                    best_l = lv[1];
+                    best_l_off = j + 1;
+                }
+                if hv[2] > best_h {
+                    best_h = hv[2];
+                    best_h_off = j + 2;
+                }
+                if lv[2] < best_l {
+                    best_l = lv[2];
+                    best_l_off = j + 2;
+                }
+                if hv[3] > best_h {
+                    best_h = hv[3];
+                    best_h_off = j + 3;
+                }
+                if lv[3] < best_l {
+                    best_l = lv[3];
+                    best_l_off = j + 3;
+                }
 
                 j += 4;
             }
@@ -543,12 +653,20 @@ pub fn aroon_avx2(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down
                     let h = *base_h.add(j);
                     let l = *base_l.add(j);
                     const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
-                    let hb = h.to_bits(); let lb = l.to_bits();
+                    let hb = h.to_bits();
+                    let lb = l.to_bits();
                     if (hb & EXP_MASK) == EXP_MASK || (lb & EXP_MASK) == EXP_MASK {
-                        invalid = true; break;
+                        invalid = true;
+                        break;
                     }
-                    if h > best_h { best_h = h; best_h_off = j; }
-                    if l < best_l { best_l = l; best_l_off = j; }
+                    if h > best_h {
+                        best_h = h;
+                        best_h_off = j;
+                    }
+                    if l < best_l {
+                        best_l = l;
+                        best_l_off = j;
+                    }
                     j += 1;
                 }
             }
@@ -562,8 +680,20 @@ pub fn aroon_avx2(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down
                 let dist_lo = length - best_l_off;
                 let up_val = (-(dist_hi as f64)).mul_add(scale, 100.0);
                 let dn_val = (-(dist_lo as f64)).mul_add(scale, 100.0);
-                *up_ptr.add(i) = if dist_hi == 0 { 100.0 } else if dist_hi >= length { 0.0 } else { up_val };
-                *dn_ptr.add(i) = if dist_lo == 0 { 100.0 } else if dist_lo >= length { 0.0 } else { dn_val };
+                *up_ptr.add(i) = if dist_hi == 0 {
+                    100.0
+                } else if dist_hi >= length {
+                    0.0
+                } else {
+                    up_val
+                };
+                *dn_ptr.add(i) = if dist_lo == 0 {
+                    100.0
+                } else if dist_lo >= length {
+                    0.0
+                } else {
+                    dn_val
+                };
             }
         }
     }
@@ -594,12 +724,12 @@ pub unsafe fn aroon_avx512_long(
 /// Streaming: O(1) amortized via monotonic deques; strict >/< tie rules (earlier extreme wins).
 #[derive(Debug)]
 pub struct AroonStream {
-    length: usize,      // N
-    buf_size: usize,    // N + 1 (window width)
-    head: usize,        // ring write index for flags
-    count: usize,       // how many bars we've seen, capped at buf_size
-    t: usize,           // absolute tick index (0-based)
-    scale_100: f64,     // precomputed 100.0 / N
+    length: usize,   // N
+    buf_size: usize, // N + 1 (window width)
+    head: usize,     // ring write index for flags
+    count: usize,    // how many bars we've seen, capped at buf_size
+    t: usize,        // absolute tick index (0-based)
+    scale_100: f64,  // precomputed 100.0 / N
 
     // Keep a ring of "invalid" flags so we can know in O(1) if the window contains NaN/Inf:
     // 0 = finite pair, 1 = invalid pair
@@ -619,7 +749,10 @@ impl AroonStream {
     pub fn try_new(params: AroonParams) -> Result<Self, AroonError> {
         let length = params.length.unwrap_or(14);
         if length == 0 {
-            return Err(AroonError::InvalidLength { length: 0, data_len: 0 });
+            return Err(AroonError::InvalidLength {
+                length: 0,
+                data_len: 0,
+            });
         }
         let buf_size = length + 1;
         Ok(AroonStream {
@@ -669,29 +802,47 @@ impl AroonStream {
         self.flags[self.head] = new_flag;
         self.invalid_count += new_flag as usize;
         self.head += 1;
-        if self.head == self.buf_size { self.head = 0; }
+        if self.head == self.buf_size {
+            self.head = 0;
+        }
 
         // Evict outdated indices from fronts (anything strictly before i - length)
         // Window is [i - length, i], size = length + 1
         let earliest = i.saturating_sub(self.length);
         while let Some(&(_, idx)) = self.maxq.front() {
-            if idx < earliest { self.maxq.pop_front(); } else { break; }
+            if idx < earliest {
+                self.maxq.pop_front();
+            } else {
+                break;
+            }
         }
         while let Some(&(_, idx)) = self.minq.front() {
-            if idx < earliest { self.minq.pop_front(); } else { break; }
+            if idx < earliest {
+                self.minq.pop_front();
+            } else {
+                break;
+            }
         }
 
         // Push the new samples into monotonic deques (strict comparisons preserve tie rules: earlier wins)
         if !invalid {
             // For highs: keep deque values strictly decreasing (older equal kept → earlier extreme wins)
             while let Some(&(v, _)) = self.maxq.back() {
-                if high > v { self.maxq.pop_back(); } else { break; }
+                if high > v {
+                    self.maxq.pop_back();
+                } else {
+                    break;
+                }
             }
             self.maxq.push_back((high, i));
 
             // For lows: keep deque values strictly increasing (older equal kept)
             while let Some(&(v, _)) = self.minq.back() {
-                if low < v { self.minq.pop_back(); } else { break; }
+                if low < v {
+                    self.minq.pop_back();
+                } else {
+                    break;
+                }
             }
             self.minq.push_back((low, i));
         }

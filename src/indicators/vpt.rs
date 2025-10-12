@@ -382,7 +382,10 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
         let m_nan_p1 = _mm256_cmp_pd(p1, p1, _CMP_UNORD_Q);
         let m_nan_v = _mm256_cmp_pd(vv, vv, _CMP_UNORD_Q);
         let m_eq0_p0 = _mm256_cmp_pd(p0, vzero, _CMP_EQ_OQ);
-        let invalid = _mm256_or_pd(_mm256_or_pd(m_nan_p0, m_nan_p1), _mm256_or_pd(m_nan_v, m_eq0_p0));
+        let invalid = _mm256_or_pd(
+            _mm256_or_pd(m_nan_p0, m_nan_p1),
+            _mm256_or_pd(m_nan_v, m_eq0_p0),
+        );
 
         // cur = v * ((p1 - p0) / p0)
         let diff = _mm256_sub_pd(p1, p0);
@@ -538,7 +541,10 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         let m_nan_p1 = _mm256_cmp_pd(p1, p1, _CMP_UNORD_Q);
         let m_nan_v = _mm256_cmp_pd(vv, vv, _CMP_UNORD_Q);
         let m_eq0_p0 = _mm256_cmp_pd(p0, vzero, _CMP_EQ_OQ);
-        let invalid = _mm256_or_pd(_mm256_or_pd(m_nan_p0, m_nan_p1), _mm256_or_pd(m_nan_v, m_eq0_p0));
+        let invalid = _mm256_or_pd(
+            _mm256_or_pd(m_nan_p0, m_nan_p1),
+            _mm256_or_pd(m_nan_v, m_eq0_p0),
+        );
 
         let diff = _mm256_sub_pd(p1, p0);
         let div = _mm256_div_pd(diff, p0);
@@ -856,7 +862,11 @@ impl VptStream {
         // From the second valid pair onward:
         // at the second pair, cum is NaN, so base := carry_inc (sum of two increments);
         // after that, base := cum (running sum).
-        let base = if self.cum.is_finite() { self.cum } else { self.carry_inc };
+        let base = if self.cum.is_finite() {
+            self.cum
+        } else {
+            self.carry_inc
+        };
         let new_cum = base + cur_inc;
 
         self.carry_inc = cur_inc;

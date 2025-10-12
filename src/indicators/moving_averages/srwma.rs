@@ -285,8 +285,15 @@ pub fn srwma_scalar(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    assert_eq!(weights.len(), period - 1, "weights.len() must be period - 1");
-    assert!(out.len() >= data.len(), "`out` must be at least as long as `data`");
+    assert_eq!(
+        weights.len(),
+        period - 1,
+        "weights.len() must be period - 1"
+    );
+    assert!(
+        out.len() >= data.len(),
+        "`out` must be at least as long as `data`"
+    );
 
     let wlen = period - 1;
     let start_idx = first_val + period + 1;
@@ -392,7 +399,17 @@ pub fn srwma_avx2(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    unsafe { srwma_row_avx2(data, first_valid, period, period - 1, weights.as_ptr(), inv_norm, out) }
+    unsafe {
+        srwma_row_avx2(
+            data,
+            first_valid,
+            period,
+            period - 1,
+            weights.as_ptr(),
+            inv_norm,
+            out,
+        )
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -405,7 +422,17 @@ pub fn srwma_avx512_short(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    unsafe { srwma_row_avx512_short(data, first_valid, period, period - 1, weights.as_ptr(), inv_norm, out) }
+    unsafe {
+        srwma_row_avx512_short(
+            data,
+            first_valid,
+            period,
+            period - 1,
+            weights.as_ptr(),
+            inv_norm,
+            out,
+        )
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -418,7 +445,17 @@ pub fn srwma_avx512_long(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    unsafe { srwma_row_avx512_long(data, first_valid, period, period - 1, weights.as_ptr(), inv_norm, out) }
+    unsafe {
+        srwma_row_avx512_long(
+            data,
+            first_valid,
+            period,
+            period - 1,
+            weights.as_ptr(),
+            inv_norm,
+            out,
+        )
+    }
 }
 
 #[inline]
@@ -1107,9 +1144,9 @@ unsafe fn srwma_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct SrwmaStream {
-    period: usize,   // user period
-    wlen: usize,     // p = period - 1
-    inv_norm: f64,   // 1 / sum(weights)
+    period: usize, // user period
+    wlen: usize,   // p = period - 1
+    inv_norm: f64, // 1 / sum(weights)
     // exact O(p) path
     weights: Vec<f64>, // length p; weights[k] = sqrt(period - k), k=0..p-1 (k=0 is newest)
     ring: Vec<f64>,    // mirrored ring buffer, length 2p
@@ -1128,15 +1165,18 @@ struct SrwmaApprox {
     s: Vec<f64>,        // state S_t^(j), one per exponential
     denom: f64,         // sum_j a_j * sum_{k=0}^{p-1} r_j^k
     // for x_{t-p} access
-    lag_buf: Vec<f64>,  // ring of length p+1 to fetch the leaving sample
-    lag_head: usize,    // write index within lag_buf
+    lag_buf: Vec<f64>, // ring of length p+1 to fetch the leaving sample
+    lag_head: usize,   // write index within lag_buf
 }
 
 impl SrwmaStream {
     pub fn try_new(params: SrwmaParams) -> Result<Self, SrwmaError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(SrwmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(SrwmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let p = period - 1;
 
@@ -1172,7 +1212,11 @@ impl SrwmaStream {
         // For period==1 (p=0), there is no defined window; maintain prior behavior (None until warmup).
         if p == 0 {
             self.count += 1;
-            return if self.count <= self.period + 1 { None } else { Some(value) };
+            return if self.count <= self.period + 1 {
+                None
+            } else {
+                Some(value)
+            };
         }
 
         // Write new sample into ring and its mirror
@@ -1245,7 +1289,9 @@ impl SrwmaStream {
             _ => vec![0.05, 0.12, 0.25, 0.60]
                 .into_iter()
                 .map(|f| f * p as f64)
-                .chain((4..q).map(|k| (0.60 + 0.35 * (k as f64 - 3.0) / (q as f64 - 3.0)) * p as f64))
+                .chain(
+                    (4..q).map(|k| (0.60 + 0.35 * (k as f64 - 3.0) / (q as f64 - 3.0)) * p as f64),
+                )
                 .collect(),
         };
         let r: Vec<f64> = taus
@@ -1314,7 +1360,11 @@ impl SrwmaStream {
         // Maintain lag buffer of length p+1; x_{t-p} leaves the window
         let x_old = some.lag_buf[some.lag_head];
         some.lag_buf[some.lag_head] = value;
-        some.lag_head = if some.lag_head + 1 == (p + 1) { 0 } else { some.lag_head + 1 };
+        some.lag_head = if some.lag_head + 1 == (p + 1) {
+            0
+        } else {
+            some.lag_head + 1
+        };
 
         // Update Q exponential states: S_t = r S_{t-1} + r x_t - r^{p+1} x_{t-p}
         for j in 0..some.s.len() {

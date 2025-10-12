@@ -327,13 +327,13 @@ fn dm_compute_into(
             dm_compute_into_scalar(high, low, period, first, plus_out, minus_out)
         }
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 | Kernel::Avx2Batch => {
-            unsafe { dm_compute_into_avx2(high, low, period, first, plus_out, minus_out) }
-        }
+        Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
+            dm_compute_into_avx2(high, low, period, first, plus_out, minus_out)
+        },
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 | Kernel::Avx512Batch => {
-            unsafe { dm_compute_into_avx512(high, low, period, first, plus_out, minus_out) }
-        }
+        Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
+            dm_compute_into_avx512(high, low, period, first, plus_out, minus_out)
+        },
         _ => unreachable!(),
     }
 }

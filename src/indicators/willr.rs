@@ -682,7 +682,11 @@ fn willr_scalar_naive(
             out[i] = f64::NAN;
         } else {
             let denom = h - l;
-            out[i] = if denom == 0.0 { 0.0 } else { (h - close[i]) / denom * -100.0 };
+            out[i] = if denom == 0.0 {
+                0.0
+            } else {
+                (h - close[i]) / denom * -100.0
+            };
         }
     }
 }
@@ -785,7 +789,11 @@ fn willr_scalar_deque(
                 out[i] = f64::NAN;
             } else {
                 let denom = h - l;
-                out[i] = if denom == 0.0 { 0.0 } else { (h - c) / denom * -100.0 };
+                out[i] = if denom == 0.0 {
+                    0.0
+                } else {
+                    (h - c) / denom * -100.0
+                };
             }
         }
 
@@ -1696,19 +1704,26 @@ impl WillrStream {
     pub fn try_new(params: WillrParams) -> Result<Self, WillrError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(WillrError::InvalidPeriod { period: 0, data_len: 0 });
+            return Err(WillrError::InvalidPeriod {
+                period: 0,
+                data_len: 0,
+            });
         }
         Ok(Self {
             period,
             high_ring: vec![f64::NAN; period],
-            low_ring:  vec![f64::NAN; period],
-            nan_ring:  vec![0u8; period],
+            low_ring: vec![f64::NAN; period],
+            nan_ring: vec![0u8; period],
             nan_count: 0,
 
             dq_max: vec![0usize; period],
             dq_min: vec![0usize; period],
-            head_max: 0, tail_max: 0, len_max: 0,
-            head_min: 0, tail_min: 0, len_min: 0,
+            head_max: 0,
+            tail_max: 0,
+            len_max: 0,
+            head_min: 0,
+            tail_min: 0,
+            len_min: 0,
 
             count: 0,
         })
@@ -1721,8 +1736,8 @@ impl WillrStream {
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
         let cap = self.period;
-        let t   = self.count;         // global index of this sample
-        let pos = t % cap;            // ring position being overwritten
+        let t = self.count; // global index of this sample
+        let pos = t % cap; // ring position being overwritten
 
         // 1) Update rolling NaN state first (corresponds to evicting t - cap and adding t).
         let new_nan = (high.is_nan() || low.is_nan()) as u8;
@@ -1732,7 +1747,7 @@ impl WillrStream {
 
         // Write incoming sample into rings.
         self.high_ring[pos] = high;
-        self.low_ring[pos]  = low;
+        self.low_ring[pos] = low;
 
         // 2) Evict outdated indices from deque fronts (anything < oldest allowed index).
         if t + 1 > cap {
@@ -1743,18 +1758,26 @@ impl WillrStream {
                 let front_idx = self.dq_max[self.head_max];
                 if front_idx < cutoff {
                     self.head_max += 1;
-                    if self.head_max == cap { self.head_max = 0; }
+                    if self.head_max == cap {
+                        self.head_max = 0;
+                    }
                     self.len_max -= 1;
-                } else { break; }
+                } else {
+                    break;
+                }
             }
             // min: pop front while idx < cutoff
             while self.len_min != 0 {
                 let front_idx = self.dq_min[self.head_min];
                 if front_idx < cutoff {
                     self.head_min += 1;
-                    if self.head_min == cap { self.head_min = 0; }
+                    if self.head_min == cap {
+                        self.head_min = 0;
+                    }
                     self.len_min -= 1;
-                } else { break; }
+                } else {
+                    break;
+                }
             }
         }
 
@@ -1762,32 +1785,48 @@ impl WillrStream {
         if new_nan == 0 {
             // Maintain decreasing deque for highs (pop while back <= high).
             while self.len_max != 0 {
-                let back_pos = if self.tail_max == 0 { cap - 1 } else { self.tail_max - 1 };
+                let back_pos = if self.tail_max == 0 {
+                    cap - 1
+                } else {
+                    self.tail_max - 1
+                };
                 let back_idx = self.dq_max[back_pos];
                 let back_val = self.high_ring[back_idx % cap];
                 if back_val <= high {
                     self.tail_max = back_pos;
                     self.len_max -= 1;
-                } else { break; }
+                } else {
+                    break;
+                }
             }
             self.dq_max[self.tail_max] = t;
             self.tail_max += 1;
-            if self.tail_max == cap { self.tail_max = 0; }
+            if self.tail_max == cap {
+                self.tail_max = 0;
+            }
             self.len_max += 1;
 
             // Maintain increasing deque for lows (pop while back >= low).
             while self.len_min != 0 {
-                let back_pos = if self.tail_min == 0 { cap - 1 } else { self.tail_min - 1 };
+                let back_pos = if self.tail_min == 0 {
+                    cap - 1
+                } else {
+                    self.tail_min - 1
+                };
                 let back_idx = self.dq_min[back_pos];
                 let back_val = self.low_ring[back_idx % cap];
                 if back_val >= low {
                     self.tail_min = back_pos;
                     self.len_min -= 1;
-                } else { break; }
+                } else {
+                    break;
+                }
             }
             self.dq_min[self.tail_min] = t;
             self.tail_min += 1;
-            if self.tail_min == cap { self.tail_min = 0; }
+            if self.tail_min == cap {
+                self.tail_min = 0;
+            }
             self.len_min += 1;
         }
 

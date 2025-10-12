@@ -1729,16 +1729,16 @@ pub struct NmaStream {
     // ── state for O(1) updates ────────────────────────────────────────────────
     // last P diffs d_t = |ln[x_t]-ln[x_{t-1}]| in a ring buffer
     d_ring: Vec<f64>,
-    d_head: usize,      // next write position in d_ring
-    d_count: usize,     // number of valid diffs currently in d_ring (≤ P)
-    denom: f64,         // exact Σ d in the window
-    x_acc: Vec<f64>,    // X_m(t) accumulators for each exponential
+    d_head: usize,   // next write position in d_ring
+    d_count: usize,  // number of valid diffs currently in d_ring (≤ P)
+    denom: f64,      // exact Σ d in the window
+    x_acc: Vec<f64>, // X_m(t) accumulators for each exponential
 
     // ── original value/ln rings to produce the final interpolation ────────────
-    buffer: Vec<f64>,       // last P+1 raw values
-    ln_buffer: Vec<f64>,    // last P+1 ln(values)
-    head: usize,            // next write pos in value/ln ring (size P+1)
-    filled: bool,           // becomes true once we have P+1 samples
+    buffer: Vec<f64>,    // last P+1 raw values
+    ln_buffer: Vec<f64>, // last P+1 ln(values)
+    head: usize,         // next write pos in value/ln ring (size P+1)
+    filled: bool,        // becomes true once we have P+1 samples
 
     // keep the exact weight vector for optional diagnostics (and future toggles)
     sqrt_diffs: Vec<f64>,
@@ -1757,7 +1757,10 @@ impl NmaStream {
     pub fn try_new(params: NmaParams) -> Result<Self, NmaError> {
         let period = params.period.unwrap_or(40);
         if period == 0 {
-            return Err(NmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(NmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         // Original weights w[i] = sqrt(i+1) - sqrt(i), with w[0] applied to the NEWEST diff.
@@ -1881,7 +1884,11 @@ impl NmaStream {
         for m in 0..self.m {
             num = (self.alpha[m] * self.x_acc[m]).mul_add(1.0, num);
         }
-        let ratio = if self.denom == 0.0 { 0.0 } else { num / self.denom };
+        let ratio = if self.denom == 0.0 {
+            0.0
+        } else {
+            num / self.denom
+        };
 
         // Interpolate between x0 = data[j-P] and x1 = data[j-P+1].
         // After increment, self.head points at x0; x1 is the next slot.
@@ -1896,10 +1903,18 @@ impl NmaStream {
         self.d_head = 0;
         self.d_count = 0;
         self.denom = 0.0;
-        for v in &mut self.d_ring { *v = 0.0; }
-        for v in &mut self.x_acc { *v = 0.0; }
-        for v in &mut self.buffer { *v = f64::NAN; }
-        for v in &mut self.ln_buffer { *v = f64::NAN; }
+        for v in &mut self.d_ring {
+            *v = 0.0;
+        }
+        for v in &mut self.x_acc {
+            *v = 0.0;
+        }
+        for v in &mut self.buffer {
+            *v = f64::NAN;
+        }
+        for v in &mut self.ln_buffer {
+            *v = f64::NAN;
+        }
         self.head = 0;
         self.filled = false;
     }
@@ -1959,11 +1974,14 @@ fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Vec<f64> {
         for i in (k + 1)..n {
             let v = a[i * n + k].abs();
             if v > maxv {
-                maxv = v; piv = i;
+                maxv = v;
+                piv = i;
             }
         }
         if piv != k {
-            for j in k..n { a.swap(k * n + j, piv * n + j); }
+            for j in k..n {
+                a.swap(k * n + j, piv * n + j);
+            }
             b.swap(k, piv);
         }
         let akk = a[k * n + k];

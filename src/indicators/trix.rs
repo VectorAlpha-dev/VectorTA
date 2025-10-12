@@ -431,13 +431,29 @@ pub struct TrixStream {
 #[derive(Debug, Clone)]
 enum StreamState {
     // Accumulate logs for first SMA → EMA1 seed
-    Seed1 { need: usize, sum1: f64 },
+    Seed1 {
+        need: usize,
+        sum1: f64,
+    },
     // Build EMA1 for (period-1) more samples while accumulating SMA → EMA2 seed
-    Seed2 { remain: usize, ema1: f64, sum_ema1: f64 },
+    Seed2 {
+        remain: usize,
+        ema1: f64,
+        sum_ema1: f64,
+    },
     // Build EMA1 & EMA2 for (period-1) samples while accumulating SMA → EMA3 seed
-    Seed3 { remain: usize, ema1: f64, ema2: f64, sum_ema2: f64 },
+    Seed3 {
+        remain: usize,
+        ema1: f64,
+        ema2: f64,
+        sum_ema2: f64,
+    },
     // Fully primed: advance EMA1→EMA2→EMA3 each tick and emit ΔEMA3*10000
-    Running { ema1: f64, ema2: f64, ema3_prev: f64 },
+    Running {
+        ema1: f64,
+        ema2: f64,
+        ema3_prev: f64,
+    },
 }
 
 impl TrixStream {
@@ -445,20 +461,29 @@ impl TrixStream {
     pub fn try_new(params: TrixParams) -> Result<Self, TrixError> {
         let period = params.period.unwrap_or(18);
         if period == 0 {
-            return Err(TrixError::InvalidPeriod { period, data_len: 0 });
+            return Err(TrixError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let alpha = 2.0 / (period as f64 + 1.0);
         Ok(Self {
             period,
             alpha,
             inv_n: 1.0 / period as f64,
-            state: StreamState::Seed1 { need: period, sum1: 0.0 },
+            state: StreamState::Seed1 {
+                need: period,
+                sum1: 0.0,
+            },
         })
     }
 
     #[inline(always)]
     fn reset(&mut self) {
-        self.state = StreamState::Seed1 { need: self.period, sum1: 0.0 };
+        self.state = StreamState::Seed1 {
+            need: self.period,
+            sum1: 0.0,
+        };
     }
 
     /// O(1) update. Returns None until fully primed (after 3*(p-1)+1 valid points).
@@ -480,24 +505,42 @@ impl TrixStream {
                 *need -= 1;
                 if *need == 0 {
                     let ema1 = *sum1 * self.inv_n;
-                    self.state = StreamState::Seed2 { remain: self.period - 1, ema1, sum_ema1: ema1 };
+                    self.state = StreamState::Seed2 {
+                        remain: self.period - 1,
+                        ema1,
+                        sum_ema1: ema1,
+                    };
                 }
                 None
             }
 
-            StreamState::Seed2 { remain, ema1, sum_ema1 } => {
+            StreamState::Seed2 {
+                remain,
+                ema1,
+                sum_ema1,
+            } => {
                 *ema1 = (lv - *ema1).mul_add(a, *ema1);
                 *sum_ema1 += *ema1;
                 *remain -= 1;
                 if *remain == 0 {
                     let ema2 = *sum_ema1 * self.inv_n;
                     let e1 = *ema1;
-                    self.state = StreamState::Seed3 { remain: self.period - 1, ema1: e1, ema2, sum_ema2: ema2 };
+                    self.state = StreamState::Seed3 {
+                        remain: self.period - 1,
+                        ema1: e1,
+                        ema2,
+                        sum_ema2: ema2,
+                    };
                 }
                 None
             }
 
-            StreamState::Seed3 { remain, ema1, ema2, sum_ema2 } => {
+            StreamState::Seed3 {
+                remain,
+                ema1,
+                ema2,
+                sum_ema2,
+            } => {
                 *ema1 = (lv - *ema1).mul_add(a, *ema1);
                 *ema2 = (*ema1 - *ema2).mul_add(a, *ema2);
                 *sum_ema2 += *ema2;
@@ -506,12 +549,20 @@ impl TrixStream {
                     let ema3_prev = *sum_ema2 * self.inv_n;
                     let e1 = *ema1;
                     let e2 = *ema2;
-                    self.state = StreamState::Running { ema1: e1, ema2: e2, ema3_prev };
+                    self.state = StreamState::Running {
+                        ema1: e1,
+                        ema2: e2,
+                        ema3_prev,
+                    };
                 }
                 None
             }
 
-            StreamState::Running { ema1, ema2, ema3_prev } => {
+            StreamState::Running {
+                ema1,
+                ema2,
+                ema3_prev,
+            } => {
                 *ema1 = (lv - *ema1).mul_add(a, *ema1);
                 *ema2 = (*ema1 - *ema2).mul_add(a, *ema2);
                 let ema3 = (*ema2 - *ema3_prev).mul_add(a, *ema3_prev);

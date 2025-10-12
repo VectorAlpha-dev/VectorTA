@@ -65,7 +65,8 @@ impl CudaPwma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?
@@ -415,12 +416,16 @@ impl CudaPwma {
                 (128, 2) => "pwma_ms1p_tiled_f32_tx128_ty2",
                 _ => return None,
             };
-            let func = match self.module.get_function(fname) { Ok(f) => f, Err(_) => return None };
+            let func = match self.module.get_function(fname) {
+                Ok(f) => f,
+                Err(_) => return None,
+            };
             let wlen = period; // full-period weights
             let align16 = |x: usize| (x + 15) & !15usize;
             let total = tx as usize + wlen - 1;
             let shared_bytes = (align16(wlen * std::mem::size_of::<f32>())
-                + total * ty as usize * std::mem::size_of::<f32>()) as u32;
+                + total * ty as usize * std::mem::size_of::<f32>())
+                as u32;
             let grid_x = ((series_len as u32) + tx - 1) / tx;
             let grid_y = ((num_series as u32) + ty - 1) / ty;
             let grid: GridSize = (grid_x, grid_y, 1).into();
@@ -460,16 +465,26 @@ impl CudaPwma {
 
         match self.policy.many_series {
             ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
-                if try_2d(tx as u32, ty as u32).is_some() { return Ok(()); }
+                if try_2d(tx as u32, ty as u32).is_some() {
+                    return Ok(());
+                }
             }
             ManySeriesKernelPolicy::OneD { .. } => {}
             ManySeriesKernelPolicy::Auto => {
                 if num_series >= 128 {
-                    if try_2d(128, 4).is_some() { return Ok(()); }
-                    if try_2d(128, 2).is_some() { return Ok(()); }
+                    if try_2d(128, 4).is_some() {
+                        return Ok(());
+                    }
+                    if try_2d(128, 2).is_some() {
+                        return Ok(());
+                    }
                 } else {
-                    if try_2d(128, 2).is_some() { return Ok(()); }
-                    if try_2d(128, 4).is_some() { return Ok(()); }
+                    if try_2d(128, 2).is_some() {
+                        return Ok(());
+                    }
+                    if try_2d(128, 4).is_some() {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -480,7 +495,10 @@ impl CudaPwma {
             .get_function("pwma_multi_series_one_param_f32")
             .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            _ => 128,
+        };
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), num_series as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -655,7 +673,9 @@ pub mod benches {
         crate::indicators::moving_averages::pwma::PwmaParams,
         pwma_batch_dev,
         pwma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::pwma::PwmaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::pwma::PwmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::pwma::PwmaParams { period: Some(64) },
         "pwma",
         "pwma"
@@ -673,12 +693,17 @@ pub struct CudaPwmaPolicy {
 
 impl Default for CudaPwmaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelSelected {
@@ -687,22 +712,35 @@ pub enum ManySeriesKernelSelected {
 }
 
 impl CudaPwma {
-    pub fn policy(&self) -> &CudaPwmaPolicy { &self.policy }
-    pub fn set_policy(&mut self, policy: CudaPwmaPolicy) { self.policy = policy; }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn policy(&self) -> &CudaPwmaPolicy {
+        &self.policy
+    }
+    pub fn set_policy(&mut self, policy: CudaPwmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] PWMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaPwma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaPwma)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -710,14 +748,19 @@ impl CudaPwma {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] PWMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaPwma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaPwma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -731,14 +774,20 @@ impl CudaPwma {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     #[inline]

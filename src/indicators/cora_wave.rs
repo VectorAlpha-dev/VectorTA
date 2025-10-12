@@ -742,7 +742,7 @@ pub struct CoraWaveStream {
     head_x: usize, // points at slot to overwrite next
     idx: usize,    // number of samples seen
     have_S: bool,
-    S: f64,        // current (unnormalized) weighted sum
+    S: f64, // current (unnormalized) weighted sum
 
     // ---- state: smoothing (WMA over CoRa outputs) ----
     m: usize,
@@ -766,7 +766,10 @@ impl CoraWaveStream {
         let smooth = params.smooth.unwrap_or(true);
 
         if period == 0 {
-            return Err(CoraWaveError::InvalidPeriod { period, data_len: 0 });
+            return Err(CoraWaveError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         if r_multi < 0.0 || !r_multi.is_finite() {
             return Err(CoraWaveError::InvalidRMulti { value: r_multi });
@@ -793,7 +796,11 @@ impl CoraWaveStream {
         let a_old = start_wt;
 
         // base^p and final weight on newest element when window is full
-        let base_pow_p = if (base - 1.0).abs() < 1e-16 { 1.0 } else { base.powi(p as i32) };
+        let base_pow_p = if (base - 1.0).abs() < 1e-16 {
+            1.0
+        } else {
+            base.powi(p as i32)
+        };
         let w_last = a_old * base_pow_p;
 
         // geometric series: sum_{j=0}^{p-1} start_wt * base^(j+1)
@@ -1483,7 +1490,9 @@ unsafe fn cora_wave_row_scalar_with_weights(
         let warm_total = warm0 + m - 1;
         let mut i = warm0;
         while i <= warm_total && i < n {
-            ring_mu.get_unchecked_mut(fill).write(*data.get_unchecked(i));
+            ring_mu
+                .get_unchecked_mut(fill)
+                .write(*data.get_unchecked(i));
             fill += 1;
             i += 1;
         }

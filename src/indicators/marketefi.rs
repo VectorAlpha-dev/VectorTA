@@ -394,13 +394,7 @@ pub fn marketefi_avx2(
     out: &mut [f64],
 ) {
     #[target_feature(enable = "avx2")]
-    unsafe fn avx2_body(
-        high: &[f64],
-        low: &[f64],
-        volume: &[f64],
-        first: usize,
-        out: &mut [f64],
-    ) {
+    unsafe fn avx2_body(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
         let n = high.len();
         let hp = high.as_ptr();
         let lp = low.as_ptr();

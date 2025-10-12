@@ -62,14 +62,20 @@ impl CudaZlema {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { cust::memory::mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        cust::memory::mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
     pub fn new(device_id: usize) -> Result<Self, CudaZlemaError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
@@ -84,7 +90,8 @@ impl CudaZlema {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaZlemaError::Cuda(e.to_string()))?
@@ -311,7 +318,7 @@ impl CudaZlema {
             + rows * std::mem::size_of::<i32>()                  // periods
             + rows * std::mem::size_of::<i32>()                  // lags
             + rows * std::mem::size_of::<f32>()                  // alphas
-            + rows * len * std::mem::size_of::<f32>();           // outputs
+            + rows * len * std::mem::size_of::<f32>(); // outputs
         let headroom = env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -475,10 +482,9 @@ impl CudaZlema {
                     break;
                 }
             }
-            let fvu = fv.ok_or_else(|| CudaZlemaError::InvalidInput(format!(
-                "series {} all NaN",
-                series
-            )))?;
+            let fvu = fv.ok_or_else(|| {
+                CudaZlemaError::InvalidInput(format!("series {} all NaN", series))
+            })?;
             if rows - fvu < period {
                 return Err(CudaZlemaError::InvalidInput(format!(
                     "series {} insufficient data for period {} (tail = {})",
@@ -572,7 +578,7 @@ impl CudaZlema {
         let elems = cols * rows;
         let bytes_required = elems * std::mem::size_of::<f32>() // prices
             + cols * std::mem::size_of::<i32>()                 // first_valids
-            + elems * std::mem::size_of::<f32>();               // outputs
+            + elems * std::mem::size_of::<f32>(); // outputs
         let headroom = env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -583,8 +589,8 @@ impl CudaZlema {
                 (bytes_required + headroom) / (1024 * 1024)
             )));
         }
-        let d_prices =
-            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
+            .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(first_valids)
             .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
@@ -592,7 +598,11 @@ impl CudaZlema {
 
         self.launch_many_series_kernel(&d_prices, &d_first, cols, rows, period, alpha, &mut d_out)?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn zlema_many_series_one_param_time_major_dev(
@@ -656,7 +666,9 @@ pub mod benches {
         crate::indicators::moving_averages::zlema::ZlemaParams,
         zlema_batch_dev,
         zlema_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::zlema::ZlemaBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::moving_averages::zlema::ZlemaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::moving_averages::zlema::ZlemaParams { period: Some(64) },
         "zlema",
         "zlema"

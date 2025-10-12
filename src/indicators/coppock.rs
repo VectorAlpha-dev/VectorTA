@@ -612,13 +612,7 @@ pub fn coppock_scalar(data: &[f64], short: usize, long: usize, first: usize, out
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
-pub unsafe fn coppock_avx2(
-    data: &[f64],
-    short: usize,
-    long: usize,
-    first: usize,
-    out: &mut [f64],
-) {
+pub unsafe fn coppock_avx2(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
     use core::arch::x86_64::*;
 
     let largest = short.max(long);
@@ -806,9 +800,9 @@ pub struct CoppockStream {
 
     // ---- Rolling accumulators ----
     // For SMA/WMA:
-    ma_sum: f64,     // S_t
-    wma_num: f64,    // Q_t
-    wma_denom: f64,  // N*(N+1)/2
+    ma_sum: f64,    // S_t
+    wma_num: f64,   // Q_t
+    wma_denom: f64, // N*(N+1)/2
 
     // For EMA:
     ema_alpha: f64,
@@ -971,7 +965,7 @@ impl CoppockStream {
         // Rolling window is full: update in O(1)
         let prev_sum = self.ma_sum; // S_t
         self.ma_sum = prev_sum - old + sum_roc; // S_{t+1}
-        // Q_{t+1} = Q_t + N*new - S_t
+                                                // Q_{t+1} = Q_t + N*new - S_t
         self.wma_num = self.wma_num + (n as f64) * sum_roc - prev_sum;
 
         // overwrite & advance

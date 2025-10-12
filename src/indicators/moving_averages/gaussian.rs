@@ -468,13 +468,7 @@ unsafe fn gaussian_poles4_fma(inp: &[f64], alpha: f64, out: &mut [f64]) {
 
     for i in 0..inp.len() {
         let x = *inp.get_unchecked(i);
-        let y = c4.mul_add(
-            p0,
-            c3.mul_add(
-                p1,
-                c2.mul_add(p2, c1.mul_add(p3, c0 * x)),
-            ),
-        );
+        let y = c4.mul_add(p0, c3.mul_add(p1, c2.mul_add(p2, c1.mul_add(p3, c0 * x))));
         p0 = p1;
         p1 = p2;
         p2 = p3;
@@ -543,12 +537,12 @@ fn gaussian_poles4(data: &[f64], n: usize, alpha: f64) -> Vec<f64> {
 #[derive(Debug, Clone)]
 pub struct GaussianStream {
     period: usize,
-    poles: u8,          // 1..=4
-    alpha: f64,         // smoothing factor
-    one_minus: f64,     // 1 - alpha
+    poles: u8,      // 1..=4
+    alpha: f64,     // smoothing factor
+    one_minus: f64, // 1 - alpha
     // Direct IIR coefficients for the y[n-k] feedback and x[n] feedforward.
     // c[0] = a^p, c[1]..c[p] = binomial feedback with alternating sign.
-    c: [f64; 5],        // only 0..=p used (p<=4)
+    c: [f64; 5], // only 0..=p used (p<=4)
     // Previous outputs y[n-1], y[n-2], y[n-3], y[n-4]
     y: [f64; 4],
     // Kept for structural compatibility; not used

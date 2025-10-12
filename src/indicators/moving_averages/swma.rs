@@ -400,7 +400,7 @@ fn build_symmetric_triangle_avec(n: usize) -> AVec<f64> {
     for w in weights.iter_mut() {
         *w /= sum;
     }
-    
+
     weights
 }
 
@@ -572,7 +572,10 @@ impl SwmaStream {
     pub fn try_new(params: SwmaParams) -> Result<Self, SwmaError> {
         let period = params.period.unwrap_or(5);
         if period == 0 {
-            return Err(SwmaError::InvalidPeriod { period, data_len: 0 });
+            return Err(SwmaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         // Map period -> (a, b) where a + b - 1 = period.
@@ -1163,8 +1166,7 @@ unsafe fn swma_row_scalar(
     }
     if period == 2 {
         for i in (first + 1)..len {
-            *out.get_unchecked_mut(i) =
-                (*data.get_unchecked(i - 1) + *data.get_unchecked(i)) * 0.5;
+            *out.get_unchecked_mut(i) = (*data.get_unchecked(i - 1) + *data.get_unchecked(i)) * 0.5;
         }
         return;
     }

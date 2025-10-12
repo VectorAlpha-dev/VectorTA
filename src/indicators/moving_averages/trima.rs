@@ -323,10 +323,7 @@ unsafe fn trima_scalar_optimized(
         let mut j = 0usize;
         let end_unroll = m1 & !3usize; // floor to multiple of 4
         while j < end_unroll {
-            sum1 += *base.add(j)
-                + *base.add(j + 1)
-                + *base.add(j + 2)
-                + *base.add(j + 3);
+            sum1 += *base.add(j) + *base.add(j + 1) + *base.add(j + 2) + *base.add(j + 3);
             j += 4;
         }
         while j < m1 {
@@ -356,7 +353,7 @@ unsafe fn trima_scalar_optimized(
     // Fill the remaining (m2 - 1) SMA1s and accumulate sum2
     while ring.len() < m2 {
         t += 1; // move to the index for the next SMA1
-        // Maintain the rolling m1-sum
+                // Maintain the rolling m1-sum
         sum1 += *p_new - *p_old;
         p_new = p_new.add(1);
         p_old = p_old.add(1);

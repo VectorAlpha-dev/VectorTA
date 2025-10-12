@@ -650,9 +650,9 @@ pub struct VamaStream {
     smooth_period: usize,
 
     // --- base EMA state ---
-    alpha: f64,       // 2/(base_period+1)
-    ema: f64,         // last EMA
-    have_ema: bool,   // first-tick bootstrap
+    alpha: f64,     // 2/(base_period+1)
+    ema: f64,       // last EMA
+    have_ema: bool, // first-tick bootstrap
 
     // --- monotonic deques over deviations d_t = x_t - ema_t ---
     // We use fixed-size ring buffers with capacity = vol_period+1 to avoid
@@ -701,10 +701,16 @@ impl VamaStream {
         let smooth_period = params.smooth_period.unwrap_or(5);
 
         if base_period == 0 {
-            return Err(VamaError::InvalidPeriod { period: base_period, data_len: 0 });
+            return Err(VamaError::InvalidPeriod {
+                period: base_period,
+                data_len: 0,
+            });
         }
         if vol_period == 0 {
-            return Err(VamaError::InvalidPeriod { period: vol_period, data_len: 0 });
+            return Err(VamaError::InvalidPeriod {
+                period: vol_period,
+                data_len: 0,
+            });
         }
         if smoothing && !(1..=3).contains(&smooth_type) {
             return Err(VamaError::InvalidSmoothType { smooth_type });
@@ -766,8 +772,14 @@ impl VamaStream {
             have_ema: false,
 
             dq_cap,
-            max_idx, max_val, max_head: 0, max_tail: 0,
-            min_idx, min_val, min_head: 0, min_tail: 0,
+            max_idx,
+            max_val,
+            max_head: 0,
+            max_tail: 0,
+            min_idx,
+            min_val,
+            min_head: 0,
+            min_tail: 0,
 
             sm_ring,
             sm_ptr: 0,
@@ -802,7 +814,11 @@ impl VamaStream {
 
         // --- 2) maintain monotonic deques on deviation d_t = x - ema
         // Expire indices falling out of the last vol_period samples
-        let cutoff = if t + 1 > self.vol_period { t + 1 - self.vol_period } else { 0 };
+        let cutoff = if t + 1 > self.vol_period {
+            t + 1 - self.vol_period
+        } else {
+            0
+        };
         while self.max_head != self.max_tail && self.max_idx[self.max_head] < cutoff {
             self.max_head = (self.max_head + 1) % self.dq_cap;
         }
@@ -815,7 +831,11 @@ impl VamaStream {
         if d.is_finite() {
             // MAX deque: keep decreasing values
             while self.max_head != self.max_tail {
-                let last = if self.max_tail == 0 { self.dq_cap - 1 } else { self.max_tail - 1 };
+                let last = if self.max_tail == 0 {
+                    self.dq_cap - 1
+                } else {
+                    self.max_tail - 1
+                };
                 if self.max_val[last] <= d {
                     self.max_tail = last; // pop_back
                 } else {
@@ -828,7 +848,11 @@ impl VamaStream {
 
             // MIN deque: keep increasing values
             while self.min_head != self.min_tail {
-                let last = if self.min_tail == 0 { self.dq_cap - 1 } else { self.min_tail - 1 };
+                let last = if self.min_tail == 0 {
+                    self.dq_cap - 1
+                } else {
+                    self.min_tail - 1
+                };
                 if self.min_val[last] >= d {
                     self.min_tail = last; // pop_back
                 } else {
@@ -845,7 +869,10 @@ impl VamaStream {
         let core = if core_ready {
             if self.max_head != self.max_tail && self.min_head != self.min_tail {
                 // e + 0.5*(up + dn) using fma
-                (0.5f64).mul_add(self.max_val[self.max_head] + self.min_val[self.min_head], self.ema)
+                (0.5f64).mul_add(
+                    self.max_val[self.max_head] + self.min_val[self.min_head],
+                    self.ema,
+                )
             } else {
                 // Fall back to EMA if we have no valid deviations
                 self.ema
@@ -915,7 +942,8 @@ impl VamaStream {
                             // S_{t+1} = S_t + core - old
                             let old = self.sm_ring[self.sm_ptr];
                             let s_prev = self.sm_sum;
-                            self.wma_num = (self.smooth_period as f64).mul_add(core, self.wma_num) - s_prev;
+                            self.wma_num =
+                                (self.smooth_period as f64).mul_add(core, self.wma_num) - s_prev;
                             self.sm_ring[self.sm_ptr] = core;
                             self.sm_ptr = (self.sm_ptr + 1) % self.smooth_period;
                             self.sm_sum = s_prev + core - old;

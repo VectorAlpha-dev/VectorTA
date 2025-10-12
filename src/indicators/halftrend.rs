@@ -698,8 +698,16 @@ pub unsafe fn halftrend_scalar_classic(
 
         // Window [i-1, i] for amplitude == 2
         let (high_price, low_price) = if i > 0 {
-            let hp = if high[i] > high[i - 1] { high[i] } else { high[i - 1] };
-            let lp = if low[i] < low[i - 1] { low[i] } else { low[i - 1] };
+            let hp = if high[i] > high[i - 1] {
+                high[i]
+            } else {
+                high[i - 1]
+            };
+            let lp = if low[i] < low[i - 1] {
+                low[i]
+            } else {
+                low[i - 1]
+            };
             (hp, lp)
         } else {
             (high[i], low[i])
@@ -709,14 +717,18 @@ pub unsafe fn halftrend_scalar_classic(
         let prev_high = if i > 0 { high[i - 1] } else { high[0] };
 
         if next_trend == 1 {
-            if low_price > max_low_price { max_low_price = low_price; }
+            if low_price > max_low_price {
+                max_low_price = low_price;
+            }
             if highma[i] < max_low_price && close[i] < prev_low {
                 current_trend = 1;
                 next_trend = 0;
                 min_high_price = high_price;
             }
         } else {
-            if high_price < min_high_price { min_high_price = high_price; }
+            if high_price < min_high_price {
+                min_high_price = high_price;
+            }
             if lowma[i] > min_high_price && close[i] > prev_high {
                 current_trend = 0;
                 next_trend = 1;
@@ -733,7 +745,13 @@ pub unsafe fn halftrend_scalar_classic(
                 up = down;
                 buy_signal[i] = up - atr2;
             } else {
-                up = if i == warm || up == 0.0 { max_low_price } else if max_low_price > up { max_low_price } else { up };
+                up = if i == warm || up == 0.0 {
+                    max_low_price
+                } else if max_low_price > up {
+                    max_low_price
+                } else {
+                    up
+                };
             }
             halftrend[i] = up;
             atr_high[i] = up + dev;
@@ -744,7 +762,13 @@ pub unsafe fn halftrend_scalar_classic(
                 down = up;
                 sell_signal[i] = down + atr2;
             } else {
-                down = if i == warm || down == 0.0 { min_high_price } else if min_high_price < down { min_high_price } else { down };
+                down = if i == warm || down == 0.0 {
+                    min_high_price
+                } else if min_high_price < down {
+                    min_high_price
+                } else {
+                    down
+                };
             }
             halftrend[i] = down;
             atr_high[i] = down + dev;
@@ -786,9 +810,22 @@ pub fn halftrend_scalar(
     let (mut min_head, mut min_tail, mut min_cnt) = (0usize, 0usize, 0usize);
 
     #[inline(always)]
-    fn inc(i: usize, cap: usize) -> usize { let j = i + 1; if j == cap { 0 } else { j } }
+    fn inc(i: usize, cap: usize) -> usize {
+        let j = i + 1;
+        if j == cap {
+            0
+        } else {
+            j
+        }
+    }
     #[inline(always)]
-    fn dec(i: usize, cap: usize) -> usize { if i == 0 { cap - 1 } else { i - 1 } }
+    fn dec(i: usize, cap: usize) -> usize {
+        if i == 0 {
+            cap - 1
+        } else {
+            i - 1
+        }
+    }
 
     if start_idx < len {
         debug_assert!(start_idx + 1 >= cap);
@@ -797,16 +834,32 @@ pub fn halftrend_scalar(
             let hv = high[k];
             while max_cnt > 0 {
                 let back = dec(max_tail, cap);
-                if max_val[back] <= hv { max_tail = back; max_cnt -= 1; } else { break; }
+                if max_val[back] <= hv {
+                    max_tail = back;
+                    max_cnt -= 1;
+                } else {
+                    break;
+                }
             }
-            max_val[max_tail] = hv; max_idx[max_tail] = k; max_tail = inc(max_tail, cap); max_cnt += 1;
+            max_val[max_tail] = hv;
+            max_idx[max_tail] = k;
+            max_tail = inc(max_tail, cap);
+            max_cnt += 1;
 
             let lv = low[k];
             while min_cnt > 0 {
                 let back = dec(min_tail, cap);
-                if min_val[back] >= lv { min_tail = back; min_cnt -= 1; } else { break; }
+                if min_val[back] >= lv {
+                    min_tail = back;
+                    min_cnt -= 1;
+                } else {
+                    break;
+                }
             }
-            min_val[min_tail] = lv; min_idx[min_tail] = k; min_tail = inc(min_tail, cap); min_cnt += 1;
+            min_val[min_tail] = lv;
+            min_idx[min_tail] = k;
+            min_tail = inc(min_tail, cap);
+            min_cnt += 1;
         }
     }
 
@@ -815,8 +868,16 @@ pub fn halftrend_scalar(
     let mut next_trend = 0i32;
     let mut up = 0.0f64;
     let mut down = 0.0f64;
-    let mut max_low_price = if start_idx > 0 { low[start_idx - 1] } else { low[0] };
-    let mut min_high_price = if start_idx > 0 { high[start_idx - 1] } else { high[0] };
+    let mut max_low_price = if start_idx > 0 {
+        low[start_idx - 1]
+    } else {
+        low[0]
+    };
+    let mut min_high_price = if start_idx > 0 {
+        high[start_idx - 1]
+    } else {
+        high[0]
+    };
 
     let ch_half = channel_deviation * 0.5;
 
@@ -826,22 +887,44 @@ pub fn halftrend_scalar(
 
         if i > start_idx {
             let wstart = i + 1 - cap;
-            while max_cnt > 0 && max_idx[max_head] < wstart { max_head = inc(max_head, cap); max_cnt -= 1; }
-            while min_cnt > 0 && min_idx[min_head] < wstart { min_head = inc(min_head, cap); min_cnt -= 1; }
+            while max_cnt > 0 && max_idx[max_head] < wstart {
+                max_head = inc(max_head, cap);
+                max_cnt -= 1;
+            }
+            while min_cnt > 0 && min_idx[min_head] < wstart {
+                min_head = inc(min_head, cap);
+                min_cnt -= 1;
+            }
 
             let hv = high[i];
             while max_cnt > 0 {
                 let back = dec(max_tail, cap);
-                if max_val[back] <= hv { max_tail = back; max_cnt -= 1; } else { break; }
+                if max_val[back] <= hv {
+                    max_tail = back;
+                    max_cnt -= 1;
+                } else {
+                    break;
+                }
             }
-            max_val[max_tail] = hv; max_idx[max_tail] = i; max_tail = inc(max_tail, cap); max_cnt += 1;
+            max_val[max_tail] = hv;
+            max_idx[max_tail] = i;
+            max_tail = inc(max_tail, cap);
+            max_cnt += 1;
 
             let lv = low[i];
             while min_cnt > 0 {
                 let back = dec(min_tail, cap);
-                if min_val[back] >= lv { min_tail = back; min_cnt -= 1; } else { break; }
+                if min_val[back] >= lv {
+                    min_tail = back;
+                    min_cnt -= 1;
+                } else {
+                    break;
+                }
             }
-            min_val[min_tail] = lv; min_idx[min_tail] = i; min_tail = inc(min_tail, cap); min_cnt += 1;
+            min_val[min_tail] = lv;
+            min_idx[min_tail] = i;
+            min_tail = inc(min_tail, cap);
+            min_cnt += 1;
         }
 
         debug_assert!(max_cnt > 0 && min_cnt > 0);
@@ -852,14 +935,18 @@ pub fn halftrend_scalar(
         let prev_high = if i > 0 { high[i - 1] } else { high[0] };
 
         if next_trend == 1 {
-            if low_price > max_low_price { max_low_price = low_price; }
+            if low_price > max_low_price {
+                max_low_price = low_price;
+            }
             if highma[i] < max_low_price && close[i] < prev_low {
                 current_trend = 1;
                 next_trend = 0;
                 min_high_price = high_price;
             }
         } else {
-            if high_price < min_high_price { min_high_price = high_price; }
+            if high_price < min_high_price {
+                min_high_price = high_price;
+            }
             if lowma[i] > min_high_price && close[i] > prev_high {
                 current_trend = 0;
                 next_trend = 1;
@@ -876,7 +963,13 @@ pub fn halftrend_scalar(
                 up = down;
                 buy_signal[i] = up - atr2;
             } else {
-                up = if i == start_idx || up == 0.0 { max_low_price } else if max_low_price > up { max_low_price } else { up };
+                up = if i == start_idx || up == 0.0 {
+                    max_low_price
+                } else if max_low_price > up {
+                    max_low_price
+                } else {
+                    up
+                };
             }
             halftrend[i] = up;
             atr_high[i] = up + dev;
@@ -887,7 +980,13 @@ pub fn halftrend_scalar(
                 down = up;
                 sell_signal[i] = down + atr2;
             } else {
-                down = if i == start_idx || down == 0.0 { min_high_price } else if min_high_price < down { min_high_price } else { down };
+                down = if i == start_idx || down == 0.0 {
+                    min_high_price
+                } else if min_high_price < down {
+                    min_high_price
+                } else {
+                    down
+                };
             }
             halftrend[i] = down;
             atr_high[i] = down + dev;
@@ -1677,34 +1776,41 @@ pub struct HalfTrendStream {
     // Params
     amplitude: usize,
     atr_period: usize,
-    ch_half: f64,      // precompute: channel_deviation * 0.5
-    inv_amp: f64,      // precompute: 1.0 / amplitude
+    ch_half: f64, // precompute: channel_deviation * 0.5
+    inv_amp: f64, // precompute: 1.0 / amplitude
 
     // ATR stream (Wilder/RMA seeded as in batch)
     atr_stream: crate::indicators::atr::AtrStream,
 
     // --- Monotonic deques for rolling extrema over 'amplitude' window ---
     // We store indices+values in fixed-size ring buffers to avoid VecDeque overhead.
-    max_idx: Vec<usize>, max_val: Vec<f64>,
-    min_idx: Vec<usize>, min_val: Vec<f64>,
-    max_head: usize, max_tail: usize, max_cnt: usize,
-    min_head: usize, min_tail: usize, min_cnt: usize,
+    max_idx: Vec<usize>,
+    max_val: Vec<f64>,
+    min_idx: Vec<usize>,
+    min_val: Vec<f64>,
+    max_head: usize,
+    max_tail: usize,
+    max_cnt: usize,
+    min_head: usize,
+    min_tail: usize,
+    min_cnt: usize,
 
     // --- SMA(high) / SMA(low) via fixed ring buffers ---
-    ring_high: Vec<f64>, ring_low: Vec<f64>,
-    ring_pos: usize,    // current write cursor in rings
-    filled: usize,      // how many elements currently valid in rings (<= amplitude)
-    high_sum: f64,      // rolling sum for SMA(high)
-    low_sum: f64,       // rolling sum for SMA(low)
+    ring_high: Vec<f64>,
+    ring_low: Vec<f64>,
+    ring_pos: usize, // current write cursor in rings
+    filled: usize,   // how many elements currently valid in rings (<= amplitude)
+    high_sum: f64,   // rolling sum for SMA(high)
+    low_sum: f64,    // rolling sum for SMA(low)
 
     // Stream index & warmup
-    i: usize,                  // 0-based bar counter (updated after each call)
-    warmup_need: usize,        // amplitude.max(atr_period)
+    i: usize,           // 0-based bar counter (updated after each call)
+    warmup_need: usize, // amplitude.max(atr_period)
 
     // State carried between updates (mirrors scalar kernel)
-    current_trend: i32,        // 0 = uptrend, 1 = downtrend
-    next_trend: i32,           // flip detector state machine
-    last_trend: i8,            // -1 unknown, 0 up, 1 down (used to gate signals)
+    current_trend: i32, // 0 = uptrend, 1 = downtrend
+    next_trend: i32,    // flip detector state machine
+    last_trend: i8,     // -1 unknown, 0 up, 1 down (used to gate signals)
     max_low_price: f64,
     min_high_price: f64,
     up: f64,
@@ -1724,10 +1830,16 @@ impl HalfTrendStream {
         let atr_period = params.atr_period.unwrap_or(100);
 
         if amplitude == 0 {
-            return Err(HalfTrendError::InvalidPeriod { period: amplitude, data_len: 0 });
+            return Err(HalfTrendError::InvalidPeriod {
+                period: amplitude,
+                data_len: 0,
+            });
         }
         if atr_period == 0 {
-            return Err(HalfTrendError::InvalidPeriod { period: atr_period, data_len: 0 });
+            return Err(HalfTrendError::InvalidPeriod {
+                period: atr_period,
+                data_len: 0,
+            });
         }
         if !(channel_deviation.is_finite()) || channel_deviation <= 0.0 {
             return Err(HalfTrendError::InvalidChannelDeviation { channel_deviation });
@@ -1753,8 +1865,12 @@ impl HalfTrendStream {
             max_val: vec![0.0; cap],
             min_idx: vec![0; cap],
             min_val: vec![0.0; cap],
-            max_head: 0, max_tail: 0, max_cnt: 0,
-            min_head: 0, min_tail: 0, min_cnt: 0,
+            max_head: 0,
+            max_tail: 0,
+            max_cnt: 0,
+            min_head: 0,
+            min_tail: 0,
+            min_cnt: 0,
 
             ring_high: vec![0.0; cap],
             ring_low: vec![0.0; cap],
@@ -1781,9 +1897,22 @@ impl HalfTrendStream {
     }
 
     #[inline(always)]
-    fn inc(i: usize, cap: usize) -> usize { let j = i + 1; if j == cap { 0 } else { j } }
+    fn inc(i: usize, cap: usize) -> usize {
+        let j = i + 1;
+        if j == cap {
+            0
+        } else {
+            j
+        }
+    }
     #[inline(always)]
-    fn dec(i: usize, cap: usize) -> usize { if i == 0 { cap - 1 } else { i - 1 } }
+    fn dec(i: usize, cap: usize) -> usize {
+        if i == 0 {
+            cap - 1
+        } else {
+            i - 1
+        }
+    }
 
     #[inline(always)]
     fn q_push_max(&mut self, idx: usize, v: f64) {
@@ -1793,7 +1922,9 @@ impl HalfTrendStream {
             if self.max_val[back] <= v {
                 self.max_tail = back;
                 self.max_cnt -= 1;
-            } else { break; }
+            } else {
+                break;
+            }
         }
         self.max_val[self.max_tail] = v;
         self.max_idx[self.max_tail] = idx;
@@ -1809,7 +1940,9 @@ impl HalfTrendStream {
             if self.min_val[back] >= v {
                 self.min_tail = back;
                 self.min_cnt -= 1;
-            } else { break; }
+            } else {
+                break;
+            }
         }
         self.min_val[self.min_tail] = v;
         self.min_idx[self.min_tail] = idx;
@@ -1865,9 +1998,8 @@ impl HalfTrendStream {
         let atr_opt = self.atr_stream.update(high, low, close);
 
         // Warmup gate: need both SMA window filled and ATR ready
-        let warmed = self.filled == self.amplitude
-            && (idx + 1) >= self.warmup_need
-            && atr_opt.is_some();
+        let warmed =
+            self.filled == self.amplitude && (idx + 1) >= self.warmup_need && atr_opt.is_some();
 
         if !warmed {
             // carry prev bar raw values for next step
@@ -1889,17 +2021,23 @@ impl HalfTrendStream {
         // seed prev high/low for first emit
         let prev_low = if self.have_prev { self.prev_low } else { low };
         let prev_high = if self.have_prev { self.prev_high } else { high };
-        if self.max_low_price.is_nan() { self.max_low_price = prev_low; }
-        if self.min_high_price.is_nan() { self.min_high_price = prev_high; }
+        if self.max_low_price.is_nan() {
+            self.max_low_price = prev_low;
+        }
+        if self.min_high_price.is_nan() {
+            self.min_high_price = prev_high;
+        }
 
         // SMAs (rolling)
         let highma = self.high_sum * self.inv_amp;
-        let lowma  = self.low_sum  * self.inv_amp;
+        let lowma = self.low_sum * self.inv_amp;
 
         // --- state machine (matches scalar kernel) ---
         if self.next_trend == 1 {
             // look for confirmation to switch into downtrend
-            if low_price > self.max_low_price { self.max_low_price = low_price; }
+            if low_price > self.max_low_price {
+                self.max_low_price = low_price;
+            }
             if highma < self.max_low_price && close < prev_low {
                 self.current_trend = 1;
                 self.next_trend = 0;
@@ -1907,7 +2045,9 @@ impl HalfTrendStream {
             }
         } else {
             // look for confirmation to switch into uptrend
-            if high_price < self.min_high_price { self.min_high_price = high_price; }
+            if high_price < self.min_high_price {
+                self.min_high_price = high_price;
+            }
             if lowma > self.min_high_price && close > prev_high {
                 self.current_trend = 0;
                 self.next_trend = 1;
@@ -1928,8 +2068,13 @@ impl HalfTrendStream {
                 buy_sig = Some(self.up - atr2);
             } else {
                 // continue: pull up to new max of lows
-                self.up = if self.up == 0.0 { self.max_low_price }
-                          else if self.max_low_price > self.up { self.max_low_price } else { self.up };
+                self.up = if self.up == 0.0 {
+                    self.max_low_price
+                } else if self.max_low_price > self.up {
+                    self.max_low_price
+                } else {
+                    self.up
+                };
             }
             let h = self.up;
             (h, h + dev, h - dev, 0.0)
@@ -1941,8 +2086,13 @@ impl HalfTrendStream {
                 sell_sig = Some(self.down + atr2);
             } else {
                 // continue: pull down to new min of highs
-                self.down = if self.down == 0.0 { self.min_high_price }
-                            else if self.min_high_price < self.down { self.min_high_price } else { self.down };
+                self.down = if self.down == 0.0 {
+                    self.min_high_price
+                } else if self.min_high_price < self.down {
+                    self.min_high_price
+                } else {
+                    self.down
+                };
             }
             let d = self.down;
             (d, d + dev, d - dev, 1.0)
@@ -2335,23 +2485,51 @@ fn halftrend_row_into(
 #[inline(always)]
 fn rolling_max_series(src: &[f64], win: usize) -> Vec<f64> {
     let n = src.len();
-    if n == 0 { return Vec::new(); }
+    if n == 0 {
+        return Vec::new();
+    }
     let cap = win.max(1);
     let mut idx = vec![0usize; cap];
     let mut val = vec![0.0f64; cap];
     let (mut head, mut tail, mut cnt) = (0usize, 0usize, 0usize);
-    #[inline(always)] fn inc(i: usize, cap: usize) -> usize { let j = i + 1; if j == cap { 0 } else { j } }
-    #[inline(always)] fn dec(i: usize, cap: usize) -> usize { if i == 0 { cap - 1 } else { i - 1 } }
+    #[inline(always)]
+    fn inc(i: usize, cap: usize) -> usize {
+        let j = i + 1;
+        if j == cap {
+            0
+        } else {
+            j
+        }
+    }
+    #[inline(always)]
+    fn dec(i: usize, cap: usize) -> usize {
+        if i == 0 {
+            cap - 1
+        } else {
+            i - 1
+        }
+    }
     let mut out = vec![f64::NAN; n];
     for i in 0..n {
         let wstart = i.saturating_add(1).saturating_sub(cap);
-        while cnt > 0 && idx[head] < wstart { head = inc(head, cap); cnt -= 1; }
+        while cnt > 0 && idx[head] < wstart {
+            head = inc(head, cap);
+            cnt -= 1;
+        }
         let x = src[i];
         while cnt > 0 {
             let back = dec(tail, cap);
-            if val[back] <= x { tail = back; cnt -= 1; } else { break; }
+            if val[back] <= x {
+                tail = back;
+                cnt -= 1;
+            } else {
+                break;
+            }
         }
-        val[tail] = x; idx[tail] = i; tail = inc(tail, cap); cnt += 1;
+        val[tail] = x;
+        idx[tail] = i;
+        tail = inc(tail, cap);
+        cnt += 1;
         out[i] = val[head];
     }
     out
@@ -2360,23 +2538,51 @@ fn rolling_max_series(src: &[f64], win: usize) -> Vec<f64> {
 #[inline(always)]
 fn rolling_min_series(src: &[f64], win: usize) -> Vec<f64> {
     let n = src.len();
-    if n == 0 { return Vec::new(); }
+    if n == 0 {
+        return Vec::new();
+    }
     let cap = win.max(1);
     let mut idx = vec![0usize; cap];
     let mut val = vec![0.0f64; cap];
     let (mut head, mut tail, mut cnt) = (0usize, 0usize, 0usize);
-    #[inline(always)] fn inc(i: usize, cap: usize) -> usize { let j = i + 1; if j == cap { 0 } else { j } }
-    #[inline(always)] fn dec(i: usize, cap: usize) -> usize { if i == 0 { cap - 1 } else { i - 1 } }
+    #[inline(always)]
+    fn inc(i: usize, cap: usize) -> usize {
+        let j = i + 1;
+        if j == cap {
+            0
+        } else {
+            j
+        }
+    }
+    #[inline(always)]
+    fn dec(i: usize, cap: usize) -> usize {
+        if i == 0 {
+            cap - 1
+        } else {
+            i - 1
+        }
+    }
     let mut out = vec![f64::NAN; n];
     for i in 0..n {
         let wstart = i.saturating_add(1).saturating_sub(cap);
-        while cnt > 0 && idx[head] < wstart { head = inc(head, cap); cnt -= 1; }
+        while cnt > 0 && idx[head] < wstart {
+            head = inc(head, cap);
+            cnt -= 1;
+        }
         let x = src[i];
         while cnt > 0 {
             let back = dec(tail, cap);
-            if val[back] >= x { tail = back; cnt -= 1; } else { break; }
+            if val[back] >= x {
+                tail = back;
+                cnt -= 1;
+            } else {
+                break;
+            }
         }
-        val[tail] = x; idx[tail] = i; tail = inc(tail, cap); cnt += 1;
+        val[tail] = x;
+        idx[tail] = i;
+        tail = inc(tail, cap);
+        cnt += 1;
         out[i] = val[head];
     }
     out
@@ -2422,14 +2628,18 @@ fn halftrend_row_into_precomputed(
         let prev_high = if i > 0 { high[i - 1] } else { high[0] };
 
         if next_trend == 1 {
-            if low_price > max_low_price { max_low_price = low_price; }
+            if low_price > max_low_price {
+                max_low_price = low_price;
+            }
             if highma[i] < max_low_price && close[i] < prev_low {
                 current_trend = 1;
                 next_trend = 0;
                 min_high_price = high_price;
             }
         } else {
-            if high_price < min_high_price { min_high_price = high_price; }
+            if high_price < min_high_price {
+                min_high_price = high_price;
+            }
             if lowma[i] > min_high_price && close[i] > prev_high {
                 current_trend = 0;
                 next_trend = 1;
@@ -2446,7 +2656,13 @@ fn halftrend_row_into_precomputed(
                 up = down;
                 out_buy[i] = up - atr2;
             } else {
-                up = if i == warm || up == 0.0 { max_low_price } else if max_low_price > up { max_low_price } else { up };
+                up = if i == warm || up == 0.0 {
+                    max_low_price
+                } else if max_low_price > up {
+                    max_low_price
+                } else {
+                    up
+                };
             }
             out_halftrend[i] = up;
             out_atr_high[i] = up + dev;
@@ -2457,7 +2673,13 @@ fn halftrend_row_into_precomputed(
                 down = up;
                 out_sell[i] = down + atr2;
             } else {
-                down = if i == warm || down == 0.0 { min_high_price } else if min_high_price < down { min_high_price } else { down };
+                down = if i == warm || down == 0.0 {
+                    min_high_price
+                } else if min_high_price < down {
+                    min_high_price
+                } else {
+                    down
+                };
             }
             out_halftrend[i] = down;
             out_atr_high[i] = down + dev;

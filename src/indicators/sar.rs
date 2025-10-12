@@ -644,7 +644,7 @@ impl SarStream {
                     prev_high: high,
                     prev_high2: high, // placeholder until bar #2
                     prev_low: low,
-                    prev_low2: low,   // placeholder until bar #2
+                    prev_low2: low, // placeholder until bar #2
                 });
                 self.idx = 1;
                 None
@@ -686,7 +686,7 @@ impl SarStream {
                     if low < next_sar {
                         st.trend_up = false;
                         next_sar = st.ep; // reversal uses previous EP as SAR
-                        st.ep = low;       // new EP is current low
+                        st.ep = low; // new EP is current low
                         st.acc = self.acceleration;
                     } else {
                         // Continue uptrend: maybe extend EP/AF and clamp to prior TWO lows
@@ -701,7 +701,7 @@ impl SarStream {
                     if high > next_sar {
                         st.trend_up = true;
                         next_sar = st.ep; // reversal uses previous EP as SAR
-                        st.ep = high;      // new EP is current high
+                        st.ep = high; // new EP is current high
                         st.acc = self.acceleration;
                     } else {
                         // Continue downtrend: maybe extend EP/AF and clamp to prior TWO highs

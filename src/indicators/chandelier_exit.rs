@@ -258,21 +258,23 @@ pub struct ChandelierExitStream {
     prev_close: Option<f64>,
 
     // trailing state (unmasked raw stops)
-    long_raw_prev: f64,    // NaN until warm is reached
-    short_raw_prev: f64,   // NaN until warm is reached
-    dir_prev: i8,          // Pine-style: starts at 1
+    long_raw_prev: f64,  // NaN until warm is reached
+    short_raw_prev: f64, // NaN until warm is reached
+    dir_prev: i8,        // Pine-style: starts at 1
 
     // Monotonic deques for rolling max/min over chosen source
-    cap: usize,            // power-of-two capacity
+    cap: usize, // power-of-two capacity
     mask: usize,
     // max deque
     dq_max_idx: Vec<usize>,
     dq_max_val: Vec<f64>,
-    hmax: usize, tmax: usize,
+    hmax: usize,
+    tmax: usize,
     // min deque
     dq_min_idx: Vec<usize>,
     dq_min_val: Vec<f64>,
-    hmin: usize, tmin: usize,
+    hmin: usize,
+    tmin: usize,
 }
 
 #[cfg(not(feature = "wasm"))]
@@ -280,7 +282,10 @@ impl ChandelierExitStream {
     pub fn try_new(p: ChandelierExitParams) -> Result<Self, ChandelierExitError> {
         let period = p.period.unwrap_or(22);
         if period == 0 {
-            return Err(ChandelierExitError::InvalidPeriod { period, data_len: 0 });
+            return Err(ChandelierExitError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let mult = p.mult.unwrap_or(3.0);
         let use_close = p.use_close.unwrap_or(true);
@@ -305,15 +310,19 @@ impl ChandelierExitStream {
             mask: cap - 1,
             dq_max_idx: vec![0usize; cap],
             dq_max_val: vec![f64::NAN; cap],
-            hmax: 0, tmax: 0,
+            hmax: 0,
+            tmax: 0,
             dq_min_idx: vec![0usize; cap],
             dq_min_val: vec![f64::NAN; cap],
-            hmin: 0, tmin: 0,
+            hmin: 0,
+            tmin: 0,
         })
     }
 
     #[inline(always)]
-    pub fn get_warmup_period(&self) -> usize { self.period - 1 }
+    pub fn get_warmup_period(&self) -> usize {
+        self.period - 1
+    }
 
     // ---- deque helpers ----
     #[inline(always)]
@@ -321,20 +330,34 @@ impl ChandelierExitStream {
         // evict indices older than window [i - period + 1 .. i]
         while self.hmax != self.tmax {
             let idx = self.dq_max_idx[self.hmax & self.mask];
-            if idx + self.period <= i { self.hmax = self.hmax.wrapping_add(1); } else { break; }
+            if idx + self.period <= i {
+                self.hmax = self.hmax.wrapping_add(1);
+            } else {
+                break;
+            }
         }
         while self.hmin != self.tmin {
             let idx = self.dq_min_idx[self.hmin & self.mask];
-            if idx + self.period <= i { self.hmin = self.hmin.wrapping_add(1); } else { break; }
+            if idx + self.period <= i {
+                self.hmin = self.hmin.wrapping_add(1);
+            } else {
+                break;
+            }
         }
     }
     #[inline(always)]
     fn push_max(&mut self, i: usize, v: f64) {
-        if v.is_nan() { return; }
+        if v.is_nan() {
+            return;
+        }
         // pop smaller values
         while self.hmax != self.tmax {
             let back_pos = (self.tmax.wrapping_sub(1)) & self.mask;
-            if self.dq_max_val[back_pos] < v { self.tmax = self.tmax.wrapping_sub(1); } else { break; }
+            if self.dq_max_val[back_pos] < v {
+                self.tmax = self.tmax.wrapping_sub(1);
+            } else {
+                break;
+            }
         }
         let pos = self.tmax & self.mask;
         self.dq_max_idx[pos] = i;
@@ -343,11 +366,17 @@ impl ChandelierExitStream {
     }
     #[inline(always)]
     fn push_min(&mut self, i: usize, v: f64) {
-        if v.is_nan() { return; }
+        if v.is_nan() {
+            return;
+        }
         // pop larger values
         while self.hmin != self.tmin {
             let back_pos = (self.tmin.wrapping_sub(1)) & self.mask;
-            if self.dq_min_val[back_pos] > v { self.tmin = self.tmin.wrapping_sub(1); } else { break; }
+            if self.dq_min_val[back_pos] > v {
+                self.tmin = self.tmin.wrapping_sub(1);
+            } else {
+                break;
+            }
         }
         let pos = self.tmin & self.mask;
         self.dq_min_idx[pos] = i;
@@ -356,11 +385,19 @@ impl ChandelierExitStream {
     }
     #[inline(always)]
     fn front_max(&self) -> f64 {
-        if self.hmax != self.tmax { self.dq_max_val[self.hmax & self.mask] } else { f64::NAN }
+        if self.hmax != self.tmax {
+            self.dq_max_val[self.hmax & self.mask]
+        } else {
+            f64::NAN
+        }
     }
     #[inline(always)]
     fn front_min(&self) -> f64 {
-        if self.hmin != self.tmin { self.dq_min_val[self.hmin & self.mask] } else { f64::NAN }
+        if self.hmin != self.tmin {
+            self.dq_min_val[self.hmin & self.mask]
+        } else {
+            f64::NAN
+        }
     }
 
     // True Range helper (Wilder)
@@ -414,15 +451,23 @@ impl ChandelierExitStream {
 
         // 2) Rolling extrema from deques
         let highest = self.front_max();
-        let lowest  = self.front_min();
+        let lowest = self.front_min();
 
         // 3) Candidate raw stops (use FMA for single-rounding)
         let ls0 = (-self.mult).mul_add(atr, highest); // highest - mult * atr
-        let ss0 = ( self.mult).mul_add(atr, lowest);  // lowest  + mult * atr
+        let ss0 = (self.mult).mul_add(atr, lowest); // lowest  + mult * atr
 
         // 4) nz-prev semantics (raw, unmasked)
-        let lsp = if self.long_raw_prev.is_nan()  { ls0 } else { self.long_raw_prev  };
-        let ssp = if self.short_raw_prev.is_nan() { ss0 } else { self.short_raw_prev };
+        let lsp = if self.long_raw_prev.is_nan() {
+            ls0
+        } else {
+            self.long_raw_prev
+        };
+        let ssp = if self.short_raw_prev.is_nan() {
+            ss0
+        } else {
+            self.short_raw_prev
+        };
 
         // 5) Trail using previous close; match batch semantics:
         //    - on the first warm bar (i == warm) do NOT trail
@@ -440,14 +485,20 @@ impl ChandelierExitStream {
         };
 
         // 6) Direction decision from previous raw stops
-        let d = if close > ssp { 1 } else if close < lsp { -1 } else { self.dir_prev };
+        let d = if close > ssp {
+            1
+        } else if close < lsp {
+            -1
+        } else {
+            self.dir_prev
+        };
 
         // 7) Persist state
-        self.long_raw_prev  = ls;
+        self.long_raw_prev = ls;
         self.short_raw_prev = ss;
-        self.dir_prev       = d;
-        self.prev_close     = Some(close);
-        self.i              = i + 1;
+        self.dir_prev = d;
+        self.prev_close = Some(close);
+        self.i = i + 1;
 
         // 8) Masked outputs (only one side active)
         Some((
@@ -607,7 +658,9 @@ fn map_kernel_for_atr(k: Kernel) -> Kernel {
     #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
     {
         match k {
-            Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch => Kernel::Scalar,
+            Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch => {
+                Kernel::Scalar
+            }
             _ => k,
         }
     }
@@ -644,8 +697,10 @@ fn ce_avx2_fill(
     let mask = cap - 1;
     let mut dq_max = vec![0usize; cap];
     let mut dq_min = vec![0usize; cap];
-    let mut hmax = 0usize; let mut tmax = 0usize;
-    let mut hmin = 0usize; let mut tmin = 0usize;
+    let mut hmax = 0usize;
+    let mut tmax = 0usize;
+    let mut hmin = 0usize;
+    let mut tmin = 0usize;
 
     let (src_max, src_min) = if use_close { (c, c) } else { (h, l) };
 
@@ -658,11 +713,19 @@ fn ce_avx2_fill(
             // Evict
             while hmax != tmax {
                 let idx = *dq_max.get_unchecked(hmax & mask);
-                if idx + period <= i { hmax = hmax.wrapping_add(1); } else { break; }
+                if idx + period <= i {
+                    hmax = hmax.wrapping_add(1);
+                } else {
+                    break;
+                }
             }
             while hmin != tmin {
                 let idx = *dq_min.get_unchecked(hmin & mask);
-                if idx + period <= i { hmin = hmin.wrapping_add(1); } else { break; }
+                if idx + period <= i {
+                    hmin = hmin.wrapping_add(1);
+                } else {
+                    break;
+                }
             }
             // Push current
             let vmax = *src_max.get_unchecked(i);
@@ -670,7 +733,11 @@ fn ce_avx2_fill(
                 while hmax != tmax {
                     let back_idx = *dq_max.get_unchecked((tmax.wrapping_sub(1)) & mask);
                     let back_v = *src_max.get_unchecked(back_idx);
-                    if back_v < vmax { tmax = tmax.wrapping_sub(1); } else { break; }
+                    if back_v < vmax {
+                        tmax = tmax.wrapping_sub(1);
+                    } else {
+                        break;
+                    }
                 }
                 *dq_max.get_unchecked_mut(tmax & mask) = i;
                 tmax = tmax.wrapping_add(1);
@@ -680,31 +747,69 @@ fn ce_avx2_fill(
                 while hmin != tmin {
                     let back_idx = *dq_min.get_unchecked((tmin.wrapping_sub(1)) & mask);
                     let back_v = *src_min.get_unchecked(back_idx);
-                    if back_v > vmin { tmin = tmin.wrapping_sub(1); } else { break; }
+                    if back_v > vmin {
+                        tmin = tmin.wrapping_sub(1);
+                    } else {
+                        break;
+                    }
                 }
                 *dq_min.get_unchecked_mut(tmin & mask) = i;
                 tmin = tmin.wrapping_add(1);
             }
 
-            if i < warm { continue; }
+            if i < warm {
+                continue;
+            }
 
-            let highest = if hmax != tmax { *src_max.get_unchecked(*dq_max.get_unchecked(hmax & mask)) } else { f64::NAN };
-            let lowest  = if hmin != tmin { *src_min.get_unchecked(*dq_min.get_unchecked(hmin & mask)) } else { f64::NAN };
+            let highest = if hmax != tmax {
+                *src_max.get_unchecked(*dq_max.get_unchecked(hmax & mask))
+            } else {
+                f64::NAN
+            };
+            let lowest = if hmin != tmin {
+                *src_min.get_unchecked(*dq_min.get_unchecked(hmin & mask))
+            } else {
+                f64::NAN
+            };
 
             let ai = *atr.get_unchecked(i);
             let ls0 = ai.mul_add(-mult, highest);
             let ss0 = ai.mul_add(mult, lowest);
 
-            let lsp = if i == warm || long_raw_prev.is_nan() { ls0 } else { long_raw_prev };
-            let ssp = if i == warm || short_raw_prev.is_nan() { ss0 } else { short_raw_prev };
+            let lsp = if i == warm || long_raw_prev.is_nan() {
+                ls0
+            } else {
+                long_raw_prev
+            };
+            let ssp = if i == warm || short_raw_prev.is_nan() {
+                ss0
+            } else {
+                short_raw_prev
+            };
 
             let prev_close = *c.get_unchecked(i - (i > warm) as usize);
-            let ls = if i > warm && gt(prev_close, lsp) { ls0.max(lsp) } else { ls0 };
-            let ss = if i > warm && lt(prev_close, ssp) { ss0.min(ssp) } else { ss0 };
+            let ls = if i > warm && gt(prev_close, lsp) {
+                ls0.max(lsp)
+            } else {
+                ls0
+            };
+            let ss = if i > warm && lt(prev_close, ssp) {
+                ss0.min(ssp)
+            } else {
+                ss0
+            };
 
-            let d = if gt(*c.get_unchecked(i), ssp) { 1 } else if lt(*c.get_unchecked(i), lsp) { -1 } else { prev_dir };
+            let d = if gt(*c.get_unchecked(i), ssp) {
+                1
+            } else if lt(*c.get_unchecked(i), lsp) {
+                -1
+            } else {
+                prev_dir
+            };
 
-            long_raw_prev = ls; short_raw_prev = ss; prev_dir = d;
+            long_raw_prev = ls;
+            short_raw_prev = ss;
+            prev_dir = d;
             *long_dst.get_unchecked_mut(i) = if d == 1 { ls } else { f64::NAN };
             *short_dst.get_unchecked_mut(i) = if d == -1 { ss } else { f64::NAN };
         }
@@ -761,7 +866,11 @@ pub fn chandelier_exit_with_kernel(
     let mut tmin = 0usize; // tail index for min deque
 
     // Select extremum source once
-    let (src_max, src_min) = if use_close { (close, close) } else { (high, low) };
+    let (src_max, src_min) = if use_close {
+        (close, close)
+    } else {
+        (high, low)
+    };
 
     // Single pass over all bars; emit once warm is satisfied
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -783,78 +892,19 @@ pub fn chandelier_exit_with_kernel(
             // Evict indices that are out of the window [i - period + 1 .. i]
             while hmax != tmax {
                 let idx = dq_max[hmax & mask];
-                if idx + period <= i { hmax = hmax.wrapping_add(1); } else { break; }
-            }
-        while hmin != tmin {
-            let idx = dq_min[hmin & mask];
-            if idx + period <= i { hmin = hmin.wrapping_add(1); } else { break; }
-        }
-
-        // Push current index to deques (skip NaNs so all-NaN window -> NaN)
-        let v_max = src_max[i];
-        if !v_max.is_nan() {
-            while hmax != tmax {
-                let back_pos = (tmax.wrapping_sub(1)) & mask;
-                let back_idx = dq_max[back_pos];
-                if src_max[back_idx] < v_max { tmax = tmax.wrapping_sub(1); } else { break; }
-            }
-            dq_max[tmax & mask] = i;
-            tmax = tmax.wrapping_add(1);
-        }
-
-        let v_min = src_min[i];
-        if !v_min.is_nan() {
-            while hmin != tmin {
-                let back_pos = (tmin.wrapping_sub(1)) & mask;
-                let back_idx = dq_min[back_pos];
-                if src_min[back_idx] > v_min { tmin = tmin.wrapping_sub(1); } else { break; }
-            }
-            dq_min[tmin & mask] = i;
-            tmin = tmin.wrapping_add(1);
-        }
-
-        if i < warm { continue; }
-
-        // Read current extrema (NaN if window had only NaNs)
-        let highest = if hmax != tmax { src_max[dq_max[hmax & mask]] } else { f64::NAN };
-        let lowest  = if hmin != tmin { src_min[dq_min[hmin & mask]] } else { f64::NAN };
-
-        // Candidate stops (unmasked)
-        let ai = atr[i];
-        // Use FMA when available for single-rounding and slight speedup
-        let ls0 = ai.mul_add(-mult, highest); // highest - mult*ai
-        let ss0 = ai.mul_add(mult, lowest);   // lowest + mult*ai
-
-        // nz-prev semantics
-        let lsp = if i == warm || long_raw_prev.is_nan() { ls0 } else { long_raw_prev };
-        let ssp = if i == warm || short_raw_prev.is_nan() { ss0 } else { short_raw_prev };
-
-        // Trailing using previous close
-        let ls = if i > warm && close[i - 1] > lsp { ls0.max(lsp) } else { ls0 };
-        let ss = if i > warm && close[i - 1] < ssp { ss0.min(ssp) } else { ss0 };
-
-        // Direction decision uses previous unmasked stops
-        let d = if close[i] > ssp { 1 } else if close[i] < lsp { -1 } else { prev_dir };
-
-        long_raw_prev = ls;
-        short_raw_prev = ss;
-        prev_dir = d;
-
-        long_stop[i] = if d == 1 { ls } else { f64::NAN };
-        short_stop[i] = if d == -1 { ss } else { f64::NAN };
-        }
-    }
-    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-    {
-        for i in 0..len {
-            // Evict indices that are out of the window [i - period + 1 .. i]
-            while hmax != tmax {
-                let idx = dq_max[hmax & mask];
-                if idx + period <= i { hmax = hmax.wrapping_add(1); } else { break; }
+                if idx + period <= i {
+                    hmax = hmax.wrapping_add(1);
+                } else {
+                    break;
+                }
             }
             while hmin != tmin {
                 let idx = dq_min[hmin & mask];
-                if idx + period <= i { hmin = hmin.wrapping_add(1); } else { break; }
+                if idx + period <= i {
+                    hmin = hmin.wrapping_add(1);
+                } else {
+                    break;
+                }
             }
 
             // Push current index to deques (skip NaNs so all-NaN window -> NaN)
@@ -863,7 +913,11 @@ pub fn chandelier_exit_with_kernel(
                 while hmax != tmax {
                     let back_pos = (tmax.wrapping_sub(1)) & mask;
                     let back_idx = dq_max[back_pos];
-                    if src_max[back_idx] < v_max { tmax = tmax.wrapping_sub(1); } else { break; }
+                    if src_max[back_idx] < v_max {
+                        tmax = tmax.wrapping_sub(1);
+                    } else {
+                        break;
+                    }
                 }
                 dq_max[tmax & mask] = i;
                 tmax = tmax.wrapping_add(1);
@@ -874,17 +928,146 @@ pub fn chandelier_exit_with_kernel(
                 while hmin != tmin {
                     let back_pos = (tmin.wrapping_sub(1)) & mask;
                     let back_idx = dq_min[back_pos];
-                    if src_min[back_idx] > v_min { tmin = tmin.wrapping_sub(1); } else { break; }
+                    if src_min[back_idx] > v_min {
+                        tmin = tmin.wrapping_sub(1);
+                    } else {
+                        break;
+                    }
                 }
                 dq_min[tmin & mask] = i;
                 tmin = tmin.wrapping_add(1);
             }
 
-            if i < warm { continue; }
+            if i < warm {
+                continue;
+            }
 
             // Read current extrema (NaN if window had only NaNs)
-            let highest = if hmax != tmax { src_max[dq_max[hmax & mask]] } else { f64::NAN };
-            let lowest  = if hmin != tmin { src_min[dq_min[hmin & mask]] } else { f64::NAN };
+            let highest = if hmax != tmax {
+                src_max[dq_max[hmax & mask]]
+            } else {
+                f64::NAN
+            };
+            let lowest = if hmin != tmin {
+                src_min[dq_min[hmin & mask]]
+            } else {
+                f64::NAN
+            };
+
+            // Candidate stops (unmasked)
+            let ai = atr[i];
+            // Use FMA when available for single-rounding and slight speedup
+            let ls0 = ai.mul_add(-mult, highest); // highest - mult*ai
+            let ss0 = ai.mul_add(mult, lowest); // lowest + mult*ai
+
+            // nz-prev semantics
+            let lsp = if i == warm || long_raw_prev.is_nan() {
+                ls0
+            } else {
+                long_raw_prev
+            };
+            let ssp = if i == warm || short_raw_prev.is_nan() {
+                ss0
+            } else {
+                short_raw_prev
+            };
+
+            // Trailing using previous close
+            let ls = if i > warm && close[i - 1] > lsp {
+                ls0.max(lsp)
+            } else {
+                ls0
+            };
+            let ss = if i > warm && close[i - 1] < ssp {
+                ss0.min(ssp)
+            } else {
+                ss0
+            };
+
+            // Direction decision uses previous unmasked stops
+            let d = if close[i] > ssp {
+                1
+            } else if close[i] < lsp {
+                -1
+            } else {
+                prev_dir
+            };
+
+            long_raw_prev = ls;
+            short_raw_prev = ss;
+            prev_dir = d;
+
+            long_stop[i] = if d == 1 { ls } else { f64::NAN };
+            short_stop[i] = if d == -1 { ss } else { f64::NAN };
+        }
+    }
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        for i in 0..len {
+            // Evict indices that are out of the window [i - period + 1 .. i]
+            while hmax != tmax {
+                let idx = dq_max[hmax & mask];
+                if idx + period <= i {
+                    hmax = hmax.wrapping_add(1);
+                } else {
+                    break;
+                }
+            }
+            while hmin != tmin {
+                let idx = dq_min[hmin & mask];
+                if idx + period <= i {
+                    hmin = hmin.wrapping_add(1);
+                } else {
+                    break;
+                }
+            }
+
+            // Push current index to deques (skip NaNs so all-NaN window -> NaN)
+            let v_max = src_max[i];
+            if !v_max.is_nan() {
+                while hmax != tmax {
+                    let back_pos = (tmax.wrapping_sub(1)) & mask;
+                    let back_idx = dq_max[back_pos];
+                    if src_max[back_idx] < v_max {
+                        tmax = tmax.wrapping_sub(1);
+                    } else {
+                        break;
+                    }
+                }
+                dq_max[tmax & mask] = i;
+                tmax = tmax.wrapping_add(1);
+            }
+
+            let v_min = src_min[i];
+            if !v_min.is_nan() {
+                while hmin != tmin {
+                    let back_pos = (tmin.wrapping_sub(1)) & mask;
+                    let back_idx = dq_min[back_pos];
+                    if src_min[back_idx] > v_min {
+                        tmin = tmin.wrapping_sub(1);
+                    } else {
+                        break;
+                    }
+                }
+                dq_min[tmin & mask] = i;
+                tmin = tmin.wrapping_add(1);
+            }
+
+            if i < warm {
+                continue;
+            }
+
+            // Read current extrema (NaN if window had only NaNs)
+            let highest = if hmax != tmax {
+                src_max[dq_max[hmax & mask]]
+            } else {
+                f64::NAN
+            };
+            let lowest = if hmin != tmin {
+                src_min[dq_min[hmin & mask]]
+            } else {
+                f64::NAN
+            };
 
             // Candidate stops (unmasked)
             let ai = atr[i];
@@ -892,15 +1075,37 @@ pub fn chandelier_exit_with_kernel(
             let ss0 = ai.mul_add(mult, lowest);
 
             // nz-prev semantics
-            let lsp = if i == warm || long_raw_prev.is_nan() { ls0 } else { long_raw_prev };
-            let ssp = if i == warm || short_raw_prev.is_nan() { ss0 } else { short_raw_prev };
+            let lsp = if i == warm || long_raw_prev.is_nan() {
+                ls0
+            } else {
+                long_raw_prev
+            };
+            let ssp = if i == warm || short_raw_prev.is_nan() {
+                ss0
+            } else {
+                short_raw_prev
+            };
 
             // Trailing using previous close
-            let ls = if i > warm && close[i - 1] > lsp { ls0.max(lsp) } else { ls0 };
-            let ss = if i > warm && close[i - 1] < ssp { ss0.min(ssp) } else { ss0 };
+            let ls = if i > warm && close[i - 1] > lsp {
+                ls0.max(lsp)
+            } else {
+                ls0
+            };
+            let ss = if i > warm && close[i - 1] < ssp {
+                ss0.min(ssp)
+            } else {
+                ss0
+            };
 
             // Direction decision uses previous unmasked stops
-            let d = if close[i] > ssp { 1 } else if close[i] < lsp { -1 } else { prev_dir };
+            let d = if close[i] > ssp {
+                1
+            } else if close[i] < lsp {
+                -1
+            } else {
+                prev_dir
+            };
 
             long_raw_prev = ls;
             short_raw_prev = ss;
@@ -911,7 +1116,10 @@ pub fn chandelier_exit_with_kernel(
         }
     }
 
-    Ok(ChandelierExitOutput { long_stop, short_stop })
+    Ok(ChandelierExitOutput {
+        long_stop,
+        short_stop,
+    })
 }
 
 // Into-slice APIs for zero-copy operations
@@ -943,8 +1151,12 @@ pub fn chandelier_exit_into_slices(
         .values;
 
     let warm = first + period - 1;
-    for v in &mut long_dst[..warm.min(len)] { *v = f64::NAN; }
-    for v in &mut short_dst[..warm.min(len)] { *v = f64::NAN; }
+    for v in &mut long_dst[..warm.min(len)] {
+        *v = f64::NAN;
+    }
+    for v in &mut short_dst[..warm.min(len)] {
+        *v = f64::NAN;
+    }
 
     // Rolling state
     let mut long_raw_prev = f64::NAN;
@@ -956,57 +1168,119 @@ pub fn chandelier_exit_into_slices(
     let mask = cap - 1;
     let mut dq_max = vec![0usize; cap];
     let mut dq_min = vec![0usize; cap];
-    let mut hmax = 0usize; let mut tmax = 0usize;
-    let mut hmin = 0usize; let mut tmin = 0usize;
+    let mut hmax = 0usize;
+    let mut tmax = 0usize;
+    let mut hmin = 0usize;
+    let mut tmin = 0usize;
     let (src_max, src_min) = if use_close { (c, c) } else { (h, l) };
 
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if matches!(chosen, Kernel::Avx2 | Kernel::Avx512) {
-        ce_avx2_fill(long_dst, short_dst, h, l, c, &atr, period, mult, use_close, first);
+        ce_avx2_fill(
+            long_dst, short_dst, h, l, c, &atr, period, mult, use_close, first,
+        );
         return Ok(());
     }
 
     for i in 0..len {
         // evict outdated
-        while hmax != tmax { let idx = dq_max[hmax & mask]; if idx + period <= i { hmax = hmax.wrapping_add(1); } else { break; } }
-        while hmin != tmin { let idx = dq_min[hmin & mask]; if idx + period <= i { hmin = hmin.wrapping_add(1); } else { break; } }
+        while hmax != tmax {
+            let idx = dq_max[hmax & mask];
+            if idx + period <= i {
+                hmax = hmax.wrapping_add(1);
+            } else {
+                break;
+            }
+        }
+        while hmin != tmin {
+            let idx = dq_min[hmin & mask];
+            if idx + period <= i {
+                hmin = hmin.wrapping_add(1);
+            } else {
+                break;
+            }
+        }
         // push current
         let vmax = src_max[i];
         if !vmax.is_nan() {
             while hmax != tmax {
                 let back_pos = (tmax.wrapping_sub(1)) & mask;
                 let back_idx = dq_max[back_pos];
-                if src_max[back_idx] < vmax { tmax = tmax.wrapping_sub(1); } else { break; }
+                if src_max[back_idx] < vmax {
+                    tmax = tmax.wrapping_sub(1);
+                } else {
+                    break;
+                }
             }
-            dq_max[tmax & mask] = i; tmax = tmax.wrapping_add(1);
+            dq_max[tmax & mask] = i;
+            tmax = tmax.wrapping_add(1);
         }
         let vmin = src_min[i];
         if !vmin.is_nan() {
             while hmin != tmin {
                 let back_pos = (tmin.wrapping_sub(1)) & mask;
                 let back_idx = dq_min[back_pos];
-                if src_min[back_idx] > vmin { tmin = tmin.wrapping_sub(1); } else { break; }
+                if src_min[back_idx] > vmin {
+                    tmin = tmin.wrapping_sub(1);
+                } else {
+                    break;
+                }
             }
-            dq_min[tmin & mask] = i; tmin = tmin.wrapping_add(1);
+            dq_min[tmin & mask] = i;
+            tmin = tmin.wrapping_add(1);
         }
 
-        if i < warm { continue; }
+        if i < warm {
+            continue;
+        }
 
-        let highest = if hmax != tmax { src_max[dq_max[hmax & mask]] } else { f64::NAN };
-        let lowest  = if hmin != tmin { src_min[dq_min[hmin & mask]] } else { f64::NAN };
+        let highest = if hmax != tmax {
+            src_max[dq_max[hmax & mask]]
+        } else {
+            f64::NAN
+        };
+        let lowest = if hmin != tmin {
+            src_min[dq_min[hmin & mask]]
+        } else {
+            f64::NAN
+        };
 
         let ai = atr[i];
         let ls0 = ai.mul_add(-mult, highest);
         let ss0 = ai.mul_add(mult, lowest);
 
-        let lsp = if i == warm || long_raw_prev.is_nan() { ls0 } else { long_raw_prev };
-        let ssp = if i == warm || short_raw_prev.is_nan() { ss0 } else { short_raw_prev };
+        let lsp = if i == warm || long_raw_prev.is_nan() {
+            ls0
+        } else {
+            long_raw_prev
+        };
+        let ssp = if i == warm || short_raw_prev.is_nan() {
+            ss0
+        } else {
+            short_raw_prev
+        };
 
-        let ls = if i > warm && c[i - 1] > lsp { ls0.max(lsp) } else { ls0 };
-        let ss = if i > warm && c[i - 1] < ssp { ss0.min(ssp) } else { ss0 };
+        let ls = if i > warm && c[i - 1] > lsp {
+            ls0.max(lsp)
+        } else {
+            ls0
+        };
+        let ss = if i > warm && c[i - 1] < ssp {
+            ss0.min(ssp)
+        } else {
+            ss0
+        };
 
-        let d = if c[i] > ssp { 1 } else if c[i] < lsp { -1 } else { prev_dir };
-        long_raw_prev = ls; short_raw_prev = ss; prev_dir = d;
+        let d = if c[i] > ssp {
+            1
+        } else if c[i] < lsp {
+            -1
+        } else {
+            prev_dir
+        };
+        long_raw_prev = ls;
+        short_raw_prev = ss;
+        prev_dir = d;
         long_dst[i] = if d == 1 { ls } else { f64::NAN };
         short_dst[i] = if d == -1 { ss } else { f64::NAN };
     }
@@ -1365,8 +1639,13 @@ fn ce_batch_inner_into(
 
         // Rolling state
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        if matches!(chosen, Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch) {
-            ce_avx2_fill(long_dst, short_dst, h, l, c, &atr, period, mult, use_close, first);
+        if matches!(
+            chosen,
+            Kernel::Avx2 | Kernel::Avx512 | Kernel::Avx2Batch | Kernel::Avx512Batch
+        ) {
+            ce_avx2_fill(
+                long_dst, short_dst, h, l, c, &atr, period, mult, use_close, first,
+            );
         } else {
             // Scalar per-row path
             let mut long_raw_prev = f64::NAN;
@@ -1377,43 +1656,103 @@ fn ce_batch_inner_into(
             let mask = cap - 1;
             let mut dq_max = vec![0usize; cap];
             let mut dq_min = vec![0usize; cap];
-            let mut hmax = 0usize; let mut tmax = 0usize;
-            let mut hmin = 0usize; let mut tmin = 0usize;
+            let mut hmax = 0usize;
+            let mut tmax = 0usize;
+            let mut hmin = 0usize;
+            let mut tmin = 0usize;
             let (src_max, src_min) = if use_close { (c, c) } else { (h, l) };
 
             for i in 0..len {
-                while hmax != tmax { let idx = dq_max[hmax & mask]; if idx + period <= i { hmax = hmax.wrapping_add(1); } else { break; } }
-                while hmin != tmin { let idx = dq_min[hmin & mask]; if idx + period <= i { hmin = hmin.wrapping_add(1); } else { break; } }
+                while hmax != tmax {
+                    let idx = dq_max[hmax & mask];
+                    if idx + period <= i {
+                        hmax = hmax.wrapping_add(1);
+                    } else {
+                        break;
+                    }
+                }
+                while hmin != tmin {
+                    let idx = dq_min[hmin & mask];
+                    if idx + period <= i {
+                        hmin = hmin.wrapping_add(1);
+                    } else {
+                        break;
+                    }
+                }
                 let vmax = src_max[i];
                 if !vmax.is_nan() {
                     while hmax != tmax {
                         let back_pos = (tmax.wrapping_sub(1)) & mask;
                         let back_idx = dq_max[back_pos];
-                        if src_max[back_idx] < vmax { tmax = tmax.wrapping_sub(1); } else { break; }
+                        if src_max[back_idx] < vmax {
+                            tmax = tmax.wrapping_sub(1);
+                        } else {
+                            break;
+                        }
                     }
-                    dq_max[tmax & mask] = i; tmax = tmax.wrapping_add(1);
+                    dq_max[tmax & mask] = i;
+                    tmax = tmax.wrapping_add(1);
                 }
                 let vmin = src_min[i];
                 if !vmin.is_nan() {
                     while hmin != tmin {
                         let back_pos = (tmin.wrapping_sub(1)) & mask;
                         let back_idx = dq_min[back_pos];
-                        if src_min[back_idx] > vmin { tmin = tmin.wrapping_sub(1); } else { break; }
+                        if src_min[back_idx] > vmin {
+                            tmin = tmin.wrapping_sub(1);
+                        } else {
+                            break;
+                        }
                     }
-                    dq_min[tmin & mask] = i; tmin = tmin.wrapping_add(1);
+                    dq_min[tmin & mask] = i;
+                    tmin = tmin.wrapping_add(1);
                 }
-                if i < warm { continue; }
-                let highest = if hmax != tmax { src_max[dq_max[hmax & mask]] } else { f64::NAN };
-                let lowest  = if hmin != tmin { src_min[dq_min[hmin & mask]] } else { f64::NAN };
+                if i < warm {
+                    continue;
+                }
+                let highest = if hmax != tmax {
+                    src_max[dq_max[hmax & mask]]
+                } else {
+                    f64::NAN
+                };
+                let lowest = if hmin != tmin {
+                    src_min[dq_min[hmin & mask]]
+                } else {
+                    f64::NAN
+                };
                 let ai = atr[i];
                 let ls0 = ai.mul_add(-mult, highest);
                 let ss0 = ai.mul_add(mult, lowest);
-                let lsp = if i == warm || long_raw_prev.is_nan() { ls0 } else { long_raw_prev };
-                let ssp = if i == warm || short_raw_prev.is_nan() { ss0 } else { short_raw_prev };
-                let ls = if i > warm && c[i - 1] > lsp { ls0.max(lsp) } else { ls0 };
-                let ss = if i > warm && c[i - 1] < ssp { ss0.min(ssp) } else { ss0 };
-                let d = if c[i] > ssp { 1 } else if c[i] < lsp { -1 } else { prev_dir };
-                long_raw_prev = ls; short_raw_prev = ss; prev_dir = d;
+                let lsp = if i == warm || long_raw_prev.is_nan() {
+                    ls0
+                } else {
+                    long_raw_prev
+                };
+                let ssp = if i == warm || short_raw_prev.is_nan() {
+                    ss0
+                } else {
+                    short_raw_prev
+                };
+                let ls = if i > warm && c[i - 1] > lsp {
+                    ls0.max(lsp)
+                } else {
+                    ls0
+                };
+                let ss = if i > warm && c[i - 1] < ssp {
+                    ss0.min(ssp)
+                } else {
+                    ss0
+                };
+                let d = if c[i] > ssp {
+                    1
+                } else if c[i] < lsp {
+                    -1
+                } else {
+                    prev_dir
+                };
+                long_raw_prev = ls;
+                short_raw_prev = ss;
+                prev_dir = d;
                 long_dst[i] = if d == 1 { ls } else { f64::NAN };
                 short_dst[i] = if d == -1 { ss } else { f64::NAN };
             }
@@ -1429,43 +1768,103 @@ fn ce_batch_inner_into(
             let mask = cap - 1;
             let mut dq_max = vec![0usize; cap];
             let mut dq_min = vec![0usize; cap];
-            let mut hmax = 0usize; let mut tmax = 0usize;
-            let mut hmin = 0usize; let mut tmin = 0usize;
+            let mut hmax = 0usize;
+            let mut tmax = 0usize;
+            let mut hmin = 0usize;
+            let mut tmin = 0usize;
             let (src_max, src_min) = if use_close { (c, c) } else { (h, l) };
 
             for i in 0..len {
-                while hmax != tmax { let idx = dq_max[hmax & mask]; if idx + period <= i { hmax = hmax.wrapping_add(1); } else { break; } }
-                while hmin != tmin { let idx = dq_min[hmin & mask]; if idx + period <= i { hmin = hmin.wrapping_add(1); } else { break; } }
+                while hmax != tmax {
+                    let idx = dq_max[hmax & mask];
+                    if idx + period <= i {
+                        hmax = hmax.wrapping_add(1);
+                    } else {
+                        break;
+                    }
+                }
+                while hmin != tmin {
+                    let idx = dq_min[hmin & mask];
+                    if idx + period <= i {
+                        hmin = hmin.wrapping_add(1);
+                    } else {
+                        break;
+                    }
+                }
                 let vmax = src_max[i];
                 if !vmax.is_nan() {
                     while hmax != tmax {
                         let back_pos = (tmax.wrapping_sub(1)) & mask;
                         let back_idx = dq_max[back_pos];
-                        if src_max[back_idx] < vmax { tmax = tmax.wrapping_sub(1); } else { break; }
+                        if src_max[back_idx] < vmax {
+                            tmax = tmax.wrapping_sub(1);
+                        } else {
+                            break;
+                        }
                     }
-                    dq_max[tmax & mask] = i; tmax = tmax.wrapping_add(1);
+                    dq_max[tmax & mask] = i;
+                    tmax = tmax.wrapping_add(1);
                 }
                 let vmin = src_min[i];
                 if !vmin.is_nan() {
                     while hmin != tmin {
                         let back_pos = (tmin.wrapping_sub(1)) & mask;
                         let back_idx = dq_min[back_pos];
-                        if src_min[back_idx] > vmin { tmin = tmin.wrapping_sub(1); } else { break; }
+                        if src_min[back_idx] > vmin {
+                            tmin = tmin.wrapping_sub(1);
+                        } else {
+                            break;
+                        }
                     }
-                    dq_min[tmin & mask] = i; tmin = tmin.wrapping_add(1);
+                    dq_min[tmin & mask] = i;
+                    tmin = tmin.wrapping_add(1);
                 }
-                if i < warm { continue; }
-                let highest = if hmax != tmax { src_max[dq_max[hmax & mask]] } else { f64::NAN };
-                let lowest  = if hmin != tmin { src_min[dq_min[hmin & mask]] } else { f64::NAN };
+                if i < warm {
+                    continue;
+                }
+                let highest = if hmax != tmax {
+                    src_max[dq_max[hmax & mask]]
+                } else {
+                    f64::NAN
+                };
+                let lowest = if hmin != tmin {
+                    src_min[dq_min[hmin & mask]]
+                } else {
+                    f64::NAN
+                };
                 let ai = atr[i];
                 let ls0 = ai.mul_add(-mult, highest);
                 let ss0 = ai.mul_add(mult, lowest);
-                let lsp = if i == warm || long_raw_prev.is_nan() { ls0 } else { long_raw_prev };
-                let ssp = if i == warm || short_raw_prev.is_nan() { ss0 } else { short_raw_prev };
-                let ls = if i > warm && c[i - 1] > lsp { ls0.max(lsp) } else { ls0 };
-                let ss = if i > warm && c[i - 1] < ssp { ss0.min(ssp) } else { ss0 };
-                let d = if c[i] > ssp { 1 } else if c[i] < lsp { -1 } else { prev_dir };
-                long_raw_prev = ls; short_raw_prev = ss; prev_dir = d;
+                let lsp = if i == warm || long_raw_prev.is_nan() {
+                    ls0
+                } else {
+                    long_raw_prev
+                };
+                let ssp = if i == warm || short_raw_prev.is_nan() {
+                    ss0
+                } else {
+                    short_raw_prev
+                };
+                let ls = if i > warm && c[i - 1] > lsp {
+                    ls0.max(lsp)
+                } else {
+                    ls0
+                };
+                let ss = if i > warm && c[i - 1] < ssp {
+                    ss0.min(ssp)
+                } else {
+                    ss0
+                };
+                let d = if c[i] > ssp {
+                    1
+                } else if c[i] < lsp {
+                    -1
+                } else {
+                    prev_dir
+                };
+                long_raw_prev = ls;
+                short_raw_prev = ss;
+                prev_dir = d;
                 long_dst[i] = if d == 1 { ls } else { f64::NAN };
                 short_dst[i] = if d == -1 { ss } else { f64::NAN };
             }

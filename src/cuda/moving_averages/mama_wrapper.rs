@@ -16,12 +16,14 @@
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
-use crate::indicators::moving_averages::mama::{expand_grid, MamaBatchRange, MamaParams, MamaBuilder};
+use crate::indicators::moving_averages::mama::{
+    expand_grid, MamaBatchRange, MamaBuilder, MamaParams,
+};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::memory::AsyncCopyDestination;
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -47,14 +49,18 @@ mod cudart_ffi {
 pub enum BatchKernelPolicy {
     Auto,
     /// One combo per block, sequential scan over time.
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
     /// One series per block, sequential scan over time.
-    OneD { block_x: u32 },
+    OneD {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -65,7 +71,10 @@ pub struct CudaMamaPolicy {
 
 impl Default for CudaMamaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -148,8 +157,7 @@ impl CudaMama {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
                 }
             }
         };
@@ -169,20 +177,35 @@ impl CudaMama {
     }
 
     /// Create using an explicit policy.
-    pub fn new_with_policy(device_id: usize, policy: CudaMamaPolicy) -> Result<Self, CudaMamaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaMamaPolicy,
+    ) -> Result<Self, CudaMamaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaMamaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaMamaPolicy { &self.policy }
+    pub fn set_policy(&mut self, policy: CudaMamaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaMamaPolicy {
+        &self.policy
+    }
 
     /// Selected kernels (if any) for debugging/inspection.
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
-    fn pick_launch_1d(&self, n_items: usize, policy_block_x: Option<u32>) -> (GridSize, BlockSize, u32) {
+    fn pick_launch_1d(
+        &self,
+        n_items: usize,
+        policy_block_x: Option<u32>,
+    ) -> (GridSize, BlockSize, u32) {
         let block_x = policy_block_x.unwrap_or(256).clamp(64, 1024);
         let blocks = ((n_items + block_x as usize - 1) / block_x as usize).min(65_535) as u32;
         let grid: GridSize = (blocks, 1, 1).into();
@@ -193,14 +216,19 @@ impl CudaMama {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] MAMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMama)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMama)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -208,14 +236,19 @@ impl CudaMama {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] MAMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMama)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMama)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -285,8 +318,12 @@ impl CudaMama {
             let f_bytes = out_fama.len() * std::mem::size_of::<f32>();
             let mut registered_m = false;
             let mut registered_f = false;
-            if cudaHostRegister(m_ptr, m_bytes, CUDA_HOST_REGISTER_DEFAULT) == 0 { registered_m = true; }
-            if cudaHostRegister(f_ptr, f_bytes, CUDA_HOST_REGISTER_DEFAULT) == 0 { registered_f = true; }
+            if cudaHostRegister(m_ptr, m_bytes, CUDA_HOST_REGISTER_DEFAULT) == 0 {
+                registered_m = true;
+            }
+            if cudaHostRegister(f_ptr, f_bytes, CUDA_HOST_REGISTER_DEFAULT) == 0 {
+                registered_f = true;
+            }
             if registered_m && registered_f {
                 pair.mama
                     .buf
@@ -303,8 +340,12 @@ impl CudaMama {
                 let _ = cudaHostUnregister(f_ptr);
                 used_direct = true;
             } else {
-                if registered_m { let _ = cudaHostUnregister(m_ptr); }
-                if registered_f { let _ = cudaHostUnregister(f_ptr); }
+                if registered_m {
+                    let _ = cudaHostUnregister(m_ptr);
+                }
+                if registered_f {
+                    let _ = cudaHostUnregister(f_ptr);
+                }
             }
         }
 
@@ -580,25 +621,27 @@ impl CudaMama {
         let (grid, block, picked_block_x) = self.pick_launch_1d(n_combos, user_block);
         unsafe {
             let this = self as *const _ as *mut CudaMama;
-            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x: picked_block_x });
+            (*this).last_batch = Some(BatchKernelSelected::Plain {
+                block_x: picked_block_x,
+            });
         }
         self.maybe_log_batch_debug();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut fast_ptr   = d_fast_limits.as_device_ptr().as_raw();
-            let mut slow_ptr   = d_slow_limits.as_device_ptr().as_raw();
-            let mut series_len_i  = series_len as i32;
-            let mut combos_i      = n_combos as i32;
+            let mut fast_ptr = d_fast_limits.as_device_ptr().as_raw();
+            let mut slow_ptr = d_slow_limits.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut combos_i = n_combos as i32;
             let mut first_valid_i = first_valid as i32;
-            let mut out_m_ptr  = d_out_mama.as_device_ptr().as_raw();
-            let mut out_f_ptr  = d_out_fama.as_device_ptr().as_raw();
+            let mut out_m_ptr = d_out_mama.as_device_ptr().as_raw();
+            let mut out_f_ptr = d_out_fama.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
-                &mut fast_ptr   as *mut _ as *mut c_void,
-                &mut slow_ptr   as *mut _ as *mut c_void,
-                &mut series_len_i  as *mut _ as *mut c_void,
-                &mut combos_i      as *mut _ as *mut c_void,
+                &mut fast_ptr as *mut _ as *mut c_void,
+                &mut slow_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_m_ptr as *mut _ as *mut c_void,
                 &mut out_f_ptr as *mut _ as *mut c_void,
@@ -785,8 +828,8 @@ impl CudaMama {
 
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;

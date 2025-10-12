@@ -377,8 +377,16 @@ pub fn dx_scalar(
                 tr_sum = tr_sum - (tr_sum / p_f64) + tr;
 
                 // Convert to +DI/-DI and DX
-                let plus_di = if tr_sum != 0.0 { (plus_dm_sum / tr_sum) * hundred } else { 0.0 };
-                let minus_di = if tr_sum != 0.0 { (minus_dm_sum / tr_sum) * hundred } else { 0.0 };
+                let plus_di = if tr_sum != 0.0 {
+                    (plus_dm_sum / tr_sum) * hundred
+                } else {
+                    0.0
+                };
+                let minus_di = if tr_sum != 0.0 {
+                    (minus_dm_sum / tr_sum) * hundred
+                } else {
+                    0.0
+                };
                 let sum_di = plus_di + minus_di;
                 *out.get_unchecked_mut(i) = if sum_di != 0.0 {
                     hundred * ((plus_di - minus_di).abs() / sum_di)
@@ -484,7 +492,10 @@ impl DxStream {
     pub fn try_new(params: DxParams) -> Result<Self, DxError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(DxError::InvalidPeriod { period, data_len: 0 });
+            return Err(DxError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         Ok(Self {
             period,
@@ -528,8 +539,16 @@ impl DxStream {
         // Wilder DM terms
         let up_move = high - self.prev_high;
         let down_move = self.prev_low - low;
-        let plus_dm = if up_move > 0.0 && up_move > down_move { up_move } else { 0.0 };
-        let minus_dm = if down_move > 0.0 && down_move > up_move { down_move } else { 0.0 };
+        let plus_dm = if up_move > 0.0 && up_move > down_move {
+            up_move
+        } else {
+            0.0
+        };
+        let minus_dm = if down_move > 0.0 && down_move > up_move {
+            down_move
+        } else {
+            0.0
+        };
 
         // Wilder True Range
         let tr1 = high - low;
@@ -801,15 +820,7 @@ fn dx_batch_inner_into(
 
     let do_row = |row: usize, dst_row: &mut [f64]| unsafe {
         let p = combos[row].period.unwrap();
-        dx_row_scalar_precomputed(
-            &plus_dm,
-            &minus_dm,
-            &tr,
-            &carry,
-            first,
-            p,
-            dst_row,
-        );
+        dx_row_scalar_precomputed(&plus_dm, &minus_dm, &tr, &carry, first, p, dst_row);
         // warmup NaNs already placed by init_matrix_prefixes before we were called
     };
 
@@ -845,9 +856,15 @@ fn dx_precompute_terms(
     let mut carry: Vec<u8> = vec![0; len];
 
     // Initialize arrays with zeros up to full len
-    for _ in 0..len { plus_dm.push(0.0); }
-    for _ in 0..len { minus_dm.push(0.0); }
-    for _ in 0..len { tr.push(0.0); }
+    for _ in 0..len {
+        plus_dm.push(0.0);
+    }
+    for _ in 0..len {
+        minus_dm.push(0.0);
+    }
+    for _ in 0..len {
+        tr.push(0.0);
+    }
 
     if len == 0 || first + 1 >= len {
         return (plus_dm, minus_dm, tr, carry);
@@ -949,8 +966,16 @@ unsafe fn dx_row_scalar_precomputed(
             plus_dm_sum = plus_dm_sum - (plus_dm_sum / p_f64) + pdm;
             minus_dm_sum = minus_dm_sum - (minus_dm_sum / p_f64) + mdm;
             tr_sum = tr_sum - (tr_sum / p_f64) + t;
-            let plus_di = if tr_sum != 0.0 { (plus_dm_sum / tr_sum) * hundred } else { 0.0 };
-            let minus_di = if tr_sum != 0.0 { (minus_dm_sum / tr_sum) * hundred } else { 0.0 };
+            let plus_di = if tr_sum != 0.0 {
+                (plus_dm_sum / tr_sum) * hundred
+            } else {
+                0.0
+            };
+            let minus_di = if tr_sum != 0.0 {
+                (minus_dm_sum / tr_sum) * hundred
+            } else {
+                0.0
+            };
             let sum_di = plus_di + minus_di;
             *out.get_unchecked_mut(i) = if sum_di != 0.0 {
                 hundred * ((plus_di - minus_di).abs() / sum_di)

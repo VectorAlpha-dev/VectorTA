@@ -390,9 +390,7 @@ fn vlma_compute_into(
             Kernel::Scalar | Kernel::ScalarBatch => {
                 // Fast path: inline SMA + stddev when requested (matches reference semantics)
                 if matype == "sma" && devtype == 0 {
-                    vlma_scalar_sma_stddev_into(
-                        data, min_period, max_period, first, out,
-                    )?;
+                    vlma_scalar_sma_stddev_into(data, min_period, max_period, first, out)?;
                 } else {
                     vlma_scalar_into(data, min_period, max_period, matype, devtype, first, out)?;
                 }
@@ -1025,7 +1023,7 @@ pub struct VlmaStream {
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
-    period: f64,   // tracked as f64 for API parity
+    period: f64, // tracked as f64 for API parity
     last_val: f64,
 
     // O(1) state for SMA + stddev fast path
@@ -1045,10 +1043,17 @@ impl VlmaStream {
         let devtype = params.devtype.unwrap_or(0);
 
         if min_period > max_period {
-            return Err(VlmaError::InvalidPeriodRange { min_period, max_period });
+            return Err(VlmaError::InvalidPeriodRange {
+                min_period,
+                max_period,
+            });
         }
         if max_period == 0 {
-            return Err(VlmaError::InvalidPeriod { min_period, max_period, data_len: 0 });
+            return Err(VlmaError::InvalidPeriod {
+                min_period,
+                max_period,
+                data_len: 0,
+            });
         }
 
         // Precompute smoothing constants α = 2/(p+1) for p∈[1..=max_period].
@@ -1200,14 +1205,21 @@ impl VlmaStream {
             Ok(v) => *v.last().unwrap_or(&f64::NAN),
             Err(_) => return None,
         };
-        let dev_params = DevParams { period: Some(self.max_period), devtype: Some(self.devtype) };
+        let dev_params = DevParams {
+            period: Some(self.max_period),
+            devtype: Some(self.devtype),
+        };
         let dv = match deviation(&DevInput::from_slice(&window, dev_params)) {
             Ok(v) => *v.last().unwrap_or(&f64::NAN),
             Err(_) => return None,
         };
 
         if value.is_finite() {
-            let prev = if self.period == 0.0 { self.max_period as f64 } else { self.period };
+            let prev = if self.period == 0.0 {
+                self.max_period as f64
+            } else {
+                self.period
+            };
             let mut new_p = prev;
             if mean.is_finite() && dv.is_finite() {
                 let a = mean - 1.75 * dv;

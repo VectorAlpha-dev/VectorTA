@@ -534,7 +534,9 @@ pub fn maaq_avx2(
 
     // ------ 2 · rolling-window buffers -------------------------------------------------------
     let mut diffs: Vec<f64> = Vec::with_capacity(period);
-    unsafe { diffs.set_len(period); }
+    unsafe {
+        diffs.set_len(period);
+    }
     let mut vol_sum = 0.0f64;
 
     unsafe {
@@ -662,12 +664,12 @@ pub struct MaaqStream {
     diff: Vec<f64>,   // ring buffer of |Δ| aligned with `buffer` writes
     head: usize,      // next write position (also the oldest element)
     filled: bool,
-    last: f64,        // last output value (EMA state)
-    count: usize,     // number of values seen so far
+    last: f64,    // last output value (EMA state)
+    count: usize, // number of values seen so far
     // ---- new for O(1) ----
-    vol_sum: f64,     // rolling sum of |Δ| in the window
-    fast_sc: f64,     // precomputed 2/(fast_period+1)
-    slow_sc: f64,     // precomputed 2/(slow_period+1)
+    vol_sum: f64, // rolling sum of |Δ| in the window
+    fast_sc: f64, // precomputed 2/(fast_period+1)
+    slow_sc: f64, // precomputed 2/(slow_period+1)
 }
 
 impl MaaqStream {
@@ -678,7 +680,11 @@ impl MaaqStream {
         let slow_p = params.slow_period.unwrap_or(30);
 
         if period == 0 || fast_p == 0 || slow_p == 0 {
-            return Err(MaaqError::ZeroPeriods { period, fast_p, slow_p });
+            return Err(MaaqError::ZeroPeriods {
+                period,
+                fast_p,
+                slow_p,
+            });
         }
 
         let fast_sc = 2.0 / (fast_p as f64 + 1.0);

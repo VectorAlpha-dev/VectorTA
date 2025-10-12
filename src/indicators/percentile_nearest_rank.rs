@@ -208,16 +208,22 @@ fn pnr_compute_into(
 ) {
     // warmup prefix already set by caller when needed
     let n = data.len();
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
     let start_i = first + length - 1;
-    if start_i >= n { return; }
+    if start_i >= n {
+        return;
+    }
 
     // maintain a sorted window of non-NaN values for the current i
     let mut sorted: Vec<f64> = Vec::with_capacity(length);
     let window_start0 = start_i + 1 - length;
     for idx in window_start0..=start_i {
         let v = data[idx];
-        if !v.is_nan() { sorted.push(v); }
+        if !v.is_nan() {
+            sorted.push(v);
+        }
     }
     sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -225,7 +231,9 @@ fn pnr_compute_into(
     let k_const_usize = {
         let raw = (p_frac.mul_add(length as f64, 0.0)).round() as isize - 1;
         let mut k = if raw <= 0 { 0usize } else { raw as usize };
-        if k >= length { k = length - 1; }
+        if k >= length {
+            k = length - 1;
+        }
         k
     };
     let mut i = start_i;
@@ -239,13 +247,17 @@ fn pnr_compute_into(
             } else {
                 let raw = (p_frac.mul_add(wl as f64, 0.0)).round() as isize - 1;
                 let mut k = if raw <= 0 { 0usize } else { raw as usize };
-                if k >= wl { k = wl - 1; }
+                if k >= wl {
+                    k = wl - 1;
+                }
                 k
             };
             out[i] = sorted[idx];
         }
 
-        if i + 1 >= n { break; }
+        if i + 1 >= n {
+            break;
+        }
 
         // Slide window: remove outgoing data[i - length + 1], insert incoming data[i+1]
         let out_idx = i + 1 - length;
@@ -437,10 +449,25 @@ use std::collections::HashMap;
 /// Wrapper that gives a total order for f64 as long as NaN isn't inserted (we filter NaNs earlier).
 #[derive(Copy, Clone, Debug)]
 struct FOrd(f64);
-impl PartialEq for FOrd { #[inline] fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl PartialEq for FOrd {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
 impl Eq for FOrd {}
-impl PartialOrd for FOrd { #[inline] fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) } }
-impl Ord for FOrd { #[inline] fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.0.partial_cmp(&other.0).unwrap() } }
+impl PartialOrd for FOrd {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for FOrd {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.partial_cmp(&other.0).unwrap()
+    }
+}
 
 /// Hash key for lazy-deletion maps that treats -0.0 == +0.0.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -463,7 +490,7 @@ pub struct PercentileNearestRankStream {
     filled: bool,
 
     // Dual-heap state for non-NaN values
-    left: std::collections::BinaryHeap<FOrd>,           // max-heap: t smallest values
+    left: std::collections::BinaryHeap<FOrd>, // max-heap: t smallest values
     right: std::collections::BinaryHeap<Reverse<FOrd>>, // min-heap: rest
     delayed_left: HashMap<FKey, usize>,
     delayed_right: HashMap<FKey, usize>,
@@ -478,9 +505,15 @@ pub struct PercentileNearestRankStream {
 fn nearest_rank_index_fast(pf: f64, wl: usize) -> usize {
     // For non-negative inputs, floor(x + 0.5) == round(x)
     let mut k = (pf.mul_add(wl as f64, 0.5)) as usize;
-    if k == 0 { 0 } else {
+    if k == 0 {
+        0
+    } else {
         k -= 1;
-        if k >= wl { wl - 1 } else { k }
+        if k >= wl {
+            wl - 1
+        } else {
+            k
+        }
     }
 }
 
@@ -490,7 +523,10 @@ impl PercentileNearestRankStream {
     ) -> Result<Self, PercentileNearestRankError> {
         let length = params.length.unwrap_or(15);
         if length == 0 {
-            return Err(PercentileNearestRankError::InvalidPeriod { period: length, data_len: 0 });
+            return Err(PercentileNearestRankError::InvalidPeriod {
+                period: length,
+                data_len: 0,
+            });
         }
         let percentage = params.percentage.unwrap_or(50.0);
         if !(0.0..=100.0).contains(&percentage) || percentage.is_nan() || percentage.is_infinite() {
@@ -525,9 +561,15 @@ impl PercentileNearestRankStream {
                 if *cnt > 0 {
                     self.left.pop();
                     *cnt -= 1;
-                    if *cnt == 0 { self.delayed_left.remove(&key); }
-                } else { break; }
-            } else { break; }
+                    if *cnt == 0 {
+                        self.delayed_left.remove(&key);
+                    }
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
         }
     }
 
@@ -539,9 +581,15 @@ impl PercentileNearestRankStream {
                 if *cnt > 0 {
                     self.right.pop();
                     *cnt -= 1;
-                    if *cnt == 0 { self.delayed_right.remove(&key); }
-                } else { break; }
-            } else { break; }
+                    if *cnt == 0 {
+                        self.delayed_right.remove(&key);
+                    }
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
         }
     }
 
@@ -553,7 +601,9 @@ impl PercentileNearestRankStream {
 
     #[inline(always)]
     fn push_value(&mut self, v: f64) {
-        if v.is_nan() { return; }
+        if v.is_nan() {
+            return;
+        }
         if self.size_left == 0 {
             self.left.push(FOrd(v));
             self.size_left += 1;
@@ -571,7 +621,9 @@ impl PercentileNearestRankStream {
 
     #[inline(always)]
     fn erase_value(&mut self, v: f64) {
-        if v.is_nan() { return; }
+        if v.is_nan() {
+            return;
+        }
         let belongs_left = match self.current_left_top() {
             Some(top) => v <= top,
             None => false,
@@ -579,19 +631,27 @@ impl PercentileNearestRankStream {
         let key = FKey::from(v);
         if belongs_left {
             *self.delayed_left.entry(key).or_insert(0) += 1;
-            if self.size_left > 0 { self.size_left -= 1; }
+            if self.size_left > 0 {
+                self.size_left -= 1;
+            }
             self.prune_left();
         } else {
             *self.delayed_right.entry(key).or_insert(0) += 1;
-            if self.size_right > 0 { self.size_right -= 1; }
+            if self.size_right > 0 {
+                self.size_right -= 1;
+            }
             self.prune_right();
         }
     }
 
     #[inline(always)]
     fn target_left_for_valid(&self, valid: usize) -> usize {
-        if valid == 0 { return 0; }
-        if valid == self.length { return self.t_full; }
+        if valid == 0 {
+            return 0;
+        }
+        if valid == self.length {
+            return self.t_full;
+        }
         nearest_rank_index_fast(self.p_frac, valid) + 1
     }
 
@@ -1080,7 +1140,9 @@ fn pnr_batch_inner_into(
         // and index it for each percentage in the group. This avoids rebuilding/sorting each step.
         for (length, rows) in by_len.into_iter() {
             let start_i = first + length - 1;
-            if start_i >= cols { continue; }
+            if start_i >= cols {
+                continue;
+            }
 
             // Precompute per-row fractions and constant index for full-length windows
             let mut rows_info: Vec<(usize, f64, usize)> = Vec::with_capacity(rows.len());
@@ -1088,7 +1150,9 @@ fn pnr_batch_inner_into(
                 let p_frac = perc * 0.01;
                 let raw = (p_frac.mul_add(length as f64, 0.0)).round() as isize - 1;
                 let mut k = if raw <= 0 { 0usize } else { raw as usize };
-                if k >= length { k = length - 1; }
+                if k >= length {
+                    k = length - 1;
+                }
                 rows_info.push((row, p_frac, k));
             }
 
@@ -1097,7 +1161,9 @@ fn pnr_batch_inner_into(
             let window_start0 = start_i + 1 - length;
             for idx in window_start0..=start_i {
                 let v = data[idx];
-                if !v.is_nan() { sorted.push(v); }
+                if !v.is_nan() {
+                    sorted.push(v);
+                }
             }
             sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -1117,14 +1183,18 @@ fn pnr_batch_inner_into(
                         } else {
                             let raw = (p_frac.mul_add(wl as f64, 0.0)).round() as isize - 1;
                             let mut k = if raw <= 0 { 0usize } else { raw as usize };
-                            if k >= wl { k = wl - 1; }
+                            if k >= wl {
+                                k = wl - 1;
+                            }
                             k
                         };
                         out[row * cols + i] = sorted[idx];
                     }
                 }
 
-                if i + 1 >= cols { break; }
+                if i + 1 >= cols {
+                    break;
+                }
 
                 // Slide: remove outgoing, insert incoming
                 let out_idx = i + 1 - length;

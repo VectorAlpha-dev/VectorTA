@@ -179,7 +179,9 @@ fn zlema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         for t in 0..rows {
             series[t] = tm[t * cols + s];
         }
-        let params = ZlemaParams { period: Some(period) };
+        let params = ZlemaParams {
+            period: Some(period),
+        };
         let input = ZlemaInput::from_slice(&series, params);
         let out = zlema_with_kernel(&input, Kernel::Scalar)?;
         for t in 0..rows {
@@ -189,7 +191,9 @@ fn zlema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
 
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaZlema::new(0).expect("CudaZlema::new");
-    let params = ZlemaParams { period: Some(period) };
+    let params = ZlemaParams {
+        period: Some(period),
+    };
     let dev = cuda
         .zlema_many_series_one_param_time_major_dev(&tm_f32, cols, rows, &params)
         .expect("zlema_many_series_one_param_time_major_dev");
@@ -214,7 +218,14 @@ fn zlema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
                 assert!(c.is_nan());
                 assert!(g.is_nan());
             } else {
-                assert!((c - g).abs() <= tol + c.abs() * 1e-4, "mismatch at ({}, {}): cpu={} gpu={}", t, s, c, g);
+                assert!(
+                    (c - g).abs() <= tol + c.abs() * 1e-4,
+                    "mismatch at ({}, {}): cpu={} gpu={}",
+                    t,
+                    s,
+                    c,
+                    g
+                );
             }
         }
     }

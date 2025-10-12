@@ -894,7 +894,9 @@ unsafe fn jsa_row_avx512_short(data: &[f64], first: usize, period: usize, out: &
     use core::arch::x86_64::*;
     let len = data.len();
     let start = first + period;
-    if start >= len { return; }
+    if start >= len {
+        return;
+    }
 
     let dp = data.as_ptr();
     let op = out.as_mut_ptr();
@@ -930,7 +932,9 @@ unsafe fn jsa_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
     use core::arch::x86_64::*;
     let len = data.len();
     let start = first + period;
-    if start >= len { return; }
+    if start >= len {
+        return;
+    }
 
     let dp = data.as_ptr();
     let op = out.as_mut_ptr();
@@ -997,7 +1001,9 @@ pub fn jsa_py<'py>(
         // Contiguous fast path: write directly into a new NumPy array
         let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
         let slice_out = unsafe { out_arr.as_slice_mut()? };
-        let params = JsaParams { period: Some(period) };
+        let params = JsaParams {
+            period: Some(period),
+        };
         let input = JsaInput::from_slice(slice_in, params);
         py.allow_threads(|| jsa_with_kernel_into(&input, kern, slice_out))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1006,7 +1012,9 @@ pub fn jsa_py<'py>(
         // Non‑contiguous (e.g., column view) — copy then compute
         let owned = data.as_array().to_owned();
         let slice_in = owned.as_slice().expect("owned array should be contiguous");
-        let params = JsaParams { period: Some(period) };
+        let params = JsaParams {
+            period: Some(period),
+        };
         let input = JsaInput::from_slice(slice_in, params);
         let mut buf = vec![f64::NAN; slice_in.len()];
         py.allow_threads(|| jsa_with_kernel_into(&input, kern, &mut buf))

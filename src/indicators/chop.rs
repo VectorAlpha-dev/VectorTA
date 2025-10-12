@@ -521,7 +521,11 @@ pub unsafe fn chop_scalar(
 
         // Current ATR sample
         let current_atr = if rel < drift {
-            if rel == drift - 1 { rma_atr } else { f64::NAN }
+            if rel == drift - 1 {
+                rma_atr
+            } else {
+                f64::NAN
+            }
         } else {
             rma_atr
         };
@@ -529,7 +533,11 @@ pub unsafe fn chop_scalar(
         // Rolling SUM(ATR(1), period)
         let oldest = atr_ring[atr_ring_idx];
         rolling_sum_atr -= oldest;
-        let new_val = if current_atr.is_nan() { 0.0 } else { current_atr };
+        let new_val = if current_atr.is_nan() {
+            0.0
+        } else {
+            current_atr
+        };
         atr_ring[atr_ring_idx] = new_val;
         rolling_sum_atr += new_val;
         atr_ring_idx = (atr_ring_idx + 1) % period;
@@ -537,17 +545,33 @@ pub unsafe fn chop_scalar(
         // Sliding-window HH/LL using monotonic VecDeque
         let win_start = i.saturating_sub(period - 1);
         while let Some(&front_idx) = dq_high.front() {
-            if front_idx < win_start { dq_high.pop_front(); } else { break; }
+            if front_idx < win_start {
+                dq_high.pop_front();
+            } else {
+                break;
+            }
         }
         while let Some(&front_idx) = dq_low.front() {
-            if front_idx < win_start { dq_low.pop_front(); } else { break; }
+            if front_idx < win_start {
+                dq_low.pop_front();
+            } else {
+                break;
+            }
         }
         while let Some(&back_idx) = dq_high.back() {
-            if high[back_idx] <= hi { dq_high.pop_back(); } else { break; }
+            if high[back_idx] <= hi {
+                dq_high.pop_back();
+            } else {
+                break;
+            }
         }
         dq_high.push_back(i);
         while let Some(&back_idx) = dq_low.back() {
-            if low[back_idx] >= lo { dq_low.pop_back(); } else { break; }
+            if low[back_idx] >= lo {
+                dq_low.pop_back();
+            } else {
+                break;
+            }
         }
         dq_low.push_back(i);
 
@@ -1031,8 +1055,8 @@ pub struct ChopStream {
     scalar: f64,
 
     // Precomputed constants
-    inv_drift: f64,      // 1.0 / drift
-    scale_ln: f64,       // scalar / ln(period)
+    inv_drift: f64, // 1.0 / drift
+    scale_ln: f64,  // scalar / ln(period)
 
     // Rolling SUM(ATR(1), period)
     atr_ring: Vec<f64>,
@@ -1054,7 +1078,10 @@ impl ChopStream {
     pub fn try_new(params: ChopParams) -> Result<Self, ChopError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(ChopError::InvalidPeriod { period, data_len: 0 });
+            return Err(ChopError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         let drift = params.drift.unwrap_or(1);
         if drift == 0 {
@@ -1128,7 +1155,11 @@ impl ChopStream {
         };
 
         // Rolling SUM(ATR(1), period)
-        let newest = if current_atr.is_nan() { 0.0 } else { current_atr };
+        let newest = if current_atr.is_nan() {
+            0.0
+        } else {
+            current_atr
+        };
         let oldest = self.atr_ring[idx_ring];
         self.atr_ring[idx_ring] = newest;
         self.rolling_sum_atr += newest - oldest;
@@ -1158,7 +1189,10 @@ impl ChopStream {
                 break;
             }
         }
-        self.dq_high.push_back(Node { idx: this_idx, val: high });
+        self.dq_high.push_back(Node {
+            idx: this_idx,
+            val: high,
+        });
 
         while let Some(&back) = self.dq_low.back() {
             if back.val >= low {
@@ -1167,7 +1201,10 @@ impl ChopStream {
                 break;
             }
         }
-        self.dq_low.push_back(Node { idx: this_idx, val: low });
+        self.dq_low.push_back(Node {
+            idx: this_idx,
+            val: low,
+        });
 
         if self.count >= self.period as u64 {
             let range = self.dq_high.front().unwrap().val - self.dq_low.front().unwrap().val;
