@@ -11,6 +11,7 @@
 use super::alma_wrapper::DeviceArrayF32;
 use cust::memory::CopyDestination;
 use crate::cuda::moving_averages::*;
+use cust::memory::CopyDestination;
 use crate::utilities::data_loader::{source_type, Candles};
 
 /// Unified error type for the CUDA MA selector.
@@ -252,8 +253,8 @@ impl CudaMaSelector {
             }
             "dma" => {
                 let sweep = crate::indicators::moving_averages::dma::DmaBatchRange {
-                    hull_length: (7, 7, 0),
-                    ema_length: (period, period, 0),
+                    hull_length: (period, period, 0),
+                    ema_length: (20, 20, 0),
                     ema_gain_limit: (50, 50, 0),
                     hull_ma_type: "WMA".to_string(),
                 };

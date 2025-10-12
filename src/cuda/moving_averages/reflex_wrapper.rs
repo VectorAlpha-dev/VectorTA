@@ -14,10 +14,10 @@ use super::DeviceArrayF32;
 // Reuse common policy enums exported by CWMA to stay consistent with ALMA.
 use super::{BatchKernelPolicy, ManySeriesKernelPolicy};
 use crate::indicators::moving_averages::reflex::{ReflexBatchRange, ReflexParams};
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -65,24 +65,21 @@ impl CudaReflex {
         let context = Context::new(device).map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/reflex_kernel.ptx"));
-        // Match ALMA JIT options for broad driver compatibility and perf
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaReflexError::Cuda(e.to_string()))?
-                }
-            }
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))
+            .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
+
+        // Prefer L1 cache (kernels use small shared memory)
+        let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
+
+        // Optional stream priority via env; default priority if parse fails
+        let prio = std::env::var("CUDA_STREAM_PRIORITY").ok().and_then(|v| v.parse::<i32>().ok());
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, prio)
             .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
 
         Ok(Self {
@@ -218,7 +215,7 @@ impl CudaReflex {
         period: usize,
         num_series: usize,
         series_len: usize,
-        d_first_valids: &DeviceBuffer<i32>,
+        d_first_valids: Option<&DeviceBuffer<i32>>,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaReflexError> {
         if period < 2 || num_series == 0 || series_len == 0 {
@@ -300,13 +297,14 @@ impl CudaReflex {
             ));
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices).map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
+        // Pinned+async H2D for higher bandwidth and overlap (default enabled)
+        let d_prices = self.htod_copy_f32(prices)?;
         let d_periods = DeviceBuffer::from_slice(&inputs.periods)
             .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
-                .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(series_len * n_combos, &self.stream)
+        }
+        .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -322,11 +320,7 @@ impl CudaReflex {
             .synchronize()
             .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: series_len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
     }
 
     fn run_many_series_kernel(
@@ -338,9 +332,8 @@ impl CudaReflex {
         prepared: &ManySeriesInputs,
     ) -> Result<DeviceArrayF32, CudaReflexError> {
         let prices_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
-        let first_valid_bytes = prepared.first_valids.len() * std::mem::size_of::<i32>();
         let out_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_valid_bytes + out_bytes;
+        let required = prices_bytes + out_bytes;
         let headroom = 32 * 1024 * 1024; // 32MB safety margin
 
         if !Self::will_fit(required, headroom) {
@@ -349,20 +342,18 @@ impl CudaReflex {
             ));
         }
 
-        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)
-            .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
-            .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }
-                .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
+        let d_prices_tm = self.htod_copy_f32(prices_tm_f32)?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(prices_tm_f32.len(), &self.stream)
+        }
+        .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
             period,
             cols,
             rows,
-            &d_first_valids,
+            None,
             &mut d_out_tm,
         )?;
 
@@ -387,9 +378,12 @@ impl CudaReflex {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaReflexError> {
+        // Prefer precomputed-coefficient kernel if present; compute coeffs on device kernel otherwise
+        // Look up function each time (avoid self-referential lifetime for cached Function)
         let func = self
             .module
             .get_function("reflex_batch_f32")
+            .or_else(|_| self.module.get_function("reflex_batch_f32_precomp"))
             .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
 
         // Log selected kernel once per scenario when BENCH_DEBUG=1
@@ -442,7 +436,7 @@ impl CudaReflex {
         period: usize,
         num_series: usize,
         series_len: usize,
-        d_first_valids: &DeviceBuffer<i32>,
+        d_first_valids: Option<&DeviceBuffer<i32>>,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaReflexError> {
         let func = self
@@ -467,7 +461,9 @@ impl CudaReflex {
             let mut period_i = period as i32;
             let mut num_series_i = num_series as i32;
             let mut series_len_i = series_len as i32;
-            let mut first_valids_ptr = d_first_valids.as_device_ptr().as_raw();
+            let mut first_valids_ptr = d_first_valids
+                .map(|b| b.as_device_ptr().as_raw())
+                .unwrap_or(0u64);
             let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
@@ -589,6 +585,25 @@ impl CudaReflex {
         }
 
         Ok(ManySeriesInputs { first_valids })
+    }
+}
+
+impl CudaReflex {
+    #[inline]
+    fn htod_copy_f32(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaReflexError> {
+        // Default to pinned+async H2D for best bandwidth; fall back to sync if pinning fails
+        match LockedBuffer::from_slice(src) {
+            Ok(h_pinned) => unsafe {
+                let mut dst =
+                    DeviceBuffer::uninitialized_async(src.len(), &self.stream)
+                        .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
+                dst.async_copy_from(&h_pinned, &self.stream)
+                    .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
+                Ok(dst)
+            },
+            Err(_) => DeviceBuffer::from_slice(src)
+                .map_err(|e| CudaReflexError::Cuda(e.to_string())),
+        }
     }
 }
 

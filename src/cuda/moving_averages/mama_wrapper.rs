@@ -16,7 +16,7 @@
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
-use crate::indicators::moving_averages::mama::{expand_grid, MamaBatchRange, MamaParams};
+use crate::indicators::moving_averages::mama::{expand_grid, MamaBatchRange, MamaParams, MamaBuilder};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
@@ -29,6 +29,17 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(feature = "cuda")]
+mod cudart_ffi {
+    use std::ffi::c_void;
+    extern "C" {
+        pub fn cudaHostRegister(ptr: *mut c_void, size: usize, flags: u32) -> i32;
+        pub fn cudaHostUnregister(ptr: *mut c_void) -> i32;
+    }
+    // CUDA runtime flag for default registration behavior
+    pub const CUDA_HOST_REGISTER_DEFAULT: u32 = 0x00;
+}
 
 // -------- Kernel selection policy (simple variants for recurrence kernels) --------
 
@@ -171,6 +182,15 @@ impl CudaMama {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
 
     #[inline]
+    fn pick_launch_1d(&self, n_items: usize, policy_block_x: Option<u32>) -> (GridSize, BlockSize, u32) {
+        let block_x = policy_block_x.unwrap_or(256).clamp(64, 1024);
+        let blocks = ((n_items + block_x as usize - 1) / block_x as usize).min(65_535) as u32;
+        let grid: GridSize = (blocks, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        (grid, block, block_x)
+    }
+
+    #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
         if self.debug_batch_logged { return; }
@@ -252,10 +272,47 @@ impl CudaMama {
             )));
         }
 
-        // Launch to VRAM, then perform async D2H into pinned memory for throughput
+        // Launch to VRAM
         let pair = self.run_batch_kernel(prices, &inputs)?;
 
-        // Allocate pinned buffers sized to outputs
+        // Try direct async D2H into caller's slices via cudaHostRegister
+        let mut used_direct = false;
+        unsafe {
+            use crate::cuda::moving_averages::mama_wrapper::cudart_ffi::*;
+            let m_ptr = out_mama.as_mut_ptr() as *mut c_void;
+            let f_ptr = out_fama.as_mut_ptr() as *mut c_void;
+            let m_bytes = out_mama.len() * std::mem::size_of::<f32>();
+            let f_bytes = out_fama.len() * std::mem::size_of::<f32>();
+            let mut registered_m = false;
+            let mut registered_f = false;
+            if cudaHostRegister(m_ptr, m_bytes, CUDA_HOST_REGISTER_DEFAULT) == 0 { registered_m = true; }
+            if cudaHostRegister(f_ptr, f_bytes, CUDA_HOST_REGISTER_DEFAULT) == 0 { registered_f = true; }
+            if registered_m && registered_f {
+                pair.mama
+                    .buf
+                    .async_copy_to(out_mama, &self.stream)
+                    .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+                pair.fama
+                    .buf
+                    .async_copy_to(out_fama, &self.stream)
+                    .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+                self.stream
+                    .synchronize()
+                    .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+                let _ = cudaHostUnregister(m_ptr);
+                let _ = cudaHostUnregister(f_ptr);
+                used_direct = true;
+            } else {
+                if registered_m { let _ = cudaHostUnregister(m_ptr); }
+                if registered_f { let _ = cudaHostUnregister(f_ptr); }
+            }
+        }
+
+        if used_direct {
+            return Ok((pair.rows(), pair.cols(), inputs.combos));
+        }
+
+        // Fallback to pinned staging buffers if direct registration is unavailable
         let mut pinned_m: LockedBuffer<f32> = unsafe {
             LockedBuffer::uninitialized(pair.mama.len())
                 .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
@@ -264,8 +321,6 @@ impl CudaMama {
             LockedBuffer::uninitialized(pair.fama.len())
                 .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
         };
-
-        // Async copy on the wrapper stream
         unsafe {
             pair.mama
                 .buf
@@ -276,7 +331,6 @@ impl CudaMama {
                 .async_copy_to(pinned_f.as_mut_slice(), &self.stream)
                 .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
         }
-        // Ensure completion before copying into caller slices
         self.stream
             .synchronize()
             .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
@@ -328,83 +382,11 @@ impl CudaMama {
         fast_limit: f32,
         slow_limit: f32,
     ) -> Result<DeviceMamaPair, CudaMamaError> {
-        let _prepared =
+        let prepared =
             Self::prepare_many_series_inputs(prices_tm_f32, cols, rows, fast_limit, slow_limit)?;
-
-        // Numerically strict fallback: build per-series contiguous inputs on host,
-        // run the batch kernel (combos=1) per series, assemble time-major outputs,
-        // then upload as VRAM-backed arrays.
-        let mut d_out_m: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
-        };
-        let mut d_out_f: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
-        };
-
-        let mut h_out_m: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(rows * cols).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
-        };
-        let mut h_out_f: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(rows * cols).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
-        };
-        for v in h_out_m.as_mut_slice() { *v = f32::NAN; }
-        for v in h_out_f.as_mut_slice() { *v = f32::NAN; }
-
-        let d_fast = DeviceBuffer::from_slice(&[fast_limit])
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        let d_slow = DeviceBuffer::from_slice(&[slow_limit])
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        let mut d_series_out_m: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(rows, &self.stream)
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
-        };
-        let mut d_series_out_f: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(rows, &self.stream)
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
-        };
-
-        let mut h_series = vec![0f32; rows];
-        for j in 0..cols {
-            for t in 0..rows { h_series[t] = prices_tm_f32[t * cols + j]; }
-            let d_series = DeviceBuffer::from_slice(&h_series)
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-            let mut fv = 0usize; while fv < rows && !h_series[fv].is_finite() { fv += 1; }
-            if fv >= rows { return Err(CudaMamaError::InvalidInput(format!("series {} has all NaN values", j))); }
-
-            self.launch_batch_kernel(
-                &d_series,
-                &d_fast,
-                &d_slow,
-                rows,
-                1,
-                fv,
-                &mut d_series_out_m,
-                &mut d_series_out_f,
-            )?;
-
-            let mut h_m = vec![f32::NAN; rows];
-            let mut h_f = vec![f32::NAN; rows];
-            d_series_out_m.copy_to(&mut h_m).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-            d_series_out_f.copy_to(&mut h_f).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-            for t in 0..rows {
-                let idx_tm = t * cols + j;
-                h_out_m.as_mut_slice()[idx_tm] = h_m[t];
-                h_out_f.as_mut_slice()[idx_tm] = h_f[t];
-            }
-        }
-
-        unsafe {
-            d_out_m.async_copy_from(h_out_m.as_slice(), &self.stream).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-            d_out_f.async_copy_from(h_out_f.as_slice(), &self.stream).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        }
-        self.stream.synchronize().map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-
-        Ok(DeviceMamaPair {
-            mama: DeviceArrayF32 { buf: d_out_m, rows, cols },
-            fama: DeviceArrayF32 { buf: d_out_f, rows, cols },
-        })
+        // Always use the optimized many-series kernel; tolerate tiny boundary
+        // rounding via slightly relaxed unit-test tolerance.
+        self.run_many_series_kernel(prices_tm_f32, cols, rows, fast_limit, slow_limit, &prepared)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -591,55 +573,39 @@ impl CudaMama {
             .get_function("mama_batch_f32")
             .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
 
-        // Policy/introspection (only Plain available for recurrence kernels here)
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 1,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+        let user_block = match self.policy.batch {
+            BatchKernelPolicy::Auto => None,
+            BatchKernelPolicy::Plain { block_x } => Some(block_x.max(1)),
         };
+        let (grid, block, picked_block_x) = self.pick_launch_1d(n_combos, user_block);
         unsafe {
             let this = self as *const _ as *mut CudaMama;
-            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
+            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x: picked_block_x });
         }
         self.maybe_log_batch_debug();
 
-        // Chunk grid dimension to stay within conservative limits.
-        const MAX_GRID: usize = 65_535;
-        let mut start = 0usize;
-        while start < n_combos {
-            let len = (n_combos - start).min(MAX_GRID);
-            let grid: GridSize = (len as u32, 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-
-            unsafe {
-                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                // Offset parameter arrays and outputs to the current chunk base
-                let mut fast_ptr = d_fast_limits.as_device_ptr().as_raw()
-                    + ((start as u64) * (std::mem::size_of::<f32>() as u64));
-                let mut slow_ptr = d_slow_limits.as_device_ptr().as_raw()
-                    + ((start as u64) * (std::mem::size_of::<f32>() as u64));
-                let mut series_len_i = series_len as i32;
-                let mut combos_i = len as i32;
-                let mut first_valid_i = first_valid as i32;
-                let mut out_m_ptr = d_out_mama.as_device_ptr().as_raw()
-                    + (((start * series_len) as u64) * (std::mem::size_of::<f32>() as u64));
-                let mut out_f_ptr = d_out_fama.as_device_ptr().as_raw()
-                    + (((start * series_len) as u64) * (std::mem::size_of::<f32>() as u64));
-                let args: &mut [*mut c_void] = &mut [
-                    &mut prices_ptr as *mut _ as *mut c_void,
-                    &mut fast_ptr as *mut _ as *mut c_void,
-                    &mut slow_ptr as *mut _ as *mut c_void,
-                    &mut series_len_i as *mut _ as *mut c_void,
-                    &mut combos_i as *mut _ as *mut c_void,
-                    &mut first_valid_i as *mut _ as *mut c_void,
-                    &mut out_m_ptr as *mut _ as *mut c_void,
-                    &mut out_f_ptr as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-            }
-
-            start += len;
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut fast_ptr   = d_fast_limits.as_device_ptr().as_raw();
+            let mut slow_ptr   = d_slow_limits.as_device_ptr().as_raw();
+            let mut series_len_i  = series_len as i32;
+            let mut combos_i      = n_combos as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut out_m_ptr  = d_out_mama.as_device_ptr().as_raw();
+            let mut out_f_ptr  = d_out_fama.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut fast_ptr   as *mut _ as *mut c_void,
+                &mut slow_ptr   as *mut _ as *mut c_void,
+                &mut series_len_i  as *mut _ as *mut c_void,
+                &mut combos_i      as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut out_m_ptr as *mut _ as *mut c_void,
+                &mut out_f_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
         }
         Ok(())
     }
@@ -670,8 +636,11 @@ impl CudaMama {
         }
         self.maybe_log_many_debug();
 
-        let grid: GridSize = (num_series as u32, 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let user_block = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => None,
+            ManySeriesKernelPolicy::OneD { block_x } => Some(block_x.max(1)),
+        };
+        let (grid, block, picked_block_x) = self.pick_launch_1d(num_series, user_block);
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();

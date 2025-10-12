@@ -473,3 +473,14 @@ fn find_vs_installation() -> Result<String, ()> {
 fn find_vs_installation() -> Result<String, ()> {
     Err(())
 }
+
+#[cfg(feature = "cuda")]
+fn placeholder_ptx() -> &'static str {
+    // Minimal valid PTX that defines no entry points; suitable for satisfying include_str!
+    // and Module::from_ptx() when the functions are never looked up.
+    r#".version 8.0
+.target sm_50
+.address_size 64
+// placeholder
+"#
+}

@@ -12,7 +12,7 @@ use crate::indicators::moving_averages::vwma::{VwmaBatchRange, VwmaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
+use cust::memory::{DeviceBuffer, LockedBuffer, AsyncCopyDestination};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -53,22 +53,15 @@ impl CudaVwma {
         let context = Context::new(device).map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vwma_kernel.ptx"));
-        // Prefer context-derived target and O2 JIT, with graceful fallback
+        // Prefer context-derived target and the most aggressive JIT optimization (O4)
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?
-                }
-            }
-        };
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))
+            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
 
@@ -107,9 +100,21 @@ impl CudaVwma {
         }
 
         let arr = self.run_batch_kernel(prices, volumes, &inputs)?;
-        arr.buf
-            .copy_to(out)
+
+        // Pinned host staging + async D2H on our stream, then memcpy into caller slice.
+        let mut h_out: LockedBuffer<f32> = unsafe {
+            LockedBuffer::uninitialized(out.len())
+        }
+        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        unsafe {
+            arr.buf
+                .async_copy_to(h_out.as_mut_slice(), &self.stream)
+        }
+        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
             .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        out.copy_from_slice(h_out.as_slice());
         Ok((arr.rows, arr.cols, inputs.combos))
     }
 
@@ -254,15 +259,30 @@ impl CudaVwma {
             ));
         }
 
-        let d_pv =
-            DeviceBuffer::from_slice(&pv_prefix).map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let d_vol = DeviceBuffer::from_slice(&vol_prefix)
+        // Pinned host buffers and async H2D copies on our stream
+        let h_pv = LockedBuffer::from_slice(&pv_prefix)
             .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&inputs.periods)
+        let h_vol = LockedBuffer::from_slice(&vol_prefix)
             .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let h_periods = LockedBuffer::from_slice(&inputs.periods)
+            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+
+        let d_pv: DeviceBuffer<f64> = unsafe {
+            DeviceBuffer::from_slice_async(&*h_pv, &self.stream)
+        }
+        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let d_vol: DeviceBuffer<f64> = unsafe {
+            DeviceBuffer::from_slice_async(&*h_vol, &self.stream)
+        }
+        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let d_periods: DeviceBuffer<i32> = unsafe {
+            DeviceBuffer::from_slice_async(&*h_periods, &self.stream)
+        }
+        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
+        }
+        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
             &d_pv,
@@ -366,16 +386,43 @@ impl CudaVwma {
         d_first_valids: &DeviceBuffer<i32>,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaVwmaError> {
-        let func = self
-            .module
-            .get_function("vwma_multi_series_one_param_f32")
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-
-        let block_x: u32 = 128;
-        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x, num_series as u32, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
-
+        // Prefer coalesced 2D kernel; fall back to compat if symbol missing or when very few columns
+        let prefer_coalesced = num_series >= 16;
+        let (func, grid, block) = if prefer_coalesced {
+            match self.module.get_function("vwma_multi_series_one_param_tm_coalesced_f32") {
+                Ok(func) => {
+                    let block_x: u32 = 256; // map across series
+                    let block_y: u32 = 4;   // small time tile
+                    let grid_y = ((num_series as u32) + block_x - 1) / block_x;
+                    let grid_x = ((series_len as u32) + block_y - 1) / block_y;
+                    let grid: GridSize = (grid_x, grid_y, 1).into();
+                    let block: BlockSize = (block_x, block_y, 1).into();
+                    (func, grid, block)
+                }
+                Err(_) => {
+                    // Fallback: original mapping (threads advance in time; grid.y = series)
+                    let func = self
+                        .module
+                        .get_function("vwma_multi_series_one_param_f32")
+                        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+                    let block_x: u32 = 128;
+                    let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+                    let grid: GridSize = (grid_x, num_series as u32, 1).into();
+                    let block: BlockSize = (block_x, 1, 1).into();
+                    (func, grid, block)
+                }
+            }
+        } else {
+            let func = self
+                .module
+                .get_function("vwma_multi_series_one_param_f32")
+                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+            let block_x: u32 = 128;
+            let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+            let grid: GridSize = (grid_x, num_series as u32, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            (func, grid, block)
+        };
         unsafe {
             let mut pv_ptr = d_pv_prefix_tm.as_device_ptr().as_raw();
             let mut vol_ptr = d_vol_prefix_tm.as_device_ptr().as_raw();
@@ -424,15 +471,30 @@ impl CudaVwma {
             ));
         }
 
-        let d_pv = DeviceBuffer::from_slice(&inputs.pv_prefix_tm)
+        // Pinned host buffers + async H2D copies
+        let h_pv = LockedBuffer::from_slice(&inputs.pv_prefix_tm)
             .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let d_vol = DeviceBuffer::from_slice(&inputs.vol_prefix_tm)
+        let h_vol = LockedBuffer::from_slice(&inputs.vol_prefix_tm)
             .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&inputs.first_valids)
+        let h_fv = LockedBuffer::from_slice(&inputs.first_valids)
             .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+
+        let d_pv: DeviceBuffer<f64> = unsafe {
+            DeviceBuffer::from_slice_async(&*h_pv, &self.stream)
+        }
+        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let d_vol: DeviceBuffer<f64> = unsafe {
+            DeviceBuffer::from_slice_async(&*h_vol, &self.stream)
+        }
+        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let d_first_valids: DeviceBuffer<i32> = unsafe {
+            DeviceBuffer::from_slice_async(&*h_fv, &self.stream)
+        }
+        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(prices_tm_f32.len(), &self.stream)
+        }
+        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
             &d_pv,

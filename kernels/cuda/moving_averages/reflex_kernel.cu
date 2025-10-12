@@ -1,11 +1,11 @@
-// CUDA kernels for the Reflex indicator.
+// CUDA kernels for the Reflex indicator (optimized).
 //
-// Each parameter combination (period) is assigned to a dedicated block that
-// processes the entire series sequentially. The recurrence only depends on the
-// last `period` smoothed values, so we keep a circular buffer in shared memory
-// to avoid additional global allocations while still matching the scalar
-// implementation's warmup semantics (first `period` outputs = 0.0, remainder
-// initialised to NaN).
+// Key changes:
+//  - Remove per-iteration modulo on ring indices
+//  - 4x temporal unrolling for ILP
+//  - __ldg() for read-only loads
+//  - Avoid whole-row zero fill (keep warmup zeros only)
+//  - Keep double-precision state + FMA + Kahan for accuracy
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -14,118 +14,224 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Match scalar implementation constants: uses 1.414 (not exact sqrt(2)).
+// Match scalar implementation constants
 constexpr double REFLEX_PI_D = 3.14159265358979323846264338327950288;
-constexpr double REFLEX_SQRT2_APPROX_D = 1.414; // matches scalar's 1.414_f64
+constexpr double REFLEX_SQRT2_APPROX_D = 1.414;
 
-static __device__ __forceinline__ float reflex_compute_ssf(float price,
-                                                           float prev_price,
-                                                           float c,
-                                                           float b,
-                                                           float a_sq,
-                                                           float prev_ssf1,
-                                                           float prev_ssf2) {
-    const double val = static_cast<double>(c) *
-            (static_cast<double>(price) + static_cast<double>(prev_price)) +
-        static_cast<double>(b) * static_cast<double>(prev_ssf1) -
-        static_cast<double>(a_sq) * static_cast<double>(prev_ssf2);
-    return static_cast<float>(val);
+// Small helper for branchless wrap of a small positive index [0, len)
+static __device__ __forceinline__ int wrap_inc(int idx, int len) {
+    idx += 1;
+    return idx - (idx == len) * len;
 }
 
-static __device__ __forceinline__ bool reflex_isfinite(float v) {
-    return !(isnan(v) || isinf(v));
+static __device__ __forceinline__ float reflex_out_if_valid(double ms, double my_sum) {
+    if (ms > 0.0 && isfinite(ms)) {
+        return static_cast<float>(my_sum / sqrt(ms));
+    }
+    return 0.0f;
 }
 
+// ------------------------
+// Existing ABI: batch mode
+// ------------------------
 extern "C" __global__
 void reflex_batch_f32(const float* __restrict__ prices,
-                      const int* __restrict__ periods,
+                      const int*   __restrict__ periods,
                       int series_len,
                       int n_combos,
                       int /*first_valid (unused, kept for ABI)*/,
                       float* __restrict__ out) {
-    int combo = blockIdx.x;
+    const int combo = blockIdx.x;
     if (combo >= n_combos || threadIdx.x != 0) { return; }
 
-    const int period = periods[combo];
+    const int period = __ldg(periods + combo);
     if (period < 2 || series_len <= 0) { return; }
 
-    float* out_row = out + combo * series_len;
-    // Initialize outputs to 0.0 to better match CPU debug warm behavior
-    // in regions that are not computed due to leading NaNs.
-    for (int i = 0; i < series_len; ++i) { out_row[i] = 0.0f; }
+    float* __restrict__ out_row = out + combo * series_len;
+
+    // Warmup semantics: write only first 'warm' zeros
     const int warm = period < series_len ? period : series_len;
     for (int i = 0; i < warm; ++i) { out_row[i] = 0.0f; }
 
-    // Coefficients in double to reduce FP error vs CPU f64
+    // Coefficients in double (match scalar/f64 reference)
     int half_period_i = period / 2; if (half_period_i < 1) half_period_i = 1;
     const double half_p = static_cast<double>(half_period_i);
-    const double a = exp(-REFLEX_SQRT2_APPROX_D * REFLEX_PI_D / half_p);
+    const double a  = exp(-REFLEX_SQRT2_APPROX_D * REFLEX_PI_D / half_p);
     const double a2 = a * a;
-    const double b = 2.0 * a * cos(REFLEX_SQRT2_APPROX_D * REFLEX_PI_D / half_p);
-    const double c = 0.5 * (1.0 + a2 - b);
+    const double b  = 2.0 * a * cos(REFLEX_SQRT2_APPROX_D * REFLEX_PI_D / half_p);
+    const double c  = 0.5 * (1.0 + a2 - b);
 
-    // Ring buffer (period+1) in dynamic shared memory (double for accuracy)
+    // Dynamic shared memory ring buffer: size >= (max_period + 1) doubles
     extern __shared__ double sdata[];
-    double* ring = sdata; // size >= period+1 per wrapper
+    double* __restrict__ ring = sdata;
     const int ring_len = period + 1;
-    if (series_len > 0) ring[0] = static_cast<double>(prices[0]);
-    if (series_len > 1) ring[1] = static_cast<double>(prices[1]);
 
-    // Rolling sum of last `period` ssf values before including ssf[i]
-    double ssf_sum = 0.0;
-    double ssf_c = 0.0; // Kahan compensator for ssf_sum
-    if (period == 1) {
-        ssf_sum = (series_len > 0) ? ring[0] : 0.0;
-    } else {
-        ssf_sum = ((series_len > 0) ? ring[0] : 0.0)
-                + ((series_len > 1) ? ring[1] : 0.0);
+    // Seed first 2 entries with raw prices (as in scalar)
+    if (series_len > 0) ring[0] = static_cast<double>(__ldg(prices + 0));
+    if (series_len > 1) ring[1] = static_cast<double>(__ldg(prices + 1));
+
+    // Rolling sum of last 'period' ssf values before including ssf[i]
+    double ssf_sum = 0.0, ssf_c = 0.0; // Kahan comp
+    ssf_sum = ((series_len > 0) ? ring[0] : 0.0) + ((series_len > 1) ? ring[1] : 0.0);
+
+    const double inv_p = 1.0 / static_cast<double>(period);
+    const double alpha = 0.5 * (1.0 + inv_p);
+    const double beta  = 1.0 - alpha;
+
+    double ms = 0.0;
+
+    // Ring indices without modulo
+    int idx    = 2;       // position to write ssf[i]
+    int idx_im1 = 1;      // ssf[i-1]
+    int idx_im2 = 0;      // ssf[i-2]
+    int idx_ip  = 0;      // ssf[i - period] (valid when i >= period)
+
+    // Price stream: keep previous price in a register
+    double dim1 = (series_len > 1) ? static_cast<double>(__ldg(prices + 1)) : 0.0;
+
+    // Main loop with 4x temporal unrolling
+    int i = 2;
+    for (; i < series_len; ) {
+    #pragma unroll 4
+        for (int u = 0; u < 4; ++u) {
+            if (i >= series_len) break;
+
+            // Load current price via read-only cache
+            const double di = static_cast<double>(__ldg(prices + i));
+
+            // ssf recurrence
+            const double ssf_im1 = ring[idx_im1];
+            const double ssf_im2 = ring[idx_im2];
+            const double t0 = c * (di + dim1);
+            const double t1 = fma(-a2, ssf_im2, t0);
+            const double ssf_i = fma(b, ssf_im1, t1);
+
+            // Update ring
+            ring[idx] = ssf_i;
+
+            if (i < period) {
+                ssf_sum += ssf_i;
+            } else {
+                const double ssf_old = ring[idx_ip];
+                const double mean_lp = ssf_sum * inv_p;
+                const double my_sum  = fma(beta, ssf_i, alpha * ssf_old) - mean_lp;
+
+                ms = fma(0.96, ms, 0.04 * my_sum * my_sum);
+                out_row[i] = reflex_out_if_valid(ms, my_sum);
+
+                // Kahan: ssf_sum += (ssf_i - ssf_old)
+                double y  = (ssf_i - ssf_old) - ssf_c;
+                double t2 = ssf_sum + y;
+                ssf_c     = (t2 - ssf_sum) - y;
+                ssf_sum   = t2;
+
+                // advance i-period pointer
+                idx_ip = wrap_inc(idx_ip, ring_len);
+            }
+
+            // Advance rolling indices and previous price
+            idx    = wrap_inc(idx,    ring_len);
+            idx_im1 = wrap_inc(idx_im1, ring_len);
+            idx_im2 = wrap_inc(idx_im2, ring_len);
+
+            dim1 = di; // next loop uses this as i-1
+            ++i;
+        }
     }
+}
+
+// ---------------------------------------------------------
+// Optional: batch mode using precomputed {a2, b, c} per combo
+// ---------------------------------------------------------
+extern "C" __global__
+void reflex_batch_f32_precomp(const float* __restrict__ prices,
+                              const int*   __restrict__ periods,
+                              const double* __restrict__ a2s,
+                              const double* __restrict__ bs,
+                              const double* __restrict__ cs,
+                              int series_len,
+                              int n_combos,
+                              int /*first_valid (unused)*/,
+                              float* __restrict__ out) {
+    const int combo = blockIdx.x;
+    if (combo >= n_combos || threadIdx.x != 0) { return; }
+
+    const int period = __ldg(periods + combo);
+    if (period < 2 || series_len <= 0) { return; }
+
+    float* __restrict__ out_row = out + combo * series_len;
+    const int warm = period < series_len ? period : series_len;
+    for (int i = 0; i < warm; ++i) { out_row[i] = 0.0f; }
+
+    const double a2 = __ldg(a2s + combo);
+    const double b  = __ldg(bs  + combo);
+    const double c  = __ldg(cs  + combo);
+
+    extern __shared__ double sdata[];
+    double* __restrict__ ring = sdata;
+    const int ring_len = period + 1;
+
+    if (series_len > 0) ring[0] = static_cast<double>(__ldg(prices + 0));
+    if (series_len > 1) ring[1] = static_cast<double>(__ldg(prices + 1));
+
+    double ssf_sum = ((series_len > 0) ? ring[0] : 0.0) + ((series_len > 1) ? ring[1] : 0.0);
+    double ssf_c = 0.0;
+
     const double inv_p = 1.0 / static_cast<double>(period);
     const double alpha = 0.5 * (1.0 + inv_p);
     const double beta  = 1.0 - alpha;
     double ms = 0.0;
 
-    for (int i = 2; i < series_len; ++i) {
-        const int idx      = i % ring_len;
-        const int idx_im1  = (i - 1) % ring_len;
-        const int idx_im2  = (i - 2) % ring_len;
+    int idx = 2, idx_im1 = 1, idx_im2 = 0, idx_ip = 0;
+    double dim1 = (series_len > 1) ? static_cast<double>(__ldg(prices + 1)) : 0.0;
 
-        const double di   = static_cast<double>(prices[i]);
-        const double dim1 = static_cast<double>(prices[i - 1]);
-        const double ssf_im1 = ring[idx_im1];
-        const double ssf_im2 = ring[idx_im2];
+    int i = 2;
+    for (; i < series_len; ) {
+    #pragma unroll 4
+        for (int u = 0; u < 4; ++u) {
+            if (i >= series_len) break;
 
-        const double t0 = c * (di + dim1);
-        const double t1 = fma(-a2, ssf_im2, t0);
-        const double ssf_i = fma(b, ssf_im1, t1);
+            const double di = static_cast<double>(__ldg(prices + i));
 
-        ring[idx] = ssf_i;
+            const double ssf_im1 = ring[idx_im1];
+            const double ssf_im2 = ring[idx_im2];
+            const double t0 = c * (di + dim1);
+            const double t1 = fma(-a2, ssf_im2, t0);
+            const double ssf_i = fma(b, ssf_im1, t1);
 
-        if (i < period) {
-            ssf_sum += ssf_i;
-            continue;
-        }
+            ring[idx] = ssf_i;
 
-        const int idx_ip = (i - period) % ring_len;
-        const double ssf_ip = ring[idx_ip];
-        const double mean_lp = ssf_sum * inv_p;
-        const double my_sum = beta * ssf_i + alpha * ssf_ip - mean_lp;
+            if (i < period) {
+                ssf_sum += ssf_i;
+            } else {
+                const double ssf_old = ring[idx_ip];
+                const double mean_lp = ssf_sum * inv_p;
+                const double my_sum  = fma(beta, ssf_i, alpha * ssf_old) - mean_lp;
 
-        ms = fma(0.96, ms, 0.04 * my_sum * my_sum);
-        if (ms > 0.0 && isfinite(ms)) {
-            out_row[i] = static_cast<float>(my_sum / sqrt(ms));
-        }
+                ms = fma(0.96, ms, 0.04 * my_sum * my_sum);
+                out_row[i] = reflex_out_if_valid(ms, my_sum);
 
-        // Kahan-compensated update: ssf_sum += (ssf_i - ssf_ip)
-        {
-            double y = (ssf_i - ssf_ip) - ssf_c;
-            double t2 = ssf_sum + y;
-            ssf_c = (t2 - ssf_sum) - y;
-            ssf_sum = t2;
+                double y  = (ssf_i - ssf_old) - ssf_c;
+                double t2 = ssf_sum + y;
+                ssf_c     = (t2 - ssf_sum) - y;
+                ssf_sum   = t2;
+
+                idx_ip = wrap_inc(idx_ip, ring_len);
+            }
+
+            idx    = wrap_inc(idx,    ring_len);
+            idx_im1 = wrap_inc(idx_im1, ring_len);
+            idx_im2 = wrap_inc(idx_im2, ring_len);
+
+            dim1 = di;
+            ++i;
         }
     }
 }
 
+// --------------------------------------------
+// Existing ABI: many series, single period
+// --------------------------------------------
 extern "C" __global__
 void reflex_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                       int period,
@@ -137,17 +243,17 @@ void reflex_many_series_one_param_f32(const float* __restrict__ prices_tm,
     if (series >= num_series || threadIdx.x != 0) { return; }
     if (period < 2 || series_len <= 0) { return; }
 
-    // Initialize outputs to 0.0 for consistency with batch behavior above.
+    // Initialize outputs to 0.0 for consistency with prior behavior
     for (int t = 0; t < series_len; ++t) { out_tm[t * num_series + series] = 0.0f; }
     const int warm = period < series_len ? period : series_len;
     for (int t = 0; t < warm; ++t) { out_tm[t * num_series + series] = 0.0f; }
 
     int half_period_i = period / 2; if (half_period_i < 1) half_period_i = 1;
     const double half_p = static_cast<double>(half_period_i);
-    const double a = exp(-REFLEX_SQRT2_APPROX_D * REFLEX_PI_D / half_p);
+    const double a  = exp(-REFLEX_SQRT2_APPROX_D * REFLEX_PI_D / half_p);
     const double a2 = a * a;
-    const double b = 2.0 * a * cos(REFLEX_SQRT2_APPROX_D * REFLEX_PI_D / half_p);
-    const double c = 0.5 * (1.0 + a2 - b);
+    const double b  = 2.0 * a * cos(REFLEX_SQRT2_APPROX_D * REFLEX_PI_D / half_p);
+    const double c  = 0.5 * (1.0 + a2 - b);
 
     extern __shared__ double sdata[];
     double* ring = sdata; // period+1
@@ -156,7 +262,6 @@ void reflex_many_series_one_param_f32(const float* __restrict__ prices_tm,
     if (series_len > 1) ring[1] = static_cast<double>(prices_tm[1 * num_series + series]);
 
     double ssf_sum = 0.0;
-    double ssf_c = 0.0; // Kahan compensator for ssf_sum
     if (period == 1) {
         ssf_sum = (series_len > 0) ? ring[0] : 0.0;
     } else {
@@ -179,8 +284,8 @@ void reflex_many_series_one_param_f32(const float* __restrict__ prices_tm,
         const double ssf_im2 = ring[idx_im2];
 
         const double t0 = c * (di + dim1);
-        const double t1 = fma(-a2, ssf_im2, t0);
-        const double ssf_t = fma(b, ssf_im1, t1);
+        const double t1 = (-a2) * ssf_im2 + t0;
+        const double ssf_t = b * ssf_im1 + t1;
         ring[idx] = ssf_t;
 
         if (t < period) { ssf_sum += ssf_t; continue; }
@@ -195,12 +300,7 @@ void reflex_many_series_one_param_f32(const float* __restrict__ prices_tm,
             out_tm[t * num_series + series] = static_cast<float>(my_sum / sqrt(ms));
         }
 
-        // Kahan-compensated update: ssf_sum += (ssf_t - ssf_ip)
-        {
-            double y = (ssf_t - ssf_ip) - ssf_c;
-            double t2 = ssf_sum + y;
-            ssf_c = (t2 - ssf_sum) - y;
-            ssf_sum = t2;
-        }
+        // Match CPU scalar update exactly (no Kahan): ssf_sum += (ssf_t - ssf_ip)
+        ssf_sum += ssf_t - ssf_ip;
     }
 }
