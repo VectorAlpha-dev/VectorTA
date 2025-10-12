@@ -19,6 +19,7 @@ use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, Function, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
+use std::ffi::CString;
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
@@ -47,14 +48,8 @@ impl std::error::Error for CudaSrwmaError {}
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
-pub enum BatchKernelSelected {
-    Plain { block_x: u32 },
-}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected {
-    OneD { block_x: u32 },
-}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -66,10 +61,6 @@ pub struct CudaSrwmaPolicy {
 }
 impl Default for CudaSrwmaPolicy {
     fn default() -> Self {
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
         Self {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
@@ -172,16 +163,11 @@ impl CudaSrwma {
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaSrwmaError::Cuda(e.to_string()))?
-                }
-            }
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaSrwmaError::Cuda(e.to_string()))?,
+            },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaSrwmaError::Cuda(e.to_string()))?;
@@ -203,10 +189,6 @@ impl CudaSrwma {
         device_id: usize,
         policy: CudaSrwmaPolicy,
     ) -> Result<Self, CudaSrwmaError> {
-    pub fn new_with_policy(
-        device_id: usize,
-        policy: CudaSrwmaPolicy,
-    ) -> Result<Self, CudaSrwmaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
@@ -215,13 +197,7 @@ impl CudaSrwma {
     pub fn set_policy(&mut self, policy: CudaSrwmaPolicy) {
         self.policy = policy;
     }
-    pub fn set_policy(&mut self, policy: CudaSrwmaPolicy) {
-        self.policy = policy;
-    }
     #[inline]
-    pub fn policy(&self) -> &CudaSrwmaPolicy {
-        &self.policy
-    }
     pub fn policy(&self) -> &CudaSrwmaPolicy {
         &self.policy
     }
@@ -229,21 +205,12 @@ impl CudaSrwma {
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch
     }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
     #[inline]
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaSrwmaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSrwmaError::Cuda(e.to_string()))
         self.stream
             .synchronize()
             .map_err(|e| CudaSrwmaError::Cuda(e.to_string()))
@@ -260,8 +227,6 @@ impl CudaSrwma {
         }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario =
-                    env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 let per_scenario =
                     env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
@@ -312,15 +277,8 @@ impl CudaSrwma {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
             Err(_) => true,
         }
-        match env::var("CUDA_MEM_CHECK") {
-            Ok(v) => v != "0" && v.to_lowercase() != "false",
-            Err(_) => true,
-        }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
@@ -330,26 +288,13 @@ impl CudaSrwma {
             return true;
         }
         if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+            return required_bytes.saturating_add(headroom_bytes) <= free;
         }
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
-        }
+        true
     }
     #[inline]
     fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
         const MAX: usize = 65_535;
-        (0..n).step_by(MAX).map(move |start| {
-            let len = (n - start).min(MAX);
-            (start, len)
-        })
         (0..n).step_by(MAX).map(move |start| {
             let len = (n - start).min(MAX);
             (start, len)
@@ -649,7 +594,7 @@ impl CudaSrwma {
             block_x = bx.max(1);
         }
 
-        let func = self
+        let mut func = self
             .module
             .get_function("srwma_batch_f32")
             .map_err(|e| CudaSrwmaError::Cuda(e.to_string()))?;
@@ -720,14 +665,7 @@ impl CudaSrwma {
             (*(self as *const _ as *mut CudaSrwma)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
-        unsafe {
-            (*(self as *const _ as *mut CudaSrwma)).last_batch =
-                Some(BatchKernelSelected::Plain { block_x });
-        }
         self.maybe_log_batch_debug();
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSrwmaError::Cuda(e.to_string()))
         self.stream
             .synchronize()
             .map_err(|e| CudaSrwmaError::Cuda(e.to_string()))
@@ -752,7 +690,7 @@ impl CudaSrwma {
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let shared_bytes = ((period - 1) * std::mem::size_of::<f32>()) as u32;
 
-        let func = self
+        let mut func = self
             .module
             .get_function("srwma_many_series_one_param_f32")
             .map_err(|e| CudaSrwmaError::Cuda(e.to_string()))?;
@@ -977,9 +915,6 @@ pub mod benches {
         crate::indicators::moving_averages::srwma::SrwmaParams,
         srwma_batch_dev,
         srwma_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::srwma::SrwmaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
         crate::indicators::moving_averages::srwma::SrwmaBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1)
         },

@@ -35,21 +35,10 @@ pub enum BatchThreadsPerOutput {
     One,
     Two,
 }
-pub enum BatchThreadsPerOutput {
-    One,
-    Two,
-}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    Plain {
-        block_x: u32,
-    },
-    Tiled {
-        tile: u32,
-        per_thread: BatchThreadsPerOutput,
-    },
     Plain {
         block_x: u32,
     },
@@ -78,19 +67,12 @@ impl Default for CudaJsaPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
     }
 }
 
 // -------- Introspection (selected kernel) --------
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected {
-    Plain { block_x: u32 },
-}
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
@@ -160,17 +142,11 @@ impl CudaJsa {
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaJsaError::Cuda(e.to_string()))?
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaJsaError::Cuda(e.to_string()))?
-                }
-            }
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaJsaError::Cuda(e.to_string()))?,
+            },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
@@ -220,27 +196,6 @@ impl CudaJsa {
         self.stream
             .synchronize()
             .map_err(|e| CudaJsaError::Cuda(e.to_string()))
-    #[inline]
-    pub fn set_policy(&mut self, policy: CudaJsaPolicy) {
-        self.policy = policy;
-    }
-    #[inline]
-    pub fn policy(&self) -> &CudaJsaPolicy {
-        &self.policy
-    }
-    #[inline]
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    #[inline]
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
-    #[inline]
-    pub fn synchronize(&self) -> Result<(), CudaJsaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))
     }
 
     // ---------- VRAM helpers ----------
@@ -255,22 +210,13 @@ impl CudaJsa {
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
             return true;
         }
-        if !Self::mem_check_enabled() {
-            return true;
-        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
-        }
         } else {
             true
         }
@@ -283,20 +229,12 @@ impl CudaJsa {
         if self.debug_batch_logged {
             return;
         }
-        if self.debug_batch_logged {
-            return;
-        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] JSA batch selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaJsa)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaJsa)).debug_batch_logged = true;
@@ -310,20 +248,12 @@ impl CudaJsa {
         if self.debug_many_logged {
             return;
         }
-        if self.debug_many_logged {
-            return;
-        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] JSA many-series selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaJsa)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaJsa)).debug_many_logged = true;
@@ -788,52 +718,8 @@ impl CudaJsa {
                 && num_series >= 128
                 && series_len >= 512);
 
-        if prefer_coalesced {
-            // Coalesced 2D mapping: threads span series at fixed t tile.
-            let func = self
-                .module
-                .get_function("jsa_many_series_one_param_f32_coalesced")
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
-            let (suggested_block_x, _min_grid) = func
-                .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
-            let block_x = match self.policy.many_series {
-                ManySeriesKernelPolicy::Tiled2D { tx, .. } => tx.max(32),
-                _ => suggested_block_x.max(128).min(1024),
-            };
-            let grid_x = ((series_len as u32) + TIME_TILE - 1) / TIME_TILE;
-            let grid_y = ((num_series as u32) + block_x - 1) / block_x;
-            let grid: GridSize = (grid_x, grid_y.max(1), 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-
-            unsafe {
-                let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
-                let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
-                let mut warm_ptr = d_warm.as_device_ptr().as_raw();
-                let mut period_i = period;
-                let mut num_series_i = num_series as i32;
-                let mut series_len_i = series_len as i32;
-                let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
-                let mut args: [*mut c_void; 7] = [
-                    &mut prices_ptr as *mut _ as *mut c_void,
-                    &mut first_ptr as *mut _ as *mut c_void,
-                    &mut warm_ptr as *mut _ as *mut c_void,
-                    &mut period_i as *mut _ as *mut c_void,
-                    &mut num_series_i as *mut _ as *mut c_void,
-                    &mut series_len_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, grid, block, 0, &mut args)
-                    .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
-            }
-            unsafe {
-                let this = self as *const _ as *mut CudaJsa;
-                (*this).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx: block_x, ty: 1 });
-            }
-            self.maybe_log_many_debug();
-            return Ok(());
-        }
+        // Coalesced 2D variant exists in PTX but is disabled here for
+        // simplicity and stability. Always use the 1D mapping below.
 
         // Fallback: original 1D mapping (one block per series)
         let func = self
@@ -1012,9 +898,6 @@ pub mod benches {
         crate::indicators::moving_averages::jsa::JsaParams,
         jsa_batch_dev,
         jsa_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::jsa::JsaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
         crate::indicators::moving_averages::jsa::JsaBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1)
         },

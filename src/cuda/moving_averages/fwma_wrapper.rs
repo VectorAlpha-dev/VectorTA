@@ -383,7 +383,7 @@ impl CudaFwma {
             ));
         }
         // Select plain batch kernel (only variant available today)
-        let func = self
+        let mut func = self
             .module
             .get_function("fwma_batch_f32")
             .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;
@@ -602,7 +602,7 @@ impl CudaFwma {
             ));
         }
 
-        let func = self
+        let mut func = self
             .module
             .get_function("fwma_multi_series_one_param_f32")
             .map_err(|e| CudaFwmaError::Cuda(e.to_string()))?;

@@ -2,11 +2,16 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    #[cfg(feature = "cuda")]
-    compile_cuda_kernels();
+    // Only compile CUDA PTX when the crate feature `cuda` is enabled.
+    // Cargo exposes active features to build.rs via env vars like CARGO_FEATURE_CUDA.
+    if env::var("CARGO_FEATURE_CUDA").is_ok() {
+        compile_cuda_kernels();
+    } else {
+        // Keep a single, quiet note for clarity in verbose logs.
+        println!("cargo:warning=feature `cuda` not enabled; skipping PTX build");
+    }
 }
 
-#[cfg(feature = "cuda")]
 fn compile_cuda_kernels() {
     println!("cargo:rerun-if-changed=kernels/cuda");
     // Re-run on environment changes that affect CUDA build behavior
@@ -18,7 +23,7 @@ fn compile_cuda_kernels() {
     println!("cargo:rerun-if-env-changed=NVCC_ARGS");
     println!("cargo:rerun-if-env-changed=CUDA_DEBUG");
     println!("cargo:rerun-if-env-changed=CUDA_FAST_MATH");
-    println!("cargo:rerun-if-env-changed=CUDA_PLACEHOLDER_ON_FAIL");
+    // Placeholder PTX on fail is disabled for focused CUDA development.
 
     let cuda_path = find_cuda_path();
     // No runtime linkage to cudart is required; PTX is JIT-loaded at runtime.
@@ -276,7 +281,6 @@ fn compile_cuda_kernels() {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn find_cuda_path() -> String {
     env::var("CUDA_PATH")
         .or_else(|_| env::var("CUDA_HOME"))
@@ -321,7 +325,6 @@ fn find_cuda_path() -> String {
         })
 }
 
-#[cfg(feature = "cuda")]
 fn compile_alma_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -330,7 +333,6 @@ fn compile_alma_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_cwma_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -339,7 +341,6 @@ fn compile_cwma_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_epma_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -348,7 +349,6 @@ fn compile_epma_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_ehlers_ecema_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -357,7 +357,6 @@ fn compile_ehlers_ecema_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_kama_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -366,7 +365,6 @@ fn compile_kama_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_highpass_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -375,7 +373,6 @@ fn compile_highpass_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_nama_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -384,7 +381,6 @@ fn compile_nama_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_wma_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -393,7 +389,6 @@ fn compile_wma_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_sinwma_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -402,7 +397,6 @@ fn compile_sinwma_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_tradjema_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -411,7 +405,6 @@ fn compile_tradjema_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_volume_adjusted_ma_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -420,7 +413,6 @@ fn compile_volume_adjusted_ma_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_supersmoother_3_pole_kernel(cuda_path: &str) {
     compile_kernel(
         cuda_path,
@@ -429,12 +421,10 @@ fn compile_supersmoother_3_pole_kernel(cuda_path: &str) {
     );
 }
 
-#[cfg(feature = "cuda")]
 fn compile_wto_kernel(cuda_path: &str) {
     compile_kernel(cuda_path, "kernels/cuda/wto_kernel.cu", "wto_kernel.ptx");
 }
 
-#[cfg(feature = "cuda")]
 fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
     use std::process::Command;
 
@@ -554,13 +544,8 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         cmd.arg("-lineinfo");
     }
 
-    // Enable HMA kernel turbo macros by default (shared ring + prefilled output)
-    if rel_src.ends_with("/moving_averages/hma_kernel.cu")
-        || rel_src.ends_with("\\moving_averages\\hma_kernel.cu")
-    {
-        cmd.arg("-DHMA_RING_IN_SHARED=1");
-        cmd.arg("-DHMA_ASSUME_OUT_PREFILLED=1");
-    }
+    // No per‑indicator compile‑time overrides. HMA fast paths are now enabled
+    // by kernel defaults or internal heuristics; see kernels/cuda/moving_averages/hma_kernel.cu.
 
     cmd.args(&[
         "-arch",
@@ -619,12 +604,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
             if env::var("CUDA_DEBUG").ok().as_deref() == Some("1") {
                 cmd2.arg("-lineinfo");
             }
-            if rel_src.ends_with("/moving_averages/hma_kernel.cu")
-                || rel_src.ends_with("\\moving_averages\\hma_kernel.cu")
-            {
-                cmd2.arg("-DHMA_RING_IN_SHARED=1");
-                cmd2.arg("-DHMA_ASSUME_OUT_PREFILLED=1");
-            }
+            // No per‑indicator overrides in fallback path either.
             cmd2.args(&[
                 "-arch",
                 "compute_80",
@@ -656,23 +636,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
         eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
 
-        // Optional: emit placeholder PTX for local iteration
-        if env::var("CUDA_PLACEHOLDER_ON_FAIL").ok().as_deref() == Some("1") {
-            let placeholder = r#"// Placeholder PTX emitted due to NVCC failure
-.version 8.0
-.target sm_50
-.address_size 64
-
-"#;
-            if std::fs::write(&ptx_path, placeholder).is_ok() {
-                eprintln!("Emitted placeholder PTX at {} (runtime loads will fail if kernels are missing)", ptx_path.display());
-                println!(
-                    "Successfully compiled {rel_src} to {} (placeholder)",
-                    ptx_path.display()
-                );
-                return;
-            }
-        }
+        // Placeholder PTX emission removed (focus on strict CUDA builds).
 
         if cfg!(target_os = "windows")
             && String::from_utf8_lossy(&output.stderr).contains("Cannot find compiler 'cl.exe'")
@@ -693,7 +657,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
     );
 }
 
-#[cfg(all(feature = "cuda", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 fn find_vs_installation() -> Result<String, ()> {
     let vs_paths = [
         "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC",
@@ -725,18 +689,9 @@ fn find_vs_installation() -> Result<String, ()> {
     Err(())
 }
 
-#[cfg(all(feature = "cuda", not(target_os = "windows")))]
+#[cfg(not(target_os = "windows"))]
 fn find_vs_installation() -> Result<String, ()> {
     Err(())
 }
 
-#[cfg(feature = "cuda")]
-fn placeholder_ptx() -> &'static str {
-    // Minimal valid PTX that defines no entry points; suitable for satisfying include_str!
-    // and Module::from_ptx() when the functions are never looked up.
-    r#".version 8.0
-.target sm_50
-.address_size 64
-// placeholder
-"#
-}
+// Note: kept intentionally strict; no placeholder PTX emission path.

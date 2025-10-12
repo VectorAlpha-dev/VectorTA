@@ -32,16 +32,11 @@ use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(feature = "cuda")]
-mod cudart_ffi {
-    use std::ffi::c_void;
-    extern "C" {
-        pub fn cudaHostRegister(ptr: *mut c_void, size: usize, flags: u32) -> i32;
-        pub fn cudaHostUnregister(ptr: *mut c_void) -> i32;
-    }
-    // CUDA runtime flag for default registration behavior
-    pub const CUDA_HOST_REGISTER_DEFAULT: u32 = 0x00;
-}
+// (No cudart FFI here by design.)
+
+// We intentionally avoid any dependency on the CUDA Runtime (cudart).
+// All host pinning uses `cust::memory::LockedBuffer` (driver API under the hood),
+// keeping linkage limited to the CUDA driver.
 
 // -------- Kernel selection policy (simple variants for recurrence kernels) --------
 
@@ -308,66 +303,23 @@ impl CudaMama {
         // Launch to VRAM
         let pair = self.run_batch_kernel(prices, &inputs)?;
 
-        // Try direct async D2H into caller's slices via cudaHostRegister
-        let mut used_direct = false;
-        unsafe {
-            use crate::cuda::moving_averages::mama_wrapper::cudart_ffi::*;
-            let m_ptr = out_mama.as_mut_ptr() as *mut c_void;
-            let f_ptr = out_fama.as_mut_ptr() as *mut c_void;
-            let m_bytes = out_mama.len() * std::mem::size_of::<f32>();
-            let f_bytes = out_fama.len() * std::mem::size_of::<f32>();
-            let mut registered_m = false;
-            let mut registered_f = false;
-            if cudaHostRegister(m_ptr, m_bytes, CUDA_HOST_REGISTER_DEFAULT) == 0 {
-                registered_m = true;
-            }
-            if cudaHostRegister(f_ptr, f_bytes, CUDA_HOST_REGISTER_DEFAULT) == 0 {
-                registered_f = true;
-            }
-            if registered_m && registered_f {
-                pair.mama
-                    .buf
-                    .async_copy_to(out_mama, &self.stream)
-                    .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-                pair.fama
-                    .buf
-                    .async_copy_to(out_fama, &self.stream)
-                    .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-                self.stream
-                    .synchronize()
-                    .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-                let _ = cudaHostUnregister(m_ptr);
-                let _ = cudaHostUnregister(f_ptr);
-                used_direct = true;
-            } else {
-                if registered_m {
-                    let _ = cudaHostUnregister(m_ptr);
-                }
-                if registered_f {
-                    let _ = cudaHostUnregister(f_ptr);
-                }
-            }
-        }
-
-        if used_direct {
-            return Ok((pair.rows(), pair.cols(), inputs.combos));
-        }
-
-        // Fallback to pinned staging buffers if direct registration is unavailable
+        // Stage Device -> pinned host, then memcpy into caller's slices.
         let mut pinned_m: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(pair.mama.len())
+            LockedBuffer::uninitialized(expected)
                 .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
         };
         let mut pinned_f: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(pair.fama.len())
+            LockedBuffer::uninitialized(expected)
                 .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
         };
         unsafe {
-            pair.mama
+            pair
+                .mama
                 .buf
                 .async_copy_to(pinned_m.as_mut_slice(), &self.stream)
                 .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-            pair.fama
+            pair
+                .fama
                 .buf
                 .async_copy_to(pinned_f.as_mut_slice(), &self.stream)
                 .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;

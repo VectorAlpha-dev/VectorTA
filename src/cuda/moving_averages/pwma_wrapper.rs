@@ -271,7 +271,7 @@ impl CudaPwma {
                 if use_tiled {
                     unsafe {
                         let this = self as *const _ as *mut CudaPwma;
-                        (*this).last_batch = Some(BatchKernelSelected::AsyncTiled { tx: 128 });
+                        (*this).last_batch = Some(BatchKernelSelected::Plain { block_x: 128 });
                     }
                     self.maybe_log_batch_debug();
                     return Ok(());
@@ -497,7 +497,7 @@ impl CudaPwma {
                 (128, 2) => "pwma_ms1p_tiled_f32_tx128_ty2",
                 _ => return None,
             };
-            let func = match self.module.get_function(fname) {
+            let mut func = match self.module.get_function(fname) {
                 Ok(f) => f,
                 Err(_) => return None,
             };

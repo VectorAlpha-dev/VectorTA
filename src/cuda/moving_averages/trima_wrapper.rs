@@ -114,16 +114,11 @@ impl CudaTrima {
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaTrimaError::Cuda(e.to_string()))?
-                }
-            }
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?,
+            },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaTrimaError::Cuda(e.to_string()))?;
@@ -164,9 +159,6 @@ impl CudaTrima {
                 unsafe {
                     (*(self as *const _ as *mut CudaTrima)).debug_batch_logged = true;
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaTrima)).debug_batch_logged = true;
-                }
             }
         }
     }
@@ -187,26 +179,11 @@ impl CudaTrima {
                 unsafe {
                     (*(self as *const _ as *mut CudaTrima)).debug_many_logged = true;
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaTrima)).debug_many_logged = true;
-                }
             }
         }
     }
 
     // Policy controls/inspection
-    pub fn set_policy(&mut self, policy: CudaTrimaPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaTrimaPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
     pub fn set_policy(&mut self, policy: CudaTrimaPolicy) {
         self.policy = policy;
     }
@@ -891,9 +868,6 @@ pub mod benches {
         crate::indicators::moving_averages::trima::TrimaParams,
         trima_batch_dev,
         trima_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::trima::TrimaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
         crate::indicators::moving_averages::trima::TrimaBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1)
         },

@@ -42,10 +42,6 @@ pub enum BatchThreadsPerOutput {
     One,
     Two,
 }
-pub enum BatchThreadsPerOutput {
-    One,
-    Two,
-}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -70,10 +66,6 @@ impl Default for CudaVwapPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
     }
 }
 
@@ -81,14 +73,8 @@ impl Default for CudaVwapPolicy {
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
-pub enum BatchKernelSelected {
-    Plain { block_x: u32 },
-}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected {
-    OneD { block_x: u32 },
-}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -173,18 +159,6 @@ impl CudaVwap {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
-    pub fn set_policy(&mut self, policy: CudaVwapPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaVwapPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -192,20 +166,12 @@ impl CudaVwap {
         if self.debug_batch_logged {
             return;
         }
-        if self.debug_batch_logged {
-            return;
-        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] VWAP batch selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaVwap)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaVwap)).debug_batch_logged = true;
@@ -227,13 +193,8 @@ impl CudaVwap {
             if let Some(sel) = self.last_many {
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] VWAP many-series selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaVwap)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaVwap)).debug_many_logged = true;
@@ -253,22 +214,13 @@ impl CudaVwap {
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
             return true;
         }
-        if !Self::mem_check_enabled() {
-            return true;
-        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
-        }
         } else {
             true
         }
@@ -490,9 +442,6 @@ impl CudaVwap {
         // VRAM estimate w/ 64MB headroom
         let in_bytes = series_len * (std::mem::size_of::<i64>() + 2 * std::mem::size_of::<f32>());
         let param_bytes = n_combos
-            * (2 * std::mem::size_of::<i32>()
-                + std::mem::size_of::<i64>()
-                + std::mem::size_of::<i32>());
             * (2 * std::mem::size_of::<i32>()
                 + std::mem::size_of::<i64>()
                 + std::mem::size_of::<i32>());

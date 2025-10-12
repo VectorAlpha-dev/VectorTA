@@ -20,7 +20,6 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
-use std::env;
 use std::ffi::c_void;
 use std::fmt;
 
@@ -50,15 +49,9 @@ pub enum BatchKernelPolicy {
     Plain {
         block_x: u32,
     },
-    Plain {
-        block_x: u32,
-    },
 }
 
 impl Default for BatchKernelPolicy {
-    fn default() -> Self {
-        Self::Auto
-    }
     fn default() -> Self {
         Self::Auto
     }
@@ -77,9 +70,6 @@ impl Default for ManySeriesKernelPolicy {
     fn default() -> Self {
         Self::Auto
     }
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -89,9 +79,6 @@ pub struct CudaEmaPolicy {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected {
-    Plain { block_x: u32 },
-}
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
@@ -150,12 +137,8 @@ impl CudaEma {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaEmaError::Cuda(e.to_string()))?
-                }
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaEmaError::Cuda(e.to_string()))?
-                }
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaEmaError::Cuda(e.to_string()))?,
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -481,9 +464,6 @@ impl CudaEma {
         if n_combos == 0 {
             return Ok(());
         }
-        if n_combos == 0 {
-            return Ok(());
-        }
 
         let func = self
             .module
@@ -497,20 +477,12 @@ impl CudaEma {
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(256),
-            BatchKernelPolicy::Auto => env::var("EMA_BLOCK_X")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(256),
         };
         if block_x == 0 {
             block_x = 256;
         }
 
         // Introspection (once per scenario when BENCH_DEBUG=1)
-        unsafe {
-            (*(self as *const _ as *mut CudaEma)).last_batch =
-                Some(BatchKernelSelected::Plain { block_x });
-        }
         unsafe {
             (*(self as *const _ as *mut CudaEma)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -566,6 +538,12 @@ impl CudaEma {
             return Ok(());
         }
 
+        // Resolve kernel function (standard one-block-per-series variant)
+        let func = self
+            .module
+            .get_function("ema_many_series_one_param_f32")
+            .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
+
         // Decide block size from policy/env, then normalize to warp multiple and cap
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -585,29 +563,23 @@ impl CudaEma {
         }
         self.maybe_log_many_debug();
 
-            let grid: GridSize = (num_series as u32, 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
+        let grid: GridSize = (num_series as u32, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
-            let stream = &self.stream;
-            unsafe {
-                launch!(
-                    func<<<grid, block, 0, stream>>>(
-                        d_prices_tm.as_device_ptr(),
-                        d_first_valids.as_device_ptr(),
-                        period,
-                        alpha,
-                        num_series as i32,
-                        series_len as i32,
-                        d_out_tm.as_device_ptr()
-                    )
+        let stream = &self.stream;
+        unsafe {
+            launch!(
+                func<<<grid, block, 0, stream>>>(
+                    d_prices_tm.as_device_ptr(),
+                    d_first_valids.as_device_ptr(),
+                    period,
+                    alpha,
+                    num_series as i32,
+                    series_len as i32,
+                    d_out_tm.as_device_ptr()
                 )
-                .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
-            }
-            unsafe {
-                (*(self as *const _ as *mut CudaEma)).last_many =
-                    Some(ManySeriesKernelSelected::OneD { block_x });
-            }
-            self.maybe_log_many_debug();
+            )
+            .map_err(|e| CudaEmaError::Cuda(e.to_string()))?;
         }
 
         Ok(())
@@ -735,9 +707,6 @@ pub mod benches {
         crate::indicators::moving_averages::ema::EmaBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1)
         },
-        crate::indicators::moving_averages::ema::EmaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
         crate::indicators::moving_averages::ema::EmaParams { period: Some(64) },
         "ema",
         "ema"
@@ -780,14 +749,6 @@ impl CudaEma {
         } else {
             true
         }
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if let Ok((free, _total)) = mem_get_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
-        }
     }
 
     #[inline]
@@ -803,15 +764,9 @@ impl CudaEma {
         if self.debug_batch_logged {
             return;
         }
-        if self.debug_batch_logged {
-            return;
-        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 eprintln!("[DEBUG] EMA batch selected kernel: {:?}", sel);
-                unsafe {
-                    (*(self as *const _ as *mut CudaEma)).debug_batch_logged = true;
-                }
                 unsafe {
                     (*(self as *const _ as *mut CudaEma)).debug_batch_logged = true;
                 }
@@ -824,15 +779,9 @@ impl CudaEma {
         if self.debug_many_logged {
             return;
         }
-        if self.debug_many_logged {
-            return;
-        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 eprintln!("[DEBUG] EMA many-series selected kernel: {:?}", sel);
-                unsafe {
-                    (*(self as *const _ as *mut CudaEma)).debug_many_logged = true;
-                }
                 unsafe {
                     (*(self as *const _ as *mut CudaEma)).debug_many_logged = true;
                 }

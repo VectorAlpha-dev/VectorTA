@@ -49,9 +49,6 @@ impl Default for BatchKernelPolicy {
     fn default() -> Self {
         BatchKernelPolicy::Auto
     }
-    fn default() -> Self {
-        BatchKernelPolicy::Auto
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -60,9 +57,6 @@ pub enum ManySeriesKernelPolicy {
     OneD { block_x: u32 },
 }
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self {
-        ManySeriesKernelPolicy::Auto
-    }
     fn default() -> Self {
         ManySeriesKernelPolicy::Auto
     }
@@ -143,18 +137,6 @@ impl CudaHighpass {
             .map_err(|e| CudaHighpassError::Cuda(e.to_string()))
     }
 
-    pub fn set_policy(&mut self, policy: CudaHighpassPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaHighpassPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
     pub fn set_policy(&mut self, policy: CudaHighpassPolicy) {
         self.policy = policy;
     }
@@ -339,7 +321,7 @@ impl CudaHighpass {
         func.set_cache_config(CacheConfig::PreferL1).ok();
 
         // Use CUDA occupancy helpers to pick a good block size.
-        let (suggested_block_x, min_grid) = func
+        let (suggested_block_x, _min_grid) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
             .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
 
@@ -359,29 +341,35 @@ impl CudaHighpass {
             let rows = (n_combos - launched).min(MAX_ROWS_PER_LAUNCH);
             let grid: GridSize = (rows as u32, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
+            // Record selection for BENCH_DEBUG once
+            unsafe {
+                (*(self as *const _ as *mut CudaHighpass)).last_batch =
+                    Some(BatchKernelSelected::Plain { block_x });
+            }
 
-        // Record what we chose for BENCH_DEBUG
-        unsafe {
-            (*(self as *const _ as *mut CudaHighpass)).last_batch =
-                Some(BatchKernelSelected::Plain { block_x });
-        }
+            // Offset parameter and output pointers for this chunk
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().add(launched).as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = rows as i32;
+                let mut out_ptr = d_out
+                    .as_device_ptr()
+                    .add(launched * series_len)
+                    .as_raw();
+                let args: &mut [*mut std::ffi::c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut std::ffi::c_void,
+                    &mut periods_ptr as *mut _ as *mut std::ffi::c_void,
+                    &mut series_len_i as *mut _ as *mut std::ffi::c_void,
+                    &mut combos_i as *mut _ as *mut std::ffi::c_void,
+                    &mut out_ptr as *mut _ as *mut std::ffi::c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+            }
 
-        unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
-            let mut combos_i = n_combos as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut std::ffi::c_void] = &mut [
-                &mut prices_ptr as *mut _ as *mut std::ffi::c_void,
-                &mut periods_ptr as *mut _ as *mut std::ffi::c_void,
-                &mut series_len_i as *mut _ as *mut std::ffi::c_void,
-                &mut combos_i as *mut _ as *mut std::ffi::c_void,
-                &mut out_ptr as *mut _ as *mut std::ffi::c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+            launched += rows;
         }
 
         self.maybe_log_batch_debug();
@@ -626,6 +614,7 @@ impl CudaHighpass {
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
 
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -730,9 +719,6 @@ pub mod benches {
         crate::indicators::moving_averages::highpass::HighPassParams,
         highpass_batch_dev,
         highpass_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::highpass::HighPassBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
         crate::indicators::moving_averages::highpass::HighPassBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1)
         },

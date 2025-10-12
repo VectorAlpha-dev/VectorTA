@@ -47,10 +47,6 @@ pub enum CudaMaData<'a> {
         candles: &'a Candles,
         source: &'a str,
     },
-    Candles {
-        candles: &'a Candles,
-        source: &'a str,
-    },
     /// Use a raw price slice.
     Slice(&'a [f64]),
     /// NEW: raw f32 slice (skips f64→f32 conversion cost)

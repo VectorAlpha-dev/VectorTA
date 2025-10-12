@@ -9,7 +9,9 @@
 // - Optional: host-prefill output with NaNs to skip per-thread fill
 // - Optional: place per-thread sqrt(n) ring in dynamic shared memory
 //
-// Both optional switches default to OFF to preserve current wrapper behavior.
+// Defaults:
+// Enable both fast paths by default so wrappers do not need per‑indicator
+// build.rs flags. These can still be overridden by -D defines if needed.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -19,14 +21,14 @@
 // If 1, the kernel assumes 'out' is already filled with NaNs by the host
 // (via cuMemsetD32Async / cudaMemsetD32Async). If 0, the kernel fills NaNs.
 #ifndef HMA_ASSUME_OUT_PREFILLED
-#define HMA_ASSUME_OUT_PREFILLED 0
+#define HMA_ASSUME_OUT_PREFILLED 1
 #endif
 
 // If 1, put per-thread ring buffers in dynamic shared memory.
 // Requires passing shared bytes = max_sqrt_len * blockDim.x * sizeof(float)
 // at kernel launch. If 0, use the provided global x_buf (original behavior).
 #ifndef HMA_RING_IN_SHARED
-#define HMA_RING_IN_SHARED 0
+#define HMA_RING_IN_SHARED 1
 #endif
 // -----------------------------------------------------------------------------
 
