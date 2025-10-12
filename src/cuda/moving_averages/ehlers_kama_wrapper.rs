@@ -10,7 +10,7 @@
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::ehlers_kama::{EhlersKamaBatchRange, EhlersKamaParams};
-use cust::context::Context;
+use cust::context::{Context, CacheConfig};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
@@ -307,57 +307,43 @@ impl CudaEhlersKama {
             ));
         }
 
+        // Grid-stride launch: single kernel launch covers all combos.
         let func = self
             .module
             .get_function("ehlers_kama_batch_f32")
             .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
 
-        // Follow ALMA: chunk very large combo counts to avoid brittle grid configurations.
-        // We slice the periods/out pointers so the kernel does not need an extra offset.
-        const MAX_CHUNK: usize = 65_535;
-        let mut launched = 0usize;
-        while launched < n_combos {
-            let todo = (n_combos - launched).min(MAX_CHUNK);
-            let grid: GridSize = (todo as u32, 1, 1).into();
-            let block: BlockSize = (
-                match self.policy.batch {
-                    BatchKernelPolicy::Auto => 1,
-                    BatchKernelPolicy::Plain { block_x } => block_x,
-                },
-                1,
-                1,
-            )
-                .into();
-            unsafe {
-                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                let mut periods_ptr = d_periods.as_device_ptr().as_raw().wrapping_add((launched) as u64 * std::mem::size_of::<i32>() as u64);
-                let mut first_valid_i = first_valid as i32;
-                let mut series_len_i = series_len as i32;
-                let mut n_combos_i = todo as i32;
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * series_len) as u64 * std::mem::size_of::<f32>() as u64);
-                let args: &mut [*mut c_void] = &mut [
-                    &mut prices_ptr as *mut _ as *mut c_void,
-                    &mut periods_ptr as *mut _ as *mut c_void,
-                    &mut first_valid_i as *mut _ as *mut c_void,
-                    &mut series_len_i as *mut _ as *mut c_void,
-                    &mut n_combos_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
-            }
-            launched += todo;
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+        };
+        let grid_x: u32 = ((n_combos as u32 + block_x - 1) / block_x).max(1);
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut first_valid_i = first_valid as i32;
+            let mut series_len_i = series_len as i32;
+            let mut n_combos_i = n_combos as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut n_combos_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
         }
 
-        // record selection for introspection/debug
         unsafe {
-            (*(self as *const _ as *mut CudaEhlersKama)).last_batch = Some(BatchKernelSelected::Plain {
-                block_x: match self.policy.batch { BatchKernelPolicy::Auto => 1, BatchKernelPolicy::Plain { block_x } => block_x },
-            });
+            (*(self as *const _ as *mut CudaEhlersKama)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
@@ -450,6 +436,23 @@ impl CudaEhlersKama {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEhlersKamaError> {
+        // Pre-fill outputs with NaN to guarantee warm-up semantics.
+        if let Ok(func) = self.module.get_function("ehlers_kama_fill_nan_vec_f32") {
+            let total = (n_combos * series_len) as u32;
+            let block_x: u32 = 256;
+            let grid_x: u32 = ((total + block_x - 1) / block_x).max(1);
+            unsafe {
+                let mut out_ptr = d_out.as_device_ptr().as_raw();
+                let mut len_i = (n_combos * series_len) as i32;
+                let args: &mut [*mut c_void] = &mut [
+                    &mut out_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)
+                    .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
+            }
+        }
         self.launch_batch_kernel(
             d_prices,
             d_periods,
@@ -478,6 +481,23 @@ impl CudaEhlersKama {
             .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
             .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
+        // Pre-fill outputs with NaN to guarantee warm-up semantics.
+        if let Ok(func) = self.module.get_function("ehlers_kama_fill_nan_vec_f32") {
+            let total = (n_combos * series_len) as u32;
+            let block_x: u32 = 256;
+            let grid_x: u32 = ((total + block_x - 1) / block_x).max(1);
+            unsafe {
+                let mut out_ptr = d_out.as_device_ptr().as_raw();
+                let mut len_i = (n_combos * series_len) as i32;
+                let args: &mut [*mut c_void] = &mut [
+                    &mut out_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)
+                    .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
+            }
+        }
         self.launch_batch_kernel(d_prices, &d_periods, first_valid, series_len, n_combos, &mut d_out)?;
         self.stream.synchronize().map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
@@ -661,14 +681,31 @@ impl CudaEhlersKama {
                 }
             }
             ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
-                let func = self
+                let mut func = self
                     .module
                     .get_function("ehlers_kama_multi_series_one_param_2d_f32")
                     .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
+                // Prefer shared when the ring buffer is sizable (advisory).
+                let _ = func.set_cache_config(CacheConfig::PreferShared);
+
                 let tile = (tx * ty).max(1);
                 let blocks = ((num_series as u32 + tile - 1) / tile).max(1);
                 let grid: GridSize = (blocks, 1, 1).into();
                 let block: BlockSize = (tx, ty, 1).into();
+                // Dynamic shared memory for per-thread ring: (period-1) * tile_series * sizeof(f32)
+                let mut shmem_bytes: u32 = ((period.saturating_sub(1) * tile as usize)
+                    .saturating_mul(std::mem::size_of::<f32>()))
+                    .try_into()
+                    .map_err(|_| CudaEhlersKamaError::InvalidInput("shared memory bytes overflow".into()))?;
+                // Soft-guard: if requested dynamic shared exceeds device limit, fall back to 0.
+                if let Ok(dev) = Device::get_device(self.device_id) {
+                    let max_dyn = dev
+                        .get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock)
+                        .map(|v| v as u32)
+                        .unwrap_or(0);
+                    if max_dyn > 0 && shmem_bytes > max_dyn { shmem_bytes = 0; }
+                }
+
                 unsafe {
                     let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
                     let mut period_i = period as i32;
@@ -685,7 +722,7 @@ impl CudaEhlersKama {
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
                     self.stream
-                        .launch(&func, grid, block, 0, args)
+                        .launch(&func, grid, block, shmem_bytes, args)
                         .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
                 }
             }
@@ -828,37 +865,8 @@ impl CudaEhlersKama {
             }
         }
         // Guard rails: as an ultimate safety, patch warm-up NaNs on host and
-        // write back to device unless explicitly disabled.
-        let guard_on = std::env::var("KAMA_GUARD_RAILS").ok().map(|v| v != "0" && v.to_lowercase() != "false").unwrap_or(true);
-        if guard_on {
-            // Copy to pinned host
-            let mut pinned: LockedBuffer<f32> = unsafe {
-                LockedBuffer::uninitialized(cols * rows)
-                    .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?
-            };
-            unsafe {
-                d_out_tm
-                    .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                    .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
-            }
-            self.stream
-                .synchronize()
-                .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
-            // Patch warm-up to NaN on host
-            let nan = f32::NAN;
-            for s in 0..cols {
-                let fv = first_valids[s] as usize;
-                let warm = fv + period - 1;
-                let warm_clamped = warm.min(rows);
-                for t in 0..warm_clamped { pinned[t * cols + s] = nan; }
-            }
-            // Copy updated host buffer back to device
-            unsafe {
-                d_out_tm
-                    .async_copy_from(pinned.as_slice(), &self.stream)
-                    .map_err(|e| CudaEhlersKamaError::Cuda(e.to_string()))?;
-            }
-        }
+        // No host-side warm-up enforcement/patching needed: compute kernels skip warm region
+        // and outputs were prefilled with NaN.
 
         self.stream
             .synchronize()

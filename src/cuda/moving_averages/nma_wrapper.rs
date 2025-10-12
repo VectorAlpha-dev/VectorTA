@@ -19,13 +19,17 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::AsyncCopyDestination;
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
-use std::ffi::c_void;
+use std::ffi::{c_void, CString};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+// Must match device-side array in kernels/cuda/moving_averages/nma_kernel.cu
+const NMA_MAX_PERIOD: usize = 4096;
 
 // ---- Kernel selection policy (kept intentionally minimal for NMA) ----
 
@@ -91,6 +95,8 @@ pub struct CudaNma {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+    // Tracks how many weights are uploaded to __constant__ c_sqrt_diffs
+    weights_len_uploaded: AtomicUsize,
 }
 
 impl CudaNma {
@@ -129,6 +135,7 @@ impl CudaNma {
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
+            weights_len_uploaded: AtomicUsize::new(0),
         })
     }
 
@@ -215,14 +222,13 @@ impl CudaNma {
 
     fn compute_abs_diffs(data: &[f32]) -> Vec<f32> {
         let len = data.len();
-        let mut ln_values = vec![0f32; len];
-        for (idx, value) in data.iter().enumerate() {
-            let safe = value.max(1e-10f32);
-            ln_values[idx] = safe.ln();
-        }
         let mut diffs = vec![0f32; len];
+        if len == 0 { return diffs; }
+        let mut prev_ln = data[0].max(1e-10f32).ln();
         for i in 1..len {
-            diffs[i] = (ln_values[i] - ln_values[i - 1]).abs();
+            let ln = data[i].max(1e-10f32).ln();
+            diffs[i] = (ln - prev_ln).abs();
+            prev_ln = ln;
         }
         diffs
     }
@@ -271,6 +277,40 @@ impl CudaNma {
         Ok((combos, first_valid, len, max_period, abs_diffs))
     }
 
+    // Upload constant-memory weights (c_sqrt_diffs) once per module
+    #[inline]
+    fn ensure_const_weights(&self, need: usize) -> Result<(), CudaNmaError> {
+        if need == 0 { return Ok(()); }
+        if need > NMA_MAX_PERIOD {
+            return Err(CudaNmaError::InvalidInput(format!(
+                "period {} exceeds NMA_MAX_PERIOD ({})",
+                need, NMA_MAX_PERIOD
+            )));
+        }
+        let already = self.weights_len_uploaded.load(Ordering::Relaxed);
+        if already >= need { return Ok(()); }
+
+        // Build host weights sqrt(i+1) - sqrt(i)
+        let mut host = [0f32; NMA_MAX_PERIOD];
+        for i in 0..need {
+            let s0 = (i as f32).sqrt();
+            let s1 = ((i + 1) as f32).sqrt();
+            host[i] = s1 - s0;
+        }
+
+        // Resolve symbol and copy to constant memory
+        let name = CString::new("c_sqrt_diffs").unwrap();
+        let mut sym = self
+            .module
+            .get_global::<[f32; NMA_MAX_PERIOD]>(&name)
+            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        unsafe {
+            sym.copy_from(&host).map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        }
+        self.weights_len_uploaded.store(need, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn launch_batch_kernel(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -287,12 +327,13 @@ impl CudaNma {
             .get_function("nma_batch_f32")
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
 
-        // Block size selection (simple, occupancy is adequate here)
-        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 128 };
+        // Block size selection (default 256; good occupancy on Ada)
+        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared = (max_period * std::mem::size_of::<f32>()) as u32;
+        // Kernel uses static shared memory for tile+halo; no dynamic shared memory required
+        let shared = 0u32;
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -337,10 +378,26 @@ impl CudaNma {
         max_period: usize,
         abs_diffs: &[f32],
     ) -> Result<DeviceArrayF32, CudaNmaError> {
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
-        let d_abs_diffs =
-            DeviceBuffer::from_slice(abs_diffs).map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        // Ensure device-side constant weights are ready
+        self.ensure_const_weights(max_period)?;
+
+        // Pinned HtoD uploads with async copies
+        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized(len) }
+            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        let mut d_abs_diffs = unsafe { DeviceBuffer::<f32>::uninitialized(len) }
+            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        let h_prices = cust::memory::LockedBuffer::from_slice(data_f32)
+            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        let h_diffs = cust::memory::LockedBuffer::from_slice(abs_diffs)
+            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        unsafe {
+            d_prices
+                .async_copy_from(h_prices.as_slice(), &self.stream)
+                .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+            d_abs_diffs
+                .async_copy_from(h_diffs.as_slice(), &self.stream)
+                .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        }
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
@@ -417,9 +474,14 @@ impl CudaNma {
 
         let dev =
             self.run_batch_kernel(data_f32, &combos, first_valid, len, max_period, &abs_diffs)?;
-        dev.buf
-            .copy_to(out)
+        // Use pinned DtoH for faster copy-back
+        let mut h_out = unsafe { cust::memory::LockedBuffer::<f32>::uninitialized(expected) }
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        unsafe { dev.buf.async_copy_to(h_out.as_mut_slice(), &self.stream).map_err(|e| CudaNmaError::Cuda(e.to_string()))?; }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        out.copy_from_slice(h_out.as_slice());
         Ok((combos.len(), len, combos))
     }
 
@@ -513,11 +575,12 @@ impl CudaNma {
             .get_function("nma_many_series_one_param_f32")
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+        let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 256 };
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared = (period * std::mem::size_of::<f32>()) as u32;
+        // No dynamic shared memory required; kernel uses constant memory weights
+        let shared = 0u32;
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -562,10 +625,26 @@ impl CudaNma {
         series_len: usize,
         period: usize,
     ) -> Result<DeviceArrayF32, CudaNmaError> {
-        let d_prices =
-            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
-        let d_abs_diffs = DeviceBuffer::from_slice(abs_diffs_tm)
+        // Ensure constant-memory weights are available for this period
+        self.ensure_const_weights(period)?;
+
+        // Pinned HtoD uploads with async copies
+        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized(num_series * series_len) }
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        let mut d_abs_diffs = unsafe { DeviceBuffer::<f32>::uninitialized(num_series * series_len) }
+            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        let h_prices = cust::memory::LockedBuffer::from_slice(data_tm_f32)
+            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        let h_diffs = cust::memory::LockedBuffer::from_slice(abs_diffs_tm)
+            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        unsafe {
+            d_prices
+                .async_copy_from(h_prices.as_slice(), &self.stream)
+                .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+            d_abs_diffs
+                .async_copy_from(h_diffs.as_slice(), &self.stream)
+                .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        }
         let d_first = DeviceBuffer::from_slice(first_valids)
             .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
         // VRAM estimate
@@ -647,9 +726,15 @@ impl CudaNma {
             rows,
             period,
         )?;
-        dev.buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaNmaError::Cuda(e.to_string()))
+        let expected = cols * rows;
+        let mut h_out = unsafe { cust::memory::LockedBuffer::<f32>::uninitialized(expected) }
+            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        unsafe { dev.buf.async_copy_to(h_out.as_mut_slice(), &self.stream).map_err(|e| CudaNmaError::Cuda(e.to_string()))?; }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+        out_tm.copy_from_slice(h_out.as_slice());
+        Ok(())
     }
 }
 
