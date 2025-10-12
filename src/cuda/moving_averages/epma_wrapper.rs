@@ -1,7 +1,7 @@
 //! CUDA wrapper for the Endpoint Moving Average (EPMA) kernels.
 //!
 //! Aligned with the ALMA wrapper API/policy:
-//! - PTX loaded with target-from-context and JIT O2→fallbacks
+//! - PTX loaded with target-from-context and JIT O4→fallbacks
 //! - Policy-driven kernel selection (Plain only for EPMA today)
 //! - VRAM estimates + headroom checks; grid.y chunking (<= 65_535)
 //! - Warmup/NaN semantics identical to scalar reference
@@ -17,7 +17,7 @@ use crate::indicators::moving_averages::epma::{EpmaBatchRange, EpmaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -25,6 +25,9 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// Keep TILE in sync with kTile() in the CUDA kernels.
+const EPMA_TILE: u32 = 8;
 
 // -------- Kernel selection policy (mirrors ALMA, minimal variants enabled) --------
 
@@ -97,10 +100,10 @@ impl CudaEpma {
         let context = Context::new(device).map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/epma_kernel.ptx"));
-        // Prefer context-derived target and a moderately high JIT opt level for stability.
+        // Prefer context-derived target and most optimized JIT level.
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -298,25 +301,9 @@ impl CudaEpma {
         series_len: usize,
         n_combos: usize,
         first_valid: usize,
-        max_period: usize,
+        _max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEpmaError> {
-        if max_period < 2 {
-            return Err(CudaEpmaError::InvalidInput(
-                "max_period must be >= 2".into(),
-            ));
-        }
-        let max_weights = max_period - 1;
-        let shared_bytes = max_weights
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaEpmaError::InvalidInput("shared memory size overflow".into()))?;
-        if shared_bytes > 96 * 1024 {
-            return Err(CudaEpmaError::InvalidInput(format!(
-                "period {} requires {} bytes shared memory (exceeds limit)",
-                max_period, shared_bytes
-            )));
-        }
-
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
@@ -328,29 +315,22 @@ impl CudaEpma {
 
         // Chunk over grid.y to respect device limit and offset params/output pointers per chunk.
         for (start_combo, len_combo) in Self::grid_y_chunks(n_combos) {
-            let grid_x = ((series_len as u32) + block_x - 1) / block_x;
-            let grid: GridSize = (grid_x.max(1), len_combo as u32, 1).into();
+            // Each thread emits EPMA_TILE outputs; size grid.x accordingly.
+            let bx_times_tile = block_x.saturating_mul(EPMA_TILE);
+            let grid_x = ((series_len as u32 + bx_times_tile - 1) / bx_times_tile).max(1);
+            let grid: GridSize = (grid_x, len_combo as u32, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
 
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                 // Advance param pointers by start_combo
-                let mut periods_ptr = d_periods
-                    .as_device_ptr()
-                    .add(start_combo)
-                    .as_raw();
-                let mut offsets_ptr = d_offsets
-                    .as_device_ptr()
-                    .add(start_combo)
-                    .as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().add(start_combo).as_raw();
+                let mut offsets_ptr = d_offsets.as_device_ptr().add(start_combo).as_raw();
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = len_combo as i32;
                 let mut first_valid_i = first_valid as i32;
                 // Advance output pointer by whole rows already skipped
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .add(start_combo * series_len)
-                    .as_raw();
+                let mut out_ptr = d_out.as_device_ptr().add(start_combo * series_len).as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut periods_ptr as *mut _ as *mut c_void,
@@ -360,8 +340,9 @@ impl CudaEpma {
                     &mut first_valid_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
+                // No dynamic shared memory in kernels now.
                 self.stream
-                    .launch(&func, grid, block, shared_bytes as u32, args)
+                    .launch(&func, grid, block, 0, args)
                     .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
             }
         }
@@ -465,6 +446,77 @@ impl CudaEpma {
             .map_err(|e| CudaEpmaError::Cuda(e.to_string()))
     }
 
+    /// Batch into pinned host memory (optional fast path).
+    pub fn epma_batch_into_pinned_host_f32(
+        &self,
+        data_pinned: &LockedBuffer<f32>,
+        sweep: &crate::indicators::moving_averages::epma::EpmaBatchRange,
+        out_pinned: &mut LockedBuffer<f32>,
+    ) -> Result<(), CudaEpmaError> {
+        // Reuse existing input validation
+        let data_f32: &[f32] = data_pinned.as_slice();
+        let (combos, first_valid, series_len, max_period) =
+            Self::prepare_batch_inputs(data_f32, sweep)?;
+
+        if out_pinned.len() != combos.len() * series_len {
+            return Err(CudaEpmaError::InvalidInput(format!(
+                "out pinned buffer wrong length: got {}, expected {}",
+                out_pinned.len(),
+                combos.len() * series_len
+            )));
+        }
+
+        // Build small host arrays for params
+        let n_combos = combos.len();
+        let mut periods_i32 = vec![0i32; n_combos];
+        let mut offsets_i32 = vec![0i32; n_combos];
+        for (idx, prm) in combos.iter().enumerate() {
+            periods_i32[idx] = prm.period.unwrap() as i32;
+            offsets_i32[idx] = prm.offset.unwrap() as i32;
+        }
+
+        // Allocate device buffers
+        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
+            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)
+            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        let d_offsets = DeviceBuffer::from_slice(&offsets_i32)
+            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+                .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+
+        // Async H->D copy from pinned host
+        unsafe {
+            d_prices
+                .async_copy_from(data_pinned.as_slice(), &self.stream)
+                .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        }
+
+        // Launch kernel (shared mem = 0 inside launch) then async D->H to pinned host
+        self.launch_batch_kernel(
+            &d_prices,
+            &d_periods,
+            &d_offsets,
+            series_len,
+            n_combos,
+            first_valid,
+            max_period,
+            &mut d_out,
+        )?;
+
+        unsafe {
+            d_out
+                .async_copy_to(out_pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        }
+
+        // Wait for kernel + copies to finish
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))
+    }
+
     pub fn epma_batch_device(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -561,32 +613,20 @@ impl CudaEpma {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEpmaError> {
-        if period < 2 {
-            return Err(CudaEpmaError::InvalidInput("period must be >= 2".into()));
-        }
+        if period < 2 { return Err(CudaEpmaError::InvalidInput("period must be >= 2".into())); }
         if offset >= period {
-            return Err(CudaEpmaError::InvalidInput(format!(
-                "offset {} must be < period {}",
-                offset, period
-            )));
-        }
-        let max_weights = period - 1;
-        let shared_bytes = max_weights
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaEpmaError::InvalidInput("shared memory size overflow".into()))?;
-        if shared_bytes > 96 * 1024 {
-            return Err(CudaEpmaError::InvalidInput(format!(
-                "period {} requires {} bytes shared memory (exceeds limit)",
-                period, shared_bytes
-            )));
+            return Err(CudaEpmaError::InvalidInput(format!("offset {} must be < period {}", offset, period)));
         }
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
         } as u32;
-        let grid_x = ((rows as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
+
+        // rows == series_len along time; size grid.x using EPMA_TILE
+        let bx_times_tile = block_x.saturating_mul(EPMA_TILE);
+        let grid_x = ((rows as u32 + bx_times_tile - 1) / bx_times_tile).max(1);
+        let grid: GridSize = (grid_x, cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         let func = self
@@ -611,8 +651,9 @@ impl CudaEpma {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
+            // No dynamic shared memory in kernels now.
             self.stream
-                .launch(&func, grid, block, shared_bytes as u32, args)
+                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
         }
         unsafe {
