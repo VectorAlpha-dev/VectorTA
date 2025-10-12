@@ -8,7 +8,9 @@
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::wilders::{WildersBatchRange, WildersParams};
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
@@ -45,10 +47,19 @@ pub struct CudaWilders {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+    // CHANGE: cache param buffers to avoid re-copying identical sweeps
+    param_cache: Option<ParamCache>,
+}
+
+// CHANGE: small cache for batch parameter buffers
+struct ParamCache {
+    hash: u64,
+    periods: DeviceBuffer<i32>,
+    alphas: DeviceBuffer<f32>,
+    warm: DeviceBuffer<i32>,
 }
 
 struct PreparedWildersBatch {
-    combos: Vec<WildersParams>,
     first_valid: usize,
     series_len: usize,
     periods_i32: Vec<i32>,
@@ -63,10 +74,11 @@ impl CudaWilders {
             .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
 
+        // CHANGE: PTX JIT at O4 (most optimized)
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/wilders_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -88,6 +100,7 @@ impl CudaWilders {
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
+            param_cache: None,
         })
     }
 
@@ -97,7 +110,7 @@ impl CudaWilders {
         sweep: &WildersBatchRange,
     ) -> Result<DeviceArrayF32, CudaWildersError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
-        let n_combos = prepared.combos.len();
+        let n_combos = prepared.periods_i32.len();
 
         // VRAM estimate (input + params + output) with headroom
         let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
@@ -116,12 +129,39 @@ impl CudaWilders {
 
         let d_prices = DeviceBuffer::from_slice(data_f32)
             .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&prepared.periods_i32)
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
-        let d_alphas = DeviceBuffer::from_slice(&prepared.alphas_f32)
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
-        let d_warm = DeviceBuffer::from_slice(&prepared.warm_indices)
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+        // CHANGE: cache parameter device buffers across identical sweeps
+        let mut hasher = DefaultHasher::new();
+        prepared.periods_i32.hash(&mut hasher);
+        for &a in &prepared.alphas_f32 { a.to_bits().hash(&mut hasher); }
+        prepared.warm_indices.hash(&mut hasher);
+        let params_hash = hasher.finish();
+
+        // SAFETY: we only mutate param_cache field; borrowing controlled
+        let (d_periods, d_alphas, d_warm) = unsafe {
+            match &mut (*(self as *const _ as *mut CudaWilders)).param_cache {
+                Some(cache)
+                    if cache.hash == params_hash
+                        && cache.periods.len() == prepared.periods_i32.len()
+                        && cache.alphas.len() == prepared.alphas_f32.len()
+                        && cache.warm.len() == prepared.warm_indices.len() =>
+                { (&cache.periods, &cache.alphas, &cache.warm) }
+                _ => {
+                    let periods = DeviceBuffer::from_slice(&prepared.periods_i32)
+                        .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+                    let alphas = DeviceBuffer::from_slice(&prepared.alphas_f32)
+                        .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+                    let warm = DeviceBuffer::from_slice(&prepared.warm_indices)
+                        .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+                    (*(self as *const _ as *mut CudaWilders)).param_cache =
+                        Some(ParamCache { hash: params_hash, periods, alphas, warm });
+                    let cache = (*(self as *const _ as *mut CudaWilders))
+                        .param_cache
+                        .as_ref()
+                        .unwrap();
+                    (&cache.periods, &cache.alphas, &cache.warm)
+                }
+            }
+        };
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(prepared.series_len * n_combos)
                 .map_err(|e| CudaWildersError::Cuda(e.to_string()))?
@@ -301,7 +341,6 @@ impl CudaWilders {
         }
 
         Ok(PreparedWildersBatch {
-            combos,
             first_valid,
             series_len,
             periods_i32,
@@ -326,21 +365,26 @@ impl CudaWilders {
             return Ok(());
         }
 
-        let func = self
+        // CHANGE: prefer L1 cache and align block size to warp multiples
+        let mut func = self
             .module
             .get_function("wilders_batch_f32")
             .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // Kernel policy selection (simple)
-        let block_x = match self.policy.batch {
+        let block_x_user = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
             BatchKernelPolicy::Auto => 256,
         };
-        unsafe { (*(self as *const _ as *mut CudaWilders)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        let block_threads = ((block_x_user / 32).max(1).min(32)) * 32; // 32..1024
+        unsafe {
+            (*(self as *const _ as *mut CudaWilders)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x: block_threads });
+        }
         self.maybe_log_batch_debug();
 
         let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let block: BlockSize = (block_threads, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -380,20 +424,30 @@ impl CudaWilders {
         series_len: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWildersError> {
-        let func = self
+        // CHANGE: prefer L1 cache and map one warp per series
+        let mut func = self
             .module
             .get_function("wilders_many_series_one_param_f32")
             .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        let block_x = match self.policy.many_series {
+        let block_x_user = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
-            ManySeriesKernelPolicy::Auto => 128,
+            ManySeriesKernelPolicy::Auto => {
+                if num_series < 64 { 128 } else { 256 }
+            }
         };
-        unsafe { (*(self as *const _ as *mut CudaWilders)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        let block_threads = ((block_x_user / 32).max(1).min(32)) * 32; // 32..1024
+        let warps_per_block: u32 = (block_threads / 32) as u32;
+        let grid_x: u32 = ((num_series as u32) + (warps_per_block - 1)) / warps_per_block;
+        unsafe {
+            (*(self as *const _ as *mut CudaWilders)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x: block_threads });
+        }
         self.maybe_log_many_debug();
 
-        let block: BlockSize = (block_x, 1, 1).into();
-        let grid: GridSize = (num_series as u32, 1, 1).into();
+        let block: BlockSize = (block_threads, 1, 1).into();
+        let grid: GridSize = (grid_x, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -459,10 +513,6 @@ impl CudaWilders {
             rows,
             &mut d_out_tm,
         )?;
-
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
     }

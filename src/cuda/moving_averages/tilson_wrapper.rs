@@ -22,6 +22,7 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cu; // raw CUDA driver API for stream memset
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -192,6 +193,19 @@ impl CudaTilson {
                 }
                 unsafe { (*(self as *const _ as *mut CudaTilson)).debug_many_logged = true; }
             }
+        }
+    }
+
+    // Stream-ordered async qNaN prefill (32-bit)
+    #[inline]
+    fn memset_nan32_async(&self, dst_ptr_raw: u64, n_elems: usize) -> Result<(), CudaTilsonError> {
+        const QNAN_BITS: u32 = 0x7FC0_0000; // canonical IEEE-754 f32 quiet NaN
+        let st: cu::CUstream = self.stream.as_inner();
+        let ptr: cu::CUdeviceptr = dst_ptr_raw;
+        let res = unsafe { cu::cuMemsetD32Async(ptr, QNAN_BITS, n_elems, st) };
+        match res {
+            cu::CUresult::CUDA_SUCCESS => Ok(()),
+            e => Err(CudaTilsonError::Cuda(format!("cuMemsetD32Async failed: {:?}", e))),
         }
     }
 
@@ -488,7 +502,9 @@ impl CudaTilson {
             BatchKernelPolicy::Auto => 256u32,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        // 1-D launch across combos
+        let blocks_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (blocks_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         // Record selection and maybe log once
@@ -511,6 +527,8 @@ impl CudaTilson {
             let mut combos_i = n_combos as i32;
             let out_elem_off = (combos_offset * series_len) as u64;
             let mut out_ptr = d_out.as_device_ptr().as_raw() + out_elem_off * std::mem::size_of::<f32>() as u64;
+            // Prefill this chunk's output region to qNaN on this stream
+            drop(self.memset_nan32_async(out_ptr, n_combos * series_len)?);
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
                 &mut periods_ptr as *mut _ as *mut c_void,
@@ -559,14 +577,19 @@ impl CudaTilson {
             .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
 
         let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 128u32,
+            ManySeriesKernelPolicy::Auto => 256u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
         };
-        let grid: GridSize = (1, num_series as u32, 1).into();
+        // 1-D launch across series
+        let blocks_x = ((num_series as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (blocks_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe { (*(self as *const _ as *mut CudaTilson)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
         self.maybe_log_many_debug();
+
+        // Prefill entire output with qNaN once per call
+        self.memset_nan32_async(d_out_tm.as_device_ptr().as_raw(), num_series * series_len)?;
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -875,7 +898,8 @@ fn expand_combos(range: &TilsonBatchRange) -> Vec<TilsonParams> {
 impl CudaTilson {
     #[inline]
     fn suggest_combos_per_launch(&self, series_len: usize, total_combos: usize) -> usize {
-        const MAX_GRID_DIM: usize = 65_535; // keep parity with ALMA guidance
+        // gridDim.x limit (Y/Z are 65,535); keep generous headroom for huge sweeps
+        const MAX_GRID_DIM: usize = 2_147_483_647; // 2^31 - 1
         let by_dim = total_combos.min(MAX_GRID_DIM);
         if !Self::mem_check_enabled() { return by_dim.max(1); }
 

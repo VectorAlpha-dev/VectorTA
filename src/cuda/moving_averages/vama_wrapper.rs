@@ -17,7 +17,9 @@ use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::volatility_adjusted_ma::{VamaBatchRange, VamaParams};
 use cust::context::Context;
 use cust::device::Device;
-use cust::function::{BlockSize, GridSize};
+use cust::context::SharedMemoryConfig;
+use cust::function::{BlockSize, Function, GridSize};
+use cust::sys as cuda_sys;
 use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
@@ -191,6 +193,61 @@ impl CudaVama {
         } else { true }
     }
 
+    // ----- Dynamic shared memory helpers -----
+    #[inline]
+    fn optin_smem_limit_bytes(&self) -> Result<i32, CudaVamaError> {
+        unsafe {
+            let mut cu_dev: cuda_sys::CUdevice = 0;
+            let res = cuda_sys::cuDeviceGet(&mut cu_dev as *mut _, self.device_id as i32);
+            if res != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(CudaVamaError::Cuda(format!("cuDeviceGet failed: {res:?}")));
+            }
+            let mut bytes: std::os::raw::c_int = 0;
+            let res = cuda_sys::cuDeviceGetAttribute(
+                &mut bytes as *mut _,
+                cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+                cu_dev,
+            );
+            if res != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(CudaVamaError::Cuda(
+                    format!(
+                        "cuDeviceGetAttribute(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN) failed: {res:?}"
+                    ),
+                ));
+            }
+            Ok(bytes)
+        }
+    }
+
+    #[inline]
+    fn set_kernel_dynamic_smem(&self, func: &mut Function, requested: usize) -> Result<usize, CudaVamaError> {
+        let limit = self.optin_smem_limit_bytes()? as usize;
+        let bytes = requested.min(limit);
+
+        func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)
+            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+
+        unsafe {
+            let res = cuda_sys::cuFuncSetAttribute(
+                func.to_raw(),
+                cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                bytes as i32,
+            );
+            if res != cuda_sys::CUresult::CUDA_SUCCESS {
+                return Err(CudaVamaError::Cuda(format!(
+                    "cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES={bytes}) failed: {res:?}"
+                )));
+            }
+            let _ = cuda_sys::cuFuncSetAttribute(
+                func.to_raw(),
+                cuda_sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                100,
+            );
+        }
+
+        Ok(bytes)
+    }
+
     pub fn vama_batch_dev(
         &self,
         data_f32: &[f32],
@@ -243,6 +300,7 @@ impl CudaVama {
             n_combos,
             &mut d_ema,
             &mut d_out,
+            &prepared.vol_periods,
         )?;
 
         // Ensure completion before returning VRAM handle for consistency
@@ -266,6 +324,7 @@ impl CudaVama {
         n_combos: usize,
         d_ema: &mut DeviceBuffer<f32>,
         d_out: &mut DeviceBuffer<f32>,
+        host_vol_periods: &[i32],
     ) -> Result<(), CudaVamaError> {
         if series_len == 0 {
             return Err(CudaVamaError::InvalidInput(
@@ -298,6 +357,12 @@ impl CudaVama {
             ));
         }
 
+        // Fetch vol periods to host to size dynamic shared memory per chunk
+        let mut host_vols = vec![0i32; n_combos];
+        d_vol_periods
+            .copy_to(&mut host_vols)
+            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+
         self.launch_batch_kernel(
             d_prices,
             d_base_periods,
@@ -309,6 +374,7 @@ impl CudaVama {
             n_combos,
             d_ema,
             d_out,
+            &host_vols,
         )
     }
 
@@ -335,6 +401,9 @@ impl CudaVama {
                 .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
         };
 
+        // Shared memory for many-series kernel: 2 deques × (float+int) × vol_period
+        let shmem_bytes = (24 * prepared.vol_period + 16) as u32;
+
         self.launch_many_series_kernel(
             &d_prices,
             &d_first_valids,
@@ -346,6 +415,7 @@ impl CudaVama {
             series_len,
             &mut d_ema,
             &mut d_out,
+            shmem_bytes,
         )?;
 
         Ok(DeviceArrayF32 {
@@ -387,6 +457,9 @@ impl CudaVama {
                 .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
         };
 
+        // Shared memory requirement for many-series kernel
+        let shmem_bytes = (24 * prepared.vol_period + 16) as u32;
+
         self.launch_many_series_kernel(
             &d_prices,
             &d_first_valids,
@@ -398,6 +471,7 @@ impl CudaVama {
             series_len,
             &mut d_ema,
             &mut d_out,
+            shmem_bytes,
         )?;
 
         self.stream
@@ -445,6 +519,9 @@ impl CudaVama {
             ));
         }
 
+        // Shared memory requirement for many-series kernel
+        let shmem_bytes = (24 * (vol_period as usize) + 16) as u32;
+
         self.launch_many_series_kernel(
             d_prices_tm,
             d_first_valids,
@@ -456,6 +533,7 @@ impl CudaVama {
             series_len as usize,
             d_ema,
             d_out_tm,
+            shmem_bytes,
         )
     }
 
@@ -532,81 +610,72 @@ impl CudaVama {
         n_combos: usize,
         d_ema: &mut DeviceBuffer<f32>,
         d_out: &mut DeviceBuffer<f32>,
+        host_vol_periods: &[i32],
     ) -> Result<(), CudaVamaError> {
-        if n_combos == 0 {
-            return Ok(());
-        }
-
-        let func = self
-            .module
-            .get_function("vama_batch_f32")
+        if n_combos == 0 { return Ok(()); }
+        // Fallback: for exact parity, reuse the many-series kernel per-combo (time-major with 1 series).
+        // This avoids minor differences between batch kernel and CPU reference.
+        let mut d_first_valids = DeviceBuffer::from_slice(&[first_valid as i32])
             .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-
-        // Policy selection (simple; no tiled variants). Allow override via env VAMA_BLOCK_X.
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => std::env::var("VAMA_BLOCK_X")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-                .filter(|&v| v > 0)
-                .unwrap_or(256),
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        // Temporary EMA/output buffers per call
+        let mut d_ema_tmp: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(series_len)
+                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
         };
-        unsafe {
-            let this = self as *const _ as *mut CudaVama;
-            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
-        }
-        self.maybe_log_batch_debug();
+        // Host copies of per-combo params
+        let mut host_base = vec![0i32; n_combos];
+        let mut host_vols = vec![0i32; n_combos];
+        let mut host_alphas = vec![0f32; n_combos];
+        let mut host_betas = vec![0f32; n_combos];
+        d_base.copy_to(&mut host_base).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        d_vol.copy_to(&mut host_vols).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        d_alphas.copy_to(&mut host_alphas).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        d_betas.copy_to(&mut host_betas).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        for c in 0..n_combos {
+            let base_p = host_base[c] as usize;
+            let vol_p = host_vols[c] as usize;
+            let alpha = host_alphas[c];
+            let beta = host_betas[c];
 
-        // Large combo counts: chunk launches to avoid extreme grid.x sizes (safety parity with ALMA's grid.y chunking guidance)
-        const MAX_GRID_DIM: usize = 65_535; // conservative bound per dimension for portability
-        let mut launch_chunk = |start_combo: usize, chunk_len: usize| -> Result<(), CudaVamaError> {
+            // Prepare function
+            let mut func = self
+                .module
+                .get_function("vama_many_series_one_param_f32")
+                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+            let grid: GridSize = (1u32, 1u32, 1u32).into();
+            let block: BlockSize = (128u32, 1u32, 1u32).into();
+            let requested_smem = 16usize * vol_p;
+            let smem_bytes: u32 = if requested_smem > 48 * 1024 {
+                self.set_kernel_dynamic_smem(&mut func, requested_smem)? as u32
+            } else { requested_smem as u32 };
+
             unsafe {
-                // Launch covers [start_combo, start_combo + chunk_len).
-                // Offset param pointers and ema/out bases to the chunk start.
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                let mut base_ptr = d_base.as_device_ptr().add(start_combo).as_raw();
-                let mut vol_ptr = d_vol.as_device_ptr().add(start_combo).as_raw();
-                let mut alpha_ptr = d_alphas.as_device_ptr().add(start_combo).as_raw();
-                let mut beta_ptr = d_betas.as_device_ptr().add(start_combo).as_raw();
+                let mut first_valids_ptr = d_first_valids.as_device_ptr().as_raw();
+                let mut base_i = base_p as i32;
+                let mut vol_i = vol_p as i32;
+                let mut alpha_f = alpha;
+                let mut beta_f = beta;
+                let mut num_series_i = 1i32;
                 let mut series_len_i = series_len as i32;
-                let mut first_valid_i = first_valid as i32;
-                let mut combos_i = chunk_len as i32;
-                let mut ema_ptr = d_ema
-                    .as_device_ptr()
-                    .add(start_combo * series_len)
-                    .as_raw();
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .add(start_combo * series_len)
-                    .as_raw();
+                let mut ema_ptr = d_ema_tmp.as_device_ptr().as_raw();
+                let mut out_ptr = d_out.as_device_ptr().add(c * series_len).as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
-                    &mut base_ptr as *mut _ as *mut c_void,
-                    &mut vol_ptr as *mut _ as *mut c_void,
-                    &mut alpha_ptr as *mut _ as *mut c_void,
-                    &mut beta_ptr as *mut _ as *mut c_void,
+                    &mut first_valids_ptr as *mut _ as *mut c_void,
+                    &mut base_i as *mut _ as *mut c_void,
+                    &mut vol_i as *mut _ as *mut c_void,
+                    &mut alpha_f as *mut _ as *mut c_void,
+                    &mut beta_f as *mut _ as *mut c_void,
+                    &mut num_series_i as *mut _ as *mut c_void,
                     &mut series_len_i as *mut _ as *mut c_void,
-                    &mut first_valid_i as *mut _ as *mut c_void,
-                    &mut combos_i as *mut _ as *mut c_void,
                     &mut ema_ptr as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                let grid: GridSize = (chunk_len as u32, 1, 1).into();
-                let block: BlockSize = (block_x, 1, 1).into();
                 self.stream
-                    .launch(&func, grid, block, 0, args)
+                    .launch(&func, grid, block, smem_bytes, args)
                     .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
             }
-            Ok(())
-        };
-
-        let mut remaining = n_combos;
-        let mut start = 0usize;
-        while remaining > 0 {
-            let take = remaining.min(MAX_GRID_DIM);
-            launch_chunk(start, take)?;
-            start += take;
-            remaining -= take;
         }
         Ok(())
     }
@@ -695,12 +764,13 @@ impl CudaVama {
         series_len: usize,
         d_ema: &mut DeviceBuffer<f32>,
         d_out_tm: &mut DeviceBuffer<f32>,
+        shmem_bytes: u32,
     ) -> Result<(), CudaVamaError> {
         if num_series == 0 || series_len == 0 {
             return Ok(());
         }
 
-        let func = self
+        let mut func = self
             .module
             .get_function("vama_many_series_one_param_f32")
             .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
@@ -719,9 +789,16 @@ impl CudaVama {
         }
         self.maybe_log_many_debug();
 
-        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), num_series as u32, 1).into();
+        // One block per series; sequential work is done by thread 0 per block
+        let grid: GridSize = (1u32, num_series as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        // Compute and opt-in dynamic SMEM for this single-vol window
+        let requested_smem = 16usize * vol_period;
+        let smem_bytes2: u32 = if requested_smem > 48 * 1024 {
+            self.set_kernel_dynamic_smem(&mut func, requested_smem)? as u32
+        } else {
+            requested_smem as u32
+        };
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -747,7 +824,7 @@ impl CudaVama {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&func, grid, block, 0, args)
+                .launch(&func, grid, block, smem_bytes2, args)
                 .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
         }
 
