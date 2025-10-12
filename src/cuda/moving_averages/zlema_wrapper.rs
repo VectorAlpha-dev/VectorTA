@@ -8,10 +8,10 @@
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::zlema::{expand_grid_zlema, ZlemaBatchRange, ZlemaParams};
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
+use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -44,6 +44,16 @@ pub struct CudaZlema {
 
 impl CudaZlema {
     #[inline]
+    fn env_flag(name: &str, default: bool) -> bool {
+        match env::var(name) {
+            Ok(v) => {
+                let v = v.to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            }
+            Err(_) => default,
+        }
+    }
+    #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
@@ -68,11 +78,9 @@ impl CudaZlema {
         let context = Context::new(device).map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/zlema_kernel.ptx"));
-        // Align with ALMA/CWMA JIT policy: DetermineTargetFromContext + O2, with fallbacks
-        let jit_opts = &[
-            ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
-        ];
+        // Keep JIT at highest optimization (O4) by default.
+        // We rely on the default being O4; only set DetermineTargetFromContext here.
+        let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
@@ -153,15 +161,34 @@ impl CudaZlema {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaZlemaError> {
-        let func = self
+        let mut func = self
             .module
             .get_function("zlema_batch_f32")
             .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = 128;
-        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        // Prefer L1 for memory-bound kernels unless user turns it off
+        if Self::env_flag("ZLEMA_PREFER_L1", true) {
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
+        }
+
+        // Optional manual override; otherwise use occupancy suggestion
+        let block_x_override = env::var("ZLEMA_BATCH_BLOCK_X")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&v| v > 0);
+
+        let (grid, block): (GridSize, BlockSize) = if let Some(bx) = block_x_override {
+            let grid_x = ((n_combos as u32) + bx - 1) / bx;
+            ((grid_x.max(1), 1, 1).into(), (bx, 1, 1).into())
+        } else {
+            let (min_grid, block_size) = func
+                .suggested_launch_configuration(0, (0, 0, 0).into())
+                .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+            let bx = block_size.clamp(64, 1024);
+            let grid_x = ((n_combos as u32) + bx - 1) / bx;
+            let gx = grid_x.max(min_grid);
+            ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
+        };
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -186,6 +213,85 @@ impl CudaZlema {
 
             self.stream
                 .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    // Tiled batch kernel launcher (uses dynamic shared memory based on tile + max_lag)
+    fn launch_batch_kernel_tiled(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_lags: &DeviceBuffer<i32>,
+        d_alphas: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        max_lag: i32,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaZlemaError> {
+        let mut func = self
+            .module
+            .get_function("zlema_batch_f32_tiled_f32")
+            .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+
+        if Self::env_flag("ZLEMA_PREFER_L1", true) {
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
+        }
+
+        // Must match kernel default unless overridden at compile time.
+        let tile: usize = env::var("ZLEMA_BATCH_TILE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(1024);
+        let shmem_bytes = (tile + (max_lag as usize)) * std::mem::size_of::<f32>();
+
+        // Optional manual override; otherwise occupancy suggestion that accounts for shmem
+        let block_x_override = env::var("ZLEMA_BATCH_BLOCK_X")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&v| v > 0);
+        let (grid, block): (GridSize, BlockSize) = if let Some(bx) = block_x_override {
+            let grid_x = ((n_combos as u32) + bx - 1) / bx;
+            ((grid_x.max(1), 1, 1).into(), (bx, 1, 1).into())
+        } else {
+            let (min_grid, block_size) = func
+                .suggested_launch_configuration(shmem_bytes, (0, 0, 0).into())
+                .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+            let bx = block_size.clamp(64, 1024);
+            let grid_x = ((n_combos as u32) + bx - 1) / bx;
+            let gx = grid_x.max(min_grid);
+            ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
+        };
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut lags_ptr = d_lags.as_device_ptr().as_raw();
+            let mut alphas_ptr = d_alphas.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut combos_i = n_combos as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut max_lag_i = max_lag as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut lags_ptr as *mut _ as *mut c_void,
+                &mut alphas_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut max_lag_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+
+            self.stream
+                .launch(&func, grid, block, shmem_bytes as u32, args)
                 .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
         }
 
@@ -240,16 +346,39 @@ impl CudaZlema {
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
             .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
 
-        self.launch_batch_kernel(
-            &d_prices,
-            &d_periods,
-            &d_lags,
-            &d_alphas,
-            len,
-            first_valid,
-            combos.len(),
-            &mut d_out,
-        )?;
+        // Heuristic: use tiled kernel when sweeping many combos or long series.
+        // Default thresholds chosen conservatively; refine with benches if needed.
+        let n_combos = combos.len();
+        let max_lag = *lags.iter().max().unwrap_or(&0);
+        // Prefer tiled only when both the series is reasonably long and there
+        // are many parameter rows to amortize the shared-memory stage.
+        // This avoids overhead on small sweeps and keeps unit-test defaults intact.
+        let use_tiled = (n_combos >= 64) && (len >= 4096);
+
+        if use_tiled {
+            self.launch_batch_kernel_tiled(
+                &d_prices,
+                &d_periods,
+                &d_lags,
+                &d_alphas,
+                len,
+                first_valid,
+                n_combos,
+                max_lag,
+                &mut d_out,
+            )?;
+        } else {
+            self.launch_batch_kernel(
+                &d_prices,
+                &d_periods,
+                &d_lags,
+                &d_alphas,
+                len,
+                first_valid,
+                n_combos,
+                &mut d_out,
+            )?;
+        }
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -284,9 +413,20 @@ impl CudaZlema {
             )));
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len)?;
-        dev.buf
-            .copy_to(out)
+        // Stage Device -> Host into pinned memory asynchronously, then memcpy to out
+        let mut pinned = unsafe {
+            LockedBuffer::<f32>::uninitialized(expected)
+                .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?
+        };
+        unsafe {
+            dev.buf
+                .async_copy_to(&mut pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
             .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+        out.copy_from_slice(pinned.as_slice());
         Ok((combos.len(), len, combos))
     }
 
@@ -364,19 +504,33 @@ impl CudaZlema {
         alpha: f32,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaZlemaError> {
-        let func = self
+        let mut func = self
             .module
             .get_function("zlema_many_series_one_param_f32")
             .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = env::var("ZLEMA_MS_BLOCK_X")
+        // Prefer L1 for memory-bound kernels unless disabled
+        if Self::env_flag("ZLEMA_PREFER_L1", true) {
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
+        }
+
+        // Optional override or occupancy-guided block size
+        let block_x_override = env::var("ZLEMA_MS_BLOCK_X")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(128);
-        let grid_x = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+            .filter(|&v| v > 0);
+        let (grid, block): (GridSize, BlockSize) = if let Some(bx) = block_x_override {
+            let grid_x = ((cols as u32) + bx - 1) / bx;
+            ((grid_x.max(1), 1, 1).into(), (bx, 1, 1).into())
+        } else {
+            let (min_grid, block_size) = func
+                .suggested_launch_configuration(0, (0, 0, 0).into())
+                .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+            let bx = block_size.clamp(64, 1024);
+            let grid_x = ((cols as u32) + bx - 1) / bx;
+            let gx = grid_x.max(min_grid);
+            ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
+        };
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -471,9 +625,21 @@ impl CudaZlema {
         let (first_valids, p, alpha) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, p, alpha)?;
-        dev.buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaZlemaError::Cuda(e.to_string()))
+        // Device -> Host via pinned buffer + async copy
+        let mut pinned = unsafe {
+            LockedBuffer::<f32>::uninitialized(cols * rows)
+                .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?
+        };
+        unsafe {
+            dev.buf
+                .async_copy_to(&mut pinned.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+        out_tm.copy_from_slice(pinned.as_slice());
+        Ok(())
     }
 }
 

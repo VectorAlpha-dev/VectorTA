@@ -1,10 +1,8 @@
 // CUDA kernels for the Fractal Adaptive Moving Average (FRAMA).
 //
-// Each parameter combination is evaluated by a single thread that maintains
-// monotonic deques for the rolling high/low extrema, mirroring the scalar
-// implementation used on the CPU. A companion kernel handles the many-series ×
-// one-parameter scenario using time-major inputs so that both CUDA paths offer
-// feature parity with the Rust ALMA integration pattern.
+// Optimized drop-in: reduce inner-loop math overhead, favor FFMA for EMA update,
+// and use base-2 math (log2f/exp2f) while keeping memory layout and deque logic
+// identical to preserve behavior and test parity.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -20,6 +18,24 @@
 #ifndef FRAMA_MAX_WINDOW
 #define FRAMA_MAX_WINDOW 1024
 #endif
+
+// --------- Build-time knobs (default: accuracy) ----------
+#ifndef FRAMA_USE_FAST_MATH
+// 0 = use log2f/exp2f; 1 = map to intrinsics __log2f/__exp2f
+#define FRAMA_USE_FAST_MATH 0
+#endif
+
+#if FRAMA_USE_FAST_MATH
+#  define FRAMA_LOG2F __log2f
+#  define FRAMA_EXP2F __exp2f
+#else
+#  define FRAMA_LOG2F log2f
+#  define FRAMA_EXP2F exp2f
+#endif
+
+__device__ __forceinline__ float frama_clampf(float x, float lo, float hi) {
+    return fminf(fmaxf(x, lo), hi);
+}
 
 struct MonoDeque {
     int* buf;
@@ -242,11 +258,14 @@ extern "C" __global__ void frama_batch_f32(const float* __restrict__ high,
         }
     }
 
-    const float sc_f = static_cast<float>(sc);
-    const float fc_f = static_cast<float>(fc);
-    const float w_ln = logf(2.0f / (sc_f + 1.0f));
-    const float sc_lim = 2.0f / (sc_f + 1.0f);
-    const float ln2 = logf(2.0f);
+    // Hoisted constants and base-2 math
+    const float sc_f     = (float)sc;
+    const float fc_f     = (float)fc;
+    const float inv_half = 1.0f / (float)half;
+    const float inv_win  = 1.0f / (float)win;
+    const float log2_k   = FRAMA_LOG2F(2.0f / (sc_f + 1.0f)); // log2(2/(sc+1))
+    const float sc_lim   = 2.0f / (sc_f + 1.0f);
+    const bool  sc_is_one = (sc == 1);
 
     float d_prev = 1.0f;
 
@@ -287,38 +306,39 @@ extern "C" __global__ void frama_batch_f32(const float* __restrict__ high,
         ExtremesPair left = frama_front_or(&d_left_max, &d_left_min, &pm2, &pn2);
         ExtremesPair full = frama_front_or(&d_full_max, &d_full_min, &pm3, &pn3);
 
-        const float hi_i = high[i];
-        const float lo_i = low[i];
+        const float hi_i    = high[i];
+        const float lo_i    = low[i];
         const float close_i = close[i];
-        const float prev_out = row_out[i - 1];
+        const float prev    = row_out[i - 1];
 
-        if (!(isnan(hi_i) || isnan(lo_i) || isnan(close_i) || isnan(prev_out))) {
-            const float n1 = (right.maxv - right.minv) / static_cast<float>(half);
-            const float n2 = (left.maxv - left.minv) / static_cast<float>(half);
-            const float n3 = (full.maxv - full.minv) / static_cast<float>(win);
+        if (!isnan(hi_i) && !isnan(lo_i) && !isnan(close_i) && !isnan(prev)) {
+            // Normalized ranges with reciprocals
+            const float n1 = (right.maxv - right.minv) * inv_half;
+            const float n2 = (left .maxv - left .minv) * inv_half;
+            const float n3 = (full .maxv - full .minv) * inv_win;
 
             float d_cur = d_prev;
             if (n1 > 0.0f && n2 > 0.0f && n3 > 0.0f) {
-                d_cur = (logf(n1 + n2) - logf(n3)) / ln2;
+                d_cur = FRAMA_LOG2F(n1 + n2) - FRAMA_LOG2F(n3);
             }
             d_prev = d_cur;
 
-            float alpha0 = expf(w_ln * (d_cur - 1.0f));
-            alpha0 = fmaxf(alpha0, 0.1f);
-            alpha0 = fminf(alpha0, 1.0f);
+            // alpha0 = (2/(sc+1))^(d-1) using exp2/log2
+            float alpha0 = FRAMA_EXP2F(log2_k * (d_cur - 1.0f));
+            alpha0 = frama_clampf(alpha0, 0.1f, 1.0f);
 
             const float old_n = (2.0f - alpha0) / alpha0;
-            float new_n = (sc_f - fc_f) * ((old_n - 1.0f) / (sc_f - 1.0f)) + fc_f;
-            if (sc_f == 1.0f) {
-                new_n = fc_f;
+            float new_n = fc_f;
+            if (!sc_is_one) {
+                new_n = (sc_f - fc_f) * ((old_n - 1.0f) / (sc_f - 1.0f)) + fc_f;
             }
             float alpha = 2.0f / (new_n + 1.0f);
-            alpha = fmaxf(alpha, sc_lim);
-            alpha = fminf(alpha, 1.0f);
+            alpha = frama_clampf(alpha, sc_lim, 1.0f);
 
-            row_out[i] = alpha * close_i + (1.0f - alpha) * prev_out;
+            // EMA update via FMA: prev + alpha * (close - prev)
+            row_out[i] = fmaf(alpha, (close_i - prev), prev);
         } else {
-            row_out[i] = prev_out;
+            row_out[i] = prev;
         }
 
         ++half_progress;
@@ -426,11 +446,14 @@ extern "C" __global__ void frama_many_series_one_param_f32(
         }
     }
 
-    const float sc_f = static_cast<float>(sc);
-    const float fc_f = static_cast<float>(fc);
-    const float w_ln = logf(2.0f / (sc_f + 1.0f));
-    const float sc_lim = 2.0f / (sc_f + 1.0f);
-    const float ln2 = logf(2.0f);
+    // Hoisted constants and base-2 math
+    const float sc_f     = (float)sc;
+    const float fc_f     = (float)fc;
+    const float inv_half = 1.0f / (float)half;
+    const float inv_win  = 1.0f / (float)win;
+    const float log2_k   = FRAMA_LOG2F(2.0f / (sc_f + 1.0f));
+    const float sc_lim   = 2.0f / (sc_f + 1.0f);
+    const bool  sc_is_one = (sc == 1);
 
     float d_prev = 1.0f;
 
@@ -471,38 +494,36 @@ extern "C" __global__ void frama_many_series_one_param_f32(
         ExtremesPair left = frama_front_or(&d_left_max, &d_left_min, &pm2, &pn2);
         ExtremesPair full = frama_front_or(&d_full_max, &d_full_min, &pm3, &pn3);
 
-        const float hi_i = high_tm[i * num_series + series];
-        const float lo_i = low_tm[i * num_series + series];
+        const float hi_i    = high_tm [i * num_series + series];
+        const float lo_i    = low_tm  [i * num_series + series];
         const float close_i = close_tm[i * num_series + series];
-        const float prev_out = col_out[(i - 1) * num_series];
+        const float prev    = col_out[(i - 1) * num_series];
 
-        if (!(isnan(hi_i) || isnan(lo_i) || isnan(close_i) || isnan(prev_out))) {
-            const float n1 = (right.maxv - right.minv) / static_cast<float>(half);
-            const float n2 = (left.maxv - left.minv) / static_cast<float>(half);
-            const float n3 = (full.maxv - full.minv) / static_cast<float>(win);
+        if (!isnan(hi_i) && !isnan(lo_i) && !isnan(close_i) && !isnan(prev)) {
+            const float n1 = (right.maxv - right.minv) * inv_half;
+            const float n2 = (left .maxv - left .minv) * inv_half;
+            const float n3 = (full .maxv - full .minv) * inv_win;
 
             float d_cur = d_prev;
             if (n1 > 0.0f && n2 > 0.0f && n3 > 0.0f) {
-                d_cur = (logf(n1 + n2) - logf(n3)) / ln2;
+                d_cur = FRAMA_LOG2F(n1 + n2) - FRAMA_LOG2F(n3);
             }
             d_prev = d_cur;
 
-            float alpha0 = expf(w_ln * (d_cur - 1.0f));
-            alpha0 = fmaxf(alpha0, 0.1f);
-            alpha0 = fminf(alpha0, 1.0f);
+            float alpha0 = FRAMA_EXP2F(log2_k * (d_cur - 1.0f));
+            alpha0 = frama_clampf(alpha0, 0.1f, 1.0f);
 
             const float old_n = (2.0f - alpha0) / alpha0;
-            float new_n = (sc_f - fc_f) * ((old_n - 1.0f) / (sc_f - 1.0f)) + fc_f;
-            if (sc_f == 1.0f) {
-                new_n = fc_f;
+            float new_n = fc_f;
+            if (!sc_is_one) {
+                new_n = (sc_f - fc_f) * ((old_n - 1.0f) / (sc_f - 1.0f)) + fc_f;
             }
             float alpha = 2.0f / (new_n + 1.0f);
-            alpha = fmaxf(alpha, sc_lim);
-            alpha = fminf(alpha, 1.0f);
+            alpha = frama_clampf(alpha, sc_lim, 1.0f);
 
-            col_out[i * num_series] = alpha * close_i + (1.0f - alpha) * prev_out;
+            col_out[i * num_series] = fmaf(alpha, (close_i - prev), prev);
         } else {
-            col_out[i * num_series] = prev_out;
+            col_out[i * num_series] = prev;
         }
 
         ++half_progress;

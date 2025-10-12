@@ -344,6 +344,12 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         cmd.arg("-lineinfo");
     }
 
+    // Enable HMA kernel turbo macros by default (shared ring + prefilled output)
+    if rel_src.ends_with("/moving_averages/hma_kernel.cu") || rel_src.ends_with("\\moving_averages\\hma_kernel.cu") {
+        cmd.arg("-DHMA_RING_IN_SHARED=1");
+        cmd.arg("-DHMA_ASSUME_OUT_PREFILLED=1");
+    }
+
     cmd.args(&["-arch", &arch, "-o", ptx_path.to_str().expect("ptx path"), &src_path]);
 
     // Extra NVCC_ARGS passthrough
@@ -380,6 +386,10 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
             cmd2.args(&["-std=c++17", "--expt-relaxed-constexpr", "--extended-lambda", "-ptx", "-O3"]);
             if env::var("CUDA_FAST_MATH").ok().as_deref() != Some("0") { cmd2.arg("--use_fast_math"); }
             if env::var("CUDA_DEBUG").ok().as_deref() == Some("1") { cmd2.arg("-lineinfo"); }
+            if rel_src.ends_with("/moving_averages/hma_kernel.cu") || rel_src.ends_with("\\moving_averages\\hma_kernel.cu") {
+                cmd2.arg("-DHMA_RING_IN_SHARED=1");
+                cmd2.arg("-DHMA_ASSUME_OUT_PREFILLED=1");
+            }
             cmd2.args(&["-arch", "compute_80", "-o", ptx_path.to_str().expect("ptx path"), &src_path]);
             if let Ok(extra) = env::var("NVCC_ARGS") { for tok in extra.split_whitespace() { if !tok.is_empty() { cmd2.arg(tok); } } }
             if cfg!(target_os = "windows") {

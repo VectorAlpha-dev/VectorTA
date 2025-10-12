@@ -14,9 +14,9 @@ use crate::indicators::moving_averages::linreg::{
     expand_grid_linreg, LinRegBatchRange, LinRegParams,
 };
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
+use cust::memory::{AsyncCopyDestination, CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -85,6 +85,7 @@ pub struct CudaLinreg {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+    sm_count: i32, // number of SMs on the active device
 }
 
 impl CudaLinreg {
@@ -92,13 +93,16 @@ impl CudaLinreg {
         cust::init(CudaFlags::empty()).map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
+        let sm_count = device
+            .get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/linreg_kernel.ptx"));
-        // Match ALMA-style JIT preference: O2 + DetermineTargetFromContext with fallbacks.
+        // Prefer DetermineTargetFromContext with OptLevel O4 (most optimized).
         let module = match Module::from_ptx(
             ptx,
-            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)],
+            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O4)],
         ) {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
@@ -119,6 +123,7 @@ impl CudaLinreg {
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
+            sm_count,
         })
     }
 
@@ -294,11 +299,10 @@ impl CudaLinreg {
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
         // Kernel policy selection (only Plain supported for LINREG currently)
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
         };
-        let grid_x = ((combos_len as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let grid: GridSize = self.grid_1d_for(combos_len, block_x);
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe { (*(self as *const _ as *mut CudaLinreg)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
@@ -388,11 +392,6 @@ impl CudaLinreg {
             &mut d_out,
         )?;
 
-        // Ensure completion before returning VRAM handle
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
-
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: combos_len,
@@ -417,6 +416,10 @@ impl CudaLinreg {
             first_valid,
             len,
         )?;
+        // Preserve prior semantics: synchronize before returning device buffer
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
         Ok((dev, combos))
     }
 
@@ -447,6 +450,10 @@ impl CudaLinreg {
             first_valid,
             len,
         )?;
+        // Single sync at the API boundary, then a blocking pageable copy
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
         dev.buf
             .copy_to(out)
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
@@ -542,11 +549,10 @@ impl CudaLinreg {
             .get_function("linreg_many_series_one_param_f32")
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
         let block_x: u32 = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 128,
+            ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
         };
-        let grid_x = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let grid: GridSize = self.grid_1d_for(cols, block_x);
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe { (*(self as *const _ as *mut CudaLinreg)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
@@ -617,11 +623,6 @@ impl CudaLinreg {
         self.launch_many_series_kernel(
             &d_prices, &d_first, cols, rows, period, x_sum, denom_inv, inv_period, &mut d_out,
         )?;
-
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
-
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -638,7 +639,7 @@ impl CudaLinreg {
     ) -> Result<DeviceArrayF32, CudaLinregError> {
         let (first_valids, period, x_sum, denom_inv, inv_period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
-        self.run_many_series_kernel(
+        let dev = self.run_many_series_kernel(
             data_tm_f32,
             cols,
             rows,
@@ -647,7 +648,12 @@ impl CudaLinreg {
             x_sum,
             denom_inv,
             inv_period,
-        )
+        )?;
+        // Synchronize before returning device buffer
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
+        Ok(dev)
     }
 
     pub fn linreg_multi_series_one_param_time_major_into_host_f32(
@@ -677,9 +683,118 @@ impl CudaLinreg {
             denom_inv,
             inv_period,
         )?;
+        // Single sync then blocking pageable copy
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
         dev.buf
             .copy_to(out_tm)
             .map_err(|e| CudaLinregError::Cuda(e.to_string()))
+    }
+
+    // Compute a right-sized grid for grid-stride 1D kernels
+    #[inline]
+    fn grid_1d_for(&self, work_items: usize, block_x: u32) -> GridSize {
+        let blocks_needed = ((work_items as u32).saturating_add(block_x - 1)) / block_x;
+        let max_blocks = (self.sm_count as u32).saturating_mul(32).max(1);
+        let grid_x = core::cmp::min(blocks_needed.max(1), max_blocks);
+        (grid_x, 1, 1).into()
+    }
+
+    /// Optional fast path: copy Device -> pinned host asynchronously, then sync once.
+    /// Caller benefits when they can reuse `LockedBuffer` across runs.
+    pub fn linreg_batch_into_locked_host_f32(
+        &self,
+        data_f32: &[f32],
+        sweep: &LinRegBatchRange,
+        pinned_out: &mut cust::memory::LockedBuffer<f32>,
+    ) -> Result<(usize, usize, Vec<LinRegParams>), CudaLinregError> {
+        let (combos, first_valid, len, periods_i32, x_sums, denom_invs, inv_periods) =
+            Self::prepare_batch_inputs(data_f32, sweep)?;
+        let expected = combos.len() * len;
+        if pinned_out.len() != expected {
+            return Err(CudaLinregError::InvalidInput(format!(
+                "pinned output length mismatch: expected {}, got {}",
+                expected,
+                pinned_out.len()
+            )));
+        }
+        let dev = self.run_batch_kernel(
+            data_f32,
+            &periods_i32,
+            &x_sums,
+            &denom_invs,
+            &inv_periods,
+            combos.len(),
+            first_valid,
+            len,
+        )?;
+        unsafe {
+            dev.buf
+                .async_copy_to(pinned_out.as_mut_slice(), &self.stream)
+                .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
+        Ok((combos.len(), len, combos))
+    }
+
+    /// Skip CPU scan for first_valids when already computed by the caller.
+    pub fn linreg_multi_series_one_param_time_major_dev_with_first_valids(
+        &self,
+        data_tm_f32: &[f32],
+        cols: usize,
+        rows: usize,
+        params: &LinRegParams,
+        first_valids: &[i32],
+    ) -> Result<DeviceArrayF32, CudaLinregError> {
+        if first_valids.len() != cols {
+            return Err(CudaLinregError::InvalidInput(format!(
+                "first_valids length mismatch: expected {}, got {}",
+                cols,
+                first_valids.len()
+            )));
+        }
+        let period = params
+            .period
+            .ok_or_else(|| CudaLinregError::InvalidInput("period must be at least 1".into()))?
+            as usize;
+        if period == 0 || period > rows {
+            return Err(CudaLinregError::InvalidInput(format!(
+                "period {} invalid for rows {}",
+                period, rows
+            )));
+        }
+        for (s, &fv) in first_valids.iter().enumerate() {
+            let fv = fv as isize;
+            if fv < 0 || fv as usize >= rows || (rows - (fv as usize)) < period {
+                return Err(CudaLinregError::InvalidInput(format!(
+                    "series {} insufficient data for period {} (first_valid={}, rows={})",
+                    s, period, fv, rows
+                )));
+            }
+        }
+        let pf = period as f64;
+        let x_sum = (pf * (pf + 1.0) * 0.5) as f32;
+        let x2_sum = (pf * (pf + 1.0) * (2.0 * pf + 1.0) / 6.0) as f32;
+        let denom_inv = (1.0f64 / (pf * x2_sum as f64 - (x_sum as f64) * (x_sum as f64))) as f32;
+        let inv_period = (1.0f64 / pf) as f32;
+
+        let dev = self.run_many_series_kernel(
+            data_tm_f32,
+            cols,
+            rows,
+            first_valids,
+            period,
+            x_sum,
+            denom_inv,
+            inv_period,
+        )?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaLinregError::Cuda(e.to_string()))?;
+        Ok(dev)
     }
 }
 

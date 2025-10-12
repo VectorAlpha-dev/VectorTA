@@ -22,6 +22,13 @@ use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[inline]
+fn vpwma_tile_t() -> usize {
+    option_env!("VPWMA_TILE_T")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(128)
+}
+
 #[derive(Debug)]
 pub enum CudaVpwmaError {
     Cuda(String),
@@ -333,19 +340,42 @@ impl CudaVpwma {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaVpwmaError> {
-        let func = self
+        use cust::context::CacheConfig;
+        let mut func = self
             .module
             .get_function("vpwma_batch_f32")
             .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
+        let _ = func.set_cache_config(CacheConfig::PreferShared);
 
-        // Policy: allow override of batch block size; default 128
+        // One block per combo (CTA-per-row tiled kernel path)
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 128,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
         };
-        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        // Dynamic shared memory requirement per CTA = weights(stride) + tile(T) + (stride-1)
+        // in floats, then *4 bytes.
+        let t_tile = vpwma_tile_t();
+        let smem_floats = t_tile
+            .checked_add(2usize.saturating_mul(stride))
+            .and_then(|v| v.checked_sub(1))
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("dynamic shared memory size overflow".into()))?;
+        let smem_bytes_u32: u32 = smem_floats
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|b| u32::try_from(b).ok())
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("dynamic shared memory size overflow".into()))?;
+
+        if let Ok(avail) = func.available_dynamic_shared_memory_per_block(grid, block) {
+            if (smem_bytes_u32 as usize) > avail {
+                return Err(CudaVpwmaError::InvalidInput(format!(
+                    "vpwma_batch_f32 requires {}B dynamic shared memory (T_TILE={} + 2*stride={} - 1 floats), \
+                     but only {}B available for this launch; reduce periods or VPWMA_TILE_T.",
+                    smem_bytes_u32, t_tile, stride, avail
+                )));
+            }
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -373,7 +403,7 @@ impl CudaVpwma {
             ];
 
             self.stream
-                .launch(&func, grid, block, 0, args)
+                .launch(&func, grid, block, smem_bytes_u32, args)
                 .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
         }
         // Record introspection for debug once-per-run
@@ -393,10 +423,12 @@ impl CudaVpwma {
         series_len: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaVpwmaError> {
-        let func = self
+        use cust::context::CacheConfig;
+        let mut func = self
             .module
             .get_function("vpwma_many_series_one_param_f32")
             .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
+        let _ = func.set_cache_config(CacheConfig::PreferShared);
 
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
@@ -405,6 +437,23 @@ impl CudaVpwma {
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        // Dynamic shared memory for per-CTA weight cache: win_len floats
+        let win_len = period.saturating_sub(1);
+        let smem_bytes_u32: u32 = win_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .and_then(|b| u32::try_from(b).ok())
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("dynamic shared memory size overflow".into()))?;
+
+        if let Ok(avail) = func.available_dynamic_shared_memory_per_block(grid, block) {
+            if (smem_bytes_u32 as usize) > avail {
+                return Err(CudaVpwmaError::InvalidInput(format!(
+                    "vpwma_many_series_one_param_f32 requires {}B dynamic shared memory for weights, \
+                     but only {}B available for this launch.",
+                    smem_bytes_u32, avail
+                )));
+            }
+        }
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -427,9 +476,9 @@ impl CudaVpwma {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
+        self.stream
+            .launch(&func, grid, block, smem_bytes_u32, args)
+            .map_err(|e| CudaVpwmaError::Cuda(e.to_string()))?;
         }
         // Record introspection for debug once-per-run
         unsafe { (*(self as *const _ as *mut CudaVpwma)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
