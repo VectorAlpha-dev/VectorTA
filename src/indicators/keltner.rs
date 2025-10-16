@@ -2739,7 +2739,9 @@ pub fn keltner_cuda_batch_dev_py<'py>(
         let cuda = CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let res = cuda.keltner_batch_dev(h, l, c, s, &sweep, ma_type)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((res.outputs.upper, res.outputs.middle, res.outputs.lower, res.outputs.upper.rows, res.outputs.upper.cols))
+        let rows = res.outputs.upper.rows;
+        let cols = res.outputs.upper.cols;
+        Ok::<_, PyErr>((res.outputs.upper, res.outputs.middle, res.outputs.lower, rows, cols))
     })?;
     let dict = PyDict::new(py);
     dict.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: up })?)?;

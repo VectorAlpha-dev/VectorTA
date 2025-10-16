@@ -3525,7 +3525,7 @@ pub fn damiani_cuda_batch_dev_py<'py>(
         let cuda = crate::cuda::CudaDamianiVolatmeter::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (arr, _combos) = cuda.damiani_volatmeter_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyValueError>(arr)
+        Ok::<_, pyo3::PyErr>(arr)
     })?;
 
     Ok(DeviceArrayF32Py { inner })

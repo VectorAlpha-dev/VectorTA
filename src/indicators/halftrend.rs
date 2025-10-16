@@ -3122,8 +3122,8 @@ pub fn halftrend_cuda_batch_dev_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "halftrend_cuda_many_series_one_param_dev")]
 #[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, cols, rows, amplitude, channel_deviation, atr_period, device_id=0))]
-pub fn halftrend_cuda_many_series_one_param_dev_py(
-    py: Python<'_>,
+pub fn halftrend_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
     high_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
     low_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
     close_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
@@ -3133,7 +3133,7 @@ pub fn halftrend_cuda_many_series_one_param_dev_py(
     channel_deviation: f64,
     atr_period: usize,
     device_id: usize,
-) -> PyResult<Bound<'_, PyDict>> {
+) -> PyResult<Bound<'py, PyDict>> {
     if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
     let h = high_tm_f32.as_slice()?; let l = low_tm_f32.as_slice()?; let c = close_tm_f32.as_slice()?;
     let out = py.allow_threads(|| {

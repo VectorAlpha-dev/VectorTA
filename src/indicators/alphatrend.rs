@@ -2232,13 +2232,15 @@ pub fn alphatrend_cuda_batch_dev_py<'py>(
         Ok::<_, PyErr>((out, coeffs, periods))
     })?;
 
+    let rows = batch.k1.rows;
+    let cols = batch.k1.cols;
     let dict = PyDict::new(py);
     dict.set_item("k1", Py::new(py, DeviceArrayF32Py { inner: batch.k1 })?)?;
     dict.set_item("k2", Py::new(py, DeviceArrayF32Py { inner: batch.k2 })?)?;
     dict.set_item("coeffs", coeffs_vec.into_pyarray(py))?;
     dict.set_item("periods", periods_vec.into_pyarray(py))?;
-    dict.set_item("rows", batch.k1.rows)?;
-    dict.set_item("cols", batch.k1.cols)?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
     Ok(dict)
 }
 

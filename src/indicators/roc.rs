@@ -1132,7 +1132,7 @@ pub fn roc_into(
             roc_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
-    Ok(())
+    return Ok(());
 }
 
 // ---------------- CUDA Python bindings ----------------

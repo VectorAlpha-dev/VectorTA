@@ -10,6 +10,12 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
+// Provide a portable definition of M_PI when building with toolchains
+// (e.g., MSVC) that don't expose it by default.
+#ifndef M_PI
+#define M_PI 3.14159265358979323846264338327950288
+#endif
+
 #ifndef LRA_NAN_F
 #define LRA_NAN_F (__int_as_float(0x7fffffff))
 #endif

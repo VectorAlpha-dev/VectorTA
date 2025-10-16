@@ -54,7 +54,6 @@ pub mod otto_wrapper;
 
 pub mod buff_averages_wrapper;
 #[cfg(feature = "cuda")]
-#[cfg(feature = "cuda")]
 pub mod cwma_wrapper;
 #[cfg(feature = "cuda")]
 pub mod cora_wave_wrapper;
@@ -105,8 +104,6 @@ pub mod rsmk_wrapper;
 pub mod vidya_wrapper;
 #[cfg(feature = "cuda")]
 pub mod correlation_cycle_wrapper;
-#[cfg(feature = "cuda")]
-pub mod vidya_wrapper;
 #[cfg(feature = "cuda")]
 pub mod trix_wrapper;
 #[cfg(feature = "cuda")]
@@ -239,8 +236,7 @@ pub use correlation_cycle_wrapper::{
     DeviceCorrelationCycleQuad,
     ManySeriesKernelPolicy as CorrelationCycleManySeriesKernelPolicy,
 };
-#[cfg(feature = "cuda")]
-pub use vidya_wrapper::{CudaVidya, CudaVidyaError};
+// (duplicate export removed)
 #[cfg(feature = "cuda")]
 pub use macz_wrapper::{CudaMacz, CudaMaczError};
 #[cfg(feature = "cuda")]

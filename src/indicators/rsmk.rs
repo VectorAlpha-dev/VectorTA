@@ -2099,9 +2099,9 @@ use crate::cuda::{cuda_available, CudaRsmk};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::{pyfunction, PyResult, Python};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::exceptions::PyValueError;
+// PyValueError already imported above under `#[cfg(feature = "python")]`.
 #[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "rsmk_cuda_batch_dev")]

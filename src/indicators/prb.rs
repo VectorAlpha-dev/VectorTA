@@ -2496,11 +2496,11 @@ use crate::cuda::{cuda_available, CudaPrb};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::PyReadonlyArray1;
+// PyReadonlyArray1 already imported above under `#[cfg(feature = "python")]`.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::{pyfunction, PyResult, Python};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::exceptions::PyValueError;
+// PyValueError already imported above under `#[cfg(feature = "python")]`.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "prb_cuda_batch_dev")]

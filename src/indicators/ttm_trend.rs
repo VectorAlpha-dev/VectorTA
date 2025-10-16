@@ -1042,9 +1042,9 @@ use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::ttm_trend_wrapper::CudaTtmTrend;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::{PyReadonlyArray1, PyReadonlyArray2};
+use numpy::PyReadonlyArray2;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::exceptions::PyValueError;
+// PyValueError imported in the general Python section below.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
 

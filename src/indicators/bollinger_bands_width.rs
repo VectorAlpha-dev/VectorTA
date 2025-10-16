@@ -2466,11 +2466,12 @@ pub fn bollinger_bands_width_cuda_batch_dev_py<'py>(
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|(p, _)| *p as u64).collect();
     let uplusd: Vec<f64> = combos.iter().map(|(_, k)| *k as f64).collect();
+    let uplusd_len = uplusd.len();
     dict.set_item("periods", periods.into_pyarray(py))?;
     dict.set_item("u_plus_d", uplusd.into_pyarray(py))?;
     // For SMA/stddev-only CUDA path, expose fixed metadata
-    dict.set_item("ma_types", PyList::new(py, vec!["sma"; uplusd.len()])?)?;
-    dict.set_item("devtypes", vec![0u64; uplusd.len()].into_pyarray(py))?;
+    dict.set_item("ma_types", PyList::new(py, vec!["sma"; uplusd_len])?)?;
+    dict.set_item("devtypes", vec![0u64; uplusd_len].into_pyarray(py))?;
 
     Ok((DeviceArrayF32Py { inner }, dict))
 }

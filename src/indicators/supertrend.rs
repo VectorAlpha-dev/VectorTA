@@ -1073,8 +1073,8 @@ pub fn supertrend_cuda_many_series_one_param_dev_py<'py>(
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: out.plus })?)?;
     dict.set_item("changed", Py::new(py, DeviceArrayF32Py { inner: out.minus })?)?;
-    dict.set_item("cols", cols.into_py(py))?;
-    dict.set_item("rows", rows.into_py(py))?;
+    dict.set_item("cols", cols)?;
+    dict.set_item("rows", rows)?;
     Ok(dict)
 }
 

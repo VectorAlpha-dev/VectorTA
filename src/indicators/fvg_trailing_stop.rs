@@ -2151,7 +2151,7 @@ pub fn fvg_trailing_stop_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::PyReadonlyArray1;
+// PyReadonlyArray1 already in scope elsewhere when needed.
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "fvg_trailing_stop_cuda_batch_dev")]
 #[pyo3(signature = (high, low, close, lookback_range, smoothing_range, reset_toggle, device_id=0))]

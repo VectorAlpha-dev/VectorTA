@@ -2119,9 +2119,7 @@ use crate::cuda::{cuda_available, CudaSqueezeMomentum};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::PyReadonlyArray1;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::exceptions::PyValueError;
+// PyReadonlyArray1 and PyValueError already imported for Python above.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "squeeze_momentum_cuda_batch_dev")]

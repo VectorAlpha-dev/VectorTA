@@ -1800,7 +1800,7 @@ pub fn tsf_into(
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             tsf_into_slice(out, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
-    Ok(())
+    return Ok(());
 }
 
 // ================= Python CUDA Bindings =================

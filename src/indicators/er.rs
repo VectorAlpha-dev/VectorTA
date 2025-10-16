@@ -1275,7 +1275,7 @@ use crate::cuda::er_wrapper::CudaEr;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyReadonlyArray1;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::exceptions::PyValueError;
+// PyValueError already imported above under `#[cfg(feature = "python")]`.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
 

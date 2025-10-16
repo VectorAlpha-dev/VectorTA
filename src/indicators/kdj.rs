@@ -3600,9 +3600,7 @@ use crate::cuda::{cuda_available, CudaKdj};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::PyReadonlyArray1;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::exceptions::PyValueError;
+// PyReadonlyArray1 and PyValueError already imported earlier in this module.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "kdj_cuda_batch_dev")]

@@ -20,6 +20,8 @@
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]

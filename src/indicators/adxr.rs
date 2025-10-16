@@ -40,6 +40,8 @@ use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaAdxr;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyUntypedArrayMethods;
 
 // Note: AVec<f64> already implements Send since f64 is Send
 // No wrapper types needed

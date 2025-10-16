@@ -3612,7 +3612,7 @@ use crate::cuda::{cuda_available, CudaModGodMode};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::{PyReadonlyArray1, PyReadonlyArray2};
+use numpy::PyReadonlyArray2;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::{pyfunction, PyResult, Python};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3644,7 +3644,9 @@ pub fn mod_god_mode_cuda_batch_dev_py<'py>(
         let cuda = CudaModGodMode::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let res = cuda.mod_god_mode_batch_dev(h, l, c, vol, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = res.outputs;
-        Ok::<_, PyErr>((out.wt1, out.wt2, out.hist, res.combos, out.rows, out.cols))
+        let rows = out.rows();
+        let cols = out.cols();
+        Ok::<_, PyErr>((out.wt1, out.wt2, out.hist, res.combos, rows, cols))
     })?;
     let dict = PyDict::new(py);
     dict.set_item("wavetrend", Py::new(py, DeviceArrayF32Py { inner: wt })?)?;

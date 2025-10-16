@@ -16,6 +16,12 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
+// Provide a portable definition of M_PI when building with toolchains
+// (e.g., MSVC) that don't expose it by default.
+#ifndef M_PI
+#define M_PI 3.14159265358979323846264338327950288
+#endif
+
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
 
 // Compute s1 matching the scalar implementation (for parity)

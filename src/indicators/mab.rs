@@ -2104,7 +2104,7 @@ use crate::cuda::{cuda_available, moving_averages::CudaMab};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::{pyfunction, PyResult, Python};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::exceptions::PyValueError;
+// PyValueError already imported above under `#[cfg(feature = "python")]`.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 
@@ -2134,8 +2134,10 @@ pub fn mab_cuda_batch_dev_py(
     };
     let (up, mid, lo) = py.allow_threads(|| {
         let cuda = CudaMab::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let (trip, _combos) = cuda.mab_batch_dev(slice, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyValueError>((trip.upper, trip.middle, trip.lower))
+        let (trip, _combos) = cuda
+            .mab_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((trip.upper, trip.middle, trip.lower))
     })?;
     Ok((DeviceArrayF32Py{ inner: up }, DeviceArrayF32Py{ inner: mid }, DeviceArrayF32Py{ inner: lo }))
 }
@@ -2170,7 +2172,7 @@ pub fn mab_cuda_many_series_one_param_dev_py(
         let cuda = CudaMab::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let trip = cuda.mab_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyValueError>((trip.upper, trip.middle, trip.lower))
+        Ok::<_, pyo3::PyErr>((trip.upper, trip.middle, trip.lower))
     })?;
     Ok((DeviceArrayF32Py{ inner: up }, DeviceArrayF32Py{ inner: mid }, DeviceArrayF32Py{ inner: lo }))
 }

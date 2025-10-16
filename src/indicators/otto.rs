@@ -2265,7 +2265,7 @@ pub fn otto_cuda_batch_dev_py(
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "otto_cuda_many_series_one_param_dev")]
-#[pyo3(signature = (prices_tm_f32, cols, rows, ott_period=2, ott_percent=0.6, fast_vidya_length=10, slow_vidya_length=25, correcting_constant=100000.0, ma_type="VAR", device_id=0))]
+#[pyo3(signature = (prices_tm_f32, cols, rows, ott_period=2, ott_percent=0.6, fast_vidya_length=10, slow_vidya_length=25, correcting_constant=100000.0, _ma_type="VAR", device_id=0))]
 pub fn otto_cuda_many_series_one_param_dev_py(
     py: Python<'_>,
     prices_tm_f32: numpy::PyReadonlyArray1<'_, f32>,

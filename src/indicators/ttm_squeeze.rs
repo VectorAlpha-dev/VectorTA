@@ -1533,7 +1533,7 @@ use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyReadonlyArray1;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::exceptions::PyValueError;
+// PyValueError already imported in Python bindings above.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ttm_squeeze_cuda_batch_dev")]

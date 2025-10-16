@@ -58,6 +58,8 @@ use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::cuda::{cuda_available, CudaRangeFilter};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyUntypedArrayMethods;
 
 impl<'a> AsRef<[f64]> for RangeFilterInput<'a> {
     #[inline(always)]

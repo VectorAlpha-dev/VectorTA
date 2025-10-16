@@ -2556,7 +2556,7 @@ pub fn dvdiqqe_batch_py<'py>(
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "dvdiqqe_cuda_batch_dev")]
-#[pyo3(signature = (open_f32, close_f32, volume_f32=None, period_range, smoothing_period_range, fast_mult_range, slow_mult_range, volume_type="default", center_type="dynamic", tick_size=0.01, device_id=0))]
+#[pyo3(signature = (open_f32, close_f32, volume_f32, period_range, smoothing_period_range, fast_mult_range, slow_mult_range, volume_type="default", center_type="dynamic", tick_size=0.01, device_id=0))]
 pub fn dvdiqqe_cuda_batch_dev_py(
     py: Python<'_>,
     open_f32: PyReadonlyArray1<'_, f32>,
@@ -2576,7 +2576,10 @@ pub fn dvdiqqe_cuda_batch_dev_py(
 
     let o = open_f32.as_slice()?;
     let c = close_f32.as_slice()?;
-    let v_opt: Option<&[f32]> = match volume_f32 { Some(v) => Some(v.as_slice()?), None => None };
+    let v_opt: Option<&[f32]> = match volume_f32.as_ref() {
+        Some(v) => Some(v.as_slice()?),
+        None => None,
+    };
     if o.len() != c.len() { return Err(PyValueError::new_err("open/close length mismatch")); }
     if let Some(v) = v_opt { if v.len() != c.len() { return Err(PyValueError::new_err("volume length mismatch")); } }
 
@@ -2599,7 +2602,7 @@ pub fn dvdiqqe_cuda_batch_dev_py(
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "dvdiqqe_cuda_many_series_one_param_dev")]
-#[pyo3(signature = (open_tm_f32, close_tm_f32, cols, rows, period, smoothing, fast_mult, slow_mult, volume_tm_f32=None, volume_type="default", center_type="dynamic", tick_size=0.01, device_id=0))]
+#[pyo3(signature = (open_tm_f32, close_tm_f32, cols, rows, period, smoothing, fast_mult, slow_mult, volume_tm_f32, volume_type="default", center_type="dynamic", tick_size=0.01, device_id=0))]
 pub fn dvdiqqe_cuda_many_series_one_param_dev_py(
     py: Python<'_>,
     open_tm_f32: PyReadonlyArray1<'_, f32>,
@@ -2621,7 +2624,10 @@ pub fn dvdiqqe_cuda_many_series_one_param_dev_py(
 
     let o_tm = open_tm_f32.as_slice()?;
     let c_tm = close_tm_f32.as_slice()?;
-    let v_tm: Option<&[f32]> = match volume_tm_f32 { Some(v) => Some(v.as_slice()?), None => None };
+    let v_tm: Option<&[f32]> = match volume_tm_f32.as_ref() {
+        Some(v) => Some(v.as_slice()?),
+        None => None,
+    };
     let expected = cols.checked_mul(rows).ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
     if o_tm.len() != expected || c_tm.len() != expected { return Err(PyValueError::new_err("time-major input length mismatch")); }
     if let Some(v) = v_tm { if v.len() != expected { return Err(PyValueError::new_err("time-major volume mismatch")); } }

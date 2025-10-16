@@ -1940,7 +1940,8 @@ pub fn macd_cuda_batch_dev_py<'py>(
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::CudaMacd;
     use crate::cuda::oscillators::macd_wrapper::DeviceMacdTriplet;
-    use numpy::{IntoPyArray, PyList};
+    use numpy::IntoPyArray;
+    use pyo3::types::PyList;
 
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));

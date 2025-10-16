@@ -1135,14 +1135,20 @@ pub fn trix_cuda_batch_dev_py<'py>(
     let slice_in = data_f32.as_slice()?;
     let sweep = TrixBatchRange { period: period_range };
 
-    let (inner, combos) = py.allow_threads(|| {
+    let inner = py.allow_threads(|| {
         let cuda = CudaTrix::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.trix_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let dict = PyDict::new(py);
-    let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
+    let (start, end, step) = period_range;
+    let mut periods: Vec<u64> = Vec::new();
+    if step == 0 { periods.push(start as u64); }
+    else {
+        let mut p = start;
+        while p <= end { periods.push(p as u64); p = p.saturating_add(step); }
+    }
     dict.set_item("periods", periods.into_pyarray(py))?;
 
     Ok((DeviceArrayF32Py { inner }, dict))

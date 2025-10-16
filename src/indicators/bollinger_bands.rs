@@ -3205,7 +3205,7 @@ use numpy::PyReadonlyArray1;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::{pyfunction, PyResult, Python};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::exceptions::PyValueError;
+// PyValueError already imported above under `#[cfg(feature = "python")]`.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "bollinger_bands_cuda_batch_dev")]

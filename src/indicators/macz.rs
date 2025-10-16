@@ -2269,7 +2269,7 @@ pub fn macz_cuda_batch_dev_py<'py>(
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "macz_cuda_many_series_one_param_dev")]
-#[pyo3(signature = (close_tm_f32, volume_tm_f32=None, cols, rows, fast_length=12, slow_length=25, signal_length=9, lengthz=20, length_stdev=25, a=1.0, b=1.0, use_lag=false, gamma=0.02, device_id=0))]
+#[pyo3(signature = (close_tm_f32, volume_tm_f32, cols, rows, fast_length=12, slow_length=25, signal_length=9, lengthz=20, length_stdev=25, a=1.0, b=1.0, use_lag=false, gamma=0.02, device_id=0))]
 pub fn macz_cuda_many_series_one_param_dev_py<'py>(
     py: Python<'py>,
     close_tm_f32: numpy::PyReadonlyArray1<'py, f32>,

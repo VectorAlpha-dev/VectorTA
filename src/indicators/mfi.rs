@@ -1329,7 +1329,7 @@ pub fn mfi_cuda_batch_dev_py(
     let vol = volume.as_slice()?;
     if tp.len() != vol.len() { return Err(PyValueError::new_err("mismatched input lengths")); }
     let sweep = MfiBatchRange { period: period_range };
-    let inner = py.allow_threads(|| {
+    let (inner, _combos) = py.allow_threads(|| {
         let cuda = CudaMfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.mfi_batch_dev(tp, vol, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
