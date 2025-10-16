@@ -2339,6 +2339,66 @@ pub fn apo_batch_py<'py>(
     Ok(dict)
 }
 
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "apo_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, short_range=(10,10,0), long_range=(20,20,0), device_id=0))]
+pub fn apo_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    short_range: (usize, usize, usize),
+    long_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaApo;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = data_f32.as_slice()?;
+    let sweep = ApoBatchRange { short: short_range, long: long_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaApo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.apo_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "apo_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, short_period, long_period, device_id=0))]
+pub fn apo_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    short_period: usize,
+    long_period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaApo;
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    if short_period == 0 || long_period == 0 || short_period >= long_period {
+        return Err(PyValueError::new_err("invalid short/long period"));
+    }
+    let flat = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = ApoParams { short_period: Some(short_period), long_period: Some(long_period) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaApo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.apo_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 // ================================================================================================
 // WASM Bindings
 // ================================================================================================

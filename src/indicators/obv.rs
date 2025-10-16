@@ -1223,6 +1223,75 @@ pub fn obv_batch_py<'py>(
     Ok(dict)
 }
 
+// ---------------- CUDA Python bindings -----------------
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaObv;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "obv_cuda_batch_dev")]
+#[pyo3(signature = (close, volume, device_id=0))]
+pub fn obv_cuda_batch_dev_py(
+    py: Python<'_>,
+    close: PyReadonlyArray1<'_, f32>,
+    volume: PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let close_slice = close.as_slice()?;
+    let volume_slice = volume.as_slice()?;
+    if close_slice.len() != volume_slice.len() {
+        return Err(PyValueError::new_err("mismatched input lengths"));
+    }
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaObv::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .obv_batch_dev(close_slice, volume_slice)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "obv_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (close_tm, volume_tm, cols, rows, device_id=0))]
+pub fn obv_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    close_tm: PyReadonlyArray1<'_, f32>,
+    volume_tm: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let close_slice = close_tm.as_slice()?;
+    let volume_slice = volume_tm.as_slice()?;
+    if close_slice.len() != volume_slice.len() || close_slice.len() != cols * rows {
+        return Err(PyValueError::new_err("mismatched input sizes or dims"));
+    }
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaObv::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .obv_many_series_one_param_time_major_dev(close_slice, volume_slice, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn obv_js(close: &[f64], volume: &[f64]) -> Result<Vec<f64>, JsValue> {

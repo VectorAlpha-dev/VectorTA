@@ -34,6 +34,19 @@ pub mod lrsi_wrapper;
 pub mod tsi_wrapper;
 pub mod ppo_wrapper;
 pub mod stoch_wrapper;
+pub mod cci_cycle_wrapper;
+#[cfg(feature = "cuda")]
+pub mod kst_wrapper;
+#[cfg(feature = "cuda")]
+pub mod msw_wrapper;
+#[cfg(feature = "cuda")]
+pub mod qqe_wrapper;
+#[cfg(feature = "cuda")]
+pub mod rocp_wrapper;
+#[cfg(feature = "cuda")]
+pub mod rvi_wrapper;
+#[cfg(feature = "cuda")]
+pub mod stc_wrapper;
 
 #[cfg(feature = "cuda")]
 pub use willr_wrapper::{CudaWillr, CudaWillrError};
@@ -131,3 +144,16 @@ pub use lrsi_wrapper::{CudaLrsi, CudaLrsiError};
 pub use tsi_wrapper::{CudaTsi, CudaTsiError};
 pub use ppo_wrapper::{CudaPpo, CudaPpoError};
 pub use stoch_wrapper::{CudaStoch, CudaStochError};
+pub use cci_cycle_wrapper::{CudaCciCycle, CudaCciCycleError};
+#[cfg(feature = "cuda")]
+pub use kst_wrapper::{CudaKst, CudaKstError, DeviceKstPair};
+#[cfg(feature = "cuda")]
+pub use msw_wrapper::{CudaMsw, CudaMswError};
+#[cfg(feature = "cuda")]
+pub use qqe_wrapper::{CudaQqe, CudaQqeError};
+#[cfg(feature = "cuda")]
+pub use rocp_wrapper::{CudaRocp, CudaRocpError};
+#[cfg(feature = "cuda")]
+pub use rvi_wrapper::{CudaRvi, CudaRviError};
+#[cfg(feature = "cuda")]
+pub use stc_wrapper::{CudaStc, CudaStcError};

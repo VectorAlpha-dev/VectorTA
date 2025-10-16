@@ -25,6 +25,18 @@ pub mod chande_wrapper;
 pub mod cvi_wrapper;
 #[cfg(feature = "cuda")]
 pub mod keltner_wrapper;
+#[cfg(feature = "cuda")]
+pub mod medprice_wrapper;
+#[cfg(feature = "cuda")]
+pub mod eri_wrapper;
+#[cfg(feature = "cuda")]
+pub mod adx_wrapper;
+#[cfg(feature = "cuda")]
+pub mod avsl_wrapper;
+#[cfg(feature = "cuda")]
+pub mod dm_wrapper;
+#[cfg(feature = "cuda")]
+pub mod dx_wrapper;
 
 #[cfg(feature = "cuda")]
 pub use bench::{CudaBenchScenario, CudaBenchState};
@@ -54,7 +66,27 @@ pub use ad_wrapper::{CudaAd, CudaAdError};
 #[cfg(feature = "cuda")]
 pub use alphatrend_wrapper::{CudaAlphaTrend, CudaAlphaTrendError};
 #[cfg(feature = "cuda")]
+pub use medprice_wrapper::CudaMedprice;
+#[cfg(feature = "cuda")]
+pub use eri_wrapper::{CudaEri, CudaEriError};
+#[cfg(feature = "cuda")]
+pub use adx_wrapper::{CudaAdx, CudaAdxError};
+#[cfg(feature = "cuda")]
+pub use avsl_wrapper::{CudaAvsl, CudaAvslError};
+#[cfg(feature = "cuda")]
+pub use dm_wrapper::{CudaDm, CudaDmError};
+#[cfg(feature = "cuda")]
+pub use dx_wrapper::{CudaDx, CudaDxError};
+#[cfg(feature = "cuda")]
 pub mod oscillators;
+#[cfg(feature = "cuda")]
+pub use oscillators::msw_wrapper::{CudaMsw, CudaMswError};
+#[cfg(feature = "cuda")]
+pub use oscillators::qqe_wrapper::{CudaQqe, CudaQqeError};
+#[cfg(feature = "cuda")]
+pub use oscillators::rvi_wrapper::{CudaRvi, CudaRviError};
+#[cfg(feature = "cuda")]
+pub use oscillators::stc_wrapper::{CudaStc, CudaStcError};
 #[cfg(feature = "cuda")]
 pub mod wto_wrapper;
 #[cfg(feature = "cuda")]
@@ -75,6 +107,8 @@ pub mod ttm_trend_wrapper;
 pub mod vpt_wrapper;
 #[cfg(feature = "cuda")]
 pub mod bollinger_bands_wrapper;
+#[cfg(feature = "cuda")]
+pub mod vwmacd_wrapper;
 
 #[cfg(feature = "cuda")]
 pub use moving_averages::cwma_wrapper::CudaCwma;
@@ -114,6 +148,8 @@ pub use supertrend_wrapper::{CudaSupertrend, CudaSupertrendError};
 pub use ttm_trend_wrapper::{CudaTtmTrend, CudaTtmTrendError};
 #[cfg(feature = "cuda")]
 pub use vpt_wrapper::{CudaVpt, CudaVptError};
+#[cfg(feature = "cuda")]
+pub use vwmacd_wrapper::{CudaVwmacd, CudaVwmacdError};
 #[cfg(feature = "cuda")]
 pub mod wad_wrapper;
 #[cfg(feature = "cuda")]
@@ -162,13 +198,26 @@ pub mod prb_wrapper;
 pub mod vi_wrapper;
 #[cfg(feature = "cuda")]
 pub mod vpci_wrapper;
+#[cfg(feature = "cuda")]
+pub mod chandelier_exit_wrapper;
+#[cfg(feature = "cuda")]
+pub mod damiani_volatmeter_wrapper;
+#[cfg(feature = "cuda")]
+pub mod halftrend_wrapper;
+#[cfg(feature = "cuda")]
+pub mod obv_wrapper;
+#[cfg(feature = "cuda")]
+pub mod pivot_wrapper;
+#[cfg(feature = "cuda")]
+pub mod ui_wrapper;
 
 #[cfg(feature = "cuda")]
 pub use moving_averages::{
     CudaBuffAverages, CudaBuffAveragesError, CudaFrama, CudaFramaError, CudaHma, CudaHmaError,
     CudaLinreg, CudaLinregError, CudaLinregIntercept, CudaLinregInterceptError, CudaNma, CudaNmaError, CudaSma, CudaSmaError, CudaSuperSmoother,
     CudaSuperSmootherError, CudaTrendflex, CudaTrendflexError, CudaVolumeAdjustedMa,
-    CudaVolumeAdjustedMaError, CudaVpwma, CudaVpwmaError, CudaZlema, CudaZlemaError, CudaVidya, CudaVidyaError,
+    CudaVolumeAdjustedMaError, CudaVpwma, CudaVpwmaError, CudaZlema, CudaZlemaError, CudaVidya, CudaVidyaError, CudaApo, CudaVlma,
+    CudaLinearregSlope, CudaLinearregSlopeError,
 };
 #[cfg(feature = "cuda")]
 pub use oscillators::cfo_wrapper::{CudaCfo, CudaCfoError};
@@ -266,6 +315,18 @@ pub use oscillators::squeeze_momentum_wrapper::{CudaSqueezeMomentum, CudaSmiErro
 pub use oscillators::ttm_squeeze_wrapper::{CudaTtmSqueeze, CudaTtmSqueezeError};
 #[cfg(feature = "cuda")]
 pub use bollinger_bands_wrapper::{CudaBollingerBands, CudaBollingerError};
+#[cfg(feature = "cuda")]
+pub use chandelier_exit_wrapper::{CudaChandelierExit, CudaCeError};
+#[cfg(feature = "cuda")]
+pub use damiani_volatmeter_wrapper::{CudaDamianiVolatmeter, CudaDamianiError};
+#[cfg(feature = "cuda")]
+pub use halftrend_wrapper::{CudaHalftrend, CudaHalftrendError};
+#[cfg(feature = "cuda")]
+pub use obv_wrapper::{CudaObv, CudaObvError};
+#[cfg(feature = "cuda")]
+pub use pivot_wrapper::{CudaPivot, CudaPivotError};
+#[cfg(feature = "cuda")]
+pub use ui_wrapper::{CudaUi, CudaUiError};
 
 /// Returns true if a CUDA device is available and the driver API can be initialized.
 #[inline]

@@ -48,6 +48,10 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaQqe};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 // SIMD imports for AVX optimizations
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1585,6 +1589,62 @@ pub fn qqe_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+// ==================== Python CUDA bindings ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "qqe_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, rsi_period_range, smoothing_factor_range, fast_factor_range, device_id=0))]
+pub fn qqe_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    rsi_period_range: (usize, usize, usize),
+    smoothing_factor_range: (usize, usize, usize),
+    fast_factor_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use numpy::IntoPyArray;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice = data_f32.as_slice()?;
+    let sweep = QqeBatchRange { rsi_period: rsi_period_range, smoothing_factor: smoothing_factor_range, fast_factor: fast_factor_range };
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaQqe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.qqe_batch_dev(slice, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("rsi_periods", combos.iter().map(|c| c.rsi_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("smoothing_factors", combos.iter().map(|c| c.smoothing_factor.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("fast_factors", combos.iter().map(|c| c.fast_factor.unwrap() as f64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("rows", 2 * combos.len())?;
+    dict.set_item("cols", slice.len())?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "qqe_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, rsi_period, smoothing_factor, fast_factor, device_id=0))]
+pub fn qqe_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    rsi_period: usize,
+    smoothing_factor: usize,
+    fast_factor: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array (rows x cols)")); }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = QqeParams { rsi_period: Some(rsi_period), smoothing_factor: Some(smoothing_factor), fast_factor: Some(fast_factor) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaQqe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.qqe_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // ==================== WASM BINDINGS ====================

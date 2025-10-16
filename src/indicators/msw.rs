@@ -41,6 +41,10 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaMsw};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -2776,4 +2780,64 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+}
+
+// ==================== Python CUDA bindings ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "msw_cuda_batch_dev")]
+#[pyo3(signature = (close_f32, period_range, device_id=0))]
+pub fn msw_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use numpy::IntoPyArray;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice = close_f32.as_slice()?;
+    let sweep = MswBatchRange { period: period_range };
+    let (inner, combos) = py
+        .allow_threads(|| {
+            let cuda = CudaMsw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.msw_batch_dev(slice, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item("rows", 2 * combos.len())?;
+    dict.set_item("cols", slice.len())?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "msw_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn msw_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array (rows x cols)")); }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = MswParams { period: Some(period) };
+    let inner = py
+        .allow_threads(|| {
+            let cuda = CudaMsw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda
+                .msw_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok(DeviceArrayF32Py { inner })
 }

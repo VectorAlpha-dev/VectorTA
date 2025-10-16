@@ -58,6 +58,18 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+// Python + CUDA bindings (device array handle reuse from ALMA)
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaKst;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use numpy::PyReadonlyArray1;
+
 #[derive(Debug, Clone)]
 pub enum KstData<'a> {
     Candles {
@@ -3184,7 +3196,90 @@ pub fn kst_batch_py<'py>(
 pub fn register_kst_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(kst_py, m)?)?;
     m.add_function(wrap_pyfunction!(kst_batch_py, m)?)?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(kst_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            kst_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
     Ok(())
+}
+
+// -------------------- Python CUDA bindings --------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "kst_cuda_batch_dev")]
+#[pyo3(signature = (
+    data_f32,
+    s1_range, s2_range, s3_range, s4_range,
+    r1_range, r2_range, r3_range, r4_range,
+    sig_range,
+    device_id=0
+))]
+pub fn kst_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    s1_range: (usize, usize, usize),
+    s2_range: (usize, usize, usize),
+    s3_range: (usize, usize, usize),
+    s4_range: (usize, usize, usize),
+    r1_range: (usize, usize, usize),
+    r2_range: (usize, usize, usize),
+    r3_range: (usize, usize, usize),
+    r4_range: (usize, usize, usize),
+    sig_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let prices = data_f32.as_slice()?;
+    let sweep = KstBatchRange {
+        sma_period1: s1_range, sma_period2: s2_range, sma_period3: s3_range, sma_period4: s4_range,
+        roc_period1: r1_range, roc_period2: r2_range, roc_period3: r3_range, roc_period4: r4_range,
+        signal_period: sig_range,
+    };
+    let (pair, _combos) = py.allow_threads(|| {
+        let cuda = CudaKst::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.kst_batch_dev(prices, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: pair.line }, DeviceArrayF32Py { inner: pair.signal }))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "kst_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (
+    data_tm_f32,
+    cols, rows,
+    s1, s2, s3, s4,
+    r1, r2, r3, r4,
+    sig,
+    device_id=0
+))]
+pub fn kst_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    s1: usize, s2: usize, s3: usize, s4: usize,
+    r1: usize, r2: usize, r3: usize, r4: usize,
+    sig: usize,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let prices_tm = data_tm_f32.as_slice()?;
+    let params = KstParams {
+        sma_period1: Some(s1), sma_period2: Some(s2), sma_period3: Some(s3), sma_period4: Some(s4),
+        roc_period1: Some(r1), roc_period2: Some(r2), roc_period3: Some(r3), roc_period4: Some(r4),
+        signal_period: Some(sig),
+    };
+    let pair = py.allow_threads(|| {
+        let cuda = CudaKst::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.kst_many_series_one_param_time_major_dev(prices_tm, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: pair.line }, DeviceArrayF32Py { inner: pair.signal }))
 }
 
 // =========================== WASM Bindings ===========================

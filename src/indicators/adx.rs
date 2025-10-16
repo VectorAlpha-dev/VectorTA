@@ -1192,6 +1192,78 @@ impl AdxBatchOutput {
     }
 }
 
+// ----- Python CUDA bindings -----
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::adx_wrapper::CudaAdx;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "adx_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, period_range, device_id=0))]
+pub fn adx_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+    let sweep = AdxBatchRange { period: period_range };
+    let (inner, combos) = py
+        .allow_threads(|| {
+            let cuda = CudaAdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.adx_batch_dev(h, l, c, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "adx_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, cols, rows, period, device_id=0))]
+pub fn adx_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    close_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let c = close_tm_f32.as_slice()?;
+    let inner = py
+        .allow_threads(|| {
+            let cuda = CudaAdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda
+                .adx_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[inline(always)]
 fn expand_grid(r: &AdxBatchRange) -> Vec<AdxParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {

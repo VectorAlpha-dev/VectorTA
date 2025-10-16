@@ -51,6 +51,10 @@ use std::error::Error;
 use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaStc;
 
 #[derive(Debug, Clone)]
 pub enum StcData<'a> {
@@ -2023,7 +2027,66 @@ pub fn register_stc_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     m.add_function(wrap_pyfunction!(stc_py, m)?)?;
     m.add_function(wrap_pyfunction!(stc_batch_py, m)?)?;
     m.add_class::<StcStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(stc_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(stc_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     Ok(())
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "stc_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, fast_period_range, slow_period_range, k_period_range, d_period_range, device_id=0))]
+pub fn stc_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    fast_period_range: (usize, usize, usize),
+    slow_period_range: (usize, usize, usize),
+    k_period_range: (usize, usize, usize),
+    d_period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = StcBatchRange { fast_period: fast_period_range, slow_period: slow_period_range, k_period: k_period_range, d_period: d_period_range };
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaStc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.stc_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("fast_periods", combos.iter().map(|c| c.fast_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("slow_periods", combos.iter().map(|c| c.slow_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("k_periods", combos.iter().map(|c| c.k_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("d_periods", combos.iter().map(|c| c.d_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "stc_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, cols, rows, fast_period=23, slow_period=50, k_period=10, d_period=3, device_id=0))]
+pub fn stc_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    fast_period: usize,
+    slow_period: usize,
+    k_period: usize,
+    d_period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let tm = data_tm_f32.as_slice()?;
+    let params = StcParams { fast_period: Some(fast_period), slow_period: Some(slow_period), k_period: Some(k_period), d_period: Some(d_period), fast_ma_type: None, slow_ma_type: None };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaStc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.stc_many_series_one_param_time_major_dev(tm, cols, rows, &params).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // Helper function for batch processing

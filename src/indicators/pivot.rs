@@ -2062,6 +2062,83 @@ pub fn pivot_py<'py>(
     ))
 }
 
+// ----- Python CUDA bindings -----
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::pivot_wrapper::CudaPivot;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "pivot_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, open_f32, mode_range, device_id=0))]
+pub fn pivot_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    open_f32: numpy::PyReadonlyArray1<'py, f32>,
+    mode_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+    let o = open_f32.as_slice()?;
+    let sweep = PivotBatchRange { mode: mode_range };
+    let (inner, combos) = py
+        .allow_threads(|| {
+            let cuda = CudaPivot::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda
+                .pivot_batch_dev(h, l, c, o, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "modes",
+        combos
+            .iter()
+            .map(|p| p.mode.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "pivot_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, open_tm_f32, cols, rows, mode, device_id=0))]
+pub fn pivot_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    close_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    open_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    mode: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let c = close_tm_f32.as_slice()?;
+    let o = open_tm_f32.as_slice()?;
+    let inner = py
+        .allow_threads(|| {
+            let cuda = CudaPivot::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda
+                .pivot_many_series_one_param_time_major_dev(h, l, c, o, cols, rows, mode)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "python")]
 #[pyclass(name = "PivotStream")]
 pub struct PivotStreamPy {

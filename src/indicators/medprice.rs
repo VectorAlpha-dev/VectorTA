@@ -44,6 +44,11 @@ use rayon::prelude::*;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaMedprice};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
 /// Source data for medprice indicator.
 #[derive(Debug, Clone)]
 pub enum MedpriceData<'a> {
@@ -1071,4 +1076,74 @@ pub fn register_medprice_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResul
     m.add_function(wrap_pyfunction!(medprice_py, m)?)?;
     m.add_function(wrap_pyfunction!(medprice_batch_py, m)?)?;
     Ok(())
+}
+
+// =============================================================================
+// Python CUDA bindings (device-backed arrays)
+// =============================================================================
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "medprice_cuda_dev")]
+#[pyo3(signature = (high, low, device_id=0))]
+pub fn medprice_cuda_dev_py(
+    py: Python<'_>,
+    high: numpy::PyReadonlyArray1<'_, f32>,
+    low: numpy::PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let hs = high.as_slice()?;
+    let ls = low.as_slice()?;
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.medprice_dev(hs, ls)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "medprice_cuda_batch_dev")]
+#[pyo3(signature = (high, low, device_id=0))]
+pub fn medprice_cuda_batch_dev_py(
+    py: Python<'_>,
+    high: numpy::PyReadonlyArray1<'_, f32>,
+    low: numpy::PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let hs = high.as_slice()?;
+    let ls = low.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.medprice_batch_dev(hs, ls).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "medprice_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm, low_tm, cols, rows, device_id=0))]
+pub fn medprice_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let hs = high_tm.as_slice()?;
+    let ls = low_tm.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.medprice_many_series_one_param_time_major_dev(hs, ls, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
