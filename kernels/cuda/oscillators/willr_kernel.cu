@@ -94,3 +94,79 @@ void willr_batch_f32(const float* __restrict__ close,
         out[base + t] = (denom == 0.0f) ? 0.0f : (h_max - c) / denom * -100.0f;
     }
 }
+
+// Many-series × one-param (time-major) kernel.
+//
+// Layout:
+// - Inputs are time-major matrices of shape [rows, cols] flattened, i.e.,
+//   index = t * cols + series.
+// - One thread handles one series (column) sequentially across time.
+// - Warmup and NaN semantics mirror the scalar implementation:
+//   * Output is NaN before first_valid[series] + period - 1.
+//   * If any NaN appears in the [t-period+1..t] window of (high|low), result is NaN.
+//   * If close[t] is NaN, result is NaN.
+//   * If (max(high)-min(low)) == 0, write 0.0.
+extern "C" __global__
+void willr_many_series_one_param_time_major_f32(
+    const float* __restrict__ high_tm,
+    const float* __restrict__ low_tm,
+    const float* __restrict__ close_tm,
+    int cols,
+    int rows,
+    int period,
+    const int* __restrict__ first_valids,
+    float* __restrict__ out_tm) {
+    const int series = blockIdx.x * blockDim.x + threadIdx.x;
+    if (series >= cols) {
+        return;
+    }
+
+    // Prefill column with NaNs
+    const float nan = nanf("");
+    for (int t = 0; t < rows; ++t) {
+        out_tm[t * cols + series] = nan;
+    }
+
+    if (period <= 0) {
+        return;
+    }
+
+    const int first_valid = first_valids[series];
+    const int warm = first_valid + period - 1;
+    if (warm >= rows) {
+        return;
+    }
+
+    for (int t = warm; t < rows; ++t) {
+        const float c = close_tm[t * cols + series];
+        if (isnan(c)) {
+            // propagate NaN in close
+            out_tm[t * cols + series] = nan;
+            continue;
+        }
+
+        const int start = t - period + 1;
+        // Scan window for max(high) and min(low); abort on NaN in either
+        float h = -INFINITY;
+        float l = INFINITY;
+        bool any_nan = false;
+        for (int j = start; j <= t; ++j) {
+            const float hj = high_tm[j * cols + series];
+            const float lj = low_tm[j * cols + series];
+            if (isnan(hj) || isnan(lj)) {
+                any_nan = true;
+                break;
+            }
+            if (hj > h) h = hj;
+            if (lj < l) l = lj;
+        }
+
+        if (any_nan || !isfinite(h) || !isfinite(l)) {
+            out_tm[t * cols + series] = nan;
+            continue;
+        }
+
+        const float denom = h - l;
+        out_tm[t * cols + series] = (denom == 0.0f) ? 0.0f : (h - c) / denom * -100.0f;
+    }
+}

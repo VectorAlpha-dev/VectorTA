@@ -60,6 +60,8 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[derive(Debug, Clone)]
 pub enum CviData<'a> {
@@ -1127,6 +1129,80 @@ pub fn cvi_batch_py<'py>(
     )?;
 
     Ok(dict.into())
+}
+
+// ============================
+// Python CUDA (zero-copy device)
+// ============================
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "cvi_cuda_batch_dev")]
+#[pyo3(signature = (high, low, period_range, device_id=0))]
+pub fn cvi_cuda_batch_dev_py(
+    py: Python<'_>,
+    high: numpy::PyReadonlyArray1<'_, f32>,
+    low: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaCvi;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    if high_slice.len() != low_slice.len() {
+        return Err(PyValueError::new_err("mismatched input lengths"));
+    }
+
+    let sweep = CviBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaCvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.cvi_batch_dev(high_slice, low_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "cvi_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm, low_tm, cols, rows, period, device_id=0))]
+pub fn cvi_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaCvi;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high_slice = high_tm.as_slice()?;
+    let low_slice = low_tm.as_slice()?;
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if high_slice.len() != expected || low_slice.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaCvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.cvi_many_series_one_param_time_major_dev(high_slice, low_slice, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(test)]

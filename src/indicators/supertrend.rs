@@ -47,6 +47,10 @@ use std::convert::AsRef;
 use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaSupertrend};
 
 #[derive(Debug, Clone)]
 pub enum SuperTrendData<'a> {
@@ -995,6 +999,83 @@ impl SuperTrendBatchOutput {
             &self.changed[start..start + self.cols]
         })
     }
+}
+
+// ---------------- Python CUDA bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "supertrend_cuda_batch_dev")]
+#[pyo3(signature = (high, low, close, period_range, factor_range, device_id=0))]
+pub fn supertrend_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    period_range: (usize, usize, usize),
+    factor_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::IntoPyArray;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high.as_slice()?;
+    let l = low.as_slice()?;
+    let c = close.as_slice()?;
+    let sweep = SuperTrendBatchRange { period: period_range, factor: factor_range };
+    let (trend, changed, combos) = py
+        .allow_threads(|| {
+            let cuda = CudaSupertrend::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let h32: Vec<f32> = h.iter().map(|&v| v as f32).collect();
+            let l32: Vec<f32> = l.iter().map(|&v| v as f32).collect();
+            let c32: Vec<f32> = c.iter().map(|&v| v as f32).collect();
+            cuda.supertrend_batch_dev(&h32, &l32, &c32, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: trend })?)?;
+    dict.set_item("changed", Py::new(py, DeviceArrayF32Py { inner: changed })?)?;
+    let periods: Vec<usize> = combos.iter().map(|p| p.period.unwrap()).collect();
+    let factors: Vec<f64> = combos.iter().map(|p| p.factor.unwrap()).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+    dict.set_item("factors", factors.into_pyarray(py))?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "supertrend_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm, low_tm, close_tm, cols, rows, period, factor, device_id=0))]
+pub fn supertrend_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    high_tm: numpy::PyReadonlyArray1<'py, f64>,
+    low_tm: numpy::PyReadonlyArray1<'py, f64>,
+    close_tm: numpy::PyReadonlyArray1<'py, f64>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    factor: f64,
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::IntoPyArray;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_tm.as_slice()?;
+    let l = low_tm.as_slice()?;
+    let c = close_tm.as_slice()?;
+    if h.len() != l.len() || l.len() != c.len() { return Err(PyValueError::new_err("length mismatch")); }
+    let h32: Vec<f32> = h.iter().map(|&v| v as f32).collect();
+    let l32: Vec<f32> = l.iter().map(|&v| v as f32).collect();
+    let c32: Vec<f32> = c.iter().map(|&v| v as f32).collect();
+    let out = py.allow_threads(|| {
+        let cuda = CudaSupertrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.supertrend_many_series_one_param_time_major_dev(&h32, &l32, &c32, cols, rows, period, factor as f32)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: out.plus })?)?;
+    dict.set_item("changed", Py::new(py, DeviceArrayF32Py { inner: out.minus })?)?;
+    dict.set_item("cols", cols.into_py(py))?;
+    dict.set_item("rows", rows.into_py(py))?;
+    Ok(dict)
 }
 
 #[inline(always)]

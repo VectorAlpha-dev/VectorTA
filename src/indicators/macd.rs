@@ -1924,6 +1924,115 @@ pub fn register_macd_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
     Ok(())
 }
 
+// ==================== PYTHON: CUDA BINDINGS (EMA only) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "macd_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, fast_range, slow_range, signal_range, ma_type="ema", device_id=0))]
+pub fn macd_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    fast_range: (usize, usize, usize),
+    slow_range: (usize, usize, usize),
+    signal_range: (usize, usize, usize),
+    ma_type: &str,
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::CudaMacd;
+    use crate::cuda::oscillators::macd_wrapper::DeviceMacdTriplet;
+    use numpy::{IntoPyArray, PyList};
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    if !ma_type.eq_ignore_ascii_case("ema") {
+        return Err(PyValueError::new_err("macd_cuda: only ma_type=\"ema\" is supported on CUDA"));
+    }
+    let slice = data_f32.as_slice()?;
+    let sweep = MacdBatchRange {
+        fast_period: fast_range,
+        slow_period: slow_range,
+        signal_period: signal_range,
+        ma_type: (ma_type.to_string(), ma_type.to_string(), String::new()),
+    };
+
+    let (outputs, combos) = py.allow_threads(|| {
+        let cuda = CudaMacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.macd_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let DeviceMacdTriplet { macd, signal, hist } = outputs;
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("macd", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: macd })?)?;
+    dict.set_item("signal", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: signal })?)?;
+    dict.set_item("hist", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: hist })?)?;
+
+    let fasts: Vec<u64> = combos.iter().map(|p| p.fast_period.unwrap() as u64).collect();
+    let slows: Vec<u64> = combos.iter().map(|p| p.slow_period.unwrap() as u64).collect();
+    let signals: Vec<u64> = combos.iter().map(|p| p.signal_period.unwrap() as u64).collect();
+    let ma_types = PyList::new(py, vec![ma_type; combos.len()])?;
+    dict.set_item("fast_periods", fasts.into_pyarray(py))?;
+    dict.set_item("slow_periods", slows.into_pyarray(py))?;
+    dict.set_item("signal_periods", signals.into_pyarray(py))?;
+    dict.set_item("ma_types", ma_types)?;
+    dict.set_item("rows", combos.len())?;
+    dict.set_item("cols", slice.len())?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "macd_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, fast_period, slow_period, signal_period, ma_type="ema", device_id=0))]
+pub fn macd_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    fast_period: usize,
+    slow_period: usize,
+    signal_period: usize,
+    ma_type: &str,
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::CudaMacd;
+    use crate::cuda::oscillators::macd_wrapper::DeviceMacdTriplet;
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    if !ma_type.eq_ignore_ascii_case("ema") {
+        return Err(PyValueError::new_err("macd_cuda: only ma_type=\"ema\" is supported on CUDA"));
+    }
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array")); }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = MacdParams {
+        fast_period: Some(fast_period),
+        slow_period: Some(slow_period),
+        signal_period: Some(signal_period),
+        ma_type: Some(ma_type.to_string()),
+    };
+    let DeviceMacdTriplet { macd, signal, hist } = py.allow_threads(|| {
+        let cuda = CudaMacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.macd_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("macd", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: macd })?)?;
+    dict.set_item("signal", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: signal })?)?;
+    dict.set_item("hist", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: hist })?)?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    dict.set_item("fast_period", fast_period)?;
+    dict.set_item("slow_period", slow_period)?;
+    dict.set_item("signal_period", signal_period)?;
+    dict.set_item("ma_type", ma_type)?;
+    Ok(dict)
+}
+
 // =============================================================================
 // WASM BINDINGS
 // =============================================================================

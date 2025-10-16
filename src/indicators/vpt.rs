@@ -1296,6 +1296,64 @@ pub fn vpt_batch_py<'py>(
     Ok(dict)
 }
 
+// ---------------- Python CUDA bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaVpt;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vpt_cuda_batch_dev")]
+#[pyo3(signature = (price, volume, device_id=0))]
+pub fn vpt_cuda_batch_dev_py(
+    py: Python<'_>,
+    price: PyReadonlyArray1<'_, f32>,
+    volume: PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+    
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let price_slice = price.as_slice()?;
+    let volume_slice = volume.as_slice()?;
+    if price_slice.len() != volume_slice.len() {
+        return Err(PyValueError::new_err("length mismatch"));
+    }
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVpt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vpt_batch_dev(price_slice, volume_slice)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vpt_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (price_tm, volume_tm, cols, rows, device_id=0))]
+pub fn vpt_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    price_tm: PyReadonlyArray1<'_, f32>,
+    volume_tm: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let price_slice = price_tm.as_slice()?;
+    let volume_slice = volume_tm.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVpt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vpt_many_series_one_param_time_major_dev(price_slice, volume_slice, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn vpt_js(price: &[f64], volume: &[f64]) -> Result<Vec<f64>, JsValue> {

@@ -49,6 +49,12 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
+// CUDA Python interop types for device arrays
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::keltner_wrapper::CudaKeltner;
+
 // Input & data types
 
 #[derive(Debug, Clone)]
@@ -2702,6 +2708,81 @@ pub fn keltner_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "keltner_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, source_f32, period_range, multiplier_range, ma_type="ema", device_id=0))]
+pub fn keltner_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    source_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    multiplier_range: (f64, f64, f64),
+    ma_type: &str,
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+    let s = source_f32.as_slice()?;
+    if !(h.len() == l.len() && l.len() == c.len() && c.len() == s.len()) {
+        return Err(PyValueError::new_err("input length mismatch"));
+    }
+    let sweep = KeltnerBatchRange { period: period_range, multiplier: multiplier_range };
+    let (up, mid, low, rows, cols) = py.allow_threads(|| {
+        let cuda = CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let res = cuda.keltner_batch_dev(h, l, c, s, &sweep, ma_type)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((res.outputs.upper, res.outputs.middle, res.outputs.lower, res.outputs.upper.rows, res.outputs.upper.cols))
+    })?;
+    let dict = PyDict::new(py);
+    dict.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: up })?)?;
+    dict.set_item("middle", Py::new(py, DeviceArrayF32Py { inner: mid })?)?;
+    dict.set_item("lower", Py::new(py, DeviceArrayF32Py { inner: low })?)?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "keltner_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, source_tm_f32, cols, rows, period, multiplier, ma_type="ema", device_id=0))]
+pub fn keltner_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    close_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    source_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    multiplier: f32,
+    ma_type: &str,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let ht = high_tm_f32.as_slice()?;
+    let lt = low_tm_f32.as_slice()?;
+    let ct = close_tm_f32.as_slice()?;
+    let st = source_tm_f32.as_slice()?;
+    let expected = cols.checked_mul(rows).ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if ht.len() != expected || lt.len() != expected || ct.len() != expected || st.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
+    let (up, mid, low) = py.allow_threads(|| {
+        let cuda = CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let trip = cuda.keltner_many_series_one_param_time_major_dev(ht, lt, ct, st, cols, rows, period, multiplier, ma_type)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((trip.upper, trip.middle, trip.lower))
+    })?;
+    Ok((DeviceArrayF32Py { inner: up }, DeviceArrayF32Py { inner: mid }, DeviceArrayF32Py { inner: low }))
 }
 
 // WASM bindings

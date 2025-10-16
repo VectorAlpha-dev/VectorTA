@@ -60,6 +60,8 @@ pub mod hma_wrapper;
 pub mod kama_wrapper;
 pub mod linreg_wrapper;
 #[cfg(feature = "cuda")]
+pub mod linearreg_intercept_wrapper;
+#[cfg(feature = "cuda")]
 pub mod ma_selector;
 #[cfg(feature = "cuda")]
 pub mod nama_wrapper;
@@ -79,6 +81,8 @@ pub mod vpwma_wrapper;
 #[cfg(feature = "cuda")]
 pub mod wma_wrapper;
 pub mod zlema_wrapper;
+#[cfg(feature = "cuda")]
+pub mod vidya_wrapper;
 
 pub use alma_wrapper::{CudaAlma, DeviceArrayF32};
 pub use buff_averages_wrapper::{CudaBuffAverages, CudaBuffAveragesError};
@@ -121,6 +125,8 @@ pub use jsa_wrapper::{CudaJsa, CudaJsaError};
 #[cfg(feature = "cuda")]
 pub use kama_wrapper::CudaKama;
 pub use linreg_wrapper::{CudaLinreg, CudaLinregError};
+#[cfg(feature = "cuda")]
+pub use linearreg_intercept_wrapper::{CudaLinregIntercept, CudaLinregInterceptError};
 #[cfg(feature = "cuda")]
 pub use ma_selector::{CudaMaData, CudaMaSelector, CudaMaSelectorError};
 pub use maaq_wrapper::CudaMaaq;
@@ -173,3 +179,5 @@ pub use wilders_wrapper::{CudaWilders, CudaWildersError};
 #[cfg(feature = "cuda")]
 pub use wma_wrapper::CudaWma;
 pub use zlema_wrapper::{CudaZlema, CudaZlemaError};
+#[cfg(feature = "cuda")]
+pub use vidya_wrapper::{CudaVidya, CudaVidyaError};

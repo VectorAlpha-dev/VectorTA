@@ -138,6 +138,11 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
+        "kernels/cuda/moving_averages/linearreg_intercept_kernel.cu",
+        "linearreg_intercept_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
         "kernels/cuda/moving_averages/maaq_kernel.cu",
         "maaq_kernel.ptx",
     );
@@ -248,6 +253,11 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
+        "kernels/cuda/moving_averages/vidya_kernel.cu",
+        "vidya_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
         "kernels/cuda/moving_averages/wilders_kernel.cu",
         "wilders_kernel.ptx",
     );
@@ -259,6 +269,57 @@ fn compile_cuda_kernels() {
 
     // Non-MA
     compile_kernel(&cuda_path, "kernels/cuda/wad_kernel.cu", "wad_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/adosc_kernel.cu",
+        "adosc_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/ao_kernel.cu",
+        "ao_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/bop_kernel.cu",
+        "bop_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/coppock_kernel.cu",
+        "coppock_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/gatorosc_kernel.cu",
+        "gatorosc_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/macd_kernel.cu",
+        "macd_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/mom_kernel.cu",
+        "mom_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/roc_kernel.cu",
+        "roc_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/rsx_kernel.cu",
+        "rsx_kernel.ptx",
+    );
+    // SRSI
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/srsi_kernel.cu",
+        "srsi_kernel.ptx",
+    );
     compile_kernel(
         &cuda_path,
         "kernels/cuda/oscillators/willr_kernel.cu",
@@ -278,6 +339,90 @@ fn compile_cuda_kernels() {
         &cuda_path,
         "kernels/cuda/zscore_kernel.cu",
         "zscore_kernel.ptx",
+    );
+    // TTM Trend
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ttm_trend_kernel.cu",
+        "ttm_trend_kernel.ptx",
+    );
+    // NVI
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/nvi_kernel.cu",
+        "nvi_kernel.ptx",
+    );
+    // PVI
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/pvi_kernel.cu",
+        "pvi_kernel.ptx",
+    );
+    // VPT
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/vpt_kernel.cu",
+        "vpt_kernel.ptx",
+    );
+    // SuperTrend
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/supertrend_kernel.cu",
+        "supertrend_kernel.ptx",
+    );
+    // Medium Absolute Deviation (MEDIUM_AD)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/medium_ad_kernel.cu",
+        "medium_ad_kernel.ptx",
+    );
+    // DI (+DI/-DI)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/di_kernel.cu",
+        "di_kernel.ptx",
+    );
+    // ATR
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/atr_kernel.cu",
+        "atr_kernel.ptx",
+    );
+    // Chande (Chandelier Exit)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/chande_kernel.cu",
+        "chande_kernel.ptx",
+    );
+    // CVI (Chaikin's Volatility)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/cvi_kernel.cu",
+        "cvi_kernel.ptx",
+    );
+    // DVDIQQE
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/dvdiqqe_kernel.cu",
+        "dvdiqqe_kernel.ptx",
+    );
+    // ER (Kaufman Efficiency Ratio)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/er_kernel.cu",
+        "er_kernel.ptx",
+    );
+    // PFE (Polarized Fractal Efficiency)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/pfe_kernel.cu",
+        "pfe_kernel.ptx",
+    );
+    // Keltner (combine kernel)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/keltner_kernel.cu",
+        "keltner_kernel.ptx",
     );
 }
 

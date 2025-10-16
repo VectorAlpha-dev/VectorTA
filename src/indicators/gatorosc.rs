@@ -3762,3 +3762,103 @@ pub fn gatorosc_batch_py<'py>(
 
     Ok(dict)
 }
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::gatorosc_wrapper::CudaGatorOsc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "gatorosc_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, jaws_length_range=(13,13,0), jaws_shift_range=(8,8,0), teeth_length_range=(8,8,0), teeth_shift_range=(5,5,0), lips_length_range=(5,5,0), lips_shift_range=(3,3,0), device_id=0))]
+pub fn gatorosc_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    jaws_length_range: (usize, usize, usize),
+    jaws_shift_range: (usize, usize, usize),
+    teeth_length_range: (usize, usize, usize),
+    teeth_shift_range: (usize, usize, usize),
+    lips_length_range: (usize, usize, usize),
+    lips_shift_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let data = data_f32.as_slice()?;
+    let sweep = GatorOscBatchRange {
+        jaws_length: jaws_length_range,
+        jaws_shift: jaws_shift_range,
+        teeth_length: teeth_length_range,
+        teeth_shift: teeth_shift_range,
+        lips_length: lips_length_range,
+        lips_shift: lips_shift_range,
+    };
+    let (upper, lower, upper_change, lower_change) = py.allow_threads(|| {
+        let cuda = CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let quad = cuda
+            .gatorosc_batch_dev(data, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>(
+            (
+                DeviceArrayF32Py { inner: quad.upper },
+                DeviceArrayF32Py { inner: quad.lower },
+                DeviceArrayF32Py { inner: quad.upper_change },
+                DeviceArrayF32Py { inner: quad.lower_change },
+            ),
+        )
+    })?;
+    Ok((upper, lower, upper_change, lower_change))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "gatorosc_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (prices_tm_f32, cols, rows, jaws_length=13, jaws_shift=8, teeth_length=8, teeth_shift=5, lips_length=5, lips_shift=3, device_id=0))]
+pub fn gatorosc_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    prices_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    jaws_length: usize,
+    jaws_shift: usize,
+    teeth_length: usize,
+    teeth_shift: usize,
+    lips_length: usize,
+    lips_shift: usize,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let prices = prices_tm_f32.as_slice()?;
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if prices.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
+    let (upper, lower, upper_change, lower_change) = py.allow_threads(|| {
+        let cuda = CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let quad = cuda
+            .gatorosc_many_series_one_param_time_major_dev(
+                prices,
+                cols,
+                rows,
+                jaws_length,
+                jaws_shift,
+                teeth_length,
+                teeth_shift,
+                lips_length,
+                lips_shift,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>(
+            (
+                DeviceArrayF32Py { inner: quad.upper },
+                DeviceArrayF32Py { inner: quad.lower },
+                DeviceArrayF32Py { inner: quad.upper_change },
+                DeviceArrayF32Py { inner: quad.lower_change },
+            ),
+        )
+    })?;
+    Ok((upper, lower, upper_change, lower_change))
+}

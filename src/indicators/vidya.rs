@@ -36,6 +36,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaVidya;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -2261,6 +2265,75 @@ pub fn vidya_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vidya_cuda_batch_dev")]
+#[pyo3(signature = (data, short_period_range, long_period_range, alpha_range, device_id=0))]
+pub fn vidya_cuda_batch_dev_py(
+    py: Python<'_>,
+    data: PyReadonlyArray1<'_, f32>,
+    short_period_range: (usize, usize, usize),
+    long_period_range: (usize, usize, usize),
+    alpha_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = data.as_slice()?;
+    let sweep = VidyaBatchRange {
+        short_period: short_period_range,
+        long_period: long_period_range,
+        alpha: alpha_range,
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVidya::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .vidya_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vidya_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm, cols, rows, short_period, long_period, alpha, device_id=0))]
+pub fn vidya_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    short_period: usize,
+    long_period: usize,
+    alpha: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = data_tm.as_slice()?;
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if slice.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
+    let params = VidyaParams {
+        short_period: Some(short_period),
+        long_period: Some(long_period),
+        alpha: Some(alpha),
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVidya::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .vidya_many_series_one_param_time_major_dev(slice, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]
