@@ -57,6 +57,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -2304,6 +2306,87 @@ pub fn chande_batch_py<'py>(
             .collect::<Vec<_>>(),
     )?;
     Ok(dict)
+}
+
+// ============================
+// Python CUDA (zero-copy device)
+// ============================
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "chande_cuda_batch_dev")]
+#[pyo3(signature = (high, low, close, period_range, mult_range, direction, device_id=0))]
+pub fn chande_cuda_batch_dev_py(
+    py: Python<'_>,
+    high: PyReadonlyArray1<'_, f32>,
+    low: PyReadonlyArray1<'_, f32>,
+    close: PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    mult_range: (f64, f64, f64),
+    direction: &str,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaChande;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+    if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
+        return Err(PyValueError::new_err("mismatched input lengths"));
+    }
+
+    let sweep = ChandeBatchRange { period: period_range, mult: mult_range };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.chande_batch_dev(high_slice, low_slice, close_slice, &sweep, direction)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "chande_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm, low_tm, close_tm, cols, rows, period, mult, direction, device_id=0))]
+pub fn chande_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm: PyReadonlyArray1<'_, f32>,
+    low_tm: PyReadonlyArray1<'_, f32>,
+    close_tm: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    mult: f32,
+    direction: &str,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaChande;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high_slice = high_tm.as_slice()?;
+    let low_slice = low_tm.as_slice()?;
+    let close_slice = close_tm.as_slice()?;
+    let expected = cols.checked_mul(rows).ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if high_slice.len() != expected || low_slice.len() != expected || close_slice.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.chande_many_series_one_param_time_major_dev(high_slice, low_slice, close_slice, cols, rows, period, mult, direction)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // ============================

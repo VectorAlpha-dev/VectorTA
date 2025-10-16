@@ -59,11 +59,22 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::moving_averages::mama_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::ehlers_pma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::linreg_wrapper::benches::bench_profiles());
+    v.extend(
+        my_project::cuda::moving_averages::linearreg_intercept_wrapper::benches::bench_profiles(),
+    );
     v.extend(my_project::cuda::moving_averages::trima_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::zlema_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::uma_wrapper::benches::bench_profiles());
+    // Oscillators
+    v.extend(my_project::cuda::oscillators::willr_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::wilders_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::vpci_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::moving_averages::vidya_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::nvi_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::pvi_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::vpt_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::supertrend_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::ttm_trend_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::maaq_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::oscillators::squeeze_momentum_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::oscillators::ttm_squeeze_wrapper::benches::bench_profiles());
@@ -78,6 +89,12 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     // non-MA wrappers registered here
     v.extend(my_project::cuda::devstop_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::fvg_trailing_stop_wrapper::benches::bench_profiles());
+    // Composite/non-MA
+    v.extend(my_project::cuda::keltner_wrapper::benches::bench_profiles());
+    // Non-MA wrappers
+    v.extend(my_project::cuda::dvdiqqe_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::er_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::pfe_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::srwma_wrapper::benches::bench_profiles());
     // Non-MA wrappers
     v.extend(my_project::cuda::sar_wrapper::benches::bench_profiles());
@@ -94,9 +111,11 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::alligator_wrapper::benches::bench_profiles());
 
     // Non-MA wrappers
+    v.extend(my_project::cuda::di_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::zscore_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::deviation_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::bollinger_bands_width_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::medium_ad_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::wto_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::wclprice_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::wad_wrapper::benches::bench_profiles());
@@ -130,6 +149,19 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::net_myrsi_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::percentile_nearest_rank_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::vi_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::oscillators::adosc_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::oscillators::ao_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::oscillators::bop_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::oscillators::coppock_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::oscillators::gatorosc_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::oscillators::macd_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::oscillators::mom_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::oscillators::roc_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::oscillators::rsx_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::oscillators::srsi_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::atr_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::chande_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::cvi_wrapper::benches::bench_profiles());
     v
 }
 

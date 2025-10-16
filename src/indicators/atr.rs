@@ -52,6 +52,10 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaAtr};
 
 #[derive(Debug, Clone)]
 pub enum AtrData<'a> {
@@ -2198,6 +2202,60 @@ pub fn atr_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict.into())
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "atr_cuda_batch_dev")]
+#[pyo3(signature = (high, low, close, length_range, device_id=0))]
+pub fn atr_cuda_batch_dev_py(
+    py: Python<'_>,
+    high: numpy::PyReadonlyArray1<'_, f32>,
+    low: numpy::PyReadonlyArray1<'_, f32>,
+    close: numpy::PyReadonlyArray1<'_, f32>,
+    length_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let hs = high.as_slice()?;
+    let ls = low.as_slice()?;
+    let cs = close.as_slice()?;
+    if hs.len() != ls.len() || ls.len() != cs.len() { return Err(PyValueError::new_err("input length mismatch")); }
+    let sweep = AtrBatchRange { length: length_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAtr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.atr_batch_dev(hs, ls, cs, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "atr_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm, low_tm, close_tm, cols, rows, length, device_id=0))]
+pub fn atr_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm: numpy::PyReadonlyArray1<'_, f32>,
+    close_tm: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    length: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_tm.as_slice()?;
+    let l = low_tm.as_slice()?;
+    let c = close_tm.as_slice()?;
+    let expected = cols.checked_mul(rows).ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if h.len() != expected || l.len() != expected || c.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAtr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.atr_many_series_one_param_time_major_dev(h, l, c, cols, rows, length)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // ============= WASM Bindings =============

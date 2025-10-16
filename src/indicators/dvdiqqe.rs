@@ -55,6 +55,10 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::dvdiqqe_wrapper::CudaDvdiqqe;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 // SIMD imports for AVX optimizations
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -2548,6 +2552,94 @@ pub fn dvdiqqe_batch_py<'py>(
     d.set_item("cols", cols)?;
     d.set_item("series", series)?;
     Ok(d.into())
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dvdiqqe_cuda_batch_dev")]
+#[pyo3(signature = (open_f32, close_f32, volume_f32=None, period_range, smoothing_period_range, fast_mult_range, slow_mult_range, volume_type="default", center_type="dynamic", tick_size=0.01, device_id=0))]
+pub fn dvdiqqe_cuda_batch_dev_py(
+    py: Python<'_>,
+    open_f32: PyReadonlyArray1<'_, f32>,
+    close_f32: PyReadonlyArray1<'_, f32>,
+    volume_f32: Option<PyReadonlyArray1<'_, f32>>,
+    period_range: (usize, usize, usize),
+    smoothing_period_range: (usize, usize, usize),
+    fast_mult_range: (f64, f64, f64),
+    slow_mult_range: (f64, f64, f64),
+    volume_type: &str,
+    center_type: &str,
+    tick_size: f32,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+
+    let o = open_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+    let v_opt: Option<&[f32]> = match volume_f32 { Some(v) => Some(v.as_slice()?), None => None };
+    if o.len() != c.len() { return Err(PyValueError::new_err("open/close length mismatch")); }
+    if let Some(v) = v_opt { if v.len() != c.len() { return Err(PyValueError::new_err("volume length mismatch")); } }
+
+    let sweep = DvdiqqeBatchRange { period: period_range, smoothing_period: smoothing_period_range, fast_multiplier: fast_mult_range, slow_multiplier: slow_mult_range };
+
+    let (dvdi, fast, slow, center) = py.allow_threads(|| {
+        let cuda = CudaDvdiqqe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let quad = cuda.dvdiqqe_batch_dev(o, c, v_opt, &sweep, volume_type, center_type, tick_size)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((
+            DeviceArrayF32Py { inner: quad.dvdi },
+            DeviceArrayF32Py { inner: quad.fast },
+            DeviceArrayF32Py { inner: quad.slow },
+            DeviceArrayF32Py { inner: quad.center },
+        ))
+    })?;
+
+    Ok((dvdi, fast, slow, center))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dvdiqqe_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (open_tm_f32, close_tm_f32, cols, rows, period, smoothing, fast_mult, slow_mult, volume_tm_f32=None, volume_type="default", center_type="dynamic", tick_size=0.01, device_id=0))]
+pub fn dvdiqqe_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    open_tm_f32: PyReadonlyArray1<'_, f32>,
+    close_tm_f32: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    smoothing: usize,
+    fast_mult: f32,
+    slow_mult: f32,
+    volume_tm_f32: Option<PyReadonlyArray1<'_, f32>>,
+    volume_type: &str,
+    center_type: &str,
+    tick_size: f32,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+
+    let o_tm = open_tm_f32.as_slice()?;
+    let c_tm = close_tm_f32.as_slice()?;
+    let v_tm: Option<&[f32]> = match volume_tm_f32 { Some(v) => Some(v.as_slice()?), None => None };
+    let expected = cols.checked_mul(rows).ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if o_tm.len() != expected || c_tm.len() != expected { return Err(PyValueError::new_err("time-major input length mismatch")); }
+    if let Some(v) = v_tm { if v.len() != expected { return Err(PyValueError::new_err("time-major volume mismatch")); } }
+
+    let (dvdi, fast, slow, center) = py.allow_threads(|| {
+        let cuda = CudaDvdiqqe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let quad = cuda.dvdiqqe_many_series_one_param_time_major_dev(
+            o_tm, c_tm, v_tm, cols, rows, period, smoothing, fast_mult, slow_mult, volume_type, center_type, tick_size
+        ).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((
+            DeviceArrayF32Py { inner: quad.dvdi },
+            DeviceArrayF32Py { inner: quad.fast },
+            DeviceArrayF32Py { inner: quad.slow },
+            DeviceArrayF32Py { inner: quad.center },
+        ))
+    })?;
+
+    Ok((dvdi, fast, slow, center))
 }
 
 // ==================== WASM BINDINGS ====================

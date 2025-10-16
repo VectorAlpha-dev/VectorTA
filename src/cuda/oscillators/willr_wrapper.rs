@@ -14,9 +14,10 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::DeviceBuffer;
-use cust::module::Module;
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cu;
 use std::ffi::c_void;
 use std::fmt;
 
@@ -58,7 +59,14 @@ impl CudaWillr {
         let context = Context::new(device).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/willr_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => Module::from_ptx(ptx, &[]).map_err(|e| CudaWillrError::Cuda(e.to_string()))?,
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
 
@@ -67,6 +75,33 @@ impl CudaWillr {
             stream,
             _context: context,
         })
+    }
+
+    fn mem_check_enabled() -> bool {
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+
+    fn device_mem_info() -> Option<(usize, usize)> {
+        unsafe {
+            let mut free: usize = 0;
+            let mut total: usize = 0;
+            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
+            if res == cu::CUresult::CUDA_SUCCESS { Some((free, total)) } else { None }
+        }
+    }
+
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
 
     pub fn willr_batch_dev(
@@ -282,6 +317,183 @@ impl CudaWillr {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    // ----- Many-series × one-param (time-major) -----
+
+    pub fn willr_many_series_one_param_time_major_dev(
+        &self,
+        high_tm: &[f32],
+        low_tm: &[f32],
+        close_tm: &[f32],
+        cols: usize,
+        rows: usize,
+        period: usize,
+    ) -> Result<DeviceArrayF32, CudaWillrError> {
+        let (first_valids, cols, rows, period) =
+            Self::prepare_many_series_inputs(high_tm, low_tm, close_tm, cols, rows, period)?;
+
+        // VRAM estimate: 3 inputs + first_valids + output
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaWillrError::InvalidInput("cols*rows overflow".into()))?;
+        let in_bytes = 3 * elems * std::mem::size_of::<f32>();
+        let first_bytes = cols * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        let required = in_bytes + first_bytes + out_bytes;
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
+            return Err(CudaWillrError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                required as f64 / (1024.0 * 1024.0)
+            )));
+        }
+
+        let d_high = DeviceBuffer::from_slice(high_tm)
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_low = DeviceBuffer::from_slice(low_tm)
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close_tm)
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+
+        self.willr_many_series_one_param_device(
+            &d_high, &d_low, &d_close, cols as i32, rows as i32, period as i32, &d_first, &mut d_out,
+        )?;
+
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
+    }
+
+    pub fn willr_many_series_one_param_device(
+        &self,
+        d_high_tm: &DeviceBuffer<f32>,
+        d_low_tm: &DeviceBuffer<f32>,
+        d_close_tm: &DeviceBuffer<f32>,
+        cols: i32,
+        rows: i32,
+        period: i32,
+        d_first_valids: &DeviceBuffer<i32>,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaWillrError> {
+        if cols <= 0 || rows <= 0 || period <= 0 {
+            return Err(CudaWillrError::InvalidInput(
+                "cols, rows, period must be positive".into(),
+            ));
+        }
+        self.launch_many_series_kernel(
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            cols as usize,
+            rows as usize,
+            period as usize,
+            d_first_valids,
+            d_out_tm,
+        )
+    }
+
+    fn prepare_many_series_inputs(
+        high_tm: &[f32],
+        low_tm: &[f32],
+        close_tm: &[f32],
+        cols: usize,
+        rows: usize,
+        period: usize,
+    ) -> Result<(Vec<i32>, usize, usize, usize), CudaWillrError> {
+        if cols == 0 || rows == 0 {
+            return Err(CudaWillrError::InvalidInput("cols and rows must be > 0".into()));
+        }
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaWillrError::InvalidInput("cols*rows overflow".into()))?;
+        if high_tm.len() != elems || low_tm.len() != elems || close_tm.len() != elems {
+            return Err(CudaWillrError::InvalidInput(
+                "inputs must be length cols*rows (time-major)".into(),
+            ));
+        }
+        if period == 0 {
+            return Err(CudaWillrError::InvalidInput("period must be > 0".into()));
+        }
+
+        // Per-series first valid index where all three inputs are non-NaN.
+        let mut first_valids = vec![0i32; cols];
+        for s in 0..cols {
+            let mut fv = -1i32;
+            for t in 0..rows {
+                let idx = t * cols + s;
+                if !high_tm[idx].is_nan() && !low_tm[idx].is_nan() && !close_tm[idx].is_nan() {
+                    fv = t as i32;
+                    break;
+                }
+            }
+            if fv < 0 || (rows as i32 - fv) < period as i32 {
+                return Err(CudaWillrError::InvalidInput(format!(
+                    "series {} lacks enough valid data (fv={}, rows={}, period={})",
+                    s, fv, rows, period
+                )));
+            }
+            first_valids[s] = fv;
+        }
+
+        Ok((first_valids, cols, rows, period))
+    }
+
+    fn launch_many_series_kernel(
+        &self,
+        d_high_tm: &DeviceBuffer<f32>,
+        d_low_tm: &DeviceBuffer<f32>,
+        d_close_tm: &DeviceBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        d_first_valids: &DeviceBuffer<i32>,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaWillrError> {
+        let block_x: u32 = 256;
+        let grid_x: u32 = (((cols as u32) + block_x - 1) / block_x).max(1);
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        let func = self
+            .module
+            .get_function("willr_many_series_one_param_time_major_f32")
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+
+        unsafe {
+            let mut high_ptr = d_high_tm.as_device_ptr().as_raw();
+            let mut low_ptr = d_low_tm.as_device_ptr().as_raw();
+            let mut close_ptr = d_close_tm.as_device_ptr().as_raw();
+            let mut cols_i = cols as i32;
+            let mut rows_i = rows as i32;
+            let mut period_i = period as i32;
+            let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
+            let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
+                &mut period_i as *mut _ as *mut c_void,
+                &mut first_ptr as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
             self.stream
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;

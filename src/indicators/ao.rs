@@ -46,6 +46,11 @@ use std::error::Error;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaAo;
+
 impl<'a> AsRef<[f64]> for AoInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -1900,6 +1905,71 @@ pub fn ao_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ao_cuda_batch_dev")]
+#[pyo3(signature = (high, low, short_period_range, long_period_range, device_id=0))]
+pub fn ao_cuda_batch_dev_py(
+    py: Python<'_>,
+    high: numpy::PyReadonlyArray1<'_, f32>,
+    low: numpy::PyReadonlyArray1<'_, f32>,
+    short_period_range: (usize, usize, usize),
+    long_period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    if high_slice.len() != low_slice.len() {
+        return Err(PyValueError::new_err("high/low length mismatch"));
+    }
+    let mut hl2_f32 = vec![0f32; high_slice.len()];
+    for i in 0..high_slice.len() {
+        let h = high_slice[i];
+        let l = low_slice[i];
+        hl2_f32[i] = (h + l) * 0.5;
+    }
+    let sweep = AoBatchRange { short_period: short_period_range, long_period: long_period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ao_batch_dev(&hl2_f32, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ao_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm, low_tm, cols, rows, short_period, long_period, device_id=0))]
+pub fn ao_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    short_period: usize,
+    long_period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let high_slice = high_tm.as_slice()?;
+    let low_slice = low_tm.as_slice()?;
+    let expected = cols.checked_mul(rows).ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if high_slice.len() != expected || low_slice.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
+    let mut hl2_f32 = vec![0f32; expected];
+    for i in 0..expected { hl2_f32[i] = (high_slice[i] + low_slice[i]) * 0.5; }
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .ao_many_series_one_param_time_major_dev(&hl2_f32, cols, rows, short_period, long_period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

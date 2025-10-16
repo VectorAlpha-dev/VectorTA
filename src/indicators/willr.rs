@@ -2717,6 +2717,46 @@ pub fn willr_cuda_batch_dev_py(
     Ok(DeviceArrayF32Py { inner })
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "willr_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm, low_tm, close_tm, cols, rows, period, device_id=0))]
+pub fn willr_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm: PyReadonlyArray1<'_, f32>,
+    low_tm: PyReadonlyArray1<'_, f32>,
+    close_tm: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high_slice = high_tm.as_slice()?;
+    let low_slice = low_tm.as_slice()?;
+    let close_slice = close_tm.as_slice()?;
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaWillr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .willr_many_series_one_param_time_major_dev(
+                high_slice,
+                low_slice,
+                close_slice,
+                cols,
+                rows,
+                period,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
 // --- WASM bindings ---
 
 #[cfg(feature = "wasm")]

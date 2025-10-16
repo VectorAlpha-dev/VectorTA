@@ -1028,7 +1028,77 @@ pub fn register_ttm_trend_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResu
     m.add_function(wrap_pyfunction!(ttm_trend_py, m)?)?;
     m.add_function(wrap_pyfunction!(ttm_trend_batch_py, m)?)?;
     m.add_class::<TtmTrendStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(ttm_trend_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(ttm_trend_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     Ok(())
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::ttm_trend_wrapper::CudaTtmTrend;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::{PyReadonlyArray1, PyReadonlyArray2};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::exceptions::PyValueError;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::prelude::*;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ttm_trend_cuda_batch_dev")]
+#[pyo3(signature = (source_f32, close_f32, period_range, device_id=0))]
+pub fn ttm_trend_cuda_batch_dev_py(
+    py: Python<'_>,
+    source_f32: PyReadonlyArray1<'_, f32>,
+    close_f32: PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let src = source_f32.as_slice()?;
+    let cls = close_f32.as_slice()?;
+    let sweep = TtmTrendBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaTtmTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .ttm_trend_batch_dev(src, cls, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ttm_trend_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (source_tm_f32, close_tm_f32, cols, rows, period, device_id=0))]
+pub fn ttm_trend_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    source_tm_f32: PyReadonlyArray1<'_, f32>,
+    close_tm_f32: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let src_tm = source_tm_f32.as_slice()?;
+    let cls_tm = close_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaTtmTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .ttm_trend_many_series_one_param_time_major_dev(src_tm, cls_tm, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(test)]

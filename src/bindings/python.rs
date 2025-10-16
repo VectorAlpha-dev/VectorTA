@@ -45,6 +45,10 @@ use crate::indicators::aso::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::atr::{atr_batch_py, atr_py, AtrStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::atr::{
+    atr_cuda_batch_dev_py, atr_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::avsl::{avsl_batch_py, avsl_py, AvslStreamPy};
 #[cfg(feature = "python")]
@@ -64,6 +68,10 @@ use crate::indicators::bollinger_bands_width::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::bop::{bop_batch_py, bop_py, BopStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::bop::{
+    bop_cuda_batch_dev_py, bop_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::cci::{cci_batch_py, cci_py, CciStreamPy};
 #[cfg(feature = "python")]
@@ -102,6 +110,10 @@ use crate::indicators::cmo::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::coppock::{coppock_batch_py, coppock_py, CoppockStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::coppock::{
+    coppock_cuda_batch_dev_py, coppock_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::cora_wave::{cora_wave_batch_py, cora_wave_py, CoraWaveStreamPy};
 #[cfg(feature = "python")]
@@ -116,6 +128,10 @@ use crate::indicators::correlation_cycle::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::cvi::{cvi_batch_py, cvi_py, CviStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::cvi::{
+    cvi_cuda_batch_dev_py, cvi_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::damiani_volatmeter::{
     damiani_batch_py, damiani_py, DamianiVolatmeterFeedStreamPy, DamianiVolatmeterStreamPy,
@@ -142,6 +158,10 @@ use crate::indicators::devstop::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::di::{di_batch_py, di_py, DiStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::di::{
+    di_cuda_batch_dev_py, di_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::dm::{dm_batch_py, dm_py, DmStreamPy};
 #[cfg(feature = "python")]
@@ -254,6 +274,10 @@ use crate::indicators::mean_ad::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::medium_ad::{medium_ad_batch_py, medium_ad_py, MediumAdStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::medium_ad::{
+    medium_ad_cuda_batch_dev_py, medium_ad_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::medprice::{medprice_batch_py, medprice_py, MedpriceStreamPy};
 #[cfg(feature = "python")]
@@ -272,6 +296,10 @@ use crate::indicators::minmax::{
 use crate::indicators::mod_god_mode::{mod_god_mode_batch_py, mod_god_mode_py, ModGodModeStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::mom::{mom_batch_py, mom_py, MomStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::mom::{
+    mom_cuda_batch_dev_py, mom_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::alma::{alma_batch_py, alma_py, AlmaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -646,6 +674,10 @@ use crate::indicators::net_myrsi::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::nvi::{nvi_batch_py, nvi_py, NviStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::nvi::{
+    nvi_cuda_batch_dev_py, nvi_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::obv::{obv_batch_py, obv_py, ObvStreamPy};
 #[cfg(feature = "python")]
@@ -662,6 +694,10 @@ use crate::indicators::percentile_nearest_rank::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::pfe::{pfe_batch_py, pfe_py, PfeStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::pfe::{
+    pfe_cuda_batch_dev_py, pfe_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::pivot::{pivot_batch_py, pivot_py, PivotStreamPy};
 #[cfg(feature = "python")]
@@ -674,6 +710,10 @@ use crate::indicators::prb::{prb_batch_py, prb_py, PrbStreamPy};
 use crate::indicators::prb::{prb_cuda_batch_dev_py, prb_cuda_many_series_one_param_dev_py};
 #[cfg(feature = "python")]
 use crate::indicators::pvi::{pvi_batch_py, pvi_py, PviStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::pvi::{
+    pvi_cuda_batch_dev_py, pvi_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::qqe::{qqe_batch_py, qqe_py, QqeStreamPy};
 #[cfg(feature = "python")]
@@ -690,6 +730,10 @@ use crate::indicators::range_filter::{
 use crate::indicators::reverse_rsi::{reverse_rsi_batch_py, reverse_rsi_py, ReverseRsiStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::roc::{roc_batch_py, roc_py, RocStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::roc::{
+    roc_cuda_batch_dev_py, roc_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::rocp::{rocp_batch_py, rocp_py, RocpStreamPy};
 #[cfg(feature = "python")]
@@ -740,6 +784,10 @@ use crate::indicators::stochf::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::supertrend::{supertrend_batch_py, supertrend_py, SuperTrendStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::supertrend::{
+    supertrend_cuda_batch_dev_py, supertrend_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::trix::{trix_batch_py, trix_py, TrixStreamPy};
 #[cfg(feature = "python")]
@@ -766,6 +814,10 @@ use crate::indicators::vi::{vi_batch_py, vi_py, ViStreamPy};
 use crate::indicators::vi::{vi_cuda_batch_dev_py, vi_cuda_many_series_one_param_dev_py};
 #[cfg(feature = "python")]
 use crate::indicators::vidya::{vidya_batch_py, vidya_py, VidyaStreamPy};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::vidya::{
+    vidya_cuda_batch_dev_py, vidya_cuda_many_series_one_param_dev_py,
+};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::vidya::{
     vidya_cuda_batch_dev_py, vidya_cuda_many_series_one_param_dev_py,
@@ -806,7 +858,9 @@ use crate::indicators::wclprice::{
 #[cfg(feature = "python")]
 use crate::indicators::wclprice::{wclprice_batch_py, wclprice_py, WclpriceStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::willr::willr_cuda_batch_dev_py;
+use crate::indicators::willr::{
+    willr_cuda_batch_dev_py, willr_cuda_many_series_one_param_dev_py,
+};
 #[cfg(feature = "python")]
 use crate::indicators::willr::{willr_batch_py, willr_py, WillrStreamPy};
 #[cfg(feature = "python")]
@@ -920,6 +974,21 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(zlema_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(
             zlema_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+        // MEDIUM_AD CUDA
+        m.add_function(wrap_pyfunction!(medium_ad_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            medium_ad_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+        // ADOSC CUDA
+        use crate::indicators::adosc::{
+            adosc_cuda_batch_dev_py, adosc_cuda_many_series_one_param_dev_py,
+        };
+        m.add_function(wrap_pyfunction!(adosc_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            adosc_cuda_many_series_one_param_dev_py,
             m
         )?)?;
         m.add_function(wrap_pyfunction!(trendflex_cuda_batch_dev_py, m)?)?;
@@ -1222,11 +1291,27 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nvi_py, m)?)?;
     m.add_function(wrap_pyfunction!(nvi_batch_py, m)?)?;
     m.add_class::<NviStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(nvi_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            nvi_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
 
     // Register PVI functions with their user-facing names
     m.add_function(wrap_pyfunction!(pvi_py, m)?)?;
     m.add_function(wrap_pyfunction!(pvi_batch_py, m)?)?;
     m.add_class::<PviStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(pvi_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            pvi_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
 
     // Register RSMK functions with their user-facing names
     m.add_function(wrap_pyfunction!(rsmk_py, m)?)?;
@@ -1242,6 +1327,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(srsi_py, m)?)?;
     m.add_function(wrap_pyfunction!(srsi_batch_py, m)?)?;
     m.add_class::<SrsiStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(srsi_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(srsi_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register TSF functions with their user-facing names
     m.add_function(wrap_pyfunction!(tsf_py, m)?)?;
@@ -1265,6 +1355,17 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vpt_py, m)?)?;
     m.add_function(wrap_pyfunction!(vpt_batch_py, m)?)?;
     m.add_class::<VptStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        use crate::indicators::vpt::{
+            vpt_cuda_batch_dev_py, vpt_cuda_many_series_one_param_dev_py,
+        };
+        m.add_function(wrap_pyfunction!(vpt_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            vpt_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
 
     // Register PWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(pwma_py, m)?)?;
@@ -1280,11 +1381,24 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pfe_py, m)?)?;
     m.add_function(wrap_pyfunction!(pfe_batch_py, m)?)?;
     m.add_class::<PfeStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(pfe_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(pfe_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register ROC functions with their user-facing names
     m.add_function(wrap_pyfunction!(roc_py, m)?)?;
     m.add_function(wrap_pyfunction!(roc_batch_py, m)?)?;
     m.add_class::<RocStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(roc_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            roc_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
 
     // Register RVI functions with their user-facing names
     m.add_function(wrap_pyfunction!(rvi_py, m)?)?;
@@ -1435,6 +1549,14 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register TTM Trend functions with their user-facing names
     m.add_function(wrap_pyfunction!(ttm_trend_py, m)?)?;
     m.add_function(wrap_pyfunction!(ttm_trend_batch_py, m)?)?;
+    #[cfg(feature = "cuda")]
+    {
+        use crate::indicators::ttm_trend::{
+            ttm_trend_cuda_batch_dev_py, ttm_trend_cuda_many_series_one_param_dev_py,
+        };
+        m.add_function(wrap_pyfunction!(ttm_trend_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(ttm_trend_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     m.add_class::<TtmTrendStreamPy>()?;
 
     // Register VLMA functions with their user-facing names
@@ -1593,6 +1715,14 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register DVDIQQE function
     m.add_function(wrap_pyfunction!(dvdiqqe_py, m)?)?;
     m.add_function(wrap_pyfunction!(dvdiqqe_batch_py, m)?)?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(dvdiqqe_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            dvdiqqe_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
 
     // Register PRB functions
     m.add_function(wrap_pyfunction!(prb_py, m)?)?;
@@ -1772,6 +1902,14 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(er_py, m)?)?;
     m.add_function(wrap_pyfunction!(er_batch_py, m)?)?;
     m.add_class::<ErStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        use crate::indicators::er::{
+            er_cuda_batch_dev_py, er_cuda_many_series_one_param_dev_py,
+        };
+        m.add_function(wrap_pyfunction!(er_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(er_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register Kaufmanstop functions with their user-facing names
     m.add_function(wrap_pyfunction!(kaufmanstop_py, m)?)?;
@@ -1840,6 +1978,12 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(macd_py, m)?)?;
     m.add_function(wrap_pyfunction!(macd_batch_py, m)?)?;
     m.add_class::<MacdStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        use crate::indicators::macd::{macd_cuda_batch_dev_py, macd_cuda_many_series_one_param_dev_py};
+        m.add_function(wrap_pyfunction!(macd_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(macd_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register MFI functions with their user-facing names
     m.add_function(wrap_pyfunction!(mfi_py, m)?)?;
@@ -1875,6 +2019,17 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rsx_py, m)?)?;
     m.add_function(wrap_pyfunction!(rsx_batch_py, m)?)?;
     m.add_class::<RsxStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        use crate::indicators::rsx::{
+            rsx_cuda_batch_dev_py, rsx_cuda_many_series_one_param_dev_py,
+        };
+        // Ensure DeviceArrayF32Py type is exported once for consumers like CuPy
+        use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+        m.add_class::<DeviceArrayF32Py>()?;
+        m.add_function(wrap_pyfunction!(rsx_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(rsx_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register Squeeze Momentum functions with their user-facing names
     m.add_function(wrap_pyfunction!(squeeze_momentum_py, m)?)?;
@@ -1947,10 +2102,20 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cvi_py, m)?)?;
     m.add_function(wrap_pyfunction!(cvi_batch_py, m)?)?;
     m.add_class::<CviStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(cvi_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(cvi_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register DI functions with their user-facing names
     m.add_function(wrap_pyfunction!(di_py, m)?)?;
     m.add_function(wrap_pyfunction!(di_batch_py, m)?)?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(di_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(di_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     m.add_class::<DiStreamPy>()?;
 
     // Register DM functions with their user-facing names
@@ -1987,16 +2152,34 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(keltner_py, m)?)?;
     m.add_function(wrap_pyfunction!(keltner_batch_py, m)?)?;
     m.add_class::<KeltnerStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(keltner_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(keltner_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register AO functions with their user-facing names
     m.add_function(wrap_pyfunction!(ao_py, m)?)?;
     m.add_function(wrap_pyfunction!(ao_batch_py, m)?)?;
     m.add_class::<AoStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+    m.add_function(wrap_pyfunction!(ao_cuda_batch_dev_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ao_cuda_many_series_one_param_dev_py, m)?)?;
+    // Coppock CUDA entrypoints
+    m.add_function(wrap_pyfunction!(coppock_cuda_batch_dev_py, m)?)?;
+    m.add_function(wrap_pyfunction!(coppock_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register ATR functions with their user-facing names
     m.add_function(wrap_pyfunction!(atr_py, m)?)?;
     m.add_function(wrap_pyfunction!(atr_batch_py, m)?)?;
     m.add_class::<AtrStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(atr_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(atr_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register AVSL functions with their user-facing names
     m.add_function(wrap_pyfunction!(avsl_py, m)?)?;
@@ -2153,6 +2336,14 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(bop_py, m)?)?;
     m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
     m.add_class::<BopStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(bop_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            bop_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
 
     // Buff Averages
     m.add_function(wrap_pyfunction!(buff_averages_py, m)?)?;
@@ -2214,6 +2405,14 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(linearreg_intercept_py, m)?)?;
     m.add_function(wrap_pyfunction!(linearreg_intercept_batch_py, m)?)?;
     m.add_class::<LinearRegInterceptStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(linearreg_intercept_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            linearreg_intercept_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
 
     // Register Mass Index functions with their user-facing names
     m.add_function(wrap_pyfunction!(mass_py, m)?)?;
@@ -2280,6 +2479,7 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(willr_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(willr_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
     // Register ZSCORE functions with their user-facing names
@@ -2295,6 +2495,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(gatorosc_py, m)?)?;
     m.add_function(wrap_pyfunction!(gatorosc_batch_py, m)?)?;
     m.add_class::<GatorOscStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(gatorosc_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(gatorosc_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register Kurtosis functions with their user-facing names
     m.add_function(wrap_pyfunction!(kurtosis_py, m)?)?;
@@ -2345,6 +2550,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(supertrend_py, m)?)?;
     m.add_function(wrap_pyfunction!(supertrend_batch_py, m)?)?;
     m.add_class::<SuperTrendStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(supertrend_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(supertrend_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register UltOsc functions with their user-facing names
     m.add_function(wrap_pyfunction!(ultosc_py, m)?)?;
@@ -2400,6 +2610,11 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mom_py, m)?)?;
     m.add_function(wrap_pyfunction!(mom_batch_py, m)?)?;
     m.add_class::<MomStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(mom_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(mom_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register Pivot functions with their user-facing names
     m.add_function(wrap_pyfunction!(pivot_py, m)?)?;
@@ -2458,6 +2673,12 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chande_py, m)?)?;
     m.add_function(wrap_pyfunction!(chande_batch_py, m)?)?;
     m.add_class::<ChandeStreamPy>()?;
+    // CUDA (feature-gated)
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(chande_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(chande_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Add other indicators here as you implement their Python bindings
 

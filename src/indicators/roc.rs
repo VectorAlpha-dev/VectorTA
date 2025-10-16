@@ -1132,8 +1132,63 @@ pub fn roc_into(
             roc_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
-        Ok(())
+    Ok(())
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::roc_wrapper::CudaRoc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "roc_cuda_batch_dev")]
+#[pyo3(signature = (data, period_range, device_id=0))]
+pub fn roc_cuda_batch_dev_py(
+    py: Python<'_>,
+    data: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let prices = data.as_slice()?;
+    let sweep = RocBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaRoc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.roc_batch_dev(prices, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "roc_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm, cols, rows, period, device_id=0))]
+pub fn roc_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let prices_tm = data_tm.as_slice()?;
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if prices_tm.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
     }
+    let inner = py.allow_threads(|| {
+        let cuda = CudaRoc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .roc_many_series_one_param_time_major_dev(prices_tm, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
 }
 
 #[cfg(feature = "wasm")]

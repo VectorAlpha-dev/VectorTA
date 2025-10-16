@@ -1741,3 +1741,67 @@ pub fn register_mom_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     m.add_function(wrap_pyfunction!(mom_batch_py, m)?)?;
     Ok(())
 }
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaMom;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mom_cuda_batch_dev")]
+#[pyo3(signature = (data, period_range, device_id=0))]
+pub fn mom_cuda_batch_dev_py(
+    py: Python<'_>,
+    data: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = data.as_slice()?;
+    if slice.is_empty() {
+        return Err(PyValueError::new_err("empty input"));
+    }
+    let sweep = MomBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMom::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .mom_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mom_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm, cols, rows, period, device_id=0))]
+pub fn mom_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = data_tm.as_slice()?;
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if slice.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMom::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .mom_many_series_one_param_time_major_dev(slice, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}

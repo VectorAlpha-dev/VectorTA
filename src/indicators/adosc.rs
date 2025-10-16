@@ -46,6 +46,11 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaAdosc;
+
 #[derive(Debug, Clone)]
 pub enum AdoscData<'a> {
     Candles {
@@ -2066,6 +2071,96 @@ pub fn adosc_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "adosc_cuda_batch_dev")]
+#[pyo3(signature = (high, low, close, volume, short_period_range, long_period_range, device_id=0))]
+pub fn adosc_cuda_batch_dev_py(
+    py: Python<'_>,
+    high: numpy::PyReadonlyArray1<'_, f32>,
+    low: numpy::PyReadonlyArray1<'_, f32>,
+    close: numpy::PyReadonlyArray1<'_, f32>,
+    volume: numpy::PyReadonlyArray1<'_, f32>,
+    short_period_range: (usize, usize, usize),
+    long_period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+    let volume_slice = volume.as_slice()?;
+    let len = close_slice.len();
+    if high_slice.len() != len || low_slice.len() != len || volume_slice.len() != len {
+        return Err(PyValueError::new_err("mismatched input lengths"));
+    }
+    let sweep = AdoscBatchRange {
+        short_period: short_period_range,
+        long_period: long_period_range,
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAdosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .adosc_batch_dev(high_slice, low_slice, close_slice, volume_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "adosc_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm, low_tm, close_tm, volume_tm, cols, rows, short_period, long_period, device_id=0))]
+pub fn adosc_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm: numpy::PyReadonlyArray1<'_, f32>,
+    close_tm: numpy::PyReadonlyArray1<'_, f32>,
+    volume_tm: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    short_period: usize,
+    long_period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let high_slice = high_tm.as_slice()?;
+    let low_slice = low_tm.as_slice()?;
+    let close_slice = close_tm.as_slice()?;
+    let volume_slice = volume_tm.as_slice()?;
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if high_slice.len() != expected
+        || low_slice.len() != expected
+        || close_slice.len() != expected
+        || volume_slice.len() != expected
+    {
+        return Err(PyValueError::new_err("time-major input lengths mismatch"));
+    }
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAdosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .adosc_many_series_one_param_time_major_dev(
+                high_slice,
+                low_slice,
+                close_slice,
+                volume_slice,
+                cols,
+                rows,
+                short_period,
+                long_period,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

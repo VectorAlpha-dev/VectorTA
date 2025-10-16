@@ -44,6 +44,11 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::pfe_wrapper::CudaPfe;
+
 impl<'a> AsRef<[f64]> for PfeInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -1304,6 +1309,55 @@ pub fn pfe_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "pfe_cuda_batch_dev")]
+#[pyo3(signature = (data, period_range, smoothing_range, device_id=0))]
+pub fn pfe_cuda_batch_dev_py(
+    py: Python<'_>,
+    data: PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    smoothing_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data.as_slice()?;
+    let sweep = PfeBatchRange { period: period_range, smoothing: smoothing_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaPfe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.pfe_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "pfe_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm, cols, rows, period, smoothing, device_id=0))]
+pub fn pfe_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    smoothing: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let tm_slice = data_tm.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaPfe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.pfe_many_series_one_param_time_major_dev(tm_slice, cols, rows, period, smoothing)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

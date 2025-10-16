@@ -1267,6 +1267,67 @@ pub fn er_batch_into(
     }
 }
 
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::er_wrapper::CudaEr;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyReadonlyArray1;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::exceptions::PyValueError;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::prelude::*;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "er_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn er_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = data_f32.as_slice()?;
+    let sweep = ErBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaEr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .er_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "er_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, cols, rows, period, device_id=0))]
+pub fn er_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = data_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaEr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .er_many_series_one_param_time_major_dev(slice, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

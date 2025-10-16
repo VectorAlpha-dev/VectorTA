@@ -20,9 +20,7 @@ fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
 #[test]
 fn cuda_feature_off_noop() {
     #[cfg(not(feature = "cuda"))]
-    {
-        assert!(true);
-    }
+    { assert!(true); }
 }
 
 #[cfg(feature = "cuda")]
@@ -34,32 +32,36 @@ fn vidya_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let len = 8192usize;
-    let mut data = vec![f64::NAN; len];
-    for i in 10..len {
+    let mut price = vec![f64::NAN; len];
+    for i in 8..len {
         let x = i as f64;
-        data[i] = (x * 0.00123).sin() + 0.00011 * x;
+        price[i] = (x * 0.00123).sin() + 0.00017 * x;
     }
     let sweep = VidyaBatchRange {
-        short_period: (2, 8, 2),
-        long_period: (10, 32, 11),
+        short_period: (2, 2, 0),
+        long_period: (10, 64, 3),
         alpha: (0.2, 0.2, 0.0),
     };
 
-    let cpu = vidya_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
-    let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    let cpu = vidya_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
+
+    let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaVidya::new(0).expect("CudaVidya::new");
     let dev = cuda
-        .vidya_batch_dev(&data_f32, &sweep)
+        .vidya_batch_dev(&price_f32, &sweep)
         .expect("vidya_batch_dev");
 
     assert_eq!(cpu.rows, dev.rows);
     assert_eq!(cpu.cols, dev.cols);
+
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
     let tol = 5e-4;
-    for idx in 0..host.len() {
-        assert!(approx_eq(cpu.values[idx], host[idx] as f64, tol), "mismatch at {}", idx);
+    for idx in 0..(cpu.rows * cpu.cols) {
+        let c = cpu.values[idx];
+        let g = host[idx] as f64;
+        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
     }
     Ok(())
 }
@@ -68,45 +70,50 @@ fn vidya_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn vidya_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!("[vidya_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        eprintln!(
+            "[vidya_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
+        );
         return Ok(());
     }
     let cols = 8usize;
-    let rows = 1024usize;
-    let mut tm = vec![f64::NAN; cols * rows];
+    let rows = 4096usize;
+    let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
-            let x = (t as f64) + (s as f64) * 0.25;
-            tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+            let x = (t as f64) + (s as f64) * 0.2;
+            price_tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
     }
-    let sp = 6usize;
+    let sp = 2usize;
     let lp = 21usize;
-    let alpha = 0.2;
+    let alpha = 0.2f64;
 
-    // CPU per-series baseline
+    // CPU baseline per series
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
-        let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = tm[t * cols + s]; }
-        let input = VidyaInput { data: VidyaData::Slice(&series), params: VidyaParams{ short_period: Some(sp), long_period: Some(lp), alpha: Some(alpha) } };
-        let out = vidya_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        let mut p = vec![f64::NAN; rows];
+        for t in 0..rows { p[t] = price_tm[t * cols + s]; }
+        let params = VidyaParams { short_period: Some(sp), long_period: Some(lp), alpha: Some(alpha) };
+        let input = VidyaInput { data: VidyaData::Slice(&p), params };
+        let out = vidya_with_kernel(&input, Kernel::Scalar)?.values;
+        for t in 0..rows { cpu_tm[t * cols + s] = out[t]; }
     }
 
-    let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
+    let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaVidya::new(0).expect("CudaVidya::new");
+    let params = VidyaParams { short_period: Some(sp), long_period: Some(lp), alpha: Some(alpha) };
     let dev_tm = cuda
-        .vidya_many_series_one_param_time_major_dev(&tm_f32, cols, rows, &VidyaParams { short_period: Some(sp), long_period: Some(lp), alpha: Some(alpha) })
-        .expect("vidya_many_series_one_param_time_major_dev");
+        .vidya_many_series_one_param_time_major_dev(&price_tm_f32, cols, rows, &params)
+        .expect("vidya many series dev");
+
     assert_eq!(dev_tm.rows, rows);
     assert_eq!(dev_tm.cols, cols);
-    let mut host_tm = vec![0f32; dev_tm.len()];
-    dev_tm.buf.copy_to(&mut host_tm)?;
 
+    let mut g_tm = vec![0f32; dev_tm.len()];
+    dev_tm.buf.copy_to(&mut g_tm)?;
     let tol = 1e-4;
-    for idx in 0..host_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol), "mismatch at {}", idx);
+    for idx in 0..g_tm.len() {
+        assert!(approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol), "mismatch at {}", idx);
     }
     Ok(())
 }

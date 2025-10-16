@@ -1552,6 +1552,76 @@ pub fn expand_grid_srsi(r: &SrsiBatchRange) -> Vec<SrsiParams> {
     expand_grid(r)
 }
 
+// ==================== PYTHON: CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "srsi_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, rsi_range, stoch_range, k_range, d_range, device_id=0))]
+pub fn srsi_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    rsi_range: (usize, usize, usize),
+    stoch_range: (usize, usize, usize),
+    k_range: (usize, usize, usize),
+    d_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::CudaSrsi;
+    use numpy::IntoPyArray;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice = data_f32.as_slice()?;
+    let sweep = SrsiBatchRange { rsi_period: rsi_range, stoch_period: stoch_range, k: k_range, d: d_range };
+    let (pair, combos) = py.allow_threads(|| {
+        let cuda = CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.srsi_batch_dev(slice, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("k", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: pair.k })?)?;
+    dict.set_item("d", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: pair.d })?)?;
+    dict.set_item("rows", combos.len())?;
+    dict.set_item("cols", slice.len())?;
+    dict.set_item("rsi_periods", combos.iter().map(|p| p.rsi_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("stoch_periods", combos.iter().map(|p| p.stoch_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("k_periods", combos.iter().map(|p| p.k.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("d_periods", combos.iter().map(|p| p.d.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "srsi_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, rsi_period=14, stoch_period=14, k=3, d=3, device_id=0))]
+pub fn srsi_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    rsi_period: usize,
+    stoch_period: usize,
+    k: usize,
+    d: usize,
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::CudaSrsi;
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array")); }
+    let rows = shape[0]; let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = SrsiParams { rsi_period: Some(rsi_period), stoch_period: Some(stoch_period), k: Some(k), d: Some(d), source: None };
+    let pair = py.allow_threads(|| {
+        let cuda = CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.srsi_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("k", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: pair.k })?)?;
+    dict.set_item("d", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: pair.d })?)?;
+    dict.set_item("rows", rows)?; dict.set_item("cols", cols)?;
+    dict.set_item("rsi_period", rsi_period)?; dict.set_item("stoch_period", stoch_period)?;
+    dict.set_item("k_period", k)?; dict.set_item("d_period", d)?;
+    Ok(dict)
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "srsi")]
 #[pyo3(signature = (data, rsi_period=None, stoch_period=None, k=None, d=None, source=None, kernel=None))]

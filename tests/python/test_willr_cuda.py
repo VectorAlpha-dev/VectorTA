@@ -70,3 +70,44 @@ class TestWillrCuda:
                 atol=2e-5,
                 msg=f"CUDA batch vs CPU mismatch (period={period})",
             )
+
+    def test_willr_cuda_many_series_one_param_matches_cpu(self, dataset):
+        T = 1024
+        N = 6
+        period = 14
+
+        base = dataset["close"][:T].astype(np.float64)
+        high_tm = np.full((T, N), np.nan, dtype=np.float64)
+        low_tm = np.full((T, N), np.nan, dtype=np.float64)
+        close_tm = np.full((T, N), np.nan, dtype=np.float64)
+        for j in range(N):
+            fv = min(j, 5)
+            off = 0.1 + 0.02 * j
+            for t in range(fv, T):
+                v = base[t] if np.isfinite(base[t]) else (0.0)
+                high_tm[t, j] = v + off
+                low_tm[t, j] = v - off
+                close_tm[t, j] = v
+
+        cpu_tm = np.full_like(close_tm, np.nan)
+        for j in range(N):
+            cpu_tm[:, j] = ti.willr(high_tm[:, j], low_tm[:, j], close_tm[:, j], period)
+
+        handle = ti.willr_cuda_many_series_one_param_dev(
+            high_tm.astype(np.float32).ravel(),
+            low_tm.astype(np.float32).ravel(),
+            close_tm.astype(np.float32).ravel(),
+            N,
+            T,
+            period,
+        )
+        gpu_tm = cp.asnumpy(cp.asarray(handle))
+
+        assert gpu_tm.shape == cpu_tm.shape
+        assert_close(
+            gpu_tm,
+            cpu_tm,
+            rtol=2e-5,
+            atol=5e-5,
+            msg="WILLR CUDA many-series mismatch",
+        )

@@ -1,6 +1,6 @@
 // Integration tests for CUDA WILLR kernels
 
-use my_project::indicators::willr::{WillrBatchBuilder, WillrBatchRange};
+use my_project::indicators::willr::{WillrBatchBuilder, WillrBatchRange, WillrBuilder, WillrInput, WillrParams, willr_with_kernel};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -84,5 +84,84 @@ fn willr_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn willr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!(
+            "[willr_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
+        );
+        return Ok(());
+    }
+
+    let cols = 12usize;
+    let rows = 2048usize;
+    let period = 14usize;
+
+    // Build time-major high/low/close with early NaNs per series
+    let mut high_tm = vec![f64::NAN; cols * rows];
+    let mut low_tm = vec![f64::NAN; cols * rows];
+    let mut close_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        let fv = s.min(5); // stagger first-valid per series
+        for t in fv..rows {
+            let x = (t as f64) * 0.0021 + (s as f64) * 0.017;
+            let base = (x).sin() + 0.0007 * (t as f64);
+            high_tm[t * cols + s] = base + 0.6;
+            low_tm[t * cols + s] = base - 0.5;
+            close_tm[t * cols + s] = base;
+        }
+    }
+
+    // CPU baseline per series
+    let mut cpu_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        let mut h = vec![f64::NAN; rows];
+        let mut l = vec![f64::NAN; rows];
+        let mut c = vec![f64::NAN; rows];
+        for t in 0..rows {
+            let idx = t * cols + s;
+            h[t] = high_tm[idx];
+            l[t] = low_tm[idx];
+            c[t] = close_tm[idx];
+        }
+        let params = WillrParams { period: Some(period) };
+        let input = WillrInput::from_slices(&h, &l, &c, params);
+        let out = willr_with_kernel(&input, Kernel::Scalar)?.values;
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out[t];
+        }
+    }
+
+    // GPU
+    let high_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
+    let cuda = CudaWillr::new(0).expect("CudaWillr::new");
+    let dev = cuda
+        .willr_many_series_one_param_time_major_dev(
+            &high_f32,
+            &low_f32,
+            &close_f32,
+            cols,
+            rows,
+            period,
+        )
+        .expect("willr many-series dev");
+
+    assert_eq!(dev.rows, rows);
+    assert_eq!(dev.cols, cols);
+    let mut host = vec![0f32; dev.len()];
+    dev.buf.copy_to(&mut host)?;
+
+    let tol = 5e-5;
+    for idx in 0..host.len() {
+        let g = host[idx] as f64;
+        let s = cpu_tm[idx];
+        assert!(approx_eq(s, g, tol), "mismatch at {}: cpu={} gpu={}", idx, s, g);
+    }
     Ok(())
 }

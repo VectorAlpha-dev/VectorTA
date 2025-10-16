@@ -1964,3 +1964,72 @@ pub fn pvi_batch_into(
         Ok(rows)
     }
 }
+
+// ---------------- Python CUDA bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaPvi;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "pvi_cuda_batch_dev")]
+#[pyo3(signature = (close, volume, initial_values, device_id=0))]
+pub fn pvi_cuda_batch_dev_py(
+    py: Python<'_>,
+    close: PyReadonlyArray1<'_, f32>,
+    volume: PyReadonlyArray1<'_, f32>,
+    initial_values: PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let close_slice = close.as_slice()?;
+    let volume_slice = volume.as_slice()?;
+    let inits_slice = initial_values.as_slice()?;
+    if close_slice.len() != volume_slice.len() {
+        return Err(PyValueError::new_err("mismatched input lengths"));
+    }
+    if inits_slice.is_empty() {
+        return Err(PyValueError::new_err("initial_values must be non-empty"));
+    }
+    let inner = py.allow_threads(|| {
+        let cuda = CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.pvi_batch_dev(close_slice, volume_slice, inits_slice)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "pvi_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (close_tm, volume_tm, cols, rows, initial_value, device_id=0))]
+pub fn pvi_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    close_tm: PyReadonlyArray1<'_, f32>,
+    volume_tm: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    initial_value: f32,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let close_slice = close_tm.as_slice()?;
+    let volume_slice = volume_tm.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.pvi_many_series_one_param_time_major_dev(
+            close_slice,
+            volume_slice,
+            cols,
+            rows,
+            initial_value,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}

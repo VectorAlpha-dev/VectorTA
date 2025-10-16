@@ -1,13 +1,15 @@
 // CUDA kernels for Variable Index Dynamic Average (VIDYA)
 //
-// Pattern: Recurrence/IIR per-parameter (or per-series) time scan.
-// Warmup semantics mirror the scalar implementation in src/indicators/vidya.rs:
-// - first_valid = index of first non-NaN input
-// - warm_end = first_valid + long_period
-// - The first defined output is at warm_end - 2
-// - Indices [0, warm_end - 2) are set to NaN
-// - Output at warm_end - 1 uses k computed from initial windows
-// - Thereafter, rolling windows update by push/pop
+// Pattern: recurrence/IIR. Each block handles one parameter combo (batch)
+// or one series (many-series, time-major). Thread 0 performs the sequential
+// scan; other threads parallelize prefix NaN initialization.
+//
+// Semantics are aligned with the scalar Rust implementation in
+// src/indicators/vidya.rs:
+// - warmup index = first_valid + long_period - 2
+// - out[warmup-2] = price[warmup-2]
+// - out[warmup-1] = EMA-style update using k = alpha * (short_std / long_std)
+// - Thereafter, rolling updates for sums/sumsq and EMA-style recurrence.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -15,11 +17,12 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include <math_constants.h>
 
 extern "C" __global__
 void vidya_batch_f32(const float* __restrict__ prices,
-                     const int*   __restrict__ shorts,
-                     const int*   __restrict__ longs,
+                     const int*   __restrict__ short_periods,
+                     const int*   __restrict__ long_periods,
                      const float* __restrict__ alphas,
                      int series_len,
                      int first_valid,
@@ -28,99 +31,109 @@ void vidya_batch_f32(const float* __restrict__ prices,
     const int combo = blockIdx.x;
     if (combo >= n_combos || series_len <= 0) return;
 
-    const int sp = shorts[combo];
-    const int lp = longs[combo];
-    if (sp <= 0 || lp <= 0 || first_valid >= series_len) return;
+    const int sp = short_periods[combo];
+    const int lp = long_periods[combo];
     const float alpha = alphas[combo];
-
     const int base = combo * series_len;
 
-    // Warmup bounds
-    const int warm_end = min(series_len, first_valid + lp);
-    const int warmup_prefix = max(0, warm_end - 2); // first defined output index
+    // Basic validation mirroring CPU-side guards; on invalid, fill NaNs.
+    bool invalid = (sp < 2) || (lp < sp) || (lp < 2) || (alpha < 0.0f) || (alpha > 1.0f) ||
+                   (first_valid < 0) || (first_valid >= series_len) ||
+                   (lp > (series_len - first_valid));
 
-    // Initialize prefix [0, warmup_prefix) to NaN
-    for (int idx = threadIdx.x; idx < warmup_prefix; idx += blockDim.x) {
-        out[base + idx] = NAN;
+    if (invalid) {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out[base + i] = CUDART_NAN_F;
+        }
+        return;
     }
 
-    // Only a single thread performs the sequential scan
+    const int warm_end = first_valid + lp; // first index after initial window
+    const int idx_m2 = warm_end - 2;
+    const int idx_m1 = warm_end - 1;
+    const int warmup_prefix = idx_m2; // exclusive end for NaN prefix
+
+    // Prefix NaN initialization [0, warmup_prefix)
+    for (int i = threadIdx.x; i < warmup_prefix; i += blockDim.x) {
+        out[base + i] = CUDART_NAN_F;
+    }
+
     if (threadIdx.x != 0) return;
 
-    if (first_valid >= series_len) return;
-
-    // Rolling accumulators for sums and sums of squares
-    double long_sum  = 0.0;
+    // Rolling accumulators over initial window [first_valid .. warm_end)
+    double long_sum = 0.0;
     double long_sum2 = 0.0;
-    double short_sum  = 0.0;
+    double short_sum = 0.0;
     double short_sum2 = 0.0;
 
-    // Phase 1: accumulate long only until short window starts contributing
-    const int short_head = max(first_valid, warm_end - sp);
+    const int short_head = warm_end - sp;
     for (int i = first_valid; i < short_head; ++i) {
-        const float x = prices[i];
-        long_sum  += (double)x;
-        long_sum2 += (double)x * (double)x;
+        const double x = static_cast<double>(prices[i]);
+        long_sum += x;
+        long_sum2 += x * x;
     }
-    // Phase 2: accumulate both long and short up to warm_end (exclusive)
     for (int i = short_head; i < warm_end; ++i) {
-        const float x = prices[i];
-        long_sum  += (double)x;
-        long_sum2 += (double)x * (double)x;
-        short_sum  += (double)x;
-        short_sum2 += (double)x * (double)x;
+        const double x = static_cast<double>(prices[i]);
+        long_sum += x;
+        long_sum2 += x * x;
+        short_sum += x;
+        short_sum2 += x * x;
     }
 
-    if (warm_end - 2 >= 0 && warm_end - 2 < series_len) {
-        float val = prices[warm_end - 2];
-        out[base + (warm_end - 2)] = val;
+    // First two defined outputs
+    float val = prices[idx_m2];
+    out[base + idx_m2] = val;
 
-        if (warm_end - 1 < series_len) {
-            const double sp_inv = 1.0 / (double)sp;
-            const double lp_inv = 1.0 / (double)lp;
-            const double short_mean = short_sum * sp_inv;
-            const double long_mean  = long_sum * lp_inv;
-            const double short_var  = short_sum2 * sp_inv - short_mean * short_mean;
-            const double long_var   = long_sum2 * lp_inv - long_mean * long_mean;
-            double k = 0.0;
-            if (long_var > 0.0 && short_var > 0.0) {
-                k = sqrt(short_var / long_var) * (double)alpha;
-            }
-            const float x1 = prices[warm_end - 1];
-            val = fmaf(x1 - val, (float)k, val);
-            out[base + (warm_end - 1)] = val;
+    if (idx_m1 < series_len) {
+        const double short_inv = 1.0 / static_cast<double>(sp);
+        const double long_inv  = 1.0 / static_cast<double>(lp);
+        const double short_mean = short_sum * short_inv;
+        const double long_mean  = long_sum * long_inv;
+        const double short_var = short_sum2 * short_inv - short_mean * short_mean;
+        const double long_var  = long_sum2 * long_inv - long_mean * long_mean;
+        const double short_std = sqrt(fmax(0.0, short_var));
+        const double long_std  = sqrt(fmax(0.0, long_var));
+        double k = (long_std == 0.0) ? 0.0 : (short_std / long_std);
+        k *= static_cast<double>(alpha);
 
-            // Main loop
-            for (int t = warm_end; t < series_len; ++t) {
-                const float x_new = prices[t];
-                const double x2   = (double)x_new * (double)x_new;
+        const float x = prices[idx_m1];
+        val = fmaf(x - val, static_cast<float>(k), val);
+        out[base + idx_m1] = val;
+    }
 
-                // push new
-                long_sum  += (double)x_new;
-                long_sum2 += x2;
-                short_sum  += (double)x_new;
-                short_sum2 += x2;
+    // Main rolling loop
+    for (int t = warm_end; t < series_len; ++t) {
+        const double x_new = static_cast<double>(prices[t]);
+        const double x_new2 = x_new * x_new;
 
-                // pop old
-                const float x_long_out  = prices[t - lp];
-                const float x_short_out = prices[t - sp];
-                long_sum  -= (double)x_long_out;
-                long_sum2 -= (double)x_long_out * (double)x_long_out;
-                short_sum  -= (double)x_short_out;
-                short_sum2 -= (double)x_short_out * (double)x_short_out;
+        // push new
+        long_sum += x_new;
+        long_sum2 += x_new2;
+        short_sum += x_new;
+        short_sum2 += x_new2;
 
-                const double short_mean2 = short_sum * sp_inv;
-                const double long_mean2  = long_sum * lp_inv;
-                const double short_var2  = short_sum2 * sp_inv - short_mean2 * short_mean2;
-                const double long_var2   = long_sum2 * lp_inv - long_mean2 * long_mean2;
-                double k2 = 0.0;
-                if (long_var2 > 0.0 && short_var2 > 0.0) {
-                    k2 = sqrt(short_var2 / long_var2) * (double)alpha;
-                }
-                val = fmaf(x_new - val, (float)k2, val);
-                out[base + t] = val;
-            }
-        }
+        // pop old
+        const double x_long_out = static_cast<double>(prices[t - lp]);
+        const double x_short_out = static_cast<double>(prices[t - sp]);
+        long_sum -= x_long_out;
+        long_sum2 -= x_long_out * x_long_out;
+        short_sum -= x_short_out;
+        short_sum2 -= x_short_out * x_short_out;
+
+        const double short_inv = 1.0 / static_cast<double>(sp);
+        const double long_inv  = 1.0 / static_cast<double>(lp);
+        const double short_mean = short_sum * short_inv;
+        const double long_mean  = long_sum * long_inv;
+        const double short_var = short_sum2 * short_inv - short_mean * short_mean;
+        const double long_var  = long_sum2 * long_inv - long_mean * long_mean;
+        const double short_std = sqrt(fmax(0.0, short_var));
+        const double long_std  = sqrt(fmax(0.0, long_var));
+        double k = (long_std == 0.0) ? 0.0 : (short_std / long_std);
+        k *= static_cast<double>(alpha);
+
+        const float x = prices[t];
+        val = fmaf(x - val, static_cast<float>(k), val);
+        out[base + t] = val;
     }
 }
 
@@ -133,90 +146,102 @@ void vidya_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                      int num_series,
                                      int series_len,
                                      float* __restrict__ out_tm) {
-    const int series_idx = blockIdx.x; // one block per series (compat mapping)
+    const int series_idx = blockIdx.x; // one block per series (compat mode)
     if (series_idx >= num_series || series_len <= 0) return;
-    if (short_period <= 0 || long_period <= 0) return;
 
-    const int stride = num_series; // time-major layout: [t][series]
+    const int sp = short_period;
+    const int lp = long_period;
     int first_valid = first_valids[series_idx];
     if (first_valid < 0) first_valid = 0;
     if (first_valid >= series_len) return;
 
-    const int warm_end = min(series_len, first_valid + long_period);
-    const int warmup_prefix = max(0, warm_end - 2);
+    const bool invalid = (sp < 2) || (lp < sp) || (lp < 2) || (alpha < 0.0f) || (alpha > 1.0f) ||
+                         (lp > (series_len - first_valid));
+    const int stride = num_series; // time-major
 
-    // Fill NaN prefix for this series
-    for (int t = threadIdx.x; t < warmup_prefix; t += blockDim.x) {
-        out_tm[t * stride + series_idx] = NAN;
+    if (invalid) {
+        for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
+            out_tm[t * stride + series_idx] = CUDART_NAN_F;
+        }
+        return;
+    }
+
+    const int warm_end = first_valid + lp;
+    const int idx_m2 = warm_end - 2;
+    const int idx_m1 = warm_end - 1;
+
+    // Prefix NaN per series
+    for (int t = threadIdx.x; t < idx_m2; t += blockDim.x) {
+        out_tm[t * stride + series_idx] = CUDART_NAN_F;
     }
 
     if (threadIdx.x != 0) return;
 
-    // Accumulators
-    double long_sum  = 0.0, long_sum2  = 0.0;
-    double short_sum = 0.0, short_sum2 = 0.0;
-
-    const int short_head = max(first_valid, warm_end - short_period);
-    for (int t = first_valid; t < short_head; ++t) {
-        const float x = prices_tm[t * stride + series_idx];
-        long_sum  += (double)x;
-        long_sum2 += (double)x * (double)x;
+    // Rolling accumulators over initial window
+    double long_sum = 0.0;
+    double long_sum2 = 0.0;
+    double short_sum = 0.0;
+    double short_sum2 = 0.0;
+    const int short_head = warm_end - sp;
+    for (int i = first_valid; i < short_head; ++i) {
+        const double x = static_cast<double>(prices_tm[i * stride + series_idx]);
+        long_sum += x;
+        long_sum2 += x * x;
     }
-    for (int t = short_head; t < warm_end; ++t) {
-        const float x = prices_tm[t * stride + series_idx];
-        long_sum  += (double)x;
-        long_sum2 += (double)x * (double)x;
-        short_sum  += (double)x;
-        short_sum2 += (double)x * (double)x;
+    for (int i = short_head; i < warm_end; ++i) {
+        const double x = static_cast<double>(prices_tm[i * stride + series_idx]);
+        long_sum += x;
+        long_sum2 += x * x;
+        short_sum += x;
+        short_sum2 += x * x;
     }
 
-    if (warm_end - 2 >= 0 && warm_end - 2 < series_len) {
-        float val = prices_tm[(warm_end - 2) * stride + series_idx];
-        out_tm[(warm_end - 2) * stride + series_idx] = val;
+    float val = prices_tm[idx_m2 * stride + series_idx];
+    out_tm[idx_m2 * stride + series_idx] = val;
 
-        if (warm_end - 1 < series_len) {
-            const double sp_inv = 1.0 / (double)short_period;
-            const double lp_inv = 1.0 / (double)long_period;
-            const double short_mean = short_sum * sp_inv;
-            const double long_mean  = long_sum * lp_inv;
-            const double short_var  = short_sum2 * sp_inv - short_mean * short_mean;
-            const double long_var   = long_sum2 * lp_inv - long_mean * long_mean;
-            double k = 0.0;
-            if (long_var > 0.0 && short_var > 0.0) {
-                k = sqrt(short_var / long_var) * (double)alpha;
-            }
-            const float x1 = prices_tm[(warm_end - 1) * stride + series_idx];
-            val = fmaf(x1 - val, (float)k, val);
-            out_tm[(warm_end - 1) * stride + series_idx] = val;
+    if (idx_m1 < series_len) {
+        const double short_inv = 1.0 / static_cast<double>(sp);
+        const double long_inv  = 1.0 / static_cast<double>(lp);
+        const double short_mean = short_sum * short_inv;
+        const double long_mean  = long_sum * long_inv;
+        const double short_var = short_sum2 * short_inv - (short_mean * short_mean);
+        const double long_var  = long_sum2 * long_inv - (long_mean * long_mean);
+        const double short_std = sqrt(fmax(0.0, short_var));
+        const double long_std  = sqrt(fmax(0.0, long_var));
+        double k = (long_std == 0.0) ? 0.0 : (short_std / long_std);
+        k *= static_cast<double>(alpha);
+        const float x = prices_tm[idx_m1 * stride + series_idx];
+        val = fmaf(x - val, static_cast<float>(k), val);
+        out_tm[idx_m1 * stride + series_idx] = val;
+    }
 
-            for (int t = warm_end; t < series_len; ++t) {
-                const float x_new = prices_tm[t * stride + series_idx];
-                const double x2   = (double)x_new * (double)x_new;
+    for (int t = warm_end; t < series_len; ++t) {
+        const double x_new = static_cast<double>(prices_tm[t * stride + series_idx]);
+        const double x_new2 = x_new * x_new;
+        long_sum += x_new;
+        long_sum2 += x_new2;
+        short_sum += x_new;
+        short_sum2 += x_new2;
+        const double x_long_out = static_cast<double>(prices_tm[(t - lp) * stride + series_idx]);
+        const double x_short_out = static_cast<double>(prices_tm[(t - sp) * stride + series_idx]);
+        long_sum -= x_long_out;
+        long_sum2 -= x_long_out * x_long_out;
+        short_sum -= x_short_out;
+        short_sum2 -= x_short_out * x_short_out;
 
-                long_sum  += (double)x_new;
-                long_sum2 += x2;
-                short_sum  += (double)x_new;
-                short_sum2 += x2;
-
-                const float x_long_out  = prices_tm[(t - long_period) * stride + series_idx];
-                const float x_short_out = prices_tm[(t - short_period) * stride + series_idx];
-                long_sum  -= (double)x_long_out;
-                long_sum2 -= (double)x_long_out * (double)x_long_out;
-                short_sum  -= (double)x_short_out;
-                short_sum2 -= (double)x_short_out * (double)x_short_out;
-
-                const double short_mean2 = short_sum * sp_inv;
-                const double long_mean2  = long_sum * lp_inv;
-                const double short_var2  = short_sum2 * sp_inv - short_mean2 * short_mean2;
-                const double long_var2   = long_sum2 * lp_inv - long_mean2 * long_mean2;
-                double k2 = 0.0;
-                if (long_var2 > 0.0 && short_var2 > 0.0) {
-                    k2 = sqrt(short_var2 / long_var2) * (double)alpha;
-                }
-                val = fmaf(x_new - val, (float)k2, val);
-                out_tm[t * stride + series_idx] = val;
-            }
-        }
+        const double short_inv = 1.0 / static_cast<double>(sp);
+        const double long_inv  = 1.0 / static_cast<double>(lp);
+        const double short_mean = short_sum * short_inv;
+        const double long_mean  = long_sum * long_inv;
+        const double short_var = short_sum2 * short_inv - short_mean * short_mean;
+        const double long_var  = long_sum2 * long_inv - long_mean * long_mean;
+        const double short_std = sqrt(fmax(0.0, short_var));
+        const double long_std  = sqrt(fmax(0.0, long_var));
+        double k = (long_std == 0.0) ? 0.0 : (short_std / long_std);
+        k *= static_cast<double>(alpha);
+        const float x = prices_tm[t * stride + series_idx];
+        val = fmaf(x - val, static_cast<float>(k), val);
+        out_tm[t * stride + series_idx] = val;
     }
 }
 
