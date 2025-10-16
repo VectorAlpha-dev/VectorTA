@@ -54,6 +54,13 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::mfi_wrapper::CudaMfi;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+
 #[derive(Debug, Clone)]
 pub enum MfiData<'a> {
     Candles {
@@ -1304,6 +1311,55 @@ pub fn mfi_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+// ---------------- CUDA Python Bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mfi_cuda_batch_dev")]
+#[pyo3(signature = (typical_price, volume, period_range, device_id=0))]
+pub fn mfi_cuda_batch_dev_py(
+    py: Python<'_>,
+    typical_price: PyReadonlyArray1<'_, f32>,
+    volume: PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let tp = typical_price.as_slice()?;
+    let vol = volume.as_slice()?;
+    if tp.len() != vol.len() { return Err(PyValueError::new_err("mismatched input lengths")); }
+    let sweep = MfiBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.mfi_batch_dev(tp, vol, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mfi_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (typical_price_tm, volume_tm, cols, rows, period, device_id=0))]
+pub fn mfi_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    typical_price_tm: PyReadonlyArray1<'_, f32>,
+    volume_tm: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let tp = typical_price_tm.as_slice()?;
+    let vol = volume_tm.as_slice()?;
+    if tp.len() != vol.len() { return Err(PyValueError::new_err("mismatched input lengths")); }
+    if tp.len() != cols * rows { return Err(PyValueError::new_err("unexpected matrix size")); }
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.mfi_many_series_one_param_time_major_dev(tp, vol, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[inline]

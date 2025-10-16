@@ -2209,6 +2209,72 @@ pub fn ultosc_batch_py<'py>(
     Ok(dict)
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ultosc_cuda_batch_dev")]
+#[pyo3(signature = (high, low, close, timeperiod1_range, timeperiod2_range, timeperiod3_range, device_id=0))]
+pub fn ultosc_cuda_batch_dev_py(
+    py: Python<'_>,
+    high: PyReadonlyArray1<'_, f32>,
+    low: PyReadonlyArray1<'_, f32>,
+    close: PyReadonlyArray1<'_, f32>,
+    timeperiod1_range: (usize, usize, usize),
+    timeperiod2_range: (usize, usize, usize),
+    timeperiod3_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::CudaUltosc;
+    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+
+    let sweep = UltOscBatchRange {
+        timeperiod1: timeperiod1_range,
+        timeperiod2: timeperiod2_range,
+        timeperiod3: timeperiod3_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaUltosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ultosc_batch_dev(high_slice, low_slice, close_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ultosc_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm, low_tm, close_tm, cols, rows, timeperiod1, timeperiod2, timeperiod3, device_id=0))]
+pub fn ultosc_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm: PyReadonlyArray1<'_, f32>,
+    low_tm: PyReadonlyArray1<'_, f32>,
+    close_tm: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    timeperiod1: usize,
+    timeperiod2: usize,
+    timeperiod3: usize,
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::CudaUltosc;
+    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_tm.as_slice()?;
+    let l = low_tm.as_slice()?;
+    let c = close_tm.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaUltosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ultosc_many_series_one_param_time_major_dev(h, l, c, cols, rows, timeperiod1, timeperiod2, timeperiod3)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "python")]
 #[pyclass(name = "UltOscStream")]
 pub struct UltOscStreamPy {

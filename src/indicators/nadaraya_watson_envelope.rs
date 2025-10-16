@@ -1600,7 +1600,90 @@ pub fn register_nadaraya_watson_envelope_module(m: &Bound<'_, PyModule>) -> PyRe
     m.add_function(wrap_pyfunction!(nadaraya_watson_envelope_py, m)?)?;
     m.add_function(wrap_pyfunction!(nadaraya_watson_envelope_batch_py, m)?)?;
     m.add_class::<NweStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(nadaraya_watson_envelope_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            nadaraya_watson_envelope_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
     Ok(())
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaNwe};
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "nadaraya_watson_envelope_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, bandwidth_range=(8.0,8.0,0.0), multiplier_range=(3.0,3.0,0.0), lookback_range=(500,500,0), device_id=0))]
+pub fn nadaraya_watson_envelope_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    bandwidth_range: (f64, f64, f64),
+    multiplier_range: (f64, f64, f64),
+    lookback_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice = data_f32.as_slice()?;
+    let sweep = NweBatchRange { bandwidth: bandwidth_range, multiplier: multiplier_range, lookback: lookback_range };
+    let dict = PyDict::new(py);
+    let (pair, combos) = py.allow_threads(|| {
+        let cuda = CudaNwe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.nwe_batch_dev(slice, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    dict.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: pair.upper })?)?;
+    dict.set_item("lower", Py::new(py, DeviceArrayF32Py { inner: pair.lower })?)?;
+    // Return parameter vectors for row mapping
+    use numpy::IntoPyArray;
+    let bws: Vec<f64> = combos.iter().map(|c| c.bandwidth.unwrap_or(8.0)).collect();
+    let mps: Vec<f64> = combos.iter().map(|c| c.multiplier.unwrap_or(3.0)).collect();
+    let lbs: Vec<usize> = combos.iter().map(|c| c.lookback.unwrap_or(500)).collect();
+    dict.set_item("bandwidths", bws.into_pyarray(py))?;
+    dict.set_item("multipliers", mps.into_pyarray(py))?;
+    dict.set_item("lookbacks", lbs.into_pyarray(py))?;
+    dict.set_item("rows", combos.len())?;
+    dict.set_item("cols", slice.len())?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "nadaraya_watson_envelope_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, bandwidth, multiplier, lookback, device_id=0))]
+pub fn nadaraya_watson_envelope_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    bandwidth: f64,
+    multiplier: f64,
+    lookback: usize,
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    use numpy::PyUntypedArrayMethods;
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D time-major array")); }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = NweParams { bandwidth: Some(bandwidth), multiplier: Some(multiplier), lookback: Some(lookback) };
+    let pair = py.allow_threads(|| {
+        let cuda = CudaNwe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.nwe_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = PyDict::new(py);
+    dict.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: pair.upper })?)?;
+    dict.set_item("lower", Py::new(py, DeviceArrayF32Py { inner: pair.lower })?)?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    dict.set_item("bandwidth", bandwidth)?;
+    dict.set_item("multiplier", multiplier)?;
+    dict.set_item("lookback", lookback)?;
+    Ok(dict)
 }
 
 // ==================== WASM BINDINGS ====================

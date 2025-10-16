@@ -147,3 +147,71 @@ fn zscore_cuda_host_copy_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
 
     Ok(())
 }
+
+#[cfg(feature = "cuda")]
+#[test]
+fn zscore_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[zscore_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let cols = 7usize;
+    let rows = 1536usize;
+    let mut data_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        for t in (s % 5)..rows { // stagger first_valid per series
+            let x = (t as f64) + (s as f64) * 0.3;
+            let base = (x * 0.00131).sin() + (x * 0.00071).cos();
+            let noise = 0.0005 * ((t + s) % 17) as f64;
+            let v = base + noise;
+            data_tm[t * cols + s] = if t % 257 == 0 { f64::NAN } else { v };
+        }
+    }
+
+    let period = 21usize;
+    let nbdev = 2.0f64;
+
+    // CPU baseline per series using batch (prefix-based) path to mirror GPU semantics
+    let mut cpu_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        let mut col = vec![f64::NAN; rows];
+        for t in 0..rows {
+            col[t] = data_tm[t * cols + s];
+        }
+        let sweep = ZscoreBatchRange {
+            period: (period, period, 0),
+            ma_type: ("sma".to_string(), "sma".to_string(), "".to_string()),
+            nbdev: (nbdev, nbdev, 0.0),
+            devtype: (0, 0, 0),
+        };
+        let cpu_row = zscore_batch_with_kernel(&col, &sweep, Kernel::ScalarBatch)?;
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = cpu_row.values[t];
+        }
+    }
+
+    let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
+    let cuda = CudaZscore::new(0).expect("CudaZscore::new");
+    let dev = cuda
+        .zscore_many_series_one_param_time_major_dev(&data_tm_f32, cols, rows, period, nbdev as f32)
+        .expect("zscore_many_series_one_param_time_major_dev");
+    assert_eq!(dev.rows, rows);
+    assert_eq!(dev.cols, cols);
+
+    let mut gpu_tm = vec![0f32; dev.len()];
+    dev.buf.copy_to(&mut gpu_tm)?;
+
+    let tol = 6e-4f64;
+    for i in 0..gpu_tm.len() {
+        assert!(
+            approx_eq(cpu_tm[i], gpu_tm[i] as f64, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            i,
+            cpu_tm[i],
+            gpu_tm[i]
+        );
+    }
+
+    Ok(())
+}

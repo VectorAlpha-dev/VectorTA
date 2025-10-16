@@ -52,6 +52,12 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use crate::indicators::highpass::{highpass, HighPassError, HighPassInput, HighPassParams};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::bandpass_wrapper::CudaBandpass;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -2752,6 +2758,93 @@ pub fn bandpass_batch_py<'py>(
         )?;
         Ok(d)
     }
+}
+
+// ========================= Python CUDA Bindings =========================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "bandpass_cuda_batch_dev")]
+#[pyo3(signature = (close_f32, period_range, bandwidth_range, device_id=0))]
+pub fn bandpass_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    bandwidth_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::IntoPyArray;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = close_f32.as_slice()?;
+    let sweep = BandPassBatchRange { period: period_range, bandwidth: bandwidth_range };
+    let (outputs, combos) = py
+        .allow_threads(|| {
+            let cuda = CudaBandpass::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.bandpass_batch_dev(slice, &sweep)
+                .map(|r| (r.outputs, r.combos))
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+
+    let d = PyDict::new(py);
+    d.set_item("bp", Py::new(py, DeviceArrayF32Py { inner: outputs.first })?)?;
+    d.set_item(
+        "bp_normalized",
+        Py::new(py, DeviceArrayF32Py { inner: outputs.second })?,
+    )?;
+    d.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: outputs.third })?)?;
+    d.set_item("trigger", Py::new(py, DeviceArrayF32Py { inner: outputs.fourth })?)?;
+
+    let periods: Vec<usize> = combos.iter().map(|p| p.period.unwrap()).collect();
+    let bands: Vec<f64> = combos.iter().map(|p| p.bandwidth.unwrap()).collect();
+    d.set_item("periods", periods.into_pyarray(py))?;
+    d.set_item("bandwidths", bands.into_pyarray(py))?;
+    d.set_item("rows", combos.len())?;
+    d.set_item("cols", slice.len())?;
+    Ok(d)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "bandpass_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, bandwidth, device_id=0))]
+pub fn bandpass_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    period: usize,
+    bandwidth: f64,
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array")); }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = BandPassParams { period: Some(period), bandwidth: Some(bandwidth) };
+
+    let outputs = py
+        .allow_threads(|| {
+            let cuda = CudaBandpass::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.bandpass_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+
+    let d = PyDict::new(py);
+    d.set_item("bp", Py::new(py, DeviceArrayF32Py { inner: outputs.first })?)?;
+    d.set_item(
+        "bp_normalized",
+        Py::new(py, DeviceArrayF32Py { inner: outputs.second })?,
+    )?;
+    d.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: outputs.third })?)?;
+    d.set_item("trigger", Py::new(py, DeviceArrayF32Py { inner: outputs.fourth })?)?;
+    d.set_item("rows", rows)?;
+    d.set_item("cols", cols)?;
+    d.set_item("period", period)?;
+    d.set_item("bandwidth", bandwidth)?;
+    Ok(d)
 }
 
 // ========================= WASM Bindings =========================

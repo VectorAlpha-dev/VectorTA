@@ -8,6 +8,8 @@ pub mod edcf_wrapper;
 pub mod ehlers_itrend_wrapper;
 pub mod ehlers_kama_wrapper;
 pub mod ehlers_pma_wrapper;
+#[cfg(feature = "cuda")]
+pub mod pma_wrapper;
 pub mod ehma_wrapper;
 #[cfg(feature = "cuda")]
 pub mod ema_wrapper;
@@ -79,6 +81,10 @@ pub mod vpwma_wrapper;
 #[cfg(feature = "cuda")]
 pub mod wma_wrapper;
 pub mod zlema_wrapper;
+#[cfg(feature = "cuda")]
+pub mod ott_wrapper;
+#[cfg(feature = "cuda")]
+pub mod tsf_wrapper;
 
 pub use alma_wrapper::{CudaAlma, DeviceArrayF32};
 pub use buff_averages_wrapper::{CudaBuffAverages, CudaBuffAveragesError};
@@ -101,6 +107,8 @@ pub use ehlers_itrend_wrapper::{
 };
 pub use ehlers_kama_wrapper::CudaEhlersKama;
 pub use ehlers_pma_wrapper::{CudaEhlersPma, DeviceEhlersPmaPair};
+#[cfg(feature = "cuda")]
+pub use pma_wrapper::{benches as pma_benches, CudaPma, CudaPmaError, DevicePmaPair};
 pub use ehma_wrapper::CudaEhma;
 #[cfg(feature = "cuda")]
 pub use ema_wrapper::{CudaEma, CudaEmaError};
@@ -173,3 +181,6 @@ pub use wilders_wrapper::{CudaWilders, CudaWildersError};
 #[cfg(feature = "cuda")]
 pub use wma_wrapper::CudaWma;
 pub use zlema_wrapper::{CudaZlema, CudaZlemaError};
+#[cfg(feature = "cuda")]
+pub use ott_wrapper::{benches as ott_benches, CudaOtt, CudaOttError};
+pub use tsf_wrapper::{CudaTsf, CudaTsfError};

@@ -2106,6 +2106,44 @@ pub fn zscore_cuda_batch_dev_py<'py>(
     Ok((DeviceArrayF32Py { inner }, dict))
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "zscore_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, cols, rows, period, nbdev=1.0, device_id=0))]
+pub fn zscore_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    nbdev: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    if nbdev < 0.0 || !nbdev.is_finite() {
+        return Err(PyValueError::new_err("nbdev must be non-negative and finite"));
+    }
+
+    let slice_in = data_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaZscore::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .zscore_many_series_one_param_time_major_dev(
+                slice_in,
+                cols,
+                rows,
+                period,
+                nbdev as f32,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "python")]
 #[pyclass(name = "ZscoreStream")]
 pub struct ZscoreStreamPy {

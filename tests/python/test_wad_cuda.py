@@ -15,53 +15,43 @@ except ImportError:  # pragma: no cover
         allow_module_level=True,
     )
 
-from test_utils import assert_close, load_test_data
+from test_utils import assert_close
 
 
 def _cuda_available() -> bool:
     if cp is None:
         return False
-    if not hasattr(ti, "wad_cuda_dev"):
+    if not hasattr(ti, "wad_cuda_batch_dev"):
         return False
     try:
-        base = np.array([100.0, 100.5, 101.0, 100.75, 100.9], dtype=np.float32)
-        high = base + 0.6
-        low = base - 0.6
-        _ = ti.wad_cuda_dev(high, low, base)
+        close = np.linspace(100.0, 101.0, 16, dtype=np.float32)
+        high = close + 0.2
+        low = close - 0.2
+        handle = ti.wad_cuda_batch_dev(high, low, close)  # returns DeviceArrayF32 handle
+        _ = cp.asarray(handle)  # ensure CUDA interop works
         return True
-    except Exception as exc:  # pragma: no cover - defensive guard
-        message = str(exc).lower()
-        if "cuda not available" in message or "ptx" in message:
+    except Exception as exc:  # pragma: no cover
+        msg = str(exc).lower()
+        if "cuda not available" in msg or "ptx" in msg:
             return False
         return True
 
 
 @pytest.mark.skipif(not _cuda_available(), reason="CUDA not available or cuda bindings not built")
 class TestWadCuda:
-    @pytest.fixture(scope="class")
-    def test_data(self):
-        return load_test_data()
+    def _make_series(self, n: int = 2048):
+        t = np.arange(n, dtype=np.float64)
+        base = 100.0 + np.sin(t * 0.0041) * 0.7 + np.cos(t * 0.0023) * 0.4
+        close = base
+        high = close + 0.65 + 0.05 * (t % 5)
+        low = close - 0.64 - 0.04 * (t % 3)
+        return high, low, close
 
-    def test_wad_cuda_matches_cpu(self, test_data):
-        high = test_data["high"][:2048].astype(np.float64)
-        low = test_data["low"][:2048].astype(np.float64)
-        close = test_data["close"][:2048].astype(np.float64)
-
+    def test_wad_cuda_batch_matches_cpu(self):
+        high, low, close = self._make_series()
         cpu = ti.wad(high, low, close)
+        cpu_vals = cpu.astype(np.float32)
+        handle = ti.wad_cuda_batch_dev(high.astype(np.float32), low.astype(np.float32), close.astype(np.float32))
+        gpu_vals = cp.asnumpy(cp.asarray(handle)).reshape(cpu_vals.shape)
+        assert_close(gpu_vals, cpu_vals, rtol=3e-4, atol=3e-4, msg="CUDA WAD mismatch")
 
-        handle = ti.wad_cuda_dev(
-            high.astype(np.float32),
-            low.astype(np.float32),
-            close.astype(np.float32),
-        )
-
-        gpu = cp.asnumpy(cp.asarray(handle))
-        assert gpu.shape == (1, cpu.shape[0])
-
-        assert_close(
-            gpu[0],
-            cpu.astype(np.float32),
-            rtol=1e-3,
-            atol=1e-3,
-            msg="CUDA WAD mismatch",
-        )

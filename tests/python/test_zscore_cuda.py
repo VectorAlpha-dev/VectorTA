@@ -75,3 +75,42 @@ class TestZscoreCuda:
         assert [*meta["ma_types"]] == ["sma"] * cpu_vals.shape[0]
         assert np.array_equal(meta["devtypes"], cpu["devtypes"])  # type: ignore[index]
 
+    def test_zscore_cuda_many_series_one_param_matches_cpu(self, test_data):
+        if not hasattr(ti, "zscore_cuda_many_series_one_param_dev"):
+            pytest.skip("many-series zscore CUDA binding not present")
+
+        # Build a small time-major slab with staggered NaNs per series
+        cols = 4
+        rows = 512
+        price = test_data["close"][: rows * cols].astype(np.float64)
+        price = price.reshape(rows, cols).copy(order="C")  # time-major [t][s]
+        for s in range(cols):
+            for t in range(0, rows, 127):
+                price[t, s] = np.nan
+
+        period = 14
+        nbdev = 2.0
+
+        # CPU baseline per series via batch prefix path
+        cpu_tm = np.full((rows, cols), np.nan, dtype=np.float64)
+        for s in range(cols):
+            col = price[:, s].copy()
+            out = ti.zscore_batch(
+                col,
+                period_range=(period, period, 0),
+                ma_type="sma",
+                nbdev_range=(nbdev, nbdev, 0.0),
+                devtype_range=(0, 0, 0),
+            )
+            cpu_tm[:, s] = out["values"].ravel()
+
+        handle = ti.zscore_cuda_many_series_one_param_dev(
+            price.astype(np.float32).ravel(),
+            cols,
+            rows,
+            period,
+            nbdev,
+        )
+        gpu_tm = cp.asnumpy(cp.asarray(handle)).reshape(rows, cols)
+
+        assert_close(gpu_tm, cpu_tm.astype(np.float32), rtol=4e-4, atol=4e-4, msg="CUDA zscore many-series mismatch")

@@ -37,6 +37,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaStddev;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1290,6 +1294,66 @@ pub fn stddev_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ============================
+// Python CUDA bindings
+// ============================
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "stddev_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, nbdev_range=(1.0, 1.0, 0.0), device_id=0))]
+pub fn stddev_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    nbdev_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = StdDevBatchRange { period: period_range, nbdev: nbdev_range };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaStddev::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .stddev_batch_dev(slice_in, &sweep)
+            .map(|(dev, _)| dev)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "stddev_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, cols, rows, period, nbdev, device_id=0))]
+pub fn stddev_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    nbdev: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaStddev::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .stddev_many_series_one_param_time_major_dev(slice_in, cols, rows, period, nbdev as f32)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // ============================
