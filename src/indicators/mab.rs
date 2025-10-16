@@ -2096,6 +2096,85 @@ pub unsafe fn mab_scalar_classic_sma(
     Ok(())
 }
 
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, moving_averages::CudaMab};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::{pyfunction, PyResult, Python};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::exceptions::PyValueError;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mab_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, fast_period_range, slow_period_range, devup_range=(1.0,1.0,0.0), devdn_range=(1.0,1.0,0.0), fast_ma_type="sma", slow_ma_type="sma", device_id=0))]
+pub fn mab_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    fast_period_range: (usize, usize, usize),
+    slow_period_range: (usize, usize, usize),
+    devup_range: (f64, f64, f64),
+    devdn_range: (f64, f64, f64),
+    fast_ma_type: &str,
+    slow_ma_type: &str,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice = data_f32.as_slice()?;
+    let sweep = MabBatchRange {
+        fast_period: fast_period_range,
+        slow_period: slow_period_range,
+        devup: devup_range,
+        devdn: devdn_range,
+        fast_ma_type: (fast_ma_type.to_string(), fast_ma_type.to_string(), String::new()),
+        slow_ma_type: (slow_ma_type.to_string(), slow_ma_type.to_string(), String::new()),
+    };
+    let (up, mid, lo) = py.allow_threads(|| {
+        let cuda = CudaMab::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (trip, _combos) = cuda.mab_batch_dev(slice, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyValueError>((trip.upper, trip.middle, trip.lower))
+    })?;
+    Ok((DeviceArrayF32Py{ inner: up }, DeviceArrayF32Py{ inner: mid }, DeviceArrayF32Py{ inner: lo }))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mab_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, fast_period, slow_period, devup=1.0, devdn=1.0, fast_ma_type="sma", slow_ma_type="sma", device_id=0))]
+pub fn mab_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: PyReadonlyArray2<'_, f32>,
+    fast_period: usize,
+    slow_period: usize,
+    devup: f64,
+    devdn: f64,
+    fast_ma_type: &str,
+    slow_ma_type: &str,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let flat: &[f32] = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = MabParams{
+        fast_period: Some(fast_period),
+        slow_period: Some(slow_period),
+        devup: Some(devup),
+        devdn: Some(devdn),
+        fast_ma_type: Some(fast_ma_type.to_string()),
+        slow_ma_type: Some(slow_ma_type.to_string()),
+    };
+    let (up, mid, lo) = py.allow_threads(|| {
+        let cuda = CudaMab::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let trip = cuda.mab_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyValueError>((trip.upper, trip.middle, trip.lower))
+    })?;
+    Ok((DeviceArrayF32Py{ inner: up }, DeviceArrayF32Py{ inner: mid }, DeviceArrayF32Py{ inner: lo }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

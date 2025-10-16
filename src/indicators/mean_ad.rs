@@ -50,6 +50,11 @@ use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaMeanAd;
+
 impl<'a> AsRef<[f64]> for MeanAdInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -1651,6 +1656,53 @@ pub fn mean_ad_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mean_ad_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn mean_ad_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !crate::cuda::cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = MeanAdBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMeanAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.mean_ad_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mean_ad_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, cols, rows, period, device_id=0))]
+pub fn mean_ad_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !crate::cuda::cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data_tm_f32.as_slice()?;
+    let params = MeanAdParams { period: Some(period) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMeanAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.mean_ad_many_series_one_param_time_major_dev(slice_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

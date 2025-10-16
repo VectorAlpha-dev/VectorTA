@@ -113,6 +113,11 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
+        "kernels/cuda/moving_averages/decycler_kernel.cu",
+        "decycler_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
         "kernels/cuda/moving_averages/hma_kernel.cu",
         "hma_kernel.ptx",
     );
@@ -155,6 +160,11 @@ fn compile_cuda_kernels() {
         &cuda_path,
         "kernels/cuda/moving_averages/nma_kernel.cu",
         "nma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/vidya_kernel.cu",
+        "vidya_kernel.ptx",
     );
     compile_kernel(
         &cuda_path,
@@ -256,6 +266,24 @@ fn compile_cuda_kernels() {
         "kernels/cuda/moving_averages/zlema_kernel.cu",
         "zlema_kernel.ptx",
     );
+    // MAB
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/mab_kernel.cu",
+        "mab_kernel.ptx",
+    );
+    // RSMK
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/rsmk_kernel.cu",
+        "rsmk_kernel.ptx",
+    );
+    // Mean Absolute Deviation
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/mean_ad_kernel.cu",
+        "mean_ad_kernel.ptx",
+    );
 
     // Non-MA
     compile_kernel(&cuda_path, "kernels/cuda/wad_kernel.cu", "wad_kernel.ptx");
@@ -266,18 +294,133 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
+        "kernels/cuda/oscillators/aso_kernel.cu",
+        "aso_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/cg_kernel.cu",
+        "cg_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/cmo_kernel.cu",
+        "cmo_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/reverse_rsi_kernel.cu",
+        "reverse_rsi_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/dti_kernel.cu",
+        "dti_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/emv_kernel.cu",
+        "emv_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/kdj_kernel.cu",
+        "kdj_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/stochf_kernel.cu",
+        "stochf_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/squeeze_momentum_kernel.cu",
+        "squeeze_momentum_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/ttm_squeeze_kernel.cu",
+        "ttm_squeeze_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
         "kernels/cuda/wavetrend_kernel.cu",
         "wavetrend_kernel.ptx",
     );
     compile_kernel(
         &cuda_path,
-        "kernels/cuda/wclprice_kernel.cu",
+        "kernels/cuda/moving_averages/wclprice_kernel.cu",
         "wclprice_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/alphatrend_kernel.cu",
+        "alphatrend_kernel.ptx",
     );
     compile_kernel(
         &cuda_path,
         "kernels/cuda/zscore_kernel.cu",
         "zscore_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/linearreg_angle_kernel.cu",
+        "linearreg_angle_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/net_myrsi_kernel.cu",
+        "net_myrsi_kernel.ptx",
+    );
+    // Percentile Nearest Rank
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/percentile_nearest_rank_kernel.cu",
+        "percentile_nearest_rank_kernel.ptx",
+    );
+    // PRB (Polynomial Regression Bands)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/prb_kernel.cu",
+        "prb_kernel.ptx",
+    );
+    // VI (Vortex Indicator)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/vi_kernel.cu",
+        "vi_kernel.ptx",
+    );
+    // VPCI (Volume Price Confirmation Index)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/vpci_kernel.cu",
+        "vpci_kernel.ptx",
+    );
+    // Mod God Mode (composite oscillator)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/mod_god_mode_kernel.cu",
+        "mod_god_mode_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/bollinger_bands_kernel.cu",
+        "bollinger_bands_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ad_kernel.cu",
+        "ad_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/devstop_kernel.cu",
+        "devstop_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/fvg_trailing_stop_kernel.cu",
+        "fvg_trailing_stop_kernel.ptx",
     );
 }
 

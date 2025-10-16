@@ -1997,5 +1997,71 @@ pub fn register_percentile_nearest_rank_module(
 ) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(percentile_nearest_rank_py, m)?)?;
     m.add_function(wrap_pyfunction!(percentile_nearest_rank_batch_py, m)?)?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(percentile_nearest_rank_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            percentile_nearest_rank_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
+    }
     Ok(())
+}
+
+// ---------------- Python CUDA bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::percentile_nearest_rank_wrapper::CudaPercentileNearestRank;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "percentile_nearest_rank_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, length_range, percentage_range, device_id=0))]
+pub fn percentile_nearest_rank_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    length_range: (usize, usize, usize),
+    percentage_range: (f64, f64, f64),
+    device_id: usize,
+    
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use numpy::{IntoPyArray, PyArrayMethods};
+    let slice_in = data_f32.as_slice()?;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let sweep = PercentileNearestRankBatchRange { length: length_range, percentage: percentage_range };
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaPercentileNearestRank::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.pnr_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = pyo3::types::PyDict::new(py);
+    let lengths: Vec<u64> = combos.iter().map(|c| c.length.unwrap_or(15) as u64).collect();
+    let percentages: Vec<f64> = combos.iter().map(|c| c.percentage.unwrap_or(50.0)).collect();
+    dict.set_item("lengths", lengths.into_pyarray(py))?;
+    dict.set_item("percentages", percentages.into_pyarray(py))?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "percentile_nearest_rank_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, cols, rows, length, percentage, device_id=0))]
+pub fn percentile_nearest_rank_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    length: usize,
+    percentage: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice_in = data_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaPercentileNearestRank::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.pnr_many_series_one_param_time_major_dev(slice_in, cols, rows, length, percentage)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }

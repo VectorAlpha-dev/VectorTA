@@ -15,6 +15,8 @@ pub mod fwma_wrapper;
 pub mod gaussian_wrapper;
 #[cfg(feature = "cuda")]
 pub mod highpass2_wrapper;
+#[cfg(feature = "cuda")]
+pub mod decycler_wrapper;
 pub mod hwma_wrapper;
 pub mod jma_wrapper;
 #[cfg(feature = "cuda")]
@@ -79,6 +81,14 @@ pub mod vpwma_wrapper;
 #[cfg(feature = "cuda")]
 pub mod wma_wrapper;
 pub mod zlema_wrapper;
+#[cfg(feature = "cuda")]
+pub mod wclprice_wrapper;
+#[cfg(feature = "cuda")]
+pub mod mab_wrapper;
+#[cfg(feature = "cuda")]
+pub mod rsmk_wrapper;
+#[cfg(feature = "cuda")]
+pub mod vidya_wrapper;
 
 pub use alma_wrapper::{CudaAlma, DeviceArrayF32};
 pub use buff_averages_wrapper::{CudaBuffAverages, CudaBuffAveragesError};
@@ -111,6 +121,8 @@ pub use fwma_wrapper::CudaFwma;
 pub use gaussian_wrapper::CudaGaussian;
 #[cfg(feature = "cuda")]
 pub use highpass2_wrapper::{CudaHighPass2, CudaHighPass2Error};
+#[cfg(feature = "cuda")]
+pub use decycler_wrapper::{CudaDecycler, CudaDecyclerError};
 #[cfg(feature = "cuda")]
 pub use highpass_wrapper::CudaHighpass;
 pub use hma_wrapper::{CudaHma, CudaHmaError};
@@ -173,3 +185,11 @@ pub use wilders_wrapper::{CudaWilders, CudaWildersError};
 #[cfg(feature = "cuda")]
 pub use wma_wrapper::CudaWma;
 pub use zlema_wrapper::{CudaZlema, CudaZlemaError};
+#[cfg(feature = "cuda")]
+pub use mab_wrapper::{CudaMab, CudaMabError};
+#[cfg(feature = "cuda")]
+pub use rsmk_wrapper::{CudaRsmk, CudaRsmkError};
+#[cfg(feature = "cuda")]
+pub use vidya_wrapper::{CudaVidya, CudaVidyaError};
+#[cfg(feature = "cuda")]
+pub use wclprice_wrapper::CudaWclprice;

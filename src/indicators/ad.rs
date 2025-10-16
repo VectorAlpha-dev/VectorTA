@@ -33,6 +33,12 @@ use pyo3::{pyfunction, Bound, PyResult, Python};
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaAd;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyReadonlyArray1;
 
 #[derive(Debug, Clone)]
 pub enum AdData<'a> {
@@ -766,6 +772,70 @@ impl AdStream {
         }
         self.sum
     }
+}
+
+// ------------------------ Python CUDA bindings ------------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ad_cuda_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, volume_f32, device_id=0))]
+pub fn ad_cuda_dev_py(
+    py: Python<'_>,
+    high_f32: PyReadonlyArray1<'_, f32>,
+    low_f32: PyReadonlyArray1<'_, f32>,
+    close_f32: PyReadonlyArray1<'_, f32>,
+    volume_f32: PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high = high_f32.as_slice()?;
+    let low = low_f32.as_slice()?;
+    let close = close_f32.as_slice()?;
+    let volume = volume_f32.as_slice()?;
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .ad_series_dev(high, low, close, volume)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ad_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, volume_tm_f32, cols, rows, device_id=0))]
+pub fn ad_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: PyReadonlyArray1<'_, f32>,
+    low_tm_f32: PyReadonlyArray1<'_, f32>,
+    close_tm_f32: PyReadonlyArray1<'_, f32>,
+    volume_tm_f32: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let high_tm = high_tm_f32.as_slice()?;
+    let low_tm = low_tm_f32.as_slice()?;
+    let close_tm = close_tm_f32.as_slice()?;
+    let volume_tm = volume_tm_f32.as_slice()?;
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .ad_many_series_one_param_time_major_dev(high_tm, low_tm, close_tm, volume_tm, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // Batch Builder for parity with Alma

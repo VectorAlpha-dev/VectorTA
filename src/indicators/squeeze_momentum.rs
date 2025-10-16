@@ -2113,6 +2113,68 @@ pub fn squeeze_momentum_py<'py>(
     Ok((sq, mo, si))
 }
 
+// ==================== PYTHON CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaSqueezeMomentum};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyReadonlyArray1;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::exceptions::PyValueError;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "squeeze_momentum_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, length_bb_range, mult_bb_range, length_kc_range, mult_kc_range, device_id=0))]
+pub fn squeeze_momentum_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: PyReadonlyArray1<'_, f32>,
+    low_f32: PyReadonlyArray1<'_, f32>,
+    close_f32: PyReadonlyArray1<'_, f32>,
+    length_bb_range: (usize, usize, usize),
+    mult_bb_range: (f64, f64, f64),
+    length_kc_range: (usize, usize, usize),
+    mult_kc_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+    let sweep = SqueezeMomentumBatchRange { length_bb: length_bb_range, mult_bb: mult_bb_range, length_kc: length_kc_range, mult_kc: mult_kc_range };
+    let (sq, mo, si) = py.allow_threads(|| {
+        let cuda = CudaSqueezeMomentum::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.squeeze_momentum_batch_dev(h, l, c, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: sq }, DeviceArrayF32Py { inner: mo }, DeviceArrayF32Py { inner: si }))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "squeeze_momentum_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, cols, rows, length_bb, mult_bb, length_kc, mult_kc, device_id=0))]
+pub fn squeeze_momentum_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: PyReadonlyArray1<'_, f32>,
+    low_tm_f32: PyReadonlyArray1<'_, f32>,
+    close_tm_f32: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    length_bb: usize,
+    mult_bb: f32,
+    length_kc: usize,
+    mult_kc: f32,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_tm_f32.as_slice()?; let l = low_tm_f32.as_slice()?; let c = close_tm_f32.as_slice()?;
+    let (sq, mo, si) = py.allow_threads(|| {
+        let cuda = CudaSqueezeMomentum::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.squeeze_momentum_many_series_one_param_time_major_dev(h, l, c, cols, rows, length_bb, mult_bb, length_kc, mult_kc)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: sq }, DeviceArrayF32Py { inner: mo }, DeviceArrayF32Py { inner: si }))
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "squeeze_momentum_batch")]
 #[pyo3(signature = (high, low, close, length_bb_range, mult_bb_range, length_kc_range, mult_kc_range, kernel=None))]

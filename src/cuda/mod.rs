@@ -10,7 +10,9 @@ pub mod moving_averages;
 #[cfg(feature = "cuda")]
 pub mod wavetrend;
 #[cfg(feature = "cuda")]
-pub mod wclprice;
+pub mod ad_wrapper;
+#[cfg(feature = "cuda")]
+pub mod alphatrend_wrapper;
 
 #[cfg(feature = "cuda")]
 pub use bench::{CudaBenchScenario, CudaBenchState};
@@ -20,11 +22,19 @@ pub use moving_averages::{
     CudaTema, CudaVwma, DeviceArrayF32, DeviceEhlersPmaPair, DeviceMamaPair,
 };
 #[cfg(feature = "cuda")]
-pub use wclprice::CudaWclprice;
+pub use moving_averages::rsmk_wrapper::{CudaRsmk, CudaRsmkError};
+#[cfg(feature = "cuda")]
+pub use moving_averages::wclprice_wrapper::CudaWclprice;
+#[cfg(feature = "cuda")]
+pub use ad_wrapper::{CudaAd, CudaAdError};
+#[cfg(feature = "cuda")]
+pub use alphatrend_wrapper::{CudaAlphaTrend, CudaAlphaTrendError};
 #[cfg(feature = "cuda")]
 pub mod oscillators;
 #[cfg(feature = "cuda")]
 pub mod wto_wrapper;
+#[cfg(feature = "cuda")]
+pub mod bollinger_bands_wrapper;
 
 #[cfg(feature = "cuda")]
 pub use moving_averages::cwma_wrapper::CudaCwma;
@@ -52,6 +62,24 @@ pub use wto_wrapper::{CudaWto, CudaWtoBatchResult, DeviceArrayF32Triplet};
 pub mod wad_wrapper;
 #[cfg(feature = "cuda")]
 pub mod zscore_wrapper;
+#[cfg(feature = "cuda")]
+pub mod devstop_wrapper;
+#[cfg(feature = "cuda")]
+pub mod fvg_trailing_stop_wrapper;
+#[cfg(feature = "cuda")]
+pub mod mean_ad_wrapper;
+#[cfg(feature = "cuda")]
+pub mod mod_god_mode_wrapper;
+#[cfg(feature = "cuda")]
+pub mod net_myrsi_wrapper;
+#[cfg(feature = "cuda")]
+pub mod percentile_nearest_rank_wrapper;
+#[cfg(feature = "cuda")]
+pub mod prb_wrapper;
+#[cfg(feature = "cuda")]
+pub mod vi_wrapper;
+#[cfg(feature = "cuda")]
+pub mod vpci_wrapper;
 
 #[cfg(feature = "cuda")]
 pub use moving_averages::{
@@ -64,6 +92,48 @@ pub use moving_averages::{
 pub use wad_wrapper::{CudaWad, CudaWadError};
 #[cfg(feature = "cuda")]
 pub use zscore_wrapper::{CudaZscore, CudaZscoreError};
+#[cfg(feature = "cuda")]
+pub use devstop_wrapper::{CudaDevStop, CudaDevStopError};
+#[cfg(feature = "cuda")]
+pub use fvg_trailing_stop_wrapper::{CudaFvgTs, CudaFvgTsError};
+#[cfg(feature = "cuda")]
+pub use mean_ad_wrapper::{CudaMeanAd, CudaMeanAdError};
+#[cfg(feature = "cuda")]
+pub use mod_god_mode_wrapper::{CudaModGodMode, CudaModGodModeBatchResult};
+#[cfg(feature = "cuda")]
+pub use net_myrsi_wrapper::{CudaNetMyrsi, CudaNetMyrsiError};
+#[cfg(feature = "cuda")]
+pub use percentile_nearest_rank_wrapper::{CudaPercentileNearestRank, CudaPnrError};
+#[cfg(feature = "cuda")]
+pub use prb_wrapper::{CudaPrb, CudaPrbError};
+#[cfg(feature = "cuda")]
+pub use vi_wrapper::{CudaVi, CudaViError};
+#[cfg(feature = "cuda")]
+pub use vpci_wrapper::{CudaVpci, CudaVpciError};
+#[cfg(feature = "cuda")]
+pub mod linearreg_angle_wrapper;
+#[cfg(feature = "cuda")]
+pub use linearreg_angle_wrapper::{CudaLinearregAngle, CudaLinearregAngleError};
+#[cfg(feature = "cuda")]
+pub use oscillators::cg_wrapper::{CudaCg, CudaCgError};
+#[cfg(feature = "cuda")]
+pub use oscillators::cmo_wrapper::{CudaCmo, CudaCmoError};
+#[cfg(feature = "cuda")]
+pub use oscillators::dti_wrapper::{CudaDti, CudaDtiError};
+#[cfg(feature = "cuda")]
+pub use oscillators::emv_wrapper::{CudaEmv, CudaEmvError};
+#[cfg(feature = "cuda")]
+pub use oscillators::kdj_wrapper::{CudaKdj, CudaKdjError};
+#[cfg(feature = "cuda")]
+pub use oscillators::stochf_wrapper::{CudaStochf, CudaStochfError};
+#[cfg(feature = "cuda")]
+pub use oscillators::reverse_rsi_wrapper::{CudaReverseRsi, CudaReverseRsiError};
+#[cfg(feature = "cuda")]
+pub use oscillators::squeeze_momentum_wrapper::{CudaSqueezeMomentum, CudaSmiError};
+#[cfg(feature = "cuda")]
+pub use oscillators::ttm_squeeze_wrapper::{CudaTtmSqueeze, CudaTtmSqueezeError};
+#[cfg(feature = "cuda")]
+pub use bollinger_bands_wrapper::{CudaBollingerBands, CudaBollingerError};
 
 /// Returns true if a CUDA device is available and the driver API can be initialized.
 #[inline]

@@ -2490,6 +2490,82 @@ pub fn prb_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+// ==================== PYTHON CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaPrb};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyReadonlyArray1;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::{pyfunction, PyResult, Python};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::exceptions::PyValueError;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "prb_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, smooth_data, smooth_period_range=(10,10,0), regression_period_range=(100,100,0), polynomial_order_range=(2,2,0), regression_offset_range=(0,0,0), device_id=0))]
+pub fn prb_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    smooth_data: bool,
+    smooth_period_range: (usize, usize, usize),
+    regression_period_range: (usize, usize, usize),
+    polynomial_order_range: (usize, usize, usize),
+    regression_offset_range: (i32, i32, i32),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice = data_f32.as_slice()?;
+    let sweep = PrbBatchRange {
+        smooth_period: smooth_period_range,
+        regression_period: regression_period_range,
+        polynomial_order: polynomial_order_range,
+        regression_offset: regression_offset_range,
+    };
+    let (main_d, up_d, lo_d) = py.allow_threads(|| {
+        let cuda = CudaPrb::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.prb_batch_dev(slice, &sweep, smooth_data)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: main_d }, DeviceArrayF32Py { inner: up_d }, DeviceArrayF32Py { inner: lo_d }))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "prb_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (prices_tm_f32, cols, rows, smooth_data, smooth_period, regression_period, polynomial_order, regression_offset, ndev=2.0, device_id=0))]
+pub fn prb_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    prices_tm_f32: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    smooth_data: bool,
+    smooth_period: usize,
+    regression_period: usize,
+    polynomial_order: usize,
+    regression_offset: i32,
+    ndev: f64,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let tm = prices_tm_f32.as_slice()?;
+    let params = PrbParams {
+        smooth_data: Some(smooth_data),
+        smooth_period: Some(smooth_period),
+        regression_period: Some(regression_period),
+        polynomial_order: Some(polynomial_order),
+        regression_offset: Some(regression_offset),
+        ndev: Some(ndev),
+        equ_from: Some(0),
+    };
+    let (m_d, u_d, l_d) = py.allow_threads(|| {
+        let cuda = CudaPrb::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.prb_many_series_one_param_time_major_dev(tm, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: m_d }, DeviceArrayF32Py { inner: u_d }, DeviceArrayF32Py { inner: l_d }))
+}
+
 // ==================== TESTS ====================
 #[cfg(test)]
 mod tests {

@@ -2091,6 +2091,66 @@ pub fn rsmk_free(ptr: *mut f64, len: usize) {
     }
 }
 
+// ==================== PYTHON: CUDA BINDINGS (zero-copy handles) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaRsmk};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::{pyfunction, PyResult, Python};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::exceptions::PyValueError;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "rsmk_cuda_batch_dev")]
+#[pyo3(signature = (main_f32, compare_f32, lookback_range, period_range, signal_period_range, device_id=0))]
+pub fn rsmk_cuda_batch_dev_py(
+    py: Python<'_>,
+    main_f32: PyReadonlyArray1<'_, f32>,
+    compare_f32: PyReadonlyArray1<'_, f32>,
+    lookback_range: (usize, usize, usize),
+    period_range: (usize, usize, usize),
+    signal_period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let main = main_f32.as_slice()?;
+    let comp = compare_f32.as_slice()?;
+    let sweep = RsmkBatchRange { lookback: lookback_range, period: period_range, signal_period: signal_period_range };
+    let (pair, _combos) = py.allow_threads(|| {
+        let cuda = CudaRsmk::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.rsmk_batch_dev(main, comp, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: pair.a }, DeviceArrayF32Py { inner: pair.b }))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "rsmk_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (main_tm_f32, compare_tm_f32, cols, rows, lookback, period, signal_period, device_id=0))]
+pub fn rsmk_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    main_tm_f32: PyReadonlyArray2<'_, f32>,
+    compare_tm_f32: PyReadonlyArray2<'_, f32>,
+    cols: usize,
+    rows: usize,
+    lookback: usize,
+    period: usize,
+    signal_period: usize,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let main_tm: &[f32] = main_tm_f32.as_slice()?;
+    let comp_tm: &[f32] = compare_tm_f32.as_slice()?;
+    let params = RsmkParams { lookback: Some(lookback), period: Some(period), signal_period: Some(signal_period), matype: Some("ema".into()), signal_matype: Some("ema".into()) };
+    let pair = py.allow_threads(|| {
+        let cuda = CudaRsmk::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.rsmk_many_series_one_param_time_major_dev(main_tm, comp_tm, cols, rows, &params).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: pair.a }, DeviceArrayF32Py { inner: pair.b }))
+}
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct RsmkBatchConfig {

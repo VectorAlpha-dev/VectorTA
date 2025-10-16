@@ -3606,6 +3606,99 @@ pub fn mod_god_mode_batch_py<'py>(
     Ok(d.into())
 }
 
+// ==================== PYTHON CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaModGodMode};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::{PyReadonlyArray1, PyReadonlyArray2};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::{pyfunction, PyResult, Python};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::types::PyDict;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mod_god_mode_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, n1_range, n2_range, n3_range, mode="tradition_mg", use_volume=false, volume_f32=None, device_id=0))]
+pub fn mod_god_mode_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: PyReadonlyArray1<'py, f32>,
+    low_f32: PyReadonlyArray1<'py, f32>,
+    close_f32: PyReadonlyArray1<'py, f32>,
+    n1_range: (usize, usize, usize),
+    n2_range: (usize, usize, usize),
+    n3_range: (usize, usize, usize),
+    mode: &str,
+    use_volume: bool,
+    volume_f32: Option<PyReadonlyArray1<'py, f32>>,
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::IntoPyArray;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_f32.as_slice()?; let l = low_f32.as_slice()?; let c = close_f32.as_slice()?;
+    let vol = if use_volume { Some(volume_f32.as_ref().ok_or_else(|| PyValueError::new_err("volume required when use_volume=true"))?.as_slice()?) } else { None };
+    let m = mode.parse::<ModGodModeMode>().map_err(|e| PyValueError::new_err(e))?;
+    let sweep = ModGodModeBatchRange { n1: n1_range, n2: n2_range, n3: n3_range, mode: m };
+    let (wt, sig, hist, combos, rows, cols) = py.allow_threads(|| {
+        let cuda = CudaModGodMode::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let res = cuda.mod_god_mode_batch_dev(h, l, c, vol, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let out = res.outputs;
+        Ok::<_, PyErr>((out.wt1, out.wt2, out.hist, res.combos, out.rows, out.cols))
+    })?;
+    let dict = PyDict::new(py);
+    dict.set_item("wavetrend", Py::new(py, DeviceArrayF32Py { inner: wt })?)?;
+    dict.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: sig })?)?;
+    dict.set_item("histogram", Py::new(py, DeviceArrayF32Py { inner: hist })?)?;
+    dict.set_item("n1s", combos.iter().map(|p| p.n1.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("n2s", combos.iter().map(|p| p.n2.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("n3s", combos.iter().map(|p| p.n3.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("modes", combos.iter().map(|p| format!("{:?}", p.mode.unwrap())).collect::<Vec<_>>())?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mod_god_mode_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, cols, rows, n1=17, n2=6, n3=4, mode="tradition_mg", use_volume=false, volume_tm_f32=None, device_id=0))]
+pub fn mod_god_mode_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    high_tm_f32: PyReadonlyArray1<'py, f32>,
+    low_tm_f32: PyReadonlyArray1<'py, f32>,
+    close_tm_f32: PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    n1: usize,
+    n2: usize,
+    n3: usize,
+    mode: &str,
+    use_volume: bool,
+    volume_tm_f32: Option<PyReadonlyArray1<'py, f32>>,
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_tm_f32.as_slice()?; let l = low_tm_f32.as_slice()?; let c = close_tm_f32.as_slice()?;
+    let vol = if use_volume { Some(volume_tm_f32.as_ref().ok_or_else(|| PyValueError::new_err("volume required when use_volume=true"))?.as_slice()?) } else { None };
+    let m = mode.parse::<ModGodModeMode>().map_err(|e| PyValueError::new_err(e))?;
+    let params = ModGodModeParams { n1: Some(n1), n2: Some(n2), n3: Some(n3), mode: Some(m), use_volume: Some(use_volume) };
+    let (wt, sig, hist) = py.allow_threads(|| {
+        let cuda = CudaModGodMode::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.mod_god_mode_many_series_one_param_time_major_dev(h, l, c, vol, cols, rows, &params)
+            .map(|tr| (tr.wt1, tr.wt2, tr.hist))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = PyDict::new(py);
+    dict.set_item("wavetrend", Py::new(py, DeviceArrayF32Py { inner: wt })?)?;
+    dict.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: sig })?)?;
+    dict.set_item("histogram", Py::new(py, DeviceArrayF32Py { inner: hist })?)?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    dict.set_item("n1", n1)?; dict.set_item("n2", n2)?; dict.set_item("n3", n3)?;
+    dict.set_item("mode", mode)?;
+    Ok(dict)
+}
+
 #[cfg(feature = "python")]
 #[pyclass]
 pub struct ModGodModeStreamPy {

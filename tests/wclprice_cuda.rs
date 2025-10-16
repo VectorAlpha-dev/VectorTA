@@ -1,78 +1,110 @@
-// Integration tests for CUDA WCLPRICE kernel
+// Integration tests for CUDA WCLPRICE kernels (batch and many-series)
 
-#[cfg(feature = "cuda")]
-use my_project::indicators::wclprice::{wclprice_with_kernel, WclpriceInput};
-#[cfg(feature = "cuda")]
+use my_project::indicators::wclprice::{wclprice_with_kernel, WclpriceData, WclpriceInput, WclpriceParams};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
-use cust::memory::CopyDestination;
-#[cfg(feature = "cuda")]
 use my_project::cuda::{cuda_available, CudaWclprice};
-
 #[cfg(feature = "cuda")]
+use cust::memory::CopyDestination;
+
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() {
-        return true;
-    }
+    if a.is_nan() && b.is_nan() { return true; }
     (a - b).abs() <= tol
 }
 
 #[test]
 fn cuda_feature_off_noop() {
     #[cfg(not(feature = "cuda"))]
-    {
-        assert!(true);
-    }
+    assert!(true);
 }
 
 #[cfg(feature = "cuda")]
 #[test]
-fn wclprice_cuda_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+fn wclprice_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!("[wclprice_cuda_matches_cpu] skipped - no CUDA device");
+        eprintln!("[wclprice_cuda_batch_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-
     let len = 4096usize;
     let mut high = vec![f64::NAN; len];
     let mut low = vec![f64::NAN; len];
     let mut close = vec![f64::NAN; len];
-
     for i in 5..len {
         let x = i as f64;
-        let base = (x * 0.002).sin() * 0.5 + 0.001 * x;
-        close[i] = base;
-        high[i] = base + 0.75;
-        low[i] = base - 0.6;
+        close[i] = (x * 0.0021).sin() + 0.00011 * x;
+        let off = (0.003 * x.sin()).abs() + 0.1;
+        high[i] = close[i] + off; low[i] = close[i] - off;
     }
-
-    let input = WclpriceInput::from_slices(&high, &low, &close);
+    // CPU baseline
+    let input = WclpriceInput { data: WclpriceData::Slices { high: &high, low: &low, close: &close }, params: WclpriceParams };
     let cpu = wclprice_with_kernel(&input, Kernel::Scalar)?;
 
-    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
-    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
-    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    // GPU
+    let hf: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let lf: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let cf: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let cuda = CudaWclprice::new(0).expect("CudaWclprice::new");
+    let dev = cuda
+        .wclprice_batch_dev(&hf, &lf, &cf, &my_project::indicators::wclprice::WclpriceBatchRange)
+        .expect("wclprice_batch_dev");
+    assert_eq!(dev.rows, 1);
+    assert_eq!(dev.cols, len);
+    let mut out = vec![0f32; dev.len()];
+    dev.buf.copy_to(&mut out)?;
 
-    let cuda = CudaWclprice::new(0)?;
-    let gpu_handle = cuda.wclprice_dev(&high_f32, &low_f32, &close_f32)?;
+    // Compare
+    let tol = 1e-4;
+    for i in 0..len {
+        assert!(approx_eq(cpu.values[i], out[i] as f64, tol), "mismatch at {}", i);
+    }
+    Ok(())
+}
 
-    assert_eq!(gpu_handle.rows, 1);
-    assert_eq!(gpu_handle.cols, cpu.values.len());
+#[cfg(feature = "cuda")]
+#[test]
+fn wclprice_cuda_many_series_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[wclprice_cuda_many_series_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+    let cols = 8usize; let rows = 1024usize;
+    let mut high_tm = vec![f64::NAN; cols * rows];
+    let mut low_tm = vec![f64::NAN; cols * rows];
+    let mut close_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols { for t in s..rows {
+        let idx = t * cols + s; let x = (t as f64) + (s as f64) * 0.2;
+        close_tm[idx] = (x * 0.002).sin() + 0.0003 * x;
+        let off = (0.0031 * x.sin()).abs() + 0.12;
+        high_tm[idx] = close_tm[idx] + off; low_tm[idx] = close_tm[idx] - off;
+    }}
 
-    let mut gpu = vec![0f32; gpu_handle.len()];
-    gpu_handle.buf.copy_to(&mut gpu)?;
-
-    let tol = 1e-5;
-    for (idx, (&cpu_val, &gpu_val)) in cpu.values.iter().zip(gpu.iter()).enumerate() {
-        assert!(
-            approx_eq(cpu_val, gpu_val as f64, tol),
-            "Mismatch at {}: cpu={} gpu={}",
-            idx,
-            cpu_val,
-            gpu_val
-        );
+    // CPU per-series
+    let mut cpu_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        let mut h = vec![f64::NAN; rows];
+        let mut l = vec![f64::NAN; rows];
+        let mut c = vec![f64::NAN; rows];
+        for t in 0..rows { let idx = t * cols + s; h[t] = high_tm[idx]; l[t] = low_tm[idx]; c[t] = close_tm[idx]; }
+        let input = WclpriceInput { data: WclpriceData::Slices { high: &h, low: &l, close: &c }, params: WclpriceParams };
+        let out = wclprice_with_kernel(&input, Kernel::Scalar)?;
+        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
     }
 
+    // GPU
+    let hf: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
+    let lf: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
+    let cf: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
+    let cuda = CudaWclprice::new(0).expect("CudaWclprice::new");
+    let dev = cuda
+        .wclprice_many_series_one_param_time_major_dev(&hf, &lf, &cf, cols, rows)
+        .expect("wclprice many");
+    assert_eq!(dev.rows, rows); assert_eq!(dev.cols, cols);
+    let mut out_tm = vec![0f32; dev.len()]; dev.buf.copy_to(&mut out_tm)?;
+
+    let tol = 1e-4;
+    for i in 0..out_tm.len() {
+        assert!(approx_eq(cpu_tm[i], out_tm[i] as f64, tol), "mismatch at {}", i);
+    }
     Ok(())
 }

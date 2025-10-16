@@ -26,6 +26,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 // Feature-gated imports for WASM bindings
 #[cfg(feature = "wasm")]
@@ -1215,6 +1217,62 @@ pub fn net_myrsi_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+// ==================== PYTHON CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "net_myrsi_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn net_myrsi_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let prices = data_f32.as_slice()?;
+    let sweep = NetMyrsiBatchRange { period: period_range };
+    let inner = py
+        .allow_threads(|| {
+            let cuda = crate::cuda::CudaNetMyrsi::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.net_myrsi_batch_dev(prices, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?
+        .0;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "net_myrsi_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn net_myrsi_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let flat = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = NetMyrsiParams { period: Some(period) };
+    let inner = py.allow_threads(|| {
+        let cuda = crate::cuda::CudaNetMyrsi::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.net_myrsi_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "python")]

@@ -31,6 +31,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -2161,6 +2163,63 @@ pub fn stochf_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyReadonlyArray1;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::exceptions::PyValueError as PyErrValue;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaStochf};
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "stochf_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, fastk_range, fastd_range, device_id=0))]
+pub fn stochf_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: PyReadonlyArray1<'_, f32>,
+    low_f32: PyReadonlyArray1<'_, f32>,
+    close_f32: PyReadonlyArray1<'_, f32>,
+    fastk_range: (usize, usize, usize),
+    fastd_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyErrValue::new_err("CUDA not available")); }
+    let h = high_f32.as_slice()?; let l = low_f32.as_slice()?; let c = close_f32.as_slice()?;
+    if h.len() != l.len() || h.len() != c.len() { return Err(PyErrValue::new_err("mismatched input lengths")); }
+    let sweep = StochfBatchRange { fastk_period: fastk_range, fastd_period: fastd_range };
+    let (pair, _combos) = py.allow_threads(|| {
+        let cuda = CudaStochf::new(device_id).map_err(|e| PyErrValue::new_err(e.to_string()))?;
+        cuda.stochf_batch_dev(h, l, c, &sweep).map_err(|e| PyErrValue::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: pair.a }, DeviceArrayF32Py { inner: pair.b }))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "stochf_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, cols, rows, fastk, fastd, fastd_matype=0, device_id=0))]
+pub fn stochf_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: PyReadonlyArray1<'_, f32>,
+    low_tm_f32: PyReadonlyArray1<'_, f32>,
+    close_tm_f32: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    fastk: usize,
+    fastd: usize,
+    fastd_matype: usize,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() { return Err(PyErrValue::new_err("CUDA not available")); }
+    let htm = high_tm_f32.as_slice()?; let ltm = low_tm_f32.as_slice()?; let ctm = close_tm_f32.as_slice()?;
+    let params = StochfParams { fastk_period: Some(fastk), fastd_period: Some(fastd), fastd_matype: Some(fastd_matype) };
+    let (k, d) = py.allow_threads(|| {
+        let cuda = CudaStochf::new(device_id).map_err(|e| PyErrValue::new_err(e.to_string()))?;
+        cuda.stochf_many_series_one_param_time_major_dev(htm, ltm, ctm, cols, rows, &params)
+            .map_err(|e| PyErrValue::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: k }, DeviceArrayF32Py { inner: d }))
 }
 
 #[cfg(test)]

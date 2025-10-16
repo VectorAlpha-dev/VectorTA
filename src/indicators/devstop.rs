@@ -41,6 +41,12 @@ use thiserror::Error;
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::{exceptions::PyValueError, prelude::*};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaDevStop;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1929,6 +1935,73 @@ pub fn devstop_batch_unified_js(
     };
     serde_wasm_bindgen::to_value(&js)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "devstop_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, period_range, mult_range, devtype_range, direction="long", device_id=0))]
+pub fn devstop_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    mult_range: (f64, f64, f64),
+    devtype_range: (usize, usize, usize),
+    direction: &str,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    if h.len() != l.len() { return Err(PyValueError::new_err("length mismatch")); }
+    let sweep = DevStopBatchRange { period: period_range, mult: mult_range, devtype: devtype_range };
+    let is_long = direction.eq_ignore_ascii_case("long");
+    let (inner, meta) = py.allow_threads(|| {
+        let cuda = CudaDevStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.devstop_batch_dev(h, l, &sweep, is_long).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let periods: Vec<u64> = meta.iter().map(|(p, _)| *p as u64).collect();
+    let mults: Vec<f32> = meta.iter().map(|(_, m)| *m).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+    dict.set_item("mults", mults.into_pyarray(py))?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "devstop_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, period, mult, direction="long", device_id=0))]
+pub fn devstop_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    mult: f64,
+    direction: &str,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if high_tm_f32.shape() != low_tm_f32.shape() { return Err(PyValueError::new_err("shape mismatch")); }
+    let flat_h = high_tm_f32.as_slice()?;
+    let flat_l = low_tm_f32.as_slice()?;
+    let rows = high_tm_f32.shape()[0];
+    let cols = high_tm_f32.shape()[1];
+    let is_long = direction.eq_ignore_ascii_case("long");
+    let inner = py.allow_threads(|| {
+        let cuda = CudaDevStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.devstop_many_series_one_param_time_major_dev(flat_h, flat_l, cols, rows, period, mult as f32, is_long)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 /// Fused, single-pass DevStop classic kernel:
