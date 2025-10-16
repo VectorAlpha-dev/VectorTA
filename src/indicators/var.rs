@@ -828,6 +828,9 @@ fn expand_grid(r: &VarBatchRange) -> Vec<VarParams> {
     out
 }
 
+#[inline(always)]
+pub fn var_expand_grid(r: &VarBatchRange) -> Vec<VarParams> { expand_grid(r) }
+
 // -- Batch Inner
 
 #[inline(always)]
@@ -2125,6 +2128,66 @@ pub fn var_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::var_wrapper::CudaVar;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "var_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, nbdev_range=(1.0,1.0,0.0), device_id=0))]
+pub fn var_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    nbdev_range: (f32, f32, f32),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = VarBatchRange {
+        period: period_range,
+        nbdev: (nbdev_range.0 as f64, nbdev_range.1 as f64, nbdev_range.2 as f64),
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.var_batch_dev(slice_in, &sweep)
+            .map(|pair| pair.0)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "var_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, cols, rows, period, nbdev=1.0, device_id=0))]
+pub fn var_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    nbdev: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_tm = data_tm_f32.as_slice()?;
+    let params = VarParams { period: Some(period), nbdev: Some(nbdev) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.var_many_series_one_param_time_major_dev(slice_tm, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // Helper function for batch processing that writes directly to output

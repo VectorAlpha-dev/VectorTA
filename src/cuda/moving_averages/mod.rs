@@ -43,6 +43,8 @@ pub mod vwap_wrapper;
 pub mod vwma_wrapper;
 #[cfg(feature = "cuda")]
 pub mod wilders_wrapper;
+#[cfg(feature = "cuda")]
+pub mod otto_wrapper;
 
 pub mod buff_averages_wrapper;
 #[cfg(feature = "cuda")]
@@ -79,6 +81,8 @@ pub mod vpwma_wrapper;
 #[cfg(feature = "cuda")]
 pub mod wma_wrapper;
 pub mod zlema_wrapper;
+#[cfg(feature = "cuda")]
+pub mod correlation_cycle_wrapper;
 
 pub use alma_wrapper::{CudaAlma, DeviceArrayF32};
 pub use buff_averages_wrapper::{CudaBuffAverages, CudaBuffAveragesError};
@@ -171,5 +175,15 @@ pub use vwma_wrapper::CudaVwma;
 #[cfg(feature = "cuda")]
 pub use wilders_wrapper::{CudaWilders, CudaWildersError};
 #[cfg(feature = "cuda")]
+pub use otto_wrapper::{CudaOtto, CudaOttoError, CudaOttoPolicy};
+#[cfg(feature = "cuda")]
 pub use wma_wrapper::CudaWma;
 pub use zlema_wrapper::{CudaZlema, CudaZlemaError};
+#[cfg(feature = "cuda")]
+pub use correlation_cycle_wrapper::{
+    BatchKernelPolicy as CorrelationCycleBatchKernelPolicy,
+    CudaCorrelationCycle,
+    CudaCorrelationCyclePolicy,
+    DeviceCorrelationCycleQuad,
+    ManySeriesKernelPolicy as CorrelationCycleManySeriesKernelPolicy,
+};

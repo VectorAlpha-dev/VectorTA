@@ -697,6 +697,12 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaAcosc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -856,6 +862,58 @@ pub fn acosc_batch_py<'py>(
     d.set_item("osc", out_osc.reshape((rows, cols))?)?;
     d.set_item("change", out_change.reshape((rows, cols))?)?;
     Ok(d)
+}
+
+// ---------------- Python CUDA bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "acosc_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, device_id=0))]
+pub fn acosc_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let pair = py.allow_threads(|| {
+        let cuda = CudaAcosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.acosc_batch_dev(h, l).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: pair.osc }, DeviceArrayF32Py { inner: pair.change }))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "acosc_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, device_id=0))]
+pub fn acosc_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let shape_h = high_tm_f32.shape();
+    let shape_l = low_tm_f32.shape();
+    if shape_h != shape_l || shape_h.len() != 2 {
+        return Err(PyValueError::new_err("high/low must be same 2D shape"));
+    }
+    let rows = shape_h[0];
+    let cols = shape_h[1];
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let pair = py.allow_threads(|| {
+        let cuda = CudaAcosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.acosc_many_series_one_param_time_major_dev(h, l, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: pair.osc }, DeviceArrayF32Py { inner: pair.change }))
 }
 
 #[cfg(feature = "wasm")]

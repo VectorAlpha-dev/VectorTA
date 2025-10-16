@@ -74,6 +74,12 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::deviation_wrapper::CudaDeviation;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -3529,6 +3535,64 @@ pub fn deviation_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+// ---------------- CUDA Python bindings (stddev-only) ----------------
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "deviation_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, devtype_range=(0,0,0), device_id=0))]
+pub fn deviation_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    devtype_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = DeviationBatchRange { period: period_range, devtype: devtype_range };
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaDeviation::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.deviation_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = PyDict::new(py);
+    let periods: Vec<u64> = combos.iter().map(|p| p.period.unwrap() as u64).collect();
+    let devtypes: Vec<u64> = combos.iter().map(|p| p.devtype.unwrap() as u64).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+    dict.set_item("devtypes", devtypes.into_pyarray(py))?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "deviation_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, cols, rows, period, devtype=0, device_id=0))]
+pub fn deviation_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    devtype: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    if devtype != 0 {
+        return Err(PyValueError::new_err("unsupported devtype for CUDA (only 0=stddev)"));
+    }
+    let slice_tm = data_tm_f32.as_slice()?;
+    let params = DeviationParams { period: Some(period), devtype: Some(devtype) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaDeviation::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.deviation_many_series_one_param_time_major_dev(slice_tm, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

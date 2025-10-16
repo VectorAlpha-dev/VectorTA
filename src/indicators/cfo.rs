@@ -19,6 +19,8 @@
 //! - Memory Optimization: GOOD - properly uses alloc_with_nan_prefix and make_uninit_matrix helpers for zero-copy allocation
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyUntypedArrayMethods};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1853,6 +1855,79 @@ pub fn cfo_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "cfo_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, scalar_range=(100.0, 100.0, 0.0), device_id=0))]
+pub fn cfo_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    scalar_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = CfoBatchRange { period: period_range, scalar: scalar_range };
+
+    // Build combos on host for metadata; GPU computes values
+    let combos = expand_grid(&sweep);
+    let inner = py.allow_threads(|| {
+        let cuda = crate::cuda::oscillators::cfo_wrapper::CudaCfo::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.cfo_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item("scalars", combos.iter().map(|p| p.scalar.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "cfo_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, scalar=100.0, device_id=0))]
+pub fn cfo_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    period: usize,
+    scalar: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = CfoParams { period: Some(period), scalar: Some(scalar) };
+    let inner = py.allow_threads(|| {
+        let cuda = crate::cuda::oscillators::cfo_wrapper::CudaCfo::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.cfo_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

@@ -52,6 +52,13 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaRangeFilter};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+
 impl<'a> AsRef<[f64]> for RangeFilterInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -1583,6 +1590,86 @@ pub fn range_filter_batch_unified_js(data: &[f64], config: JsValue) -> Result<Js
     )?;
 
     Ok(obj.into())
+}
+
+// ========================= Python CUDA Bindings =========================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "range_filter_cuda_batch_dev")]
+#[pyo3(signature = (data_f32,
+                    range_size_start=2.618, range_size_end=2.618, range_size_step=0.1,
+                    range_period_start=14, range_period_end=14, range_period_step=1,
+                    smooth_range=true, smooth_period=27, device_id=0))]
+pub fn range_filter_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    range_size_start: f64,
+    range_size_end: f64,
+    range_size_step: f64,
+    range_period_start: usize,
+    range_period_end: usize,
+    range_period_step: usize,
+    smooth_range: bool,
+    smooth_period: usize,
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let sweep = RangeFilterBatchRange {
+        range_size: (range_size_start, range_size_end, range_size_step),
+        range_period: (range_period_start, range_period_end, range_period_step),
+        smooth_range: Some(smooth_range),
+        smooth_period: Some(smooth_period),
+    };
+    let slice_in: &[f32] = data_f32.as_slice()?;
+    let (dev_trio, combos) = py.allow_threads(|| {
+        let cuda = CudaRangeFilter::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.range_filter_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("filter", Py::new(py, DeviceArrayF32Py { inner: DeviceArrayF32 { buf: dev_trio.filter, rows: combos.len(), cols: slice_in.len() } })?)?;
+    dict.set_item("high",   Py::new(py, DeviceArrayF32Py { inner: DeviceArrayF32 { buf: dev_trio.high,   rows: combos.len(), cols: slice_in.len() } })?)?;
+    dict.set_item("low",    Py::new(py, DeviceArrayF32Py { inner: DeviceArrayF32 { buf: dev_trio.low,    rows: combos.len(), cols: slice_in.len() } })?)?;
+    // Metadata
+    dict.set_item("rows", combos.len())?;
+    dict.set_item("cols", slice_in.len())?;
+    use numpy::IntoPyArray;
+    dict.set_item("range_sizes", combos.iter().map(|c| c.range_size.unwrap_or(2.618)).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("range_periods", combos.iter().map(|c| c.range_period.unwrap_or(14) as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("smooth_range", combos.iter().map(|c| c.smooth_range.unwrap_or(true)).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("smooth_periods", combos.iter().map(|c| c.smooth_period.unwrap_or(27) as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "range_filter_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, range_size=2.618, range_period=14, smooth_range=true, smooth_period=27, device_id=0))]
+pub fn range_filter_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    range_size: f64,
+    range_period: usize,
+    smooth_range: bool,
+    smooth_period: usize,
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = RangeFilterParams { range_size: Some(range_size), range_period: Some(range_period), smooth_range: Some(smooth_range), smooth_period: Some(smooth_period) };
+    let dev_trio = py.allow_threads(|| {
+        let cuda = CudaRangeFilter::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.range_filter_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = PyDict::new(py);
+    dict.set_item("filter", Py::new(py, DeviceArrayF32Py { inner: DeviceArrayF32 { buf: dev_trio.filter, rows, cols } })?)?;
+    dict.set_item("high",   Py::new(py, DeviceArrayF32Py { inner: DeviceArrayF32 { buf: dev_trio.high,   rows, cols } })?)?;
+    dict.set_item("low",    Py::new(py, DeviceArrayF32Py { inner: DeviceArrayF32 { buf: dev_trio.low,    rows, cols } })?)?;
+    dict.set_item("rows", rows)?; dict.set_item("cols", cols)?;
+    dict.set_item("range_size", range_size)?; dict.set_item("range_period", range_period)?;
+    dict.set_item("smooth_range", smooth_range)?; dict.set_item("smooth_period", smooth_period)?;
+    Ok(dict)
 }
 
 #[cfg(feature = "wasm")]

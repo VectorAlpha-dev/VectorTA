@@ -1663,6 +1663,91 @@ impl StochStream {
     }
 }
 
+// ==================== PYTHON CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "stoch_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, fastk_period=(14,14,0), slowk_period=(3,3,0), slowd_period=(3,3,0), slowk_ma_type="sma", slowd_ma_type="sma", device_id=0))]
+pub fn stoch_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    close_f32: numpy::PyReadonlyArray1<'_, f32>,
+    fastk_period: (usize, usize, usize),
+    slowk_period: (usize, usize, usize),
+    slowd_period: (usize, usize, usize),
+    slowk_ma_type: &str,
+    slowd_ma_type: &str,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+    let sweep = StochBatchRange {
+        fastk_period,
+        slowk_period,
+        slowk_ma_type: (slowk_ma_type.to_string(), slowk_ma_type.to_string(), 0.0),
+        slowd_period,
+        slowd_ma_type: (slowd_ma_type.to_string(), slowd_ma_type.to_string(), 0.0),
+    };
+    let (k, d) = py
+        .allow_threads(|| {
+            let cuda = crate::cuda::oscillators::CudaStoch::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.stoch_batch_dev(h, l, c, &sweep)
+                .map(|b| (b.k, b.d))
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok((DeviceArrayF32Py { inner: k }, DeviceArrayF32Py { inner: d }))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "stoch_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, cols, rows, fastk_period=14, slowk_period=3, slowd_period=3, slowk_ma_type="sma", slowd_ma_type="sma", device_id=0))]
+pub fn stoch_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    close_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    fastk_period: usize,
+    slowk_period: usize,
+    slowd_period: usize,
+    slowk_ma_type: &str,
+    slowd_ma_type: &str,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let c = close_tm_f32.as_slice()?;
+    let params = StochParams {
+        fastk_period: Some(fastk_period),
+        slowk_period: Some(slowk_period),
+        slowk_ma_type: Some(slowk_ma_type.to_string()),
+        slowd_period: Some(slowd_period),
+        slowd_ma_type: Some(slowd_ma_type.to_string()),
+    };
+    let (k, d) = py
+        .allow_threads(|| {
+            let cuda = crate::cuda::oscillators::CudaStoch::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.stoch_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok((DeviceArrayF32Py { inner: k }, DeviceArrayF32Py { inner: d }))
+}
+
 // === Python Bindings ===
 
 #[cfg(feature = "python")]

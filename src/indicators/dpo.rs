@@ -1647,6 +1647,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1757,6 +1759,76 @@ pub fn dpo_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dpo_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn dpo_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = DpoBatchRange { period: period_range };
+
+    // Build combos on host for metadata; GPU computes values
+    let combos = expand_grid(&sweep);
+    let inner = py.allow_threads(|| {
+        let cuda = crate::cuda::oscillators::dpo_wrapper::CudaDpo::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.dpo_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dpo_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn dpo_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = DpoParams { period: Some(period) };
+    let inner = py.allow_threads(|| {
+        let cuda = crate::cuda::oscillators::dpo_wrapper::CudaDpo::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.dpo_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // ============================================================================

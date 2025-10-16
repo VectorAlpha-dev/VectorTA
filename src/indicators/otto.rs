@@ -32,6 +32,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -2221,6 +2223,85 @@ pub fn otto_into(
         Ok(())
     }
 }
+
+// ==================== PYTHON CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "otto_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, ott_period_range, ott_percent_range=(0.6,0.6,0.0), fast_vidya_range=(10,10,0), slow_vidya_range=(25,25,0), correcting_constant_range=(100000.0,100000.0,0.0), ma_types=vec!["VAR".to_string()], device_id=0))]
+pub fn otto_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    ott_period_range: (usize, usize, usize),
+    ott_percent_range: (f64, f64, f64),
+    fast_vidya_range: (usize, usize, usize),
+    slow_vidya_range: (usize, usize, usize),
+    correcting_constant_range: (f64, f64, f64),
+    ma_types: Vec<String>,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = data_f32.as_slice()?;
+    let sweep = OttoBatchRange {
+        ott_period: ott_period_range,
+        ott_percent: ott_percent_range,
+        fast_vidya: fast_vidya_range,
+        slow_vidya: slow_vidya_range,
+        correcting_constant: correcting_constant_range,
+        ma_types,
+    };
+    let (hott, lott) = py
+        .allow_threads(|| {
+            let cuda = crate::cuda::moving_averages::CudaOtto::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.otto_batch_dev(slice, &sweep)
+                .map(|(h, l, _)| (h, l))
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok((DeviceArrayF32Py { inner: hott }, DeviceArrayF32Py { inner: lott }))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "otto_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (prices_tm_f32, cols, rows, ott_period=2, ott_percent=0.6, fast_vidya_length=10, slow_vidya_length=25, correcting_constant=100000.0, ma_type="VAR", device_id=0))]
+pub fn otto_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    prices_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    ott_period: usize,
+    ott_percent: f64,
+    fast_vidya_length: usize,
+    slow_vidya_length: usize,
+    correcting_constant: f64,
+    _ma_type: &str,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let prices = prices_tm_f32.as_slice()?;
+    let params = OttoParams {
+        ott_period: Some(ott_period),
+        ott_percent: Some(ott_percent),
+        fast_vidya_length: Some(fast_vidya_length),
+        slow_vidya_length: Some(slow_vidya_length),
+        correcting_constant: Some(correcting_constant),
+        ma_type: Some("VAR".to_string()),
+    };
+    let (hott, lott) = py
+        .allow_threads(|| {
+            let cuda = crate::cuda::moving_averages::CudaOtto::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.otto_many_series_one_param_time_major_dev(prices, cols, rows, &params)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok((DeviceArrayF32Py { inner: hott }, DeviceArrayF32Py { inner: lott }))
+}
+
 
 // ============= TESTS =============
 

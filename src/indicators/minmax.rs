@@ -418,6 +418,84 @@ pub fn minmax_with_kernel(
     })
 }
 
+// ========================= Python CUDA Bindings =========================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::minmax_wrapper::CudaMinmax;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "minmax_cuda_batch_dev")]
+#[pyo3(signature = (high, low, order_range=(3,3,0), device_id=0))]
+pub fn minmax_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high: numpy::PyReadonlyArray1<'py, f32>,
+    low: numpy::PyReadonlyArray1<'py, f32>,
+    order_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    if !crate::cuda::cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let hs = high.as_slice()?;
+    let ls = low.as_slice()?;
+    let sweep = MinmaxBatchRange { order: order_range };
+    let (quad, combos) = py.allow_threads(|| {
+        let cuda = CudaMinmax::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.minmax_batch_dev(hs, ls, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("is_min", Py::new(py, DeviceArrayF32Py { inner: crate::cuda::moving_averages::DeviceArrayF32 { buf: quad.is_min, rows: combos.len(), cols: hs.len() } })?)?;
+    dict.set_item("is_max", Py::new(py, DeviceArrayF32Py { inner: crate::cuda::moving_averages::DeviceArrayF32 { buf: quad.is_max, rows: combos.len(), cols: hs.len() } })?)?;
+    dict.set_item("last_min", Py::new(py, DeviceArrayF32Py { inner: crate::cuda::moving_averages::DeviceArrayF32 { buf: quad.last_min, rows: combos.len(), cols: hs.len() } })?)?;
+    dict.set_item("last_max", Py::new(py, DeviceArrayF32Py { inner: crate::cuda::moving_averages::DeviceArrayF32 { buf: quad.last_max, rows: combos.len(), cols: hs.len() } })?)?;
+    use numpy::IntoPyArray;
+    dict.set_item("orders", combos.iter().map(|p| p.order.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("rows", combos.len())?;
+    dict.set_item("cols", hs.len())?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "minmax_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm, low_tm, order=3, device_id=0))]
+pub fn minmax_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    high_tm: numpy::PyReadonlyArray2<'py, f32>,
+    low_tm: numpy::PyReadonlyArray2<'py, f32>,
+    order: usize,
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    if !crate::cuda::cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let sh = high_tm.shape();
+    let sl = low_tm.shape();
+    if sh.len() != 2 || sl.len() != 2 || sh != sl {
+        return Err(PyValueError::new_err("expected 2D arrays with identical shape"));
+    }
+    let rows = sh[0];
+    let cols = sh[1];
+    let hflat = high_tm.as_slice()?;
+    let lflat = low_tm.as_slice()?;
+    let params = MinmaxParams { order: Some(order) };
+    let quad = py.allow_threads(|| {
+        let cuda = CudaMinmax::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.minmax_many_series_one_param_time_major_dev(hflat, lflat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("is_min", Py::new(py, DeviceArrayF32Py { inner: crate::cuda::moving_averages::DeviceArrayF32 { buf: quad.is_min, rows, cols } })?)?;
+    dict.set_item("is_max", Py::new(py, DeviceArrayF32Py { inner: crate::cuda::moving_averages::DeviceArrayF32 { buf: quad.is_max, rows, cols } })?)?;
+    dict.set_item("last_min", Py::new(py, DeviceArrayF32Py { inner: crate::cuda::moving_averages::DeviceArrayF32 { buf: quad.last_min, rows, cols } })?)?;
+    dict.set_item("last_max", Py::new(py, DeviceArrayF32Py { inner: crate::cuda::moving_averages::DeviceArrayF32 { buf: quad.last_max, rows, cols } })?)?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    dict.set_item("order", order)?;
+    Ok(dict)
+}
+
 // --- SCALAR LOGIC ---
 
 #[inline]

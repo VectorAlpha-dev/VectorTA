@@ -3544,23 +3544,83 @@ pub fn wavetrend_cuda_batch_dev_py<'py>(
         )?,
     )?;
 
-    let channels: Vec<usize> = batch
-        .combos
-        .iter()
-        .map(|p| p.channel_length.unwrap())
-        .collect();
-    let averages: Vec<usize> = batch
-        .combos
-        .iter()
-        .map(|p| p.average_length.unwrap())
-        .collect();
-    let mas: Vec<usize> = batch.combos.iter().map(|p| p.ma_length.unwrap()).collect();
-    let factors: Vec<f64> = batch.combos.iter().map(|p| p.factor.unwrap()).collect();
+    // Return axis values (unique per dimension) to match ALMA-style metadata expectations
+    let (c0, c1, cstep) = channel_length_range;
+    let (a0, a1, astep) = average_length_range;
+    let (m0, m1, mstep) = ma_length_range;
+    let (f0, f1, fstep) = factor_range;
+    let channel_axis: Vec<usize> = if cstep == 0 { vec![c0] } else { (c0..=c1).step_by(cstep).collect() };
+    let average_axis: Vec<usize> = if astep == 0 { vec![a0] } else { (a0..=a1).step_by(astep).collect() };
+    let ma_axis: Vec<usize> = if mstep == 0 { vec![m0] } else { (m0..=m1).step_by(mstep).collect() };
+    let mut factor_axis: Vec<f64> = Vec::new();
+    if fstep.abs() < f64::EPSILON || (f0 - f1).abs() < f64::EPSILON {
+        factor_axis.push(f0);
+    } else {
+        let mut v = f0;
+        while v <= f1 + fstep.abs() * 1e-12 {
+            factor_axis.push(v);
+            v += fstep;
+        }
+    }
 
-    dict.set_item("channel_lengths", channels.into_pyarray(py))?;
-    dict.set_item("average_lengths", averages.into_pyarray(py))?;
-    dict.set_item("ma_lengths", mas.into_pyarray(py))?;
-    dict.set_item("factors", factors.into_pyarray(py))?;
+    dict.set_item("channel_lengths", channel_axis.into_pyarray(py))?;
+    dict.set_item("average_lengths", average_axis.into_pyarray(py))?;
+    dict.set_item("ma_lengths", ma_axis.into_pyarray(py))?;
+    dict.set_item("factors", factor_axis.into_pyarray(py))?;
+
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "wavetrend_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, channel_length, average_length, ma_length, factor, device_id=0))]
+pub fn wavetrend_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    channel_length: usize,
+    average_length: usize,
+    ma_length: usize,
+    factor: f64,
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array (rows x cols)"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+
+    let params = WavetrendParams {
+        channel_length: Some(channel_length),
+        average_length: Some(average_length),
+        ma_length: Some(ma_length),
+        factor: Some(factor),
+    };
+
+    let (wt1, wt2, wt_diff) = py.allow_threads(|| {
+        let cuda = CudaWavetrend::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.wavetrend_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("wt1", Py::new(py, DeviceArrayF32Py { inner: wt1 })?)?;
+    dict.set_item("wt2", Py::new(py, DeviceArrayF32Py { inner: wt2 })?)?;
+    dict.set_item("wt_diff", Py::new(py, DeviceArrayF32Py { inner: wt_diff })?)?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    dict.set_item("channel_length", channel_length)?;
+    dict.set_item("average_length", average_length)?;
+    dict.set_item("ma_length", ma_length)?;
+    dict.set_item("factor", factor)?;
 
     Ok(dict)
 }

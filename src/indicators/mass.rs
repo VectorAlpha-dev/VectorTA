@@ -29,6 +29,12 @@ use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::mass_wrapper::CudaMass;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 #[cfg(feature = "wasm")]
@@ -1789,10 +1795,76 @@ pub fn mass_batch_py<'py>(
     Ok(dict)
 }
 
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mass_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, period_range, device_id=0))]
+pub fn mass_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use numpy::{IntoPyArray, PyArrayMethods};
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let high = high_f32.as_slice()?;
+    let low = low_f32.as_slice()?;
+    let sweep = MassBatchRange { period: period_range };
+
+    let (inner, combos) = py.allow_threads(|| {
+        let mut cuda = CudaMass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.mass_batch_dev(high, low, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = pyo3::types::PyDict::new(py);
+    let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap_or(0) as u64).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mass_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, period, device_id=0))]
+pub fn mass_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    high_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+
+    let hs = high_tm_f32.shape();
+    let ls = low_tm_f32.shape();
+    if hs != ls || hs.len() != 2 { return Err(PyValueError::new_err("expected matching 2D arrays")); }
+    let rows = hs[0];
+    let cols = hs[1];
+    let high = high_tm_f32.as_slice()?;
+    let low = low_tm_f32.as_slice()?;
+    let params = MassParams { period: Some(period) };
+
+    let inner = py.allow_threads(|| {
+        let mut cuda = CudaMass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.mass_many_series_one_param_time_major_dev(high, low, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "python")]
 pub fn register_mass_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mass_py, m)?)?;
     m.add_function(wrap_pyfunction!(mass_batch_py, m)?)?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(mass_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(mass_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     Ok(())
 }
 

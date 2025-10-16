@@ -53,6 +53,13 @@ use std::convert::AsRef;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::bollinger_bands_width_wrapper::CudaBbw;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
 impl<'a> AsRef<[f64]> for BollingerBandsWidthInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -2426,6 +2433,79 @@ pub fn bollinger_bands_width_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "bollinger_bands_width_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, devup_range, devdn_range, device_id=0))]
+pub fn bollinger_bands_width_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    devup_range: (f64, f64, f64),
+    devdn_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = BollingerBandsWidthBatchRange {
+        period: period_range,
+        devup: devup_range,
+        devdn: devdn_range,
+    };
+
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaBbw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.bbw_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let periods: Vec<u64> = combos.iter().map(|(p, _)| *p as u64).collect();
+    let uplusd: Vec<f64> = combos.iter().map(|(_, k)| *k as f64).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+    dict.set_item("u_plus_d", uplusd.into_pyarray(py))?;
+    // For SMA/stddev-only CUDA path, expose fixed metadata
+    dict.set_item("ma_types", PyList::new(py, vec!["sma"; uplusd.len()])?)?;
+    dict.set_item("devtypes", vec![0u64; uplusd.len()].into_pyarray(py))?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "bollinger_bands_width_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, cols, rows, period, devup, devdn, device_id=0))]
+pub fn bollinger_bands_width_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    devup: f64,
+    devdn: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data_tm_f32.as_slice()?;
+    let inner = py
+        .allow_threads(|| {
+            let cuda = CudaBbw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.bbw_many_series_one_param_time_major_dev(
+                slice_in,
+                cols,
+                rows,
+                period,
+                devup as f32,
+                devdn as f32,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

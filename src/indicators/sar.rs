@@ -28,6 +28,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1351,6 +1353,72 @@ pub fn sar_js(
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
+}
+
+// ----------------------------- PYTHON CUDA BINDINGS -----------------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "sar_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, acceleration_range, maximum_range, device_id=0))]
+pub fn sar_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    acceleration_range: (f64, f64, f64),
+    maximum_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaSar;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    if h.len() != l.len() {
+        return Err(PyValueError::new_err("high/low length mismatch"));
+    }
+    let sweep = SarBatchRange { acceleration: acceleration_range, maximum: maximum_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaSar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.sar_batch_dev(h, l, &sweep)
+            .map(|(dev, _combos)| dev)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "sar_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, cols, rows, acceleration, maximum, device_id=0))]
+pub fn sar_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    acceleration: f64,
+    maximum: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaSar;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    if cols.checked_mul(rows).unwrap_or(0) != h.len() || h.len() != l.len() {
+        return Err(PyValueError::new_err("time‑major inputs must be equal length and cols*rows"));
+    }
+    let params = SarParams { acceleration: Some(acceleration), maximum: Some(maximum) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaSar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.sar_many_series_one_param_time_major_dev(h, l, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

@@ -2543,6 +2543,80 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "correlation_cycle_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, threshold_range, device_id=0))]
+pub fn correlation_cycle_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    threshold_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<(
+    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+)> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaCorrelationCycle;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = CorrelationCycleBatchRange { period: period_range, threshold: threshold_range };
+    let quad = py.allow_threads(|| {
+        let mut cuda = CudaCorrelationCycle::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.correlation_cycle_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((
+        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.real },
+        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.imag },
+        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.angle },
+        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.state },
+    ))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "correlation_cycle_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, threshold, device_id=0))]
+pub fn correlation_cycle_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    threshold: f64,
+    device_id: usize,
+) -> PyResult<(
+    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+)> {
+    use numpy::PyUntypedArrayMethods;
+    use crate::cuda::cuda_available;
+    use crate::cuda::moving_averages::CudaCorrelationCycle;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array")); }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = CorrelationCycleParams { period: Some(period), threshold: Some(threshold) };
+    let quad = py.allow_threads(|| {
+        let mut cuda = CudaCorrelationCycle::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.correlation_cycle_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((
+        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.real },
+        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.imag },
+        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.angle },
+        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner: quad.state },
+    ))
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "correlation_cycle")]
 #[pyo3(signature = (data, period=None, threshold=None, kernel=None))]

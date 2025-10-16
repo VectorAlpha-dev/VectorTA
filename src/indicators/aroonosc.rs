@@ -1688,6 +1688,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaAroonOsc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1846,6 +1850,74 @@ pub fn aroon_osc_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ---------------- Python CUDA bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "aroonosc_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, length_range, device_id=0))]
+pub fn aroonosc_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    length_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use pyo3::exceptions::PyValueError;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let high = high_f32.as_slice()?;
+    let low = low_f32.as_slice()?;
+    if high.len() != low.len() {
+        return Err(PyValueError::new_err("mismatched input lengths"));
+    }
+
+    let sweep = AroonOscBatchRange { length: length_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAroonOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.aroonosc_batch_dev(high, low, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "aroonosc_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, length, device_id=0))]
+pub fn aroonosc_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    length: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+    use pyo3::exceptions::PyValueError;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let shape_h = high_tm_f32.shape();
+    let shape_l = low_tm_f32.shape();
+    if shape_h != shape_l || shape_h.len() != 2 {
+        return Err(PyValueError::new_err("high/low must be same 2D shape"));
+    }
+    let rows = shape_h[0];
+    let cols = shape_h[1];
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAroonOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.aroonosc_many_series_one_param_time_major_dev(h, l, cols, rows, length)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

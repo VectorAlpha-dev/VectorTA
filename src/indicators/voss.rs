@@ -1341,6 +1341,66 @@ pub fn register_voss_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
     Ok(())
 }
 
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "voss_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period=(20,20,0), predict=(3,3,0), bandwidth=(0.25,0.25,0.0), device_id=0))]
+pub fn voss_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period: (usize, usize, usize),
+    predict: (usize, usize, usize),
+    bandwidth: (f64, f64, f64),
+    device_id: usize,
+)
+-> PyResult<Bound<'py, PyDict>> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = VossBatchRange { period, predict, bandwidth };
+    let (voss_dev, filt_dev, combos) = py.allow_threads(|| {
+        let cuda = crate::cuda::CudaVoss::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.voss_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = PyDict::new(py);
+    dict.set_item("voss", Py::new(py, DeviceArrayF32Py { inner: voss_dev })?)?;
+    dict.set_item("filt", Py::new(py, DeviceArrayF32Py { inner: filt_dev })?)?;
+    dict.set_item("rows", combos.len())?;
+    dict.set_item("cols", slice_in.len())?;
+    use numpy::IntoPyArray;
+    dict.set_item("periods", combos.iter().map(|c| c.period.unwrap_or(20) as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("predicts", combos.iter().map(|c| c.predict.unwrap_or(3) as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("bandwidths", combos.iter().map(|c| c.bandwidth.unwrap_or(0.25)).collect::<Vec<_>>().into_pyarray(py))?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "voss_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period=20, predict=3, bandwidth=0.25, device_id=0))]
+pub fn voss_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    period: usize,
+    predict: usize,
+    bandwidth: f64,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = VossParams { period: Some(period), predict: Some(predict), bandwidth: Some(bandwidth) };
+    let (voss_dev, filt_dev) = py.allow_threads(|| {
+        let cuda = crate::cuda::CudaVoss::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.voss_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((DeviceArrayF32Py { inner: voss_dev }, DeviceArrayF32Py { inner: filt_dev }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

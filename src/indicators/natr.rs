@@ -2583,5 +2583,78 @@ pub fn natr_batch_into(
 pub fn register_natr_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(natr_py, m)?)?;
     m.add_function(wrap_pyfunction!(natr_batch_py, m)?)?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(natr_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(natr_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     Ok(())
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "natr_cuda_batch_dev")]
+#[pyo3(signature = (high, low, close, period_range, device_id=0))]
+pub fn natr_cuda_batch_dev_py(
+    py: Python<'_>,
+    high: numpy::PyReadonlyArray1<'_, f32>,
+    low: numpy::PyReadonlyArray1<'_, f32>,
+    close: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaNatr;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high.as_slice()?;
+    let l = low.as_slice()?;
+    let c = close.as_slice()?;
+    if h.len() != l.len() || h.len() != c.len() {
+        return Err(PyValueError::new_err("mismatched input lengths"));
+    }
+    let sweep = NatrBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let mut cuda = CudaNatr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.natr_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "natr_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm, low_tm, close_tm, period, device_id=0))]
+pub fn natr_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm: numpy::PyReadonlyArray2<'_, f32>,
+    close_tm: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaNatr;
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_tm.as_slice()?;
+    let l = low_tm.as_slice()?;
+    let c = close_tm.as_slice()?;
+    let rows = high_tm.shape()[0];
+    let cols = high_tm.shape()[1];
+
+    let inner = py.allow_threads(|| {
+        let mut cuda = CudaNatr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.natr_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }

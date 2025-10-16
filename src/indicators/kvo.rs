@@ -44,6 +44,8 @@ use thiserror::Error;
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -2101,6 +2103,107 @@ pub fn kvo_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ----------------------------- PYTHON CUDA BINDINGS -----------------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "kvo_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, volume_f32, short_range, long_range, device_id=0))]
+pub fn kvo_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    volume_f32: numpy::PyReadonlyArray1<'py, f32>,
+    short_range: (usize, usize, usize),
+    long_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaKvo;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+    let v = volume_f32.as_slice()?;
+    if h.len() != l.len() || h.len() != c.len() || h.len() != v.len() {
+        return Err(PyValueError::new_err("inputs must have equal length"));
+    }
+
+    let sweep = KvoBatchRange { short_period: short_range, long_period: long_range };
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaKvo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.kvo_batch_dev(h, l, c, v, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "shorts",
+        combos
+            .iter()
+            .map(|p| p.short_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "longs",
+        combos
+            .iter()
+            .map(|p| p.long_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "kvo_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, volume_tm_f32, cols, rows, short_period, long_period, device_id=0))]
+pub fn kvo_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    high_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    close_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    volume_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    short_period: usize,
+    long_period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaKvo;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let c = close_tm_f32.as_slice()?;
+    let v = volume_tm_f32.as_slice()?;
+    if h.len() != l.len() || h.len() != c.len() || h.len() != v.len() {
+        return Err(PyValueError::new_err("inputs must have equal length"));
+    }
+    if cols * rows != h.len() {
+        return Err(PyValueError::new_err("cols*rows must equal data length"));
+    }
+
+    let params = KvoParams { short_period: Some(short_period), long_period: Some(long_period) };
+    let inner = py
+        .allow_threads(|| {
+            let cuda = CudaKvo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.kvo_many_series_one_param_time_major_dev(h, l, c, v, cols, rows, &params)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // Helper function for batch processing that writes directly into the provided slice

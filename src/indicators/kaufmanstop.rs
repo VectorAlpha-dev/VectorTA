@@ -44,6 +44,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1444,6 +1446,89 @@ pub fn kaufmanstop_batch_py<'py>(
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     Ok(dict)
+}
+
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "kaufmanstop_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, period_range, mult_range=(2.0, 2.0, 0.0), direction="long", ma_type="sma", device_id=0))]
+pub fn kaufmanstop_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    mult_range: (f64, f64, f64),
+    direction: &str,
+    ma_type: &str,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaKaufmanstop;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    if h.len() != l.len() {
+        return Err(PyValueError::new_err("High and low arrays must have same length"));
+    }
+    let sweep = KaufmanstopBatchRange {
+        period: period_range,
+        mult: mult_range,
+        direction: (direction.to_string(), direction.to_string(), 0.0),
+        ma_type: (ma_type.to_string(), ma_type.to_string(), 0.0),
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaKaufmanstop::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (dev, _combos) = cuda
+            .kaufmanstop_batch_dev(h, l, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>(dev)
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "kaufmanstop_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, period, mult=2.0, direction="long", ma_type="sma", device_id=0))]
+pub fn kaufmanstop_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    mult: f64,
+    direction: &str,
+    ma_type: &str,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaKaufmanstop;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let rows = high_tm_f32.shape()[0];
+    let cols = high_tm_f32.shape()[1];
+    if low_tm_f32.shape()[0] != rows || low_tm_f32.shape()[1] != cols {
+        return Err(PyValueError::new_err("high/low shapes must match"));
+    }
+    let params = KaufmanstopParams {
+        period: Some(period),
+        mult: Some(mult),
+        direction: Some(direction.to_string()),
+        ma_type: Some(ma_type.to_string()),
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaKaufmanstop::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .kaufmanstop_many_series_one_param_time_major_dev(h, l, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // ================== Core Helper Functions ==================

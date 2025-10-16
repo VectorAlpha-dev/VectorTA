@@ -2326,11 +2326,81 @@ pub fn ppo_batch_py<'py>(
     Ok(dict)
 }
 
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ppo_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, fast_period_range, slow_period_range, ma_type="sma", device_id=0))]
+pub fn ppo_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    fast_period_range: (usize, usize, usize),
+    slow_period_range: (usize, usize, usize),
+    ma_type: &str,
+    device_id: usize,
+) -> PyResult<(crate::indicators::moving_averages::alma::DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::ppo_wrapper::CudaPpo;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+
+    let slice_in = data_f32.as_slice()?;
+    let sweep = PpoBatchRange { fast_period: fast_period_range, slow_period: slow_period_range, ma_type: ma_type.to_string() };
+    let (inner, combos) = py
+        .allow_threads(|| CudaPpo::new(device_id).and_then(|c| c.ppo_batch_dev(slice_in, &sweep)))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "fast_periods",
+        combos.iter().map(|p| p.fast_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    dict.set_item(
+        "slow_periods",
+        combos.iter().map(|p| p.slow_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    dict.set_item(
+        "ma_types",
+        combos.iter().map(|p| p.ma_type.as_ref().unwrap().clone()).collect::<Vec<_>>(),
+    )?;
+    Ok((crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ppo_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, fast_period, slow_period, ma_type="sma", device_id=0))]
+pub fn ppo_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    fast_period: usize,
+    slow_period: usize,
+    ma_type: &str,
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::ppo_wrapper::CudaPpo;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array")); }
+    let rows = shape[0];
+    let cols = shape[1];
+    let flat = data_tm_f32.as_slice()?;
+    let params = PpoParams { fast_period: Some(fast_period), slow_period: Some(slow_period), ma_type: Some(ma_type.to_string()) };
+    let inner = py
+        .allow_threads(|| CudaPpo::new(device_id).and_then(|c| c.ppo_many_series_one_param_time_major_dev(flat, cols, rows, &params)))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "python")]
 pub fn register_ppo_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ppo_py, m)?)?;
     m.add_function(wrap_pyfunction!(ppo_batch_py, m)?)?;
     m.add_class::<PpoStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(ppo_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(ppo_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     Ok(())
 }
 

@@ -1,0 +1,108 @@
+use my_project::indicators::tsi::{tsi_batch_with_kernel, TsiBatchRange};
+use my_project::utilities::enums::Kernel;
+
+#[cfg(feature = "cuda")]
+use cust::memory::CopyDestination;
+#[cfg(feature = "cuda")]
+use my_project::cuda::cuda_available;
+#[cfg(feature = "cuda")]
+use my_project::cuda::oscillators::tsi_wrapper::CudaTsi;
+
+fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
+    if a.is_nan() && b.is_nan() { return true; }
+    let diff = (a - b).abs();
+    diff <= atol.max(rtol * a.abs())
+}
+
+#[test]
+fn cuda_feature_off_noop() {
+    #[cfg(not(feature = "cuda"))]
+    { assert!(true); }
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn tsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[tsi_cuda_batch_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+    let len = 8192usize;
+    let mut price = vec![f64::NAN; len];
+    for i in 1..len { // momentum needs previous
+        let x = i as f64;
+        price[i] = (x * 0.00123).sin() + 0.00017 * x;
+    }
+    let sweep = TsiBatchRange { long_period: (10, 40, 5), short_period: (5, 20, 5) };
+    let cpu = tsi_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
+
+    let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
+    let mut cuda = CudaTsi::new(0).expect("CudaTsi::new");
+    let (dev, combos) = cuda.tsi_batch_dev(&price_f32, &sweep).expect("tsi_batch_dev");
+
+    assert_eq!(cpu.rows, combos.len());
+    assert_eq!(cpu.rows, dev.rows);
+    assert_eq!(cpu.cols, dev.cols);
+
+    let mut host = vec![0f32; dev.len()];
+    dev.buf.copy_to(&mut host)?;
+
+    // fp32 path; chained EMAs accumulate small error – allow modest tolerance
+    let (atol, rtol) = (0.5, 5e-3);
+    for idx in 0..(cpu.rows * cpu.cols) {
+        let c = cpu.values[idx];
+        let g = host[idx] as f64;
+        assert!(approx_eq(c, g, atol, rtol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn tsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[tsi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+    use my_project::indicators::tsi::{tsi_with_kernel, TsiInput, TsiParams, TsiData};
+
+    let cols = 6usize; // series
+    let rows = 2048usize; // length
+    let mut price_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        for t in (1 + s)..rows { // ensure prev exists for momentum
+            let x = (t as f64) + (s as f64) * 0.2;
+            price_tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+        }
+    }
+    let long = 25usize; let short = 13usize;
+
+    // CPU baseline
+    let mut cpu_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        let mut p = vec![f64::NAN; rows];
+        for t in 0..rows { p[t] = price_tm[t * cols + s]; }
+        let params = TsiParams { long_period: Some(long), short_period: Some(short) };
+        let input = TsiInput { data: TsiData::Slice(&p), params };
+        let out = tsi_with_kernel(&input, Kernel::Scalar)?.values;
+        for t in 0..rows { cpu_tm[t * cols + s] = out[t]; }
+    }
+
+    let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
+    let mut cuda = CudaTsi::new(0).expect("CudaTsi::new");
+    let dev_tm = cuda
+        .tsi_many_series_one_param_time_major_dev(&price_tm_f32, cols, rows, long, short)
+        .expect("tsi_many_series_one_param_time_major_dev");
+
+    assert_eq!(dev_tm.rows, rows);
+    assert_eq!(dev_tm.cols, cols);
+
+    let mut g_tm = vec![0f32; dev_tm.len()];
+    dev_tm.buf.copy_to(&mut g_tm)?;
+
+    let (atol, rtol) = (0.5, 5e-3);
+    for idx in 0..g_tm.len() {
+        assert!(approx_eq(cpu_tm[idx], g_tm[idx] as f64, atol, rtol), "many-series mismatch at {}", idx);
+    }
+    Ok(())
+}

@@ -2040,3 +2040,64 @@ pub fn lrsi_batch_py<'py>(
     )?;
     Ok(dict)
 }
+
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "lrsi_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, alpha_range, device_id=0))]
+pub fn lrsi_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    alpha_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::CudaLrsi;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    if h.len() != l.len() {
+        return Err(PyValueError::new_err("mismatched input lengths"));
+    }
+    let sweep = LrsiBatchRange { alpha: alpha_range };
+    let inner = py.allow_threads(|| {
+        let mut cuda = CudaLrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.lrsi_batch_dev(h, l, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "lrsi_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, alpha, device_id=0))]
+pub fn lrsi_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    alpha: f64,
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::CudaLrsi;
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let rows = high_tm_f32.shape()[0];
+    let cols = high_tm_f32.shape()[1];
+    if low_tm_f32.shape() != [rows, cols] {
+        return Err(PyValueError::new_err("mismatched matrix shapes"));
+    }
+    let inner = py.allow_threads(|| {
+        let mut cuda = CudaLrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.lrsi_many_series_one_param_time_major_dev(h, l, cols, rows, alpha)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner })
+}

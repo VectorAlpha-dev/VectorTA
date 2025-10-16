@@ -256,13 +256,74 @@ fn compile_cuda_kernels() {
         "kernels/cuda/moving_averages/zlema_kernel.cu",
         "zlema_kernel.ptx",
     );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/alligator_kernel.cu",
+        "alligator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/correlation_cycle_kernel.cu",
+        "correlation_cycle_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/otto_kernel.cu",
+        "otto_kernel.ptx",
+    );
 
     // Non-MA
     compile_kernel(&cuda_path, "kernels/cuda/wad_kernel.cu", "wad_kernel.ptx");
+    compile_kernel(&cuda_path, "kernels/cuda/var_kernel.cu", "var_kernel.ptx");
     compile_kernel(
         &cuda_path,
         "kernels/cuda/oscillators/willr_kernel.cu",
         "willr_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/acosc_kernel.cu",
+        "acosc_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/aroonosc_kernel.cu",
+        "aroonosc_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/cfo_kernel.cu",
+        "cfo_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/fosc_kernel.cu",
+        "fosc_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/dpo_kernel.cu",
+        "dpo_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/lrsi_kernel.cu",
+        "lrsi_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/ppo_kernel.cu",
+        "ppo_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/tsi_kernel.cu",
+        "tsi_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/stoch_kernel.cu",
+        "stoch_kernel.ptx",
     );
     compile_kernel(
         &cuda_path,
@@ -276,8 +337,71 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
+        "kernels/cuda/sar_kernel.cu",
+        "sar_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
         "kernels/cuda/zscore_kernel.cu",
         "zscore_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/voss_kernel.cu",
+        "voss_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/cksp_kernel.cu",
+        "cksp_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/emd_kernel.cu",
+        "emd_kernel.ptx",
+    );
+    // MinMax (local extrema)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/minmax_kernel.cu",
+        "minmax_kernel.ptx",
+    );
+    // Additional top-level kernels
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/bollinger_bands_width_kernel.cu",
+        "bollinger_bands_width_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/deviation_kernel.cu",
+        "deviation_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/range_filter_kernel.cu",
+        "range_filter_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/kaufmanstop_kernel.cu",
+        "kaufmanstop_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/mass_kernel.cu",
+        "mass_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/kvo_kernel.cu",
+        "kvo_kernel.ptx",
+    );
+    // NATR
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/natr_kernel.cu",
+        "natr_kernel.ptx",
     );
 }
 
@@ -455,6 +579,12 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         }
         if !any {
             eprintln!("Skipping {} due to CUDA_FILTER", rel_src);
+            // Emit a tiny placeholder PTX so include_str! still succeeds for other wrappers.
+            let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+            let ptx_path = out_dir.join(ptx_name);
+            let placeholder = 
+                ".version 7.0\n.target compute_80\n.address_size 64\n// placeholder PTX (no kernels)\n";
+            std::fs::write(&ptx_path, placeholder).expect("write placeholder PTX");
             return;
         }
     }
