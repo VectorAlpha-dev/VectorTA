@@ -3194,3 +3194,82 @@ pub fn bb_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsV
     serde_wasm_bindgen::to_value(&js)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
+
+// ==================== PYTHON CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaBollingerBands};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyReadonlyArray1;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::{pyfunction, PyResult, Python};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::exceptions::PyValueError;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "bollinger_bands_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, devup_range, devdn_range, device_id=0))]
+pub fn bollinger_bands_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    devup_range: (f64, f64, f64),
+    devdn_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = data_f32.as_slice()?;
+    let sweep = BollingerBandsBatchRange {
+        period: period_range,
+        devup: devup_range,
+        devdn: devdn_range,
+        matype: ("sma".to_string(), "sma".to_string(), 0),
+        devtype: (0, 0, 0),
+    };
+    let (up, mid, lo) = py.allow_threads(|| {
+        let cuda = CudaBollingerBands::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.bollinger_bands_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((
+        DeviceArrayF32Py { inner: up },
+        DeviceArrayF32Py { inner: mid },
+        DeviceArrayF32Py { inner: lo },
+    ))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "bollinger_bands_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (prices_tm_f32, cols, rows, period, devup, devdn, device_id=0))]
+pub fn bollinger_bands_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    prices_tm_f32: PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    devup: f32,
+    devdn: f32,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let tm = prices_tm_f32.as_slice()?;
+    let (up, mid, lo) = py.allow_threads(|| {
+        let cuda = CudaBollingerBands::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.bollinger_bands_many_series_one_param_time_major_dev(
+            tm, cols, rows, period, devup, devdn,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((
+        DeviceArrayF32Py { inner: up },
+        DeviceArrayF32Py { inner: mid },
+        DeviceArrayF32Py { inner: lo },
+    ))
+}

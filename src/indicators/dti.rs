@@ -1301,6 +1301,80 @@ pub fn dti_batch_py<'py>(
     Ok(dict)
 }
 
+// -------------------- Python CUDA bindings --------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaDti;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dti_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, r_range, s_range, u_range, device_id=0))]
+pub fn dti_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    r_range: (usize, usize, usize),
+    s_range: (usize, usize, usize),
+    u_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let high = high_f32.as_slice()?;
+    let low = low_f32.as_slice()?;
+    let sweep = DtiBatchRange { r: r_range, s: s_range, u: u_range };
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaDti::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.dti_batch_dev(high, low, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = PyDict::new(py);
+    let rr: Vec<u64> = combos.iter().map(|c| c.r.unwrap() as u64).collect();
+    let ss: Vec<u64> = combos.iter().map(|c| c.s.unwrap() as u64).collect();
+    let uu: Vec<u64> = combos.iter().map(|c| c.u.unwrap() as u64).collect();
+    dict.set_item("r", rr.into_pyarray(py))?;
+    dict.set_item("s", ss.into_pyarray(py))?;
+    dict.set_item("u", uu.into_pyarray(py))?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dti_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, r, s, u, device_id=0))]
+pub fn dti_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    r: usize,
+    s: usize,
+    u: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let high_flat = high_tm_f32.as_slice()?;
+    let low_flat = low_tm_f32.as_slice()?;
+    let rows = high_tm_f32.shape()[0];
+    let cols = high_tm_f32.shape()[1];
+    if low_tm_f32.shape() != [rows, cols] {
+        return Err(PyValueError::new_err("high/low shapes mismatch"));
+    }
+    let params = DtiParams { r: Some(r), s: Some(s), u: Some(u) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaDti::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.dti_many_series_one_param_time_major_dev(high_flat, low_flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[derive(Clone, Debug)]
 pub struct DtiBatchRange {
     pub r: (usize, usize, usize),

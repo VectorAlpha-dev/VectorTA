@@ -43,6 +43,12 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaEmv;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1563,4 +1569,59 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         Ok(()) // No-op in release builds
     }
+}
+
+// ---------------- Python CUDA bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "emv_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, volume_f32, device_id=0))]
+pub fn emv_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    volume_f32: numpy::PyReadonlyArray1<'py, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let v = volume_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaEmv::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.emv_batch_dev(h, l, v)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "emv_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, volume_tm_f32, device_id=0))]
+pub fn emv_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    volume_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    use numpy::PyUntypedArrayMethods;
+    let h_flat = high_tm_f32.as_slice()?;
+    let l_flat = low_tm_f32.as_slice()?;
+    let v_flat = volume_tm_f32.as_slice()?;
+    let rows = high_tm_f32.shape()[0];
+    let cols = high_tm_f32.shape()[1];
+    if low_tm_f32.shape() != [rows, cols] || volume_tm_f32.shape() != [rows, cols] {
+        return Err(PyValueError::new_err("high/low/volume shapes mismatch"));
+    }
+    let inner = py.allow_threads(|| {
+        let cuda = CudaEmv::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.emv_many_series_one_param_time_major_dev(h_flat, l_flat, v_flat, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }

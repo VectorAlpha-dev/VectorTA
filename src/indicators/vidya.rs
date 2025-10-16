@@ -2263,6 +2263,79 @@ pub fn vidya_batch_py<'py>(
     Ok(dict)
 }
 
+// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaVidya;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vidya_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, short_period_range, long_period_range, alpha_range, device_id=0))]
+pub fn vidya_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    short_period_range: (usize, usize, usize),
+    long_period_range: (usize, usize, usize),
+    alpha_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = VidyaBatchRange { short_period: short_period_range, long_period: long_period_range, alpha: alpha_range };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVidya::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vidya_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    // Re-expand grid to report combos deterministically for Python
+    fn axis_usize(a: (usize, usize, usize)) -> Vec<usize> { let (s,e,st)=a; if st==0 || s==e { return vec![s]; } (s..=e).step_by(st).collect() }
+    fn axis_f64(a: (f64, f64, f64)) -> Vec<f64> { let (s,e,st)=a; if st.abs()<1e-12 || (s-e).abs()<1e-12 { return vec![s]; } let mut v=Vec::new(); let mut x=s; while x<=e+1e-12 { v.push(x); x+=st; } v }
+    let shorts = axis_usize(short_period_range);
+    let longs  = axis_usize(long_period_range);
+    let alphas = axis_f64(alpha_range);
+
+    let dict = PyDict::new(py);
+    dict.set_item("short_periods", shorts.into_pyarray(py))?;
+    dict.set_item("long_periods", longs.into_pyarray(py))?;
+    dict.set_item("alphas", alphas.into_pyarray(py))?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vidya_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, short_period, long_period, alpha, device_id=0))]
+pub fn vidya_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    short_period: usize,
+    long_period: usize,
+    alpha: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+
+    let flat_in = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = VidyaParams { short_period: Some(short_period), long_period: Some(long_period), alpha: Some(alpha) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaVidya::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vidya_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn vidya_js(

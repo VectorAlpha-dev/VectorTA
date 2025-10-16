@@ -904,12 +904,58 @@ pub fn wclprice_cuda_dev_py(
     let cs = close.as_slice()?;
 
     let inner = py.allow_threads(|| {
-        let cuda =
-            CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.wclprice_dev(hs, ls, cs)
+        let cuda = CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.wclprice_batch_dev(hs, ls, cs, &WclpriceBatchRange)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "wclprice_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, device_id=0))]
+pub fn wclprice_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    close_f32: numpy::PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let hs = high_f32.as_slice()?; let ls = low_f32.as_slice()?; let cs = close_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.wclprice_batch_dev(hs, ls, cs, &WclpriceBatchRange)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "wclprice_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, device_id=0))]
+pub fn wclprice_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    close_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h_shape = high_tm_f32.shape();
+    if h_shape != low_tm_f32.shape() || h_shape != close_tm_f32.shape() {
+        return Err(PyValueError::new_err("high/low/close matrices must share shape"));
+    }
+    let rows = h_shape[0];
+    let cols = h_shape[1];
+    let hs = high_tm_f32.as_slice()?; let ls = low_tm_f32.as_slice()?; let cs = close_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.wclprice_many_series_one_param_time_major_dev(hs, ls, cs, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     Ok(DeviceArrayF32Py { inner })
 }
 

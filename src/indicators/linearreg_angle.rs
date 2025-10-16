@@ -29,6 +29,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaLinearregAngle};
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -2078,10 +2082,60 @@ pub fn linearreg_angle_batch_py<'py>(
     Ok(dict)
 }
 
+// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "linearreg_angle_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn linearreg_angle_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+)
+-> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = Linearreg_angleBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaLinearregAngle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.linearreg_angle_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "linearreg_angle_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, cols, rows, period, device_id=0))]
+pub fn linearreg_angle_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    data_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let params = Linearreg_angleParams { period: Some(period) };
+    let slice_in = data_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaLinearregAngle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.linearreg_angle_many_series_one_param_time_major_dev(slice_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "python")]
 pub fn register_linearreg_angle_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(linearreg_angle_py, m)?)?;
     m.add_function(wrap_pyfunction!(linearreg_angle_batch_py, m)?)?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(linearreg_angle_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(linearreg_angle_cuda_many_series_one_param_dev_py, m)?)?;
+        m.add_class::<crate::indicators::moving_averages::alma::DeviceArrayF32Py>()?;
+    }
     Ok(())
 }
 
