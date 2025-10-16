@@ -2802,3 +2802,74 @@ pub fn safezonestop_batch_py<'py>(
 
     Ok(dict)
 }
+
+// -------- Python CUDA bindings (DeviceArrayF32Py) --------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaSafeZoneStop;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "safezonestop_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, period_range, mult_range, max_lookback_range, direction, device_id=0))]
+pub fn safezonestop_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    mult_range: (f64, f64, f64),
+    max_lookback_range: (usize, usize, usize),
+    direction: &str,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let high = high_f32.as_slice()?;
+    let low = low_f32.as_slice()?;
+    let sweep = SafeZoneStopBatchRange { period: period_range, mult: mult_range, max_lookback: max_lookback_range };
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaSafeZoneStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.safezonestop_batch_dev(high, low, direction, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let periods: Vec<u64> = combos.iter().map(|p| p.period.unwrap() as u64).collect();
+    let mults: Vec<f64> = combos.iter().map(|p| p.mult.unwrap()).collect();
+    let looks: Vec<u64> = combos.iter().map(|p| p.max_lookback.unwrap() as u64).collect();
+    dict.set_item("periods", periods.into_pyarray(py))?;
+    dict.set_item("mults", mults.into_pyarray(py))?;
+    dict.set_item("max_lookbacks", looks.into_pyarray(py))?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "safezonestop_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, cols, rows, period, mult, max_lookback, direction, device_id=0))]
+pub fn safezonestop_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    high_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_tm_f32: numpy::PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    mult: f32,
+    max_lookback: usize,
+    direction: &str,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let high = high_tm_f32.as_slice()?;
+    let low = low_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaSafeZoneStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.safezonestop_many_series_one_param_time_major_dev(high, low, cols, rows, period, mult, max_lookback, direction)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}

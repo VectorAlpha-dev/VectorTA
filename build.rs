@@ -84,6 +84,11 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
+        "kernels/cuda/moving_averages/pma_kernel.cu",
+        "pma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
         "kernels/cuda/moving_averages/ehma_kernel.cu",
         "ehma_kernel.ptx",
     );
@@ -157,6 +162,11 @@ fn compile_cuda_kernels() {
         &cuda_path,
         "kernels/cuda/moving_averages/linearreg_slope_kernel.cu",
         "linearreg_slope_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/tsf_kernel.cu",
+        "tsf_kernel.ptx",
     );
     compile_kernel(
         &cuda_path,
@@ -350,6 +360,17 @@ fn compile_cuda_kernels() {
         "kernels/cuda/moving_averages/macz_kernel.cu",
         "macz_kernel.ptx",
     );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/qstick_kernel.cu",
+        "qstick_kernel.ptx",
+    );
+    // OTT (composite indicator; kernels consume either MA or compute VAR inline)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/ott_kernel.cu",
+        "ott_kernel.ptx",
+    );
 
     // Non-MA
     compile_kernel(&cuda_path, "kernels/cuda/wad_kernel.cu", "wad_kernel.ptx");
@@ -404,6 +425,23 @@ fn compile_cuda_kernels() {
         &cuda_path,
         "kernels/cuda/oscillators/srsi_kernel.cu",
         "srsi_kernel.ptx",
+    );
+    // VOSC (Volume Oscillator)
+    compile_kernel(&cuda_path, "kernels/cuda/vosc_kernel.cu", "vosc_kernel.ptx");
+    // SafeZoneStop (trend stop indicator)
+    compile_kernel(&cuda_path, "kernels/cuda/safezonestop_kernel.cu", "safezonestop_kernel.ptx");
+    // ROCR (Rate of Change Ratio)
+    compile_kernel(&cuda_path, "kernels/cuda/rocr_kernel.cu", "rocr_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/nadaraya_watson_envelope_kernel.cu",
+        "nadaraya_watson_envelope_kernel.ptx",
+    );
+    // MFI (oscillator)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/mfi_kernel.cu",
+        "mfi_kernel.ptx",
     );
     compile_kernel(
         &cuda_path,
@@ -507,6 +545,39 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
+        "kernels/cuda/oscillators/cci_kernel.cu",
+        "cci_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/chop_kernel.cu",
+        "chop_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/dec_osc_kernel.cu",
+        "dec_osc_kernel.ptx",
+    );
+    // Fisher Transform (oscillator)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/fisher_kernel.cu",
+        "fisher_kernel.ptx",
+    );
+    // IFT RSI (oscillator)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/ift_rsi_kernel.cu",
+        "ift_rsi_kernel.ptx",
+    );
+    // Ultimate Oscillator
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/ultosc_kernel.cu",
+        "ultosc_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
         "kernels/cuda/wavetrend_kernel.cu",
         "wavetrend_kernel.ptx",
     );
@@ -565,6 +636,18 @@ fn compile_cuda_kernels() {
         &cuda_path,
         "kernels/cuda/medprice_kernel.cu",
         "medprice_kernel.ptx",
+    );
+    // Band-Pass
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/bandpass_kernel.cu",
+        "bandpass_kernel.ptx",
+    );
+    // Aroon (trend indicator)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/aroon_kernel.cu",
+        "aroon_kernel.ptx",
     );
     compile_kernel(
         &cuda_path,
@@ -827,6 +910,26 @@ fn compile_cuda_kernels() {
         "kernels/cuda/ui_kernel.cu",
         "ui_kernel.ptx",
     );
+    // StdDev (rolling standard deviation)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/stddev_kernel.cu",
+        "stddev_kernel.ptx",
+    );
+    // Donchian Channels (upper/middle/lower)
+    compile_kernel(&cuda_path, "kernels/cuda/donchian_kernel.cu", "donchian_kernel.ptx");
+    // Trend/strength
+    compile_kernel(&cuda_path, "kernels/cuda/adxr_kernel.cu", "adxr_kernel.ptx");
+    // Correlation (high vs low)
+    compile_kernel(&cuda_path, "kernels/cuda/correl_hl_kernel.cu", "correl_hl_kernel.ptx");
+    // Elder's Force Index (EFI)
+    compile_kernel(&cuda_path, "kernels/cuda/efi_kernel.cu", "efi_kernel.ptx");
+    // Market Facilitation Index (marketefi)
+    compile_kernel(&cuda_path, "kernels/cuda/marketefi_kernel.cu", "marketefi_kernel.ptx");
+    // Kurtosis (excess kurtosis)
+    compile_kernel(&cuda_path, "kernels/cuda/kurtosis_kernel.cu", "kurtosis_kernel.ptx");
+    // Low Pass Channel (LPC)
+    compile_kernel(&cuda_path, "kernels/cuda/lpc_kernel.cu", "lpc_kernel.ptx");
 }
 
 fn find_cuda_path() -> String {

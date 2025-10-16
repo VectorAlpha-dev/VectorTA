@@ -1758,6 +1758,67 @@ pub fn kurtosis_batch_py<'py>(
     Ok(dict)
 }
 
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "kurtosis_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn kurtosis_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::kurtosis_wrapper::CudaKurtosis;
+    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = KurtosisBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaKurtosis::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (dev, _combos) = cuda
+            .kurtosis_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>(dev)
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "kurtosis_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn kurtosis_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::kurtosis_wrapper::CudaKurtosis;
+    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let shape = data_tm_f32.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D time-major array"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let slice_in = data_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaKurtosis::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .kurtosis_many_series_one_param_time_major_dev(slice_in, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WASM Bindings
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1719,6 +1719,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "qstick")]
@@ -1832,7 +1834,69 @@ pub fn register_qstick_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<
     m.add_function(wrap_pyfunction!(qstick_py, m)?)?;
     m.add_function(wrap_pyfunction!(qstick_batch_py, m)?)?;
     m.add_class::<QstickStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(qstick_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(qstick_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     Ok(())
+}
+
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "qstick_cuda_batch_dev")]
+#[pyo3(signature = (open_f32, close_f32, period_range, device_id=0))]
+pub fn qstick_cuda_batch_dev_py(
+    py: Python<'_>,
+    open_f32: numpy::PyReadonlyArray1<'_, f32>,
+    close_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaQstick;
+
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let open_slice = open_f32.as_slice()?;
+    let close_slice = close_f32.as_slice()?;
+    let sweep = QstickBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaQstick::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.qstick_batch_dev(open_slice, close_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "qstick_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (open_tm_f32, close_tm_f32, period, device_id=0))]
+pub fn qstick_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    open_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    close_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::CudaQstick;
+    use numpy::PyUntypedArrayMethods;
+
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if open_tm_f32.shape() != close_tm_f32.shape() {
+        return Err(PyValueError::new_err("open/close shapes differ"));
+    }
+    let flat_open: &[f32] = open_tm_f32.as_slice()?;
+    let flat_close: &[f32] = close_tm_f32.as_slice()?;
+    let rows = open_tm_f32.shape()[0];
+    let cols = open_tm_f32.shape()[1];
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaQstick::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.qstick_many_series_one_param_time_major_dev(flat_open, flat_close, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 /// Write qstick directly to output slice - no allocations

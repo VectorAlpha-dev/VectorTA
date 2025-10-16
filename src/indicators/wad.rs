@@ -1483,6 +1483,56 @@ pub fn wad_cuda_dev_py(
     Ok(DeviceArrayF32Py { inner })
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "wad_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, device_id=0))]
+pub fn wad_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: PyReadonlyArray1<'_, f32>,
+    low_f32: PyReadonlyArray1<'_, f32>,
+    close_f32: PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let high = high_f32.as_slice()?;
+    let low = low_f32.as_slice()?;
+    let close = close_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaWad::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.wad_batch_dev(high, low, close)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "wad_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, device_id=0))]
+pub fn wad_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    close_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let rows = high_tm_f32.shape()[0];
+    let cols = high_tm_f32.shape()[1];
+    if low_tm_f32.shape() != [rows, cols] || close_tm_f32.shape() != [rows, cols] {
+        return Err(PyValueError::new_err("high/low/close shapes must match"));
+    }
+    let high = high_tm_f32.as_slice()?;
+    let low = low_tm_f32.as_slice()?;
+    let close = close_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaWad::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.wad_many_series_one_param_time_major_dev(high, low, close, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "wad")]
 #[pyo3(signature = (high, low, close, kernel=None))]

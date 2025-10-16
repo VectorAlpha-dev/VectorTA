@@ -436,7 +436,7 @@ pub enum LpcError {
 
 // ==================== CORE COMPUTATION FUNCTIONS ====================
 /// Dominant Cycle Detection Function Using In Phase & Quadrature IFM
-fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
+pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
     let len = src.len();
     let mut dom_cycles = vec![f64::NAN; len];
 
@@ -1805,7 +1805,123 @@ pub fn lpc_batch_py<'py>(
 pub fn register_lpc_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lpc_py, m)?)?;
     m.add_function(wrap_pyfunction!(lpc_batch_py, m)?)?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(lpc_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(lpc_cuda_many_series_one_param_dev_py, m)?)?;
+    }
     Ok(())
+}
+
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available as cuda_is_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::lpc_wrapper::CudaLpc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "lpc_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, src_f32, fixed_period_range, cycle_mult_range, tr_mult_range, cutoff_type="fixed", max_cycle_limit=60, device_id=0))]
+pub fn lpc_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    src_f32: numpy::PyReadonlyArray1<'py, f32>,
+    fixed_period_range: (usize, usize, usize),
+    cycle_mult_range: (f64, f64, f64),
+    tr_mult_range: (f64, f64, f64),
+    cutoff_type: &str,
+    max_cycle_limit: usize,
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::IntoPyArray;
+    if !cuda_is_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+    let s = src_f32.as_slice()?;
+    if h.len() != s.len() || l.len() != s.len() || c.len() != s.len() {
+        return Err(PyValueError::new_err("All arrays must have the same length"));
+    }
+    let sweep = LpcBatchRange {
+        fixed_period: fixed_period_range,
+        cycle_mult: cycle_mult_range,
+        tr_mult: tr_mult_range,
+        cutoff_type: cutoff_type.to_string(),
+        max_cycle_limit,
+    };
+    let (triplet, combos) = py.allow_threads(|| {
+        let cuda = CudaLpc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.lpc_batch_dev(h, l, c, s, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("filter", Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?)?;
+    d.set_item("high",   Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?)?;
+    d.set_item("low",    Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
+    d.set_item(
+        "fixed_periods",
+        combos.iter().map(|p| p.fixed_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    d.set_item(
+        "cycle_mults",
+        combos.iter().map(|p| p.cycle_mult.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    d.set_item(
+        "tr_mults",
+        combos.iter().map(|p| p.tr_mult.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    d.set_item("rows", combos.len())?;
+    d.set_item("cols", s.len())?;
+    Ok(d)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "lpc_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, src_tm_f32, cutoff_type="fixed", fixed_period=20, tr_mult=1.0, device_id=0))]
+pub fn lpc_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    high_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    close_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    src_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    cutoff_type: &str,
+    fixed_period: usize,
+    tr_mult: f64,
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    if !cuda_is_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cutoff_type.eq_ignore_ascii_case("fixed") {
+        return Err(PyValueError::new_err("many-series CUDA supports fixed cutoff only"));
+    }
+    let sh = high_tm_f32.shape();
+    let sl = low_tm_f32.shape();
+    let sc = close_tm_f32.shape();
+    let ss = src_tm_f32.shape();
+    if sh != sl || sh != sc || sh != ss || sh.len() != 2 { return Err(PyValueError::new_err("expected matching 2D arrays [rows, cols]")); }
+    let rows = sh[0];
+    let cols = sh[1];
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let c = close_tm_f32.as_slice()?;
+    let s = src_tm_f32.as_slice()?;
+    let params = LpcParams { cutoff_type: Some(cutoff_type.to_string()), fixed_period: Some(fixed_period), max_cycle_limit: Some(60), cycle_mult: Some(1.0), tr_mult: Some(tr_mult) };
+    let triplet = py.allow_threads(|| {
+        let cuda = CudaLpc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.lpc_many_series_one_param_time_major_dev(h, l, c, s, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("filter", Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?)?;
+    d.set_item("high",   Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?)?;
+    d.set_item("low",    Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
+    d.set_item("rows", rows)?;
+    d.set_item("cols", cols)?;
+    d.set_item("fixed_period", fixed_period)?;
+    d.set_item("tr_mult", tr_mult)?;
+    Ok(d)
 }
 
 // ==================== WASM BINDINGS ====================

@@ -1869,6 +1869,67 @@ pub fn dec_osc_batch_py<'py>(
     Ok(dict)
 }
 
+// ---------- CUDA Python bindings ----------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaDecOsc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dec_osc_cuda_batch_dev")]
+#[pyo3(signature = (data, hp_period_range, k_range))]
+pub fn dec_osc_cuda_batch_dev_py(
+    py: Python<'_>,
+    data: PyReadonlyArray1<'_, f64>,
+    hp_period_range: (usize, usize, usize),
+    k_range: (f64, f64, f64),
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA device not available"));
+    }
+    let slice_in = data.as_slice()?;
+    let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
+    let sweep = DecOscBatchRange { hp_period: hp_period_range, k: k_range };
+    let inner = py
+        .allow_threads(|| {
+            let cuda = CudaDecOsc::new(0).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.dec_osc_batch_dev(&data_f32, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dec_osc_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm, cols, rows, hp_period, k))]
+pub fn dec_osc_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm: PyReadonlyArray1<'_, f64>,
+    cols: usize,
+    rows: usize,
+    hp_period: usize,
+    k: f64,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA device not available"));
+    }
+    let slice = data_tm.as_slice()?;
+    if slice.len() != cols * rows {
+        return Err(PyValueError::new_err("time-major array length != cols*rows"));
+    }
+    let data_f32: Vec<f32> = slice.iter().map(|&v| v as f32).collect();
+    let params = DecOscParams { hp_period: Some(hp_period), k: Some(k) };
+    let inner = py
+        .allow_threads(|| {
+            let cuda = CudaDecOsc::new(0).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.dec_osc_many_series_one_param_time_major_dev(&data_f32, cols, rows, &params)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn dec_osc_js(data: &[f64], hp_period: usize, k: f64) -> Result<Vec<f64>, JsValue> {

@@ -44,6 +44,11 @@ use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaMarketefi};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
 #[derive(Debug, Clone)]
 pub enum MarketefiData<'a> {
     Candles {
@@ -858,6 +863,63 @@ pub fn marketefi_batch_py<'py>(
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     Ok(dict)
+}
+
+// ====== PYTHON CUDA BINDINGS ======
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "marketefi_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, volume_f32, device_id=0))]
+pub fn marketefi_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    volume_f32: numpy::PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let v = volume_f32.as_slice()?;
+    if h.len() != l.len() || l.len() != v.len() {
+        return Err(PyValueError::new_err("high, low, volume must have same length"));
+    }
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMarketefi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.marketefi_batch_dev(h, l, v).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "marketefi_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, volume_tm_f32, device_id=0))]
+pub fn marketefi_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    volume_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::{PyArrayMethods, PyUntypedArrayMethods};
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let v = volume_tm_f32.as_slice()?;
+    let shp_h = high_tm_f32.shape();
+    let shp_l = low_tm_f32.shape();
+    let shp_v = volume_tm_f32.shape();
+    if shp_h.len() != 2 || shp_h != shp_l || shp_h != shp_v {
+        return Err(PyValueError::new_err("high_tm, low_tm, volume_tm must have same 2D shape"));
+    }
+    let rows = shp_h[0];
+    let cols = shp_h[1];
+    let inner = py.allow_threads(|| {
+        let cuda = CudaMarketefi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.marketefi_many_series_one_param_time_major_dev(h, l, v, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // Unit tests

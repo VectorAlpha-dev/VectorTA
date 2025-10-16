@@ -30,6 +30,12 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaOtt;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
 
 // Feature-gated imports for WASM bindings
 #[cfg(feature = "wasm")]
@@ -1816,6 +1822,60 @@ pub fn ott_batch_py<'py>(
     let types = PyList::new(py, combos.iter().map(|p| p.ma_type.as_deref().unwrap()))?;
     dict.set_item("ma_types", types)?;
     Ok(dict)
+}
+
+// ==================== Python CUDA Bindings ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ott_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, percent_range, ma_types, device_id=0))]
+pub fn ott_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    percent_range: (f64, f64, f64),
+    ma_types: Vec<String>,
+    device_id: usize,
+)
+    -> PyResult<DeviceArrayF32Py>
+{
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = OttBatchRange { period: period_range, percent: percent_range, ma_types };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaOtt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ott_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ott_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, percent, ma_type="VAR", device_id=0))]
+pub fn ott_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    percent: f64,
+    ma_type: &str,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let flat = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = OttParams { period: Some(period), percent: Some(percent), ma_type: Some(ma_type.to_string()) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaOtt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ott_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // ==================== WASM BINDINGS ====================

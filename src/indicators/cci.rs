@@ -25,6 +25,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaCci;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -2093,6 +2097,54 @@ pub fn cci_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// -------- Python CUDA bindings --------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "cci_cuda_batch_dev")]
+#[pyo3(signature = (data, period_range, device_id=0))]
+pub fn cci_cuda_batch_dev_py(
+    py: Python<'_>,
+    data: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = data.as_slice()?;
+    let sweep = CciBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.cci_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "cci_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm, cols, rows, period, device_id=0))]
+pub fn cci_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice = data_tm.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.cci_many_series_one_param_time_major_dev(slice, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

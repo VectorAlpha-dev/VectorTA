@@ -2664,3 +2664,76 @@ pub fn donchian_batch_into(
         Ok(rows)
     }
 }
+
+// ========================= Python CUDA Bindings =========================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::donchian_wrapper::CudaDonchian;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "donchian_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, period_range, device_id=0))]
+pub fn donchian_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+)-> PyResult<Bound<'py, PyDict>> {
+    use numpy::IntoPyArray;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let sweep = DonchianBatchRange { period: period_range };
+    let (triplet, combos) = py.allow_threads(|| {
+        let cuda = CudaDonchian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.donchian_batch_dev(h, l, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let d = PyDict::new(py);
+    d.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?)?;
+    d.set_item("middle", Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?)?;
+    d.set_item("lower", Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
+    d.set_item("periods", combos.iter().map(|p| p.period.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item("rows", combos.len())?;
+    d.set_item("cols", h.len())?;
+    Ok(d)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "donchian_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, period, device_id=0))]
+pub fn donchian_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    high_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let shape = high_tm_f32.shape();
+    if shape.len() != 2 || low_tm_f32.shape() != shape {
+        return Err(PyValueError::new_err("expected matching 2D arrays [rows, cols]"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let high_tm = high_tm_f32.as_slice()?;
+    let low_tm  = low_tm_f32.as_slice()?;
+    let params = DonchianParams { period: Some(period) };
+    let triplet = py.allow_threads(|| {
+        let cuda = CudaDonchian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.donchian_many_series_one_param_time_major_dev(high_tm, low_tm, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let d = PyDict::new(py);
+    d.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?)?;
+    d.set_item("middle", Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?)?;
+    d.set_item("lower", Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
+    d.set_item("rows", rows)?;
+    d.set_item("cols", cols)?;
+    d.set_item("period", period)?;
+    Ok(d)
+}

@@ -56,6 +56,11 @@ use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaEfi};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
 #[inline(always)]
 fn first_valid_diff_index(price: &[f64], volume: &[f64], first_valid_idx: usize) -> usize {
     let mut i = first_valid_idx.saturating_add(1);
@@ -1143,6 +1148,69 @@ pub fn efi_batch_js(price: &[f64], volume: &[f64], config: JsValue) -> Result<Js
 
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// ====== PYTHON CUDA BINDINGS ======
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "efi_cuda_batch_dev")]
+#[pyo3(signature = (price_f32, volume_f32, period_range=(13,13,0), device_id=0))]
+pub fn efi_cuda_batch_dev_py(
+    py: Python<'_>,
+    price_f32: numpy::PyReadonlyArray1<'_, f32>,
+    volume_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyArrayMethods;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let p = price_f32.as_slice()?;
+    let v = volume_f32.as_slice()?;
+    if p.len() != v.len() {
+        return Err(PyValueError::new_err("price and volume must have same length"));
+    }
+    let sweep = EfiBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaEfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.efi_batch_dev(p, v, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "efi_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (prices_tm_f32, volumes_tm_f32, period=13, device_id=0))]
+pub fn efi_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    prices_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    volumes_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use numpy::PyArrayMethods;
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let p_flat = prices_tm_f32.as_slice()?;
+    let v_flat = volumes_tm_f32.as_slice()?;
+    let shp_p = prices_tm_f32.shape();
+    let shp_v = volumes_tm_f32.shape();
+    if shp_p.len() != 2 || shp_v.len() != 2 || shp_p != shp_v {
+        return Err(PyValueError::new_err("prices_tm and volumes_tm must be same 2D shape"));
+    }
+    let rows = shp_p[0];
+    let cols = shp_p[1];
+    let params = EfiParams { period: Some(period) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaEfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.efi_many_series_one_param_time_major_dev(p_flat, v_flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

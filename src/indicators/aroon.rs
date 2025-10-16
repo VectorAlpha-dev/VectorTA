@@ -50,6 +50,10 @@ use std::collections::VecDeque;
 use std::convert::AsRef;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaAroon};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[derive(Debug, Clone)]
 pub enum AroonData<'a> {
@@ -1218,6 +1222,64 @@ fn aroon_batch_inner_into(
     }
 
     Ok(combos)
+}
+
+// ==================== PYTHON CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "aroon_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, length_range, device_id=0))]
+pub fn aroon_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    length_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let sweep = AroonBatchRange { length: length_range };
+    let (up_dev, dn_dev) = py.allow_threads(|| {
+        let cuda = CudaAroon::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let res = cuda
+            .aroon_batch_dev(h, l, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((res.outputs.first, res.outputs.second))
+    })?;
+    Ok((DeviceArrayF32Py { inner: up_dev }, DeviceArrayF32Py { inner: dn_dev }))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "aroon_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, length, device_id=0))]
+pub fn aroon_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    high_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    length: usize,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let shape = high_tm_f32.shape();
+    if shape.len() != 2 || low_tm_f32.shape() != shape {
+        return Err(PyValueError::new_err("expected two matching 2D arrays"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let (up_dev, dn_dev) = py.allow_threads(|| {
+        let cuda = CudaAroon::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let pair = cuda
+            .aroon_many_series_one_param_time_major_dev(h, l, cols, rows, length)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((pair.first, pair.second))
+    })?;
+    Ok((DeviceArrayF32Py { inner: up_dev }, DeviceArrayF32Py { inner: dn_dev }))
 }
 
 #[inline(always)]

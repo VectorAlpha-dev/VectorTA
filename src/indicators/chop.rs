@@ -62,6 +62,13 @@ use std::error::Error;
 use std::mem::ManuallyDrop;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaChop;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+
 #[derive(Debug, Clone)]
 pub enum ChopData<'a> {
     Candles(&'a Candles),
@@ -2323,6 +2330,63 @@ pub fn chop_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+// ---------- Python CUDA bindings ----------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "chop_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, period_range, scalar_range, drift_range, device_id=0))]
+pub fn chop_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    close_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    scalar_range: (f64, f64, f64),
+    drift_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+    let sweep = ChopBatchRange { period: period_range, scalar: scalar_range, drift: drift_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaChop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (arr, _combos) = cuda
+            .chop_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>(arr)
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "chop_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, cols, rows, period, scalar=100.0, drift=1, device_id=0))]
+pub fn chop_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    close_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    scalar: f64,
+    drift: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let c = close_tm_f32.as_slice()?;
+    let params = ChopParams { period: Some(period), scalar: Some(scalar), drift: Some(drift) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaChop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.chop_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

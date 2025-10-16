@@ -2245,6 +2245,61 @@ pub fn ift_rsi_batch_py<'py>(
     Ok(dict)
 }
 
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ift_rsi_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, rsi_range, wma_range, device_id=0))]
+pub fn ift_rsi_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    rsi_range: (usize, usize, usize),
+    wma_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::CudaIftRsi;
+    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let slice_in: &[f32] = data_f32.as_slice()?;
+    let sweep = IftRsiBatchRange { rsi_period: rsi_range, wma_period: wma_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaIftRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (dev, _combos) = cuda
+            .ift_rsi_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>(dev)
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ift_rsi_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, rsi_period, wma_period, device_id=0))]
+pub fn ift_rsi_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    rsi_period: usize,
+    wma_period: usize,
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::CudaIftRsi;
+    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let flat_in: &[f32] = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = IftRsiParams { rsi_period: Some(rsi_period), wma_period: Some(wma_period) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaIftRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .ift_rsi_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn ift_rsi_js(data: &[f64], rsi_period: usize, wma_period: usize) -> Result<Vec<f64>, JsValue> {

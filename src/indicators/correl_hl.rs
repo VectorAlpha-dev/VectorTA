@@ -1618,6 +1618,65 @@ pub fn correl_hl_batch_py<'py>(
     Ok(dict)
 }
 
+// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "correl_hl_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, period_range, device_id=0))]
+pub fn correl_hl_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::correl_hl_wrapper::CudaCorrelHl;
+    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let sweep = CorrelHlBatchRange { period: period_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaCorrelHl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (dev, _combos) = cuda
+            .correl_hl_batch_dev(h, l, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>(dev)
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "correl_hl_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, period, device_id=0))]
+pub fn correl_hl_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::correl_hl_wrapper::CudaCorrelHl;
+    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let shape = high_tm_f32.shape();
+    if shape.len() != 2 || low_tm_f32.shape() != shape {
+        return Err(PyValueError::new_err("expected matching 2D arrays"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaCorrelHl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .correl_hl_many_series_one_param_time_major_dev(h, l, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
