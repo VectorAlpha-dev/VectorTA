@@ -33,6 +33,7 @@ fn compile_cuda_kernels() {
     compile_alma_kernel(&cuda_path);
     compile_cwma_kernel(&cuda_path);
     compile_epma_kernel(&cuda_path);
+    compile_cora_wave_kernel(&cuda_path);
     compile_ehlers_ecema_kernel(&cuda_path);
     compile_kama_kernel(&cuda_path);
     compile_highpass_kernel(&cuda_path);
@@ -93,6 +94,11 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
+        "kernels/cuda/moving_averages/apo_kernel.cu",
+        "apo_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
         "kernels/cuda/moving_averages/frama_kernel.cu",
         "frama_kernel.ptx",
     );
@@ -135,6 +141,12 @@ fn compile_cuda_kernels() {
         &cuda_path,
         "kernels/cuda/moving_averages/linreg_kernel.cu",
         "linreg_kernel.ptx",
+    );
+    // Linear Regression Slope
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/linearreg_slope_kernel.cu",
+        "linearreg_slope_kernel.ptx",
     );
     compile_kernel(
         &cuda_path,
@@ -223,8 +235,18 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
+        "kernels/cuda/moving_averages/trix_kernel.cu",
+        "trix_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
         "kernels/cuda/moving_averages/uma_kernel.cu",
         "uma_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/vlma_kernel.cu",
+        "vlma_kernel.ptx",
     );
     compile_kernel(
         &cuda_path,
@@ -246,6 +268,18 @@ fn compile_cuda_kernels() {
         "kernels/cuda/moving_averages/vwma_kernel.cu",
         "vwma_kernel.ptx",
     );
+    // VWMACD (Volume-Weighted MACD)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/vwmacd_kernel.cu",
+        "vwmacd_kernel.ptx",
+    );
+    // AVSL (Anti-Volume Stop Loss)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/avsl_kernel.cu",
+        "avsl_kernel.ptx",
+    );
     compile_kernel(
         &cuda_path,
         "kernels/cuda/moving_averages/wilders_kernel.cu",
@@ -255,6 +289,13 @@ fn compile_cuda_kernels() {
         &cuda_path,
         "kernels/cuda/moving_averages/zlema_kernel.cu",
         "zlema_kernel.ptx",
+    );
+
+    // MAC-Z (ZVWAP + MACD/Stddev composite)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_averages/macz_kernel.cu",
+        "macz_kernel.ptx",
     );
 
     // Non-MA
@@ -271,13 +312,108 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
+        "kernels/cuda/oscillators/cci_cycle_kernel.cu",
+        "cci_cycle_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/msw_kernel.cu",
+        "msw_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/kst_kernel.cu",
+        "kst_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/qqe_kernel.cu",
+        "qqe_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/rocp_kernel.cu",
+        "rocp_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/rvi_kernel.cu",
+        "rvi_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/stc_kernel.cu",
+        "stc_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
         "kernels/cuda/wclprice_kernel.cu",
         "wclprice_kernel.ptx",
+    );
+    // Price transforms
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/medprice_kernel.cu",
+        "medprice_kernel.ptx",
     );
     compile_kernel(
         &cuda_path,
         "kernels/cuda/zscore_kernel.cu",
         "zscore_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/adx_kernel.cu",
+        "adx_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/dm_kernel.cu",
+        "dm_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/chandelier_exit_kernel.cu",
+        "chandelier_exit_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/damiani_volatmeter_kernel.cu",
+        "damiani_volatmeter_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/dx_kernel.cu",
+        "dx_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/eri_kernel.cu",
+        "eri_kernel.ptx",
+    );
+    // OBV (On-Balance Volume)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/obv_kernel.cu",
+        "obv_kernel.ptx",
+    );
+    // HalfTrend indicator
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/halftrend_kernel.cu",
+        "halftrend_kernel.ptx",
+    );
+    // Pivot indicator
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/pivot_kernel.cu",
+        "pivot_kernel.ptx",
+    );
+    // Ulcer Index (UI)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ui_kernel.cu",
+        "ui_kernel.ptx",
     );
 }
 
@@ -338,6 +474,14 @@ fn compile_cwma_kernel(cuda_path: &str) {
         cuda_path,
         "kernels/cuda/moving_averages/cwma_kernel.cu",
         "cwma_kernel.ptx",
+    );
+}
+
+fn compile_cora_wave_kernel(cuda_path: &str) {
+    compile_kernel(
+        cuda_path,
+        "kernels/cuda/moving_averages/cora_wave_kernel.cu",
+        "cora_wave_kernel.ptx",
     );
 }
 

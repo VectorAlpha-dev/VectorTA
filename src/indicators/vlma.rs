@@ -53,6 +53,10 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaVlma};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 impl<'a> AsRef<[f64]> for VlmaInput<'a> {
     #[inline(always)]
@@ -1834,6 +1838,70 @@ pub fn vlma_batch_py<'py>(
     )?;
 
     Ok(dict)
+}
+
+// ------------------------ Python CUDA bindings ------------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vlma_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, min_period_range=(5, 5, 0), max_period_range=(50, 50, 0), devtype_range=(0, 0, 0), matype="sma", device_id=0))]
+pub fn vlma_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    min_period_range: (usize, usize, usize),
+    max_period_range: (usize, usize, usize),
+    devtype_range: (usize, usize, usize),
+    matype: &str,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = VlmaBatchRange {
+        min_period: min_period_range,
+        max_period: max_period_range,
+        matype: (matype.to_string(), matype.to_string(), "".to_string()),
+        devtype: devtype_range,
+    };
+
+    let inner = py.allow_threads(|| {
+        let mut cuda = CudaVlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vlma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vlma_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, min_period, max_period, devtype=0, matype="sma", device_id=0))]
+pub fn vlma_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    min_period: usize,
+    max_period: usize,
+    devtype: usize,
+    matype: &str,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let flat: &[f32] = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = VlmaParams {
+        min_period: Some(min_period),
+        max_period: Some(max_period),
+        matype: Some(matype.to_string()),
+        devtype: Some(devtype),
+    };
+    let inner = py.allow_threads(|| {
+        let mut cuda = CudaVlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vlma_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 // WASM bindings following ALMA pattern

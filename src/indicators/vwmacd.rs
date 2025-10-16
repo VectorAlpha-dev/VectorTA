@@ -2959,6 +2959,114 @@ pub fn vwmacd_batch_py<'py>(
     Ok(d)
 }
 
+// ==================== PYTHON CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaVwmacd};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vwmacd_cuda_batch_dev")]
+#[pyo3(signature = (close_f32, volume_f32, fast_range, slow_range, signal_range, device_id=0))]
+pub fn vwmacd_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    volume_f32: numpy::PyReadonlyArray1<'py, f32>,
+    fast_range: (usize, usize, usize),
+    slow_range: (usize, usize, usize),
+    signal_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::IntoPyArray;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let prices = close_f32.as_slice()?;
+    let volumes = volume_f32.as_slice()?;
+    let sweep = VwmacdBatchRange {
+        fast: fast_range,
+        slow: slow_range,
+        signal: signal_range,
+        fast_ma_type: "sma".to_string(),
+        slow_ma_type: "sma".to_string(),
+        signal_ma_type: "ema".to_string(),
+    };
+
+    let (triplet, combos) = py.allow_threads(|| {
+        let cuda = CudaVwmacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vwmacd_batch_dev(prices, volumes, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("macd", Py::new(py, DeviceArrayF32Py { inner: triplet.macd })?)?;
+    dict.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: triplet.signal })?)?;
+    dict.set_item("hist", Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
+    dict.set_item("rows", combos.len())?;
+    dict.set_item("cols", prices.len())?;
+    dict.set_item(
+        "fasts",
+        combos.iter().map(|c| c.fast_period.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    dict.set_item(
+        "slows",
+        combos.iter().map(|c| c.slow_period.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    dict.set_item(
+        "signals",
+        combos.iter().map(|c| c.signal_period.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vwmacd_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (prices_tm_f32, volumes_tm_f32, fast, slow, signal, device_id=0))]
+pub fn vwmacd_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    prices_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    volumes_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
+    fast: usize,
+    slow: usize,
+    signal: usize,
+    device_id: usize,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let ps = prices_tm_f32.shape();
+    let vs = volumes_tm_f32.shape();
+    if ps.len() != 2 || vs.len() != 2 || ps != vs {
+        return Err(PyValueError::new_err("expected two 2D arrays with same shape"));
+    }
+    let rows = ps[0];
+    let cols = ps[1];
+    let p = prices_tm_f32.as_slice()?;
+    let v = volumes_tm_f32.as_slice()?;
+    let params = VwmacdParams {
+        fast_period: Some(fast),
+        slow_period: Some(slow),
+        signal_period: Some(signal),
+        fast_ma_type: Some("sma".into()),
+        slow_ma_type: Some("sma".into()),
+        signal_ma_type: Some("ema".into()),
+    };
+
+    let triplet = py.allow_threads(|| {
+        let cuda = CudaVwmacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.vwmacd_many_series_one_param_time_major_dev(p, v, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("macd", Py::new(py, DeviceArrayF32Py { inner: triplet.macd })?)?;
+    dict.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: triplet.signal })?)?;
+    dict.set_item("hist", Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    dict.set_item("fast", fast)?;
+    dict.set_item("slow", slow)?;
+    dict.set_item("signal_len", signal)?;
+    Ok(dict)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

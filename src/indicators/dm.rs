@@ -31,6 +31,10 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::dm_wrapper::CudaDm;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -2102,6 +2106,63 @@ pub fn dm_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict)
+}
+
+// ----- Python CUDA bindings -----
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dm_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, period_range, device_id=0))]
+pub fn dm_cuda_batch_dev_py(
+    py: Python<'_>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let sweep = DmBatchRange { period: period_range };
+    let pair = py
+        .allow_threads(|| {
+            let cuda = CudaDm::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda
+                .dm_batch_dev(h, l, &sweep)
+                .map(|(pair, _)| pair)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok((DeviceArrayF32Py { inner: pair.plus }, DeviceArrayF32Py { inner: pair.minus }))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "dm_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, cols, rows, period, device_id=0))]
+pub fn dm_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let pair = py
+        .allow_threads(|| {
+            let cuda = CudaDm::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda
+                .dm_many_series_one_param_time_major_dev(h, l, cols, rows, period)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
+    Ok((DeviceArrayF32Py { inner: pair.plus }, DeviceArrayF32Py { inner: pair.minus }))
 }
 
 // Optional: streaming

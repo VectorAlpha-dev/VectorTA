@@ -2242,6 +2242,82 @@ pub fn avsl_batch_py<'py>(
     Ok(dict)
 }
 
+// ==================== Python CUDA Bindings ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::avsl_wrapper::CudaAvsl;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "avsl_cuda_batch_dev")]
+#[pyo3(signature = (close_f32, low_f32, volume_f32, fast_range, slow_range, mult_range, device_id=0))]
+pub fn avsl_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    volume_f32: numpy::PyReadonlyArray1<'py, f32>,
+    fast_range: (usize, usize, usize),
+    slow_range: (usize, usize, usize),
+    mult_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+    use crate::cuda::cuda_available;
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let close = close_f32.as_slice()?;
+    let low = low_f32.as_slice()?;
+    let vol = volume_f32.as_slice()?;
+    let sweep = AvslBatchRange { fast_period: fast_range, slow_period: slow_range, multiplier: mult_range };
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaAvsl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.avsl_batch_dev(close, low, vol, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "fast_periods",
+        combos.iter().map(|p| p.fast_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    dict.set_item(
+        "slow_periods",
+        combos.iter().map(|p| p.slow_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    dict.set_item(
+        "multipliers",
+        combos.iter().map(|p| p.multiplier.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "avsl_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (close_tm_f32, low_tm_f32, volume_tm_f32, cols, rows, fast_period, slow_period, multiplier, device_id=0))]
+pub fn avsl_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    close_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    volume_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    fast_period: usize,
+    slow_period: usize,
+    multiplier: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let c = close_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let v = volume_tm_f32.as_slice()?;
+    let params = AvslParams { fast_period: Some(fast_period), slow_period: Some(slow_period), multiplier: Some(multiplier) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAvsl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.avsl_many_series_one_param_time_major_dev(c, l, v, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 // ==================== WASM BINDINGS ====================
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]

@@ -46,6 +46,12 @@ use rayon::prelude::*;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+// CUDA Python bindings (VRAM DTO)
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaUi;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
 impl<'a> AsRef<[f64]> for UiInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -1480,6 +1486,59 @@ pub fn ui_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsV
 
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// ---------------- CUDA Python bindings -----------------
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ui_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, scalar_range=(100.0, 100.0, 0.0), device_id=0))]
+pub fn ui_cuda_batch_dev_py(
+    py: Python<'_>,
+    data_f32: numpy::PyReadonlyArray1<'_, f32>,
+    period_range: (usize, usize, usize),
+    scalar_range: (f64, f64, f64),
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let slice_in = data_f32.as_slice()?;
+    let sweep = UiBatchRange { period: period_range, scalar: scalar_range };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaUi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ui_batch_dev(slice_in, &sweep).map(|(arr, _)| arr)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "ui_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, scalar=100.0, device_id=0))]
+pub fn ui_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    scalar: f64,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let flat_in: &[f32] = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let params = UiParams { period: Some(period), scalar: Some(scalar) };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaUi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ui_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 /// Fast batch API with raw pointers

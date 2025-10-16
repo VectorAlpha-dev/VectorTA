@@ -1063,6 +1063,59 @@ pub fn register_rocp_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
     Ok(())
 }
 
+// ==================== PYTHON CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaRocp;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "rocp_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn rocp_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let d = data_f32.as_slice()?;
+    let sweep = RocpBatchRange { period: period_range };
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaRocp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.rocp_batch_dev(d, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "periods",
+        combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    Ok((DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "rocp_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, cols, rows, period, device_id=0))]
+pub fn rocp_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let tm = data_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaRocp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.rocp_many_series_one_param_time_major_dev(tm, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn rocp_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {

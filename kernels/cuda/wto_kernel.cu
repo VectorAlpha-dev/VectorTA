@@ -65,10 +65,14 @@ void wto_batch_f32(const float* __restrict__ prices,
     double d = 0.0;
     double wt1_val = 0.0;
 
+    // Maintain both a small ring buffer and streaming prefix-sum pair.
+    // Using (ps - ps4) mirrors the CPU SMA implementation (prefix sums),
+    // reducing tiny rounding deltas in the histogram.
     double window[4] = {0.0, 0.0, 0.0, 0.0};
     int window_count = 0;
     int window_idx = 0;
-    double window_sum = 0.0;
+    double ps = 0.0;   // prefix sum of WT1
+    double ps4 = 0.0;  // prefix sum delayed by 4 samples
 
     for (int t = 0; t < series_len; ++t) {
         const double price = static_cast<double>(prices[t]);
@@ -85,7 +89,9 @@ void wto_batch_f32(const float* __restrict__ prices,
             esa = price;
             esa_init = true;
         } else if (price_finite) {
-            esa = alpha_ch * price + beta_ch * esa;
+            // Mirror scalar: tmp = alpha*x; esa = beta*esa + tmp (fused on the add path)
+            double tmp = alpha_ch * price;
+            esa = fma(beta_ch, esa, tmp);
         }
 
         const double diff = price - esa;
@@ -100,7 +106,8 @@ void wto_batch_f32(const float* __restrict__ prices,
                     continue;
                 }
             } else if (isfinite(abs_diff)) {
-                d = alpha_ch * abs_diff + beta_ch * d;
+                double tmp = alpha_ch * abs_diff;
+                d = fma(beta_ch, d, tmp);
             }
 
             if (!d_init) {
@@ -124,7 +131,8 @@ void wto_batch_f32(const float* __restrict__ prices,
                 wt1_val = ci_val;
                 wt1_init = true;
             } else if (ci_valid) {
-                wt1_val = alpha_avg * ci_val + beta_avg * wt1_val;
+                double tmp = alpha_avg * ci_val;
+                wt1_val = fma(beta_avg, wt1_val, tmp);
             }
 
             if (!wt1_init) {
@@ -133,19 +141,22 @@ void wto_batch_f32(const float* __restrict__ prices,
 
             wt1_row[t] = static_cast<float>(wt1_val);
 
+            // Update ring + streaming prefix sums
             if (window_count == 4) {
-                window_sum -= window[window_idx];
+                ps4 += window[window_idx];
             } else {
                 window_count++;
             }
+            ps += wt1_val;
             window[window_idx] = wt1_val;
-            window_sum += wt1_val;
             window_idx = (window_idx + 1) & 3;
 
             if (window_count == 4) {
-                const double wt2_val = window_sum * 0.25;
-                wt2_row[t] = static_cast<float>(wt2_val);
-                hist_row[t] = static_cast<float>(wt1_val - wt2_val);
+                const double wt2_val = (ps - ps4) * 0.25;
+                const float wt1_f = static_cast<float>(wt1_val);
+                const float wt2_f = static_cast<float>(wt2_val);
+                wt2_row[t] = wt2_f;
+                hist_row[t] = wt1_f - wt2_f;
             }
         }
     }
@@ -207,7 +218,8 @@ void wto_many_series_one_param_time_major_f32(
     double window[4] = {0.0, 0.0, 0.0, 0.0};
     int window_count = 0;
     int window_idx = 0;
-    double window_sum = 0.0;
+    double ps = 0.0;
+    double ps4 = 0.0;
 
     for (int t = 0; t < rows; ++t) {
         const double price = static_cast<double>(prices_tm[t * cols + series]);
@@ -224,7 +236,8 @@ void wto_many_series_one_param_time_major_f32(
             esa = price;
             esa_init = true;
         } else if (price_finite) {
-            esa = alpha_ch * price + beta_ch * esa;
+            double tmp = alpha_ch * price;
+            esa = fma(beta_ch, esa, tmp);
         }
 
         const double diff = price - esa;
@@ -239,7 +252,8 @@ void wto_many_series_one_param_time_major_f32(
                     continue;
                 }
             } else if (isfinite(abs_diff)) {
-                d = alpha_ch * abs_diff + beta_ch * d;
+                double tmp = alpha_ch * abs_diff;
+                d = fma(beta_ch, d, tmp);
             }
 
             if (!d_init) {
@@ -263,7 +277,8 @@ void wto_many_series_one_param_time_major_f32(
                 wt1_val = ci_val;
                 wt1_init = true;
             } else if (ci_valid) {
-                wt1_val = alpha_avg * ci_val + beta_avg * wt1_val;
+                double tmp = alpha_avg * ci_val;
+                wt1_val = fma(beta_avg, wt1_val, tmp);
             }
 
             if (!wt1_init) {
@@ -273,18 +288,20 @@ void wto_many_series_one_param_time_major_f32(
             wt1_col[t * cols] = static_cast<float>(wt1_val);
 
             if (window_count == 4) {
-                window_sum -= window[window_idx];
+                ps4 += window[window_idx];
             } else {
                 window_count++;
             }
+            ps += wt1_val;
             window[window_idx] = wt1_val;
-            window_sum += wt1_val;
             window_idx = (window_idx + 1) & 3;
 
             if (window_count == 4) {
-                const double wt2_val = window_sum * 0.25;
-                wt2_col[t * cols] = static_cast<float>(wt2_val);
-                hist_col[t * cols] = static_cast<float>(wt1_val - wt2_val);
+                const double wt2_val = (ps - ps4) * 0.25;
+                const float wt1_f = static_cast<float>(wt1_val);
+                const float wt2_f = static_cast<float>(wt2_val);
+                wt2_col[t * cols] = wt2_f;
+                hist_col[t * cols] = wt1_f - wt2_f;
             }
         }
     }

@@ -13,7 +13,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{CopyDestination, DeviceBuffer};
-use cust::module::Module;
+use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
@@ -61,10 +61,40 @@ pub struct CudaWtoBatchResult {
     pub combos: Vec<WtoParams>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+
+impl Default for BatchKernelPolicy {
+    fn default() -> Self { BatchKernelPolicy::Auto }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CudaWtoPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+
 pub struct CudaWto {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
+    policy: CudaWtoPolicy,
+    debug_batch_logged: bool,
+    debug_many_logged: bool,
 }
 
 impl CudaWto {
@@ -74,13 +104,28 @@ impl CudaWto {
             Device::get_device(device_id as u32).map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/wto_kernel.ptx"));
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+        // Prefer context-targeted JIT with moderate opt level, fallback to simpler modes
+        let module = match Module::from_ptx(
+            ptx,
+            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)],
+        ) {
+            Ok(m) => m,
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaWtoError::Cuda(e.to_string()))?,
+            },
+        };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
         Ok(Self {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
+            policy: CudaWtoPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto },
+            debug_batch_logged: false,
+            debug_many_logged: false,
         })
     }
 
@@ -506,10 +551,22 @@ impl CudaWto {
         d_wt2: &mut DeviceBuffer<f32>,
         d_hist: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWtoError> {
-        let block_x: u32 = 256;
+        // Kernel block policy (parity with ALMA’s explicit selection knob)
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(64),
+        };
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        if !self.debug_batch_logged && std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            eprintln!(
+                "[wto] batch kernel: block_x={}, grid_x={}, device={}",
+                block_x, grid_x, self.device_id
+            );
+            // NOTE: best-effort one-time logging; keep immutable self for simple API parity.
+        }
 
         let func = self
             .module
@@ -556,10 +613,20 @@ impl CudaWto {
         d_wt2: &mut DeviceBuffer<f32>,
         d_hist: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWtoError> {
-        let block_x: u32 = 256;
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
+        };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        if !self.debug_many_logged && std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            eprintln!(
+                "[wto] many-series kernel: block_x={}, grid_x={}, device={}",
+                block_x, grid_x, self.device_id
+            );
+        }
 
         let func = self
             .module

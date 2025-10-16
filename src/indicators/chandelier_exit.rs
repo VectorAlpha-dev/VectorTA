@@ -60,6 +60,10 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 use crate::indicators::atr::{atr_with_kernel, AtrInput, AtrParams};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(feature = "cuda")]
+use crate::cuda::{CudaChandelierExit, CudaCeError};
 
 impl<'a> AsRef<[f64]> for ChandelierExitInput<'a> {
     #[inline(always)]
@@ -2192,6 +2196,80 @@ pub fn ce_js(
     values[cols..].copy_from_slice(&out.short_stop);
     serde_wasm_bindgen::to_value(&CeResult { values, rows, cols })
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// ---------------- CUDA Python bindings ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "chandelier_exit_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, period_range, mult_range=(3.0,3.0,0.0), use_close=true, device_id=0))]
+pub fn chandelier_exit_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: PyReadonlyArray1<'py, f32>,
+    low_f32: PyReadonlyArray1<'py, f32>,
+    close_f32: PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    mult_range: (f64, f64, f64),
+    use_close: bool,
+    device_id: usize,
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+
+    let sweep = CeBatchRange { period: period_range, mult: mult_range, use_close: (use_close, use_close, false) };
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.chandelier_exit_batch_dev(h, l, c, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let d = PyDict::new(py);
+    d.set_item(
+        "periods",
+        combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    d.set_item(
+        "mults",
+        combos.iter().map(|p| p.mult.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    d.set_item(
+        "use_close",
+        combos.iter().map(|p| p.use_close.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+    )?;
+    Ok((DeviceArrayF32Py { inner }, d))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "chandelier_exit_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, cols, rows, period, mult, use_close=true, device_id=0))]
+pub fn chandelier_exit_cuda_many_series_one_param_dev_py<'py>(
+    py: Python<'py>,
+    high_tm_f32: PyReadonlyArray1<'py, f32>,
+    low_tm_f32: PyReadonlyArray1<'py, f32>,
+    close_tm_f32: PyReadonlyArray1<'py, f32>,
+    cols: usize,
+    rows: usize,
+    period: usize,
+    mult: f64,
+    use_close: bool,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let c = close_tm_f32.as_slice()?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.chandelier_exit_many_series_one_param_time_major_dev(h, l, c, cols, rows, period, mult as f32, use_close)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(DeviceArrayF32Py { inner })
 }
 
 #[cfg(feature = "wasm")]

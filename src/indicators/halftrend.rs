@@ -41,6 +41,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaHalftrend};
 
 // Feature-gated imports for WASM bindings
 #[cfg(feature = "wasm")]
@@ -3078,6 +3082,73 @@ pub fn halftrend_batch_py<'py>(
             .into_pyarray(py),
     )?;
     Ok(dict.into())
+}
+
+// ==================== PYTHON CUDA BINDINGS ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "halftrend_cuda_batch_dev")]
+#[pyo3(signature = (high_f32, low_f32, close_f32, amplitude_range, channel_deviation_range=(2.0,2.0,0.0), atr_period_range=(14,14,0), device_id=0))]
+pub fn halftrend_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    amplitude_range: (usize, usize, usize),
+    channel_deviation_range: (f64, f64, f64),
+    atr_period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_f32.as_slice()?; let l = low_f32.as_slice()?; let c = close_f32.as_slice()?;
+    let sweep = HalfTrendBatchRange { amplitude: amplitude_range, channel_deviation: channel_deviation_range, atr_period: atr_period_range };
+    let batch = py.allow_threads(|| {
+        let cuda = CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.halftrend_batch_dev(h, l, c, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = PyDict::new(py);
+    dict.set_item("halftrend", Py::new(py, DeviceArrayF32Py { inner: batch.halftrend })?)?;
+    dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: batch.trend })?)?;
+    dict.set_item("atr_high", Py::new(py, DeviceArrayF32Py { inner: batch.atr_high })?)?;
+    dict.set_item("atr_low", Py::new(py, DeviceArrayF32Py { inner: batch.atr_low })?)?;
+    dict.set_item("buy_signal", Py::new(py, DeviceArrayF32Py { inner: batch.buy })?)?;
+    dict.set_item("sell_signal", Py::new(py, DeviceArrayF32Py { inner: batch.sell })?)?;
+    use numpy::IntoPyArray;
+    dict.set_item("amplitudes", batch.combos.iter().map(|p| p.amplitude.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("channel_deviations", batch.combos.iter().map(|p| p.channel_deviation.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item("atr_periods", batch.combos.iter().map(|p| p.atr_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "halftrend_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (high_tm_f32, low_tm_f32, close_tm_f32, cols, rows, amplitude, channel_deviation, atr_period, device_id=0))]
+pub fn halftrend_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    high_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    close_tm_f32: numpy::PyReadonlyArray1<'_, f32>,
+    cols: usize,
+    rows: usize,
+    amplitude: usize,
+    channel_deviation: f64,
+    atr_period: usize,
+    device_id: usize,
+) -> PyResult<Bound<'_, PyDict>> {
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    let h = high_tm_f32.as_slice()?; let l = low_tm_f32.as_slice()?; let c = close_tm_f32.as_slice()?;
+    let out = py.allow_threads(|| {
+        let cuda = CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.halftrend_many_series_one_param_time_major_dev(h, l, c, cols, rows, amplitude, channel_deviation, atr_period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    let dict = PyDict::new(py);
+    dict.set_item("halftrend", Py::new(py, DeviceArrayF32Py { inner: out.halftrend })?)?;
+    dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: out.trend })?)?;
+    dict.set_item("atr_high", Py::new(py, DeviceArrayF32Py { inner: out.atr_high })?)?;
+    dict.set_item("atr_low", Py::new(py, DeviceArrayF32Py { inner: out.atr_low })?)?;
+    dict.set_item("buy_signal", Py::new(py, DeviceArrayF32Py { inner: out.buy })?)?;
+    dict.set_item("sell_signal", Py::new(py, DeviceArrayF32Py { inner: out.sell })?)?;
+    Ok(dict)
 }
 
 #[cfg(feature = "python")]

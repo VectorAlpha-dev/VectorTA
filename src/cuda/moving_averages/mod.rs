@@ -1,6 +1,8 @@
 #[cfg(feature = "cuda")]
 pub mod alma_wrapper;
 #[cfg(feature = "cuda")]
+pub mod apo_wrapper;
+#[cfg(feature = "cuda")]
 pub mod dema_wrapper;
 pub mod dma_wrapper;
 pub mod edcf_wrapper;
@@ -49,6 +51,8 @@ pub mod buff_averages_wrapper;
 #[cfg(feature = "cuda")]
 pub mod cwma_wrapper;
 #[cfg(feature = "cuda")]
+pub mod cora_wave_wrapper;
+#[cfg(feature = "cuda")]
 pub mod ehlers_ecema_wrapper;
 #[cfg(feature = "cuda")]
 pub mod epma_wrapper;
@@ -60,7 +64,11 @@ pub mod hma_wrapper;
 pub mod kama_wrapper;
 pub mod linreg_wrapper;
 #[cfg(feature = "cuda")]
+pub mod linearreg_slope_wrapper;
+#[cfg(feature = "cuda")]
 pub mod ma_selector;
+#[cfg(feature = "cuda")]
+pub mod macz_wrapper;
 #[cfg(feature = "cuda")]
 pub mod nama_wrapper;
 pub mod nma_wrapper;
@@ -79,13 +87,21 @@ pub mod vpwma_wrapper;
 #[cfg(feature = "cuda")]
 pub mod wma_wrapper;
 pub mod zlema_wrapper;
+#[cfg(feature = "cuda")]
+pub mod trix_wrapper;
+#[cfg(feature = "cuda")]
+pub mod vlma_wrapper;
 
 pub use alma_wrapper::{CudaAlma, DeviceArrayF32};
+#[cfg(feature = "cuda")]
+pub use apo_wrapper::{CudaApo, CudaApoError};
 pub use buff_averages_wrapper::{CudaBuffAverages, CudaBuffAveragesError};
 #[cfg(feature = "cuda")]
 pub use cwma_wrapper::{
     BatchKernelPolicy, BatchThreadsPerOutput, CudaCwma, CudaCwmaPolicy, ManySeriesKernelPolicy,
 };
+#[cfg(feature = "cuda")]
+pub use cora_wave_wrapper::{CudaCoraWave, CudaCoraWaveError};
 #[cfg(feature = "cuda")]
 pub use dema_wrapper::{CudaDema, CudaDemaError};
 pub use dma_wrapper::CudaDma;
@@ -121,6 +137,8 @@ pub use jsa_wrapper::{CudaJsa, CudaJsaError};
 #[cfg(feature = "cuda")]
 pub use kama_wrapper::CudaKama;
 pub use linreg_wrapper::{CudaLinreg, CudaLinregError};
+#[cfg(feature = "cuda")]
+pub use linearreg_slope_wrapper::{CudaLinearregSlope, CudaLinearregSlopeError};
 #[cfg(feature = "cuda")]
 pub use ma_selector::{CudaMaData, CudaMaSelector, CudaMaSelectorError};
 pub use maaq_wrapper::CudaMaaq;
@@ -173,3 +191,9 @@ pub use wilders_wrapper::{CudaWilders, CudaWildersError};
 #[cfg(feature = "cuda")]
 pub use wma_wrapper::CudaWma;
 pub use zlema_wrapper::{CudaZlema, CudaZlemaError};
+#[cfg(feature = "cuda")]
+pub use macz_wrapper::{CudaMacz, CudaMaczError};
+#[cfg(feature = "cuda")]
+pub use trix_wrapper::{CudaTrix, CudaTrixError};
+#[cfg(feature = "cuda")]
+pub use vlma_wrapper::{CudaVlma, CudaVlmaError};
