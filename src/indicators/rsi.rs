@@ -1956,6 +1956,72 @@ pub fn rsi_batch_py<'py>(
     Ok(dict)
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "rsi_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
+pub fn rsi_cuda_batch_dev_py<'py>(
+    py: Python<'py>,
+    data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+)
+-> PyResult<(crate::indicators::moving_averages::alma::DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)>
+{
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::rsi_wrapper::CudaRsi;
+    use numpy::IntoPyArray;
+    use pyo3::types::PyDict;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let prices = data_f32.as_slice()?;
+    let sweep = RsiBatchRange { period: period_range };
+
+    let inner = py.allow_threads(|| {
+        let cuda = CudaRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.rsi_batch_dev(prices, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+
+    let dict = PyDict::new(py);
+    let (start, end, step) = period_range;
+    let mut periods: Vec<u64> = Vec::new();
+    if step == 0 { periods.push(start as u64); } else {
+        let mut p = start;
+        while p <= end { periods.push(p as u64); p = p.saturating_add(step); }
+    }
+    dict.set_item("periods", periods.into_pyarray(py))?;
+
+    Ok((crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner }, dict))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "rsi_cuda_many_series_one_param_dev")]
+#[pyo3(signature = (data_tm_f32, period, device_id=0))]
+pub fn rsi_cuda_many_series_one_param_dev_py(
+    py: Python<'_>,
+    data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
+    period: usize,
+    device_id: usize,
+) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::oscillators::rsi_wrapper::CudaRsi;
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+
+    let flat = data_tm_f32.as_slice()?;
+    let rows = data_tm_f32.shape()[0];
+    let cols = data_tm_f32.shape()[1];
+    let inner = py.allow_threads(|| {
+        let cuda = CudaRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.rsi_many_series_one_param_time_major_dev(flat, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner })
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn rsi_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {

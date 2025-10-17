@@ -513,6 +513,12 @@ fn compile_cuda_kernels() {
         "kernels/cuda/oscillators/reverse_rsi_kernel.cu",
         "reverse_rsi_kernel.ptx",
     );
+    // RSI (Relative Strength Index)
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/oscillators/rsi_kernel.cu",
+        "rsi_kernel.ptx",
+    );
     compile_kernel(
         &cuda_path,
         "kernels/cuda/oscillators/dti_kernel.cu",

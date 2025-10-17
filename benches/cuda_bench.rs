@@ -202,6 +202,7 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::oscillators::macd_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::oscillators::mom_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::oscillators::roc_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::oscillators::rsi_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::oscillators::rsx_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::oscillators::srsi_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::atr_wrapper::benches::bench_profiles());

@@ -140,6 +140,9 @@ pub mod roc_wrapper;
 pub mod rsx_wrapper;
 
 #[cfg(feature = "cuda")]
+#[path = "rsi_wrapper.rs"]
+pub mod rsi_wrapper;
+#[cfg(feature = "cuda")]
 #[path = "srsi_wrapper.rs"]
 pub mod srsi_wrapper;
 
@@ -164,6 +167,8 @@ pub use mom_wrapper::{CudaMom, CudaMomError};
 pub use roc_wrapper::{CudaRoc, CudaRocError};
 #[cfg(feature = "cuda")]
 pub use rsx_wrapper::{CudaRsx, CudaRsxError};
+#[cfg(feature = "cuda")]
+pub use rsi_wrapper::{CudaRsi, CudaRsiError};
 #[cfg(feature = "cuda")]
 pub use srsi_wrapper::{CudaSrsi, CudaSrsiError};
 #[cfg(feature = "cuda")]
@@ -226,4 +231,3 @@ pub use ultosc_wrapper::{
     benches as ultosc_benches, BatchKernelPolicy as UltoscBatchKernelPolicy, CudaUltosc,
     CudaUltoscError, CudaUltoscPolicy, ManySeriesKernelPolicy as UltoscManySeriesKernelPolicy,
 };
-

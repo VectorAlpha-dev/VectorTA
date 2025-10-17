@@ -1887,7 +1887,7 @@ pub fn volume_adjusted_ma_cuda_batch_dev_py(
     let inner = py.allow_threads(|| {
         let cuda = CudaVolumeAdjustedMa::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vama_batch_dev(prices, volumes, &sweep)
+        cuda.volume_adjusted_ma_batch_dev(prices, volumes, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
@@ -1938,7 +1938,7 @@ pub fn volume_adjusted_ma_cuda_many_series_one_param_dev_py(
     let inner = py.allow_threads(|| {
         let cuda = CudaVolumeAdjustedMa::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vama_multi_series_one_param_time_major_dev(
+        cuda.volume_adjusted_ma_many_series_one_param_time_major_dev(
             price_slice,
             volume_slice,
             cols,

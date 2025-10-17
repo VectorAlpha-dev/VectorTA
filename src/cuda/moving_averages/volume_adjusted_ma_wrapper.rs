@@ -1,4 +1,4 @@
-//! CUDA wrapper for the Volume Adjusted Moving Average (VAMA) kernels.
+//! CUDA wrapper for the Volume Adjusted Moving Average kernels.
 //!
 //! Mirrors the VRAM-first design used by the ALMA and WMA wrappers: the
 //! methods below operate on FP32 buffers already staged on-device and expose
@@ -776,6 +776,60 @@ impl CudaVama {
         )
     }
 
+    // ---- Friendly aliases with indicator name (non-breaking) ----
+    #[inline]
+    pub fn volume_adjusted_ma_batch_dev(
+        &self,
+        prices: &[f32],
+        volumes: &[f32],
+        sweep: &VolumeAdjustedMaBatchRange,
+    ) -> Result<DeviceArrayF32, CudaVamaError> {
+        self.vama_batch_dev(prices, volumes, sweep)
+    }
+
+    #[inline]
+    pub fn volume_adjusted_ma_batch_into_host_f32(
+        &self,
+        prices: &[f32],
+        volumes: &[f32],
+        sweep: &VolumeAdjustedMaBatchRange,
+        out: &mut [f32],
+    ) -> Result<(usize, usize, Vec<VolumeAdjustedMaParams>), CudaVamaError> {
+        self.vama_batch_into_host_f32(prices, volumes, sweep, out)
+    }
+
+    #[inline]
+    pub fn volume_adjusted_ma_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_volumes: &DeviceBuffer<f32>,
+        d_prefix_volumes: &DeviceBuffer<f32>,
+        d_prefix_price_volumes: &DeviceBuffer<f32>,
+        d_lengths: &DeviceBuffer<i32>,
+        d_vi_factors: &DeviceBuffer<f32>,
+        d_sample_periods: &DeviceBuffer<i32>,
+        d_strict_flags: &DeviceBuffer<u8>,
+        series_len: i32,
+        n_combos: i32,
+        first_valid: i32,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaVamaError> {
+        self.vama_batch_device(
+            d_prices,
+            d_volumes,
+            d_prefix_volumes,
+            d_prefix_price_volumes,
+            d_lengths,
+            d_vi_factors,
+            d_sample_periods,
+            d_strict_flags,
+            series_len,
+            n_combos,
+            first_valid,
+            d_out,
+        )
+    }
+
     pub fn vama_multi_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -796,6 +850,24 @@ impl CudaVama {
             vi_factor,
             sample_period,
             strict,
+        )
+    }
+
+    #[inline]
+    pub fn volume_adjusted_ma_many_series_one_param_time_major_dev(
+        &self,
+        price_tm_f32: &[f32],
+        volume_tm_f32: &[f32],
+        cols: usize,
+        rows: usize,
+        params: &VolumeAdjustedMaParams,
+    ) -> Result<DeviceArrayF32, CudaVamaError> {
+        self.vama_multi_series_one_param_time_major_dev(
+            price_tm_f32,
+            volume_tm_f32,
+            cols,
+            rows,
+            params,
         )
     }
 
@@ -839,6 +911,26 @@ impl CudaVama {
         Ok(())
     }
 
+    #[inline]
+    pub fn volume_adjusted_ma_many_series_one_param_time_major_into_host_f32(
+        &self,
+        price_tm_f32: &[f32],
+        volume_tm_f32: &[f32],
+        cols: usize,
+        rows: usize,
+        params: &VolumeAdjustedMaParams,
+        out: &mut [f32],
+    ) -> Result<(), CudaVamaError> {
+        self.vama_multi_series_one_param_time_major_into_host_f32(
+            price_tm_f32,
+            volume_tm_f32,
+            cols,
+            rows,
+            params,
+            out,
+        )
+    }
+
     pub fn vama_multi_series_one_param_time_major_device(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -870,6 +962,38 @@ impl CudaVama {
             strict,
             num_series as usize,
             series_len as usize,
+            d_first_valids,
+            d_out,
+        )
+    }
+
+    #[inline]
+    pub fn volume_adjusted_ma_many_series_one_param_time_major_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_volumes: &DeviceBuffer<f32>,
+        d_prefix_volumes: &DeviceBuffer<f32>,
+        d_prefix_price_volumes: &DeviceBuffer<f32>,
+        period: i32,
+        vi_factor: f32,
+        sample_period: i32,
+        strict: bool,
+        num_series: i32,
+        series_len: i32,
+        d_first_valids: &DeviceBuffer<i32>,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaVamaError> {
+        self.vama_multi_series_one_param_time_major_device(
+            d_prices,
+            d_volumes,
+            d_prefix_volumes,
+            d_prefix_price_volumes,
+            period,
+            vi_factor,
+            sample_period,
+            strict,
+            num_series,
+            series_len,
             d_first_valids,
             d_out,
         )

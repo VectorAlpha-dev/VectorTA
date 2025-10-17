@@ -2457,6 +2457,15 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rsi_py, m)?)?;
     m.add_function(wrap_pyfunction!(rsi_batch_py, m)?)?;
     m.add_class::<RsiStreamPy>()?;
+    #[cfg(feature = "cuda")]
+    {
+        use crate::indicators::rsi::{
+            rsi_cuda_batch_dev_py, rsi_cuda_many_series_one_param_dev_py,
+        };
+        // DeviceArrayF32Py is already exported in other CUDA sections (e.g., RSX/ALMA)
+        m.add_function(wrap_pyfunction!(rsi_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(rsi_cuda_many_series_one_param_dev_py, m)?)?;
+    }
 
     // Register RSX functions with their user-facing names
     m.add_function(wrap_pyfunction!(rsx_py, m)?)?;
