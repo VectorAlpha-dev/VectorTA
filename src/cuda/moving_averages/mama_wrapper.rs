@@ -305,21 +305,17 @@ impl CudaMama {
 
         // Stage Device -> pinned host, then memcpy into caller's slices.
         let mut pinned_m: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(expected)
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+            LockedBuffer::uninitialized(expected).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
         };
         let mut pinned_f: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(expected)
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+            LockedBuffer::uninitialized(expected).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
         };
         unsafe {
-            pair
-                .mama
+            pair.mama
                 .buf
                 .async_copy_to(pinned_m.as_mut_slice(), &self.stream)
                 .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-            pair
-                .fama
+            pair.fama
                 .buf
                 .async_copy_to(pinned_f.as_mut_slice(), &self.stream)
                 .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;

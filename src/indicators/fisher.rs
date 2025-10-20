@@ -55,9 +55,9 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::CudaFisher;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaFisher;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
@@ -2139,17 +2139,28 @@ pub fn fisher_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::IntoPyArray;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let high = high_f32.as_slice()?;
     let low = low_f32.as_slice()?;
-    let sweep = FisherBatchRange { period: period_range };
+    let sweep = FisherBatchRange {
+        period: period_range,
+    };
     let ((pair, combos)) = py.allow_threads(|| {
         let cuda = CudaFisher::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.fisher_batch_dev(high, low, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.fisher_batch_dev(high, low, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("fisher", Py::new(py, DeviceArrayF32Py { inner: pair.fisher })?)?;
-    dict.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: pair.signal })?)?;
+    dict.set_item(
+        "fisher",
+        Py::new(py, DeviceArrayF32Py { inner: pair.fisher })?,
+    )?;
+    dict.set_item(
+        "signal",
+        Py::new(py, DeviceArrayF32Py { inner: pair.signal })?,
+    )?;
     dict.set_item(
         "periods",
         combos
@@ -2175,18 +2186,25 @@ pub fn fisher_cuda_many_series_one_param_dev_py<'py>(
     period: usize,
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let high_tm = high_tm_f32.as_slice()?;
-    let low_tm  = low_tm_f32.as_slice()?;
+    let low_tm = low_tm_f32.as_slice()?;
     let pair = py.allow_threads(|| {
         let cuda = CudaFisher::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .fisher_many_series_one_param_time_major_dev(high_tm, low_tm, cols, rows, period)
+        cuda.fisher_many_series_one_param_time_major_dev(high_tm, low_tm, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("fisher", Py::new(py, DeviceArrayF32Py { inner: pair.fisher })?)?;
-    dict.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: pair.signal })?)?;
+    dict.set_item(
+        "fisher",
+        Py::new(py, DeviceArrayF32Py { inner: pair.fisher })?,
+    )?;
+    dict.set_item(
+        "signal",
+        Py::new(py, DeviceArrayF32Py { inner: pair.signal })?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     Ok(dict)

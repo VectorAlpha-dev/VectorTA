@@ -11,10 +11,10 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
-use cust::module::{Module, ModuleJitOption, OptLevel};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::module::{Module, ModuleJitOption};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
@@ -61,20 +61,49 @@ pub struct CudaBop {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+    sm_count: u32,
 }
 
 impl CudaBop {
+    #[inline]
+    fn copy_h2d_maybe_async_f32(
+        &self,
+        src: &[f32],
+    ) -> Result<(DeviceBuffer<f32>, Option<LockedBuffer<f32>>), CudaBopError> {
+        const ASYNC_PIN_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
+        let bytes = src.len() * std::mem::size_of::<f32>();
+        if bytes >= ASYNC_PIN_THRESHOLD_BYTES {
+            let h_locked =
+                LockedBuffer::from_slice(src).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+            let mut d = unsafe {
+                DeviceBuffer::uninitialized_async(src.len(), &self.stream)
+                    .map_err(|e| CudaBopError::Cuda(e.to_string()))?
+            };
+            unsafe {
+                d.async_copy_from(&h_locked, &self.stream)
+                    .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+            }
+            Ok((d, Some(h_locked)))
+        } else {
+            DeviceBuffer::from_slice(src)
+                .map(|d| (d, None))
+                .map_err(|e| CudaBopError::Cuda(e.to_string()))
+        }
+    }
     pub fn new(device_id: usize) -> Result<Self, CudaBopError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
 
+        // SM count for light grid clamping
+        let sm_count = device
+            .get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map_err(|e| CudaBopError::Cuda(e.to_string()))? as u32;
+
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/bop_kernel.ptx"));
-        let jit_opts = &[
-            ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
-        ];
+        // Keep target-from-context; default JIT OptLevel is O4 (max optimised)
+        let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))
@@ -91,6 +120,7 @@ impl CudaBop {
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
+            sm_count,
         })
     }
 
@@ -120,17 +150,24 @@ impl CudaBop {
             }
         }
 
-        let d_open =
-            DeviceBuffer::from_slice(open).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let d_high =
-            DeviceBuffer::from_slice(high).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+        let mut _pinned_guards: Vec<LockedBuffer<f32>> = Vec::new();
+        let (d_open, p0) = self.copy_h2d_maybe_async_f32(open)?;  if let Some(h) = p0 { _pinned_guards.push(h); }
+        let (d_high, p1) = self.copy_h2d_maybe_async_f32(high)?;  if let Some(h) = p1 { _pinned_guards.push(h); }
+        let (d_low,  p2) = self.copy_h2d_maybe_async_f32(low)?;   if let Some(h) = p2 { _pinned_guards.push(h); }
+        let (d_close,p3) = self.copy_h2d_maybe_async_f32(close)?; if let Some(h) = p3 { _pinned_guards.push(h); }
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }
+                .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
 
-        self.launch_batch(&d_open, &d_high, &d_low, &d_close, len, first_valid, &mut d_out)?;
+        self.launch_batch(
+            &d_open,
+            &d_high,
+            &d_low,
+            &d_close,
+            len,
+            first_valid,
+            &mut d_out,
+        )?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: 1,
@@ -154,8 +191,13 @@ impl CudaBop {
             .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
 
         let block_x = self.policy.batch_block_x.unwrap_or(256);
-        let grid_x = ((len as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        // Match kernel ILP (4 items per thread) to size grid tightly.
+        const ILP: u32 = 4;
+        let work = ((len as u32) + block_x * ILP - 1) / (block_x * ILP);
+        // Clamp grid to a conservative multiple of SMs to avoid oversubscription on huge inputs
+        let max_grid = (self.sm_count.max(1)) * 32;
+        let grid_x = work.min(max_grid).max(1);
+        let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
@@ -215,7 +257,7 @@ impl CudaBop {
             ));
         }
 
-        // Per-series first_valids
+        // Per-series first_valids (allow all-NaN series; kernel fills NaNs)
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -229,12 +271,6 @@ impl CudaBop {
                     fv = t as i32;
                     break;
                 }
-            }
-            if fv < 0 {
-                return Err(CudaBopError::InvalidInput(format!(
-                    "series {} all NaN",
-                    s
-                )));
             }
             first_valids[s] = fv;
         }
@@ -251,20 +287,20 @@ impl CudaBop {
             }
         }
 
-        let d_open =
-            DeviceBuffer::from_slice(open_tm).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let d_first =
-            DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
+        let mut _pinned_guards: Vec<LockedBuffer<f32>> = Vec::new();
+        let (d_open,  p0) = self.copy_h2d_maybe_async_f32(open_tm)?;  if let Some(h) = p0 { _pinned_guards.push(h); }
+        let (d_high,  p1) = self.copy_h2d_maybe_async_f32(high_tm)?;  if let Some(h) = p1 { _pinned_guards.push(h); }
+        let (d_low,   p2) = self.copy_h2d_maybe_async_f32(low_tm)?;   if let Some(h) = p2 { _pinned_guards.push(h); }
+        let (d_close, p3) = self.copy_h2d_maybe_async_f32(close_tm)?; if let Some(h) = p3 { _pinned_guards.push(h); }
+        let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(expected, &self.stream) }
+                .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
 
-        self.launch_many_series(&d_open, &d_high, &d_low, &d_close, &d_first, cols, rows, &mut d_out)?;
+        self.launch_many_series(
+            &d_open, &d_high, &d_low, &d_close, &d_first, cols, rows, &mut d_out,
+        )?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -287,7 +323,7 @@ impl CudaBop {
             .module
             .get_function("bop_many_series_one_param_f32")
             .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let block_x = self.policy.many_block_x.unwrap_or(128);
+        let block_x = self.policy.many_block_x.unwrap_or(256);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -336,7 +372,9 @@ impl CudaBop {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] BOP batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaBop)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaBop)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -352,7 +390,9 @@ impl CudaBop {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] BOP many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaBop)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaBop)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -370,7 +410,9 @@ impl CudaBop {
             ));
         }
         let first_valid = (0..len)
-            .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+            .find(|&i| {
+                !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan()
+            })
             .ok_or_else(|| CudaBopError::InvalidInput("all values are NaN".into()))?;
         Ok((first_valid, len))
     }
@@ -399,8 +441,21 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct BopBatchState { cuda: CudaBop, open: Vec<f32>, high: Vec<f32>, low: Vec<f32>, close: Vec<f32> }
-    impl CudaBenchState for BopBatchState { fn launch(&mut self) { let _ = self.cuda.bop_batch_dev(&self.open, &self.high, &self.low, &self.close).expect("bop batch"); } }
+    struct BopBatchState {
+        cuda: CudaBop,
+        open: Vec<f32>,
+        high: Vec<f32>,
+        low: Vec<f32>,
+        close: Vec<f32>,
+    }
+    impl CudaBenchState for BopBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .bop_batch_dev(&self.open, &self.high, &self.low, &self.close)
+                .expect("bop batch");
+        }
+    }
     fn prep_one_series_batch() -> Box<dyn CudaBenchState> {
         let cuda = CudaBop::new(0).expect("cuda bop");
         let mut open = gen_series(ONE_SERIES_LEN);
@@ -414,11 +469,37 @@ pub mod benches {
             low[i] = open[i] - (0.5 + 0.05 * x.sin()).abs();
             close[i] = open[i] + 0.2 * (x).sin();
         }
-        Box::new(BopBatchState { cuda, open, high, low, close })
+        Box::new(BopBatchState {
+            cuda,
+            open,
+            high,
+            low,
+            close,
+        })
     }
 
-    struct BopManyState { cuda: CudaBop, open_tm: Vec<f32>, high_tm: Vec<f32>, low_tm: Vec<f32>, close_tm: Vec<f32> }
-    impl CudaBenchState for BopManyState { fn launch(&mut self) { let _ = self.cuda.bop_many_series_one_param_time_major_dev(&self.open_tm, &self.high_tm, &self.low_tm, &self.close_tm, MANY_COLS, MANY_ROWS).expect("bop many"); } }
+    struct BopManyState {
+        cuda: CudaBop,
+        open_tm: Vec<f32>,
+        high_tm: Vec<f32>,
+        low_tm: Vec<f32>,
+        close_tm: Vec<f32>,
+    }
+    impl CudaBenchState for BopManyState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .bop_many_series_one_param_time_major_dev(
+                    &self.open_tm,
+                    &self.high_tm,
+                    &self.low_tm,
+                    &self.close_tm,
+                    MANY_COLS,
+                    MANY_ROWS,
+                )
+                .expect("bop many");
+        }
+    }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaBop::new(0).expect("cuda bop");
         let n = MANY_COLS * MANY_ROWS;
@@ -427,8 +508,24 @@ pub mod benches {
         let mut high = vec![f32::NAN; n];
         let mut low = vec![f32::NAN; n];
         let mut close = vec![f32::NAN; n];
-        for s in 0..MANY_COLS { for t in s..MANY_ROWS { let idx = t * MANY_COLS + s; let x = (t as f32) * 0.002 + (s as f32) * 0.01; let b = base[idx]; open[idx] = b + 0.001 * x.cos(); high[idx] = b + 0.3 + 0.02 * x.sin(); low[idx] = b - 0.3 - 0.02 * x.cos(); close[idx] = b + 0.05 * x.sin(); } }
-        Box::new(BopManyState { cuda, open_tm: open, high_tm: high, low_tm: low, close_tm: close })
+        for s in 0..MANY_COLS {
+            for t in s..MANY_ROWS {
+                let idx = t * MANY_COLS + s;
+                let x = (t as f32) * 0.002 + (s as f32) * 0.01;
+                let b = base[idx];
+                open[idx] = b + 0.001 * x.cos();
+                high[idx] = b + 0.3 + 0.02 * x.sin();
+                low[idx] = b - 0.3 - 0.02 * x.cos();
+                close[idx] = b + 0.05 * x.sin();
+            }
+        }
+        Box::new(BopManyState {
+            cuda,
+            open_tm: open,
+            high_tm: high,
+            low_tm: low,
+            close_tm: close,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

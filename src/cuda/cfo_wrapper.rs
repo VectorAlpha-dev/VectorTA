@@ -61,7 +61,10 @@ pub struct CudaCfoPolicy {
 }
 impl Default for CudaCfoPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -77,8 +80,8 @@ pub struct CudaCfo {
 impl CudaCfo {
     pub fn new(device_id: usize) -> Result<Self, CudaCfoError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cfo_kernel.ptx"));
@@ -106,8 +109,12 @@ impl CudaCfo {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaCfoPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaCfoPolicy { &self.policy }
+    pub fn set_policy(&mut self, policy: CudaCfoPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaCfoPolicy {
+        &self.policy
+    }
 
     // ---------- One-series × many-params ----------
 
@@ -138,14 +145,14 @@ impl CudaCfo {
             }
         }
 
-        let d_data = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_data =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
         let d_ps = DeviceBuffer::from_slice(&ps).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
         let d_pw = DeviceBuffer::from_slice(&pw).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_scalars = DeviceBuffer::from_slice(&scalars)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_periods =
+            DeviceBuffer::from_slice(&periods).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_scalars =
+            DeviceBuffer::from_slice(&scalars).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(len * n_combos)
                 .map_err(|e| CudaCfoError::Cuda(e.to_string()))?
@@ -163,7 +170,11 @@ impl CudaCfo {
             &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -252,15 +263,16 @@ impl CudaCfo {
             }
         }
 
-        let d_data = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_ps = DeviceBuffer::from_slice(&ps_tm).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_pw = DeviceBuffer::from_slice(&pw_tm).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_data =
+            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_ps =
+            DeviceBuffer::from_slice(&ps_tm).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_pw =
+            DeviceBuffer::from_slice(&pw_tm).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
         let d_fv = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(elems)
-                .map_err(|e| CudaCfoError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(elems).map_err(|e| CudaCfoError::Cuda(e.to_string()))?
         };
 
         self.launch_many_series_kernel(
@@ -275,7 +287,11 @@ impl CudaCfo {
             &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -291,7 +307,9 @@ impl CudaCfo {
         scalar: f32,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaCfoError> {
-        if cols <= 0 || rows <= 0 { return Ok(()); }
+        if cols <= 0 || rows <= 0 {
+            return Ok(());
+        }
         let func = self
             .module
             .get_function("cfo_many_series_one_param_time_major_f32")
@@ -351,7 +369,9 @@ impl CudaCfo {
 
         let combos = expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaCfoError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaCfoError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
 
         let mut periods = Vec::with_capacity(combos.len());
@@ -431,7 +451,7 @@ impl CudaCfo {
 
 // ---- Prefix builders ----
 
-    fn build_prefixes_from_first(data: &[f32], first_valid: usize) -> (Vec<f64>, Vec<f64>) {
+fn build_prefixes_from_first(data: &[f32], first_valid: usize) -> (Vec<f64>, Vec<f64>) {
     let len = data.len();
     // Store length+1 array aligned to absolute indices: prefix[i] holds sum over [first_valid..i-1]
     // For i <= first_valid, value remains 0.
@@ -487,14 +507,21 @@ fn build_prefixes_time_major(
 
 fn expand_grid(r: &CfoBatchRange) -> Vec<CfoParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return vec![start]; }
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return vec![start];
+        }
         let mut out = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 { out.push(x); x += step; }
+        while x <= end + 1e-12 {
+            out.push(x);
+            x += step;
+        }
         out
     }
     let periods = axis_usize(r.period);
@@ -502,7 +529,10 @@ fn expand_grid(r: &CfoBatchRange) -> Vec<CfoParams> {
     let mut out = Vec::with_capacity(periods.len() * scalars.len());
     for &p in &periods {
         for &s in &scalars {
-            out.push(CfoParams { period: Some(p), scalar: Some(s) });
+            out.push(CfoParams {
+                period: Some(p),
+                scalar: Some(s),
+            });
         }
     }
     out
@@ -518,7 +548,9 @@ fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
         type Item = (usize, usize);
         fn next(&mut self) -> Option<Self::Item> {
             const MAX: usize = 65_535;
-            if self.launched >= self.n { return None; }
+            if self.launched >= self.n {
+                return None;
+            }
             let start = self.launched;
             let len = (self.n - self.launched).min(MAX);
             self.launched += len;
@@ -563,13 +595,19 @@ pub mod benches {
     }
     impl CudaBenchState for CfoBatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.cfo_batch_dev(&self.price, &self.sweep).expect("cfo batch");
+            let _ = self
+                .cuda
+                .cfo_batch_dev(&self.price, &self.sweep)
+                .expect("cfo batch");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaCfo::new(0).expect("cuda cfo");
         let price = gen_series(ONE_SERIES_LEN);
-        let sweep = CfoBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), scalar: (100.0, 100.0, 0.0) };
+        let sweep = CfoBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            scalar: (100.0, 100.0, 0.0),
+        };
         Box::new(CfoBatchState { cuda, price, sweep })
     }
 
@@ -598,8 +636,17 @@ pub mod benches {
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_ROWS;
         let data_tm = gen_time_major_prices(cols, rows);
-        let params = CfoParams { period: Some(14), scalar: Some(100.0) };
-        Box::new(CfoManyState { cuda, data_tm, cols, rows, params })
+        let params = CfoParams {
+            period: Some(14),
+            scalar: Some(100.0),
+        };
+        Box::new(CfoManyState {
+            cuda,
+            data_tm,
+            cols,
+            rows,
+            params,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

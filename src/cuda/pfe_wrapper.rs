@@ -39,7 +39,10 @@ impl fmt::Display for CudaPfeError {
 impl Error for CudaPfeError {}
 
 #[derive(Clone, Debug)]
-struct PfeCombo { period: i32, smoothing: i32 }
+struct PfeCombo {
+    period: i32,
+    smoothing: i32,
+}
 
 pub struct CudaPfe {
     pub(crate) module: Module,
@@ -50,8 +53,8 @@ pub struct CudaPfe {
 impl CudaPfe {
     pub fn new(device_id: usize) -> Result<Self, CudaPfeError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
         let ctx = Context::new(device).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/pfe_kernel.ptx"));
         let jit_opts = &[
@@ -64,20 +67,31 @@ impl CudaPfe {
             .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-        Ok(Self { module, stream, _ctx: ctx })
+        Ok(Self {
+            module,
+            stream,
+            _ctx: ctx,
+        })
     }
 
     fn expand_grid(range: &PfeBatchRange) -> Vec<PfeCombo> {
         let axis = |a: (usize, usize, usize)| -> Vec<usize> {
             let (s, e, st) = a;
-            if st == 0 || s == e { vec![s] } else { (s..=e).step_by(st).collect() }
+            if st == 0 || s == e {
+                vec![s]
+            } else {
+                (s..=e).step_by(st).collect()
+            }
         };
         let periods = axis(range.period);
         let smoothings = axis(range.smoothing);
         let mut out = Vec::with_capacity(periods.len() * smoothings.len());
         for &p in &periods {
             for &s in &smoothings {
-                out.push(PfeCombo { period: p as i32, smoothing: s as i32 });
+                out.push(PfeCombo {
+                    period: p as i32,
+                    smoothing: s as i32,
+                });
             }
         }
         out
@@ -124,14 +138,20 @@ impl CudaPfe {
             .ok_or_else(|| CudaPfeError::InvalidInput("all NaN".into()))?;
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaPfeError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaPfeError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         // Validate parameters
         for c in &combos {
             let p = c.period as usize;
             let s = c.smoothing as usize;
-            if p == 0 || p > len { return Err(CudaPfeError::InvalidInput("invalid period".into())); }
-            if s == 0 { return Err(CudaPfeError::InvalidInput("invalid smoothing".into())); }
+            if p == 0 || p > len {
+                return Err(CudaPfeError::InvalidInput("invalid period".into()));
+            }
+            if s == 0 {
+                return Err(CudaPfeError::InvalidInput("invalid smoothing".into()));
+            }
             if len - first_valid < p + 1 {
                 return Err(CudaPfeError::InvalidInput("not enough valid data".into()));
             }
@@ -145,12 +165,16 @@ impl CudaPfe {
         }
 
         // Device buffers
-        let d_data = DeviceBuffer::from_slice(data_f32).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-        let d_prefix = DeviceBuffer::from_slice(&prefix).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        let d_data =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        let d_prefix =
+            DeviceBuffer::from_slice(&prefix).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
         let smooths: Vec<i32> = combos.iter().map(|c| c.smoothing).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
-        let d_smooths = DeviceBuffer::from_slice(&smooths).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        let d_periods =
+            DeviceBuffer::from_slice(&periods).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        let d_smooths =
+            DeviceBuffer::from_slice(&smooths).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
 
         let total_out = combos.len() * len;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }
@@ -186,7 +210,9 @@ impl CudaPfe {
                     .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
             }
         } else {
-            let func = self.module.get_function("pfe_batch_f32")
+            let func = self
+                .module
+                .get_function("pfe_batch_f32")
                 .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
             let chunk = Self::chunk_rows(combos.len(), len);
             let mut launched = 0usize;
@@ -200,10 +226,19 @@ impl CudaPfe {
                     let mut data_ptr = d_data.as_device_ptr().as_raw();
                     let mut len_i = len as i32;
                     let mut fv_i = first_valid as i32;
-                    let mut per_ptr = d_periods.as_device_ptr().as_raw().wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
-                    let mut sm_ptr = d_smooths.as_device_ptr().as_raw().wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
+                    let mut per_ptr = d_periods
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
+                    let mut sm_ptr = d_smooths
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
                     let mut ncomb_i = cur as i32;
-                    let mut out_ptr = d_out.as_device_ptr().as_raw().wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
+                    let mut out_ptr = d_out
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
                     let args: &mut [*mut c_void] = &mut [
                         &mut data_ptr as *mut _ as *mut c_void,
                         &mut len_i as *mut _ as *mut c_void,
@@ -225,7 +260,11 @@ impl CudaPfe {
             .synchronize()
             .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
     }
 
     pub fn pfe_many_series_one_param_time_major_dev(
@@ -239,14 +278,20 @@ impl CudaPfe {
         if cols == 0 || rows == 0 {
             return Err(CudaPfeError::InvalidInput("cols/rows must be > 0".into()));
         }
-        let expected = cols.checked_mul(rows).ok_or_else(|| CudaPfeError::InvalidInput("rows*cols overflow".into()))?;
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaPfeError::InvalidInput("rows*cols overflow".into()))?;
         if data_tm_f32.len() != expected {
-            return Err(CudaPfeError::InvalidInput("time-major input length mismatch".into()));
+            return Err(CudaPfeError::InvalidInput(
+                "time-major input length mismatch".into(),
+            ));
         }
         if period == 0 || period > rows {
             return Err(CudaPfeError::InvalidInput("invalid period".into()));
         }
-        if smoothing == 0 { return Err(CudaPfeError::InvalidInput("invalid smoothing".into())); }
+        if smoothing == 0 {
+            return Err(CudaPfeError::InvalidInput("invalid smoothing".into()));
+        }
 
         // Build per-series first_valid indices
         let mut fvs = vec![0i32; cols];
@@ -254,18 +299,23 @@ impl CudaPfe {
             let mut fv = 0usize;
             while fv < rows {
                 let v = data_tm_f32[fv * cols + s];
-                if !v.is_nan() { break; }
+                if !v.is_nan() {
+                    break;
+                }
                 fv += 1;
             }
             fvs[s] = fv as i32;
         }
 
-        let d_tm = DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+        let d_tm =
+            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
         let d_fv = DeviceBuffer::from_slice(&fvs).map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
             .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
 
-        let func = self.module.get_function("pfe_many_series_one_param_time_major_f32")
+        let func = self
+            .module
+            .get_function("pfe_many_series_one_param_time_major_f32")
             .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
         let block_x: u32 = 256;
         let grid_x: u32 = (((cols as u32) + block_x - 1) / block_x).max(1);
@@ -296,11 +346,17 @@ impl CudaPfe {
             .synchronize()
             .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn synchronize(&self) -> Result<(), CudaPfeError> {
-        self.stream.synchronize().map_err(|e| CudaPfeError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaPfeError::Cuda(e.to_string()))
     }
 }
 
@@ -310,7 +366,13 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new("pfe", "batch_dev", "pfe_cuda_batch_dev", "60k_x_grid", prep_pfe_batch_box),
+            CudaBenchScenario::new(
+                "pfe",
+                "batch_dev",
+                "pfe_cuda_batch_dev",
+                "60k_x_grid",
+                prep_pfe_batch_box,
+            ),
             CudaBenchScenario::new(
                 "pfe",
                 "many_series_one_param",
@@ -359,7 +421,10 @@ pub mod benches {
                     &mut ncomb_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.cuda.stream.launch(&func, grid, block, 0, args).expect("launch");
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, args)
+                    .expect("launch");
             }
             self.cuda.synchronize().expect("sync");
         }
@@ -369,18 +434,38 @@ pub mod benches {
         let cuda = CudaPfe::new(0).expect("cuda pfe");
         let len = 60_000usize;
         let mut price = vec![f32::NAN; len];
-        for i in 10..len { let x = i as f32; price[i] = (x * 0.001).sin() + 0.0002 * x; }
+        for i in 10..len {
+            let x = i as f32;
+            price[i] = (x * 0.001).sin() + 0.0002 * x;
+        }
         let mut periods = Vec::new();
         let mut smooths = Vec::new();
-        for p in 5..=49 { for s in [3,5,7,9] { periods.push(p as i32); smooths.push(s as i32); } }
+        for p in 5..=49 {
+            for s in [3, 5, 7, 9] {
+                periods.push(p as i32);
+                smooths.push(s as i32);
+            }
+        }
         let first_valid = price.iter().position(|v| !v.is_nan()).unwrap_or(0);
         let d_data = DeviceBuffer::from_slice(&price).expect("d_data");
         let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
         let d_smooths = DeviceBuffer::from_slice(&smooths).expect("d_smooths");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(periods.len() * len) }.expect("d_out");
-        PfeBatchState { cuda, d_data, d_periods, d_smooths, d_out, len, n_combos: periods.len(), first_valid }
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(periods.len() * len) }.expect("d_out");
+        PfeBatchState {
+            cuda,
+            d_data,
+            d_periods,
+            d_smooths,
+            d_out,
+            len,
+            n_combos: periods.len(),
+            first_valid,
+        }
     }
-    fn prep_pfe_batch_box() -> Box<dyn CudaBenchState> { Box::new(prep_pfe_batch()) }
+    fn prep_pfe_batch_box() -> Box<dyn CudaBenchState> {
+        Box::new(prep_pfe_batch())
+    }
 
     struct PfeManySeriesState {
         cuda: CudaPfe,
@@ -420,7 +505,10 @@ pub mod benches {
                     &mut s_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.cuda.stream.launch(&func, grid, block, 0, args).expect("launch");
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, args)
+                    .expect("launch");
             }
             self.cuda.synchronize().expect("sync");
         }
@@ -428,16 +516,42 @@ pub mod benches {
 
     fn prep_pfe_many_series() -> PfeManySeriesState {
         let cuda = CudaPfe::new(0).expect("cuda pfe");
-        let cols = 250usize; let rows = 1_000_000usize; let period = 20usize; let smoothing = 5usize;
+        let cols = 250usize;
+        let rows = 1_000_000usize;
+        let period = 20usize;
+        let smoothing = 5usize;
         let mut tm = vec![f32::NAN; cols * rows];
-        for s in 0..cols { for t in s..rows { let x = (t as f32) + (s as f32) * 0.1; tm[t * cols + s] = (x * 0.002).sin() + 0.0002 * x; } }
+        for s in 0..cols {
+            for t in s..rows {
+                let x = (t as f32) + (s as f32) * 0.1;
+                tm[t * cols + s] = (x * 0.002).sin() + 0.0002 * x;
+            }
+        }
         let mut fvs = vec![0i32; cols];
-        for s in 0..cols { let mut fv = 0usize; while fv < rows && tm[fv * cols + s].is_nan() { fv += 1; } fvs[s] = fv as i32; }
+        for s in 0..cols {
+            let mut fv = 0usize;
+            while fv < rows && tm[fv * cols + s].is_nan() {
+                fv += 1;
+            }
+            fvs[s] = fv as i32;
+        }
         let d_tm = DeviceBuffer::from_slice(&tm).expect("d_tm");
         let d_fv = DeviceBuffer::from_slice(&fvs).expect("d_fv");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
-        PfeManySeriesState { cuda, d_tm, d_fv, d_out, cols, rows, period, smoothing }
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
+        PfeManySeriesState {
+            cuda,
+            d_tm,
+            d_fv,
+            d_out,
+            cols,
+            rows,
+            period,
+            smoothing,
+        }
     }
 
-    fn prep_pfe_many_series_box() -> Box<dyn CudaBenchState> { Box::new(prep_pfe_many_series()) }
+    fn prep_pfe_many_series_box() -> Box<dyn CudaBenchState> {
+        Box::new(prep_pfe_many_series())
+    }
 }

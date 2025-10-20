@@ -37,16 +37,16 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use thiserror::Error;
 
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
-#[cfg(feature = "python")]
-use pyo3::{exceptions::PyValueError, prelude::*};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaDevStop;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
+#[cfg(feature = "python")]
+use pyo3::{exceptions::PyValueError, prelude::*};
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1955,15 +1955,24 @@ pub fn devstop_cuda_batch_dev_py<'py>(
     use numpy::IntoPyArray;
     use pyo3::types::PyDict;
 
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
-    if h.len() != l.len() { return Err(PyValueError::new_err("length mismatch")); }
-    let sweep = DevStopBatchRange { period: period_range, mult: mult_range, devtype: devtype_range };
+    if h.len() != l.len() {
+        return Err(PyValueError::new_err("length mismatch"));
+    }
+    let sweep = DevStopBatchRange {
+        period: period_range,
+        mult: mult_range,
+        devtype: devtype_range,
+    };
     let is_long = direction.eq_ignore_ascii_case("long");
     let (inner, meta) = py.allow_threads(|| {
         let cuda = CudaDevStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.devstop_batch_dev(h, l, &sweep, is_long).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.devstop_batch_dev(h, l, &sweep, is_long)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let dict = PyDict::new(py);
@@ -1989,8 +1998,12 @@ pub fn devstop_cuda_many_series_one_param_dev_py(
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use numpy::PyUntypedArrayMethods;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
-    if high_tm_f32.shape() != low_tm_f32.shape() { return Err(PyValueError::new_err("shape mismatch")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    if high_tm_f32.shape() != low_tm_f32.shape() {
+        return Err(PyValueError::new_err("shape mismatch"));
+    }
     let flat_h = high_tm_f32.as_slice()?;
     let flat_l = low_tm_f32.as_slice()?;
     let rows = high_tm_f32.shape()[0];
@@ -1998,8 +2011,16 @@ pub fn devstop_cuda_many_series_one_param_dev_py(
     let is_long = direction.eq_ignore_ascii_case("long");
     let inner = py.allow_threads(|| {
         let cuda = CudaDevStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.devstop_many_series_one_param_time_major_dev(flat_h, flat_l, cols, rows, period, mult as f32, is_long)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.devstop_many_series_one_param_time_major_dev(
+            flat_h,
+            flat_l,
+            cols,
+            rows,
+            period,
+            mult as f32,
+            is_long,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

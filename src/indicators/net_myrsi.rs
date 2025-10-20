@@ -18,6 +18,8 @@
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -26,8 +28,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 // Feature-gated imports for WASM bindings
 #[cfg(feature = "wasm")]
@@ -1235,7 +1235,9 @@ pub fn net_myrsi_cuda_batch_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let prices = data_f32.as_slice()?;
-    let sweep = NetMyrsiBatchRange { period: period_range };
+    let sweep = NetMyrsiBatchRange {
+        period: period_range,
+    };
     let inner = py
         .allow_threads(|| {
             let cuda = crate::cuda::CudaNetMyrsi::new(device_id)
@@ -1265,7 +1267,9 @@ pub fn net_myrsi_cuda_many_series_one_param_dev_py(
     let flat = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = NetMyrsiParams { period: Some(period) };
+    let params = NetMyrsiParams {
+        period: Some(period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = crate::cuda::CudaNetMyrsi::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;

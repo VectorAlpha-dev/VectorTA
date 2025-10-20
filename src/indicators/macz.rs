@@ -2244,25 +2244,85 @@ pub fn macz_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
 
     let price = data_f32.as_slice()?;
     let volume_opt: Option<&[f32]> = volume_f32.as_ref().map(|v| v.as_slice()).transpose()?;
-    let sweep = MaczBatchRange { fast_length: fast_length_range, slow_length: slow_length_range, signal_length: signal_length_range, lengthz: lengthz_range, length_stdev: length_stdev_range, a: a_range, b: b_range };
+    let sweep = MaczBatchRange {
+        fast_length: fast_length_range,
+        slow_length: slow_length_range,
+        signal_length: signal_length_range,
+        lengthz: lengthz_range,
+        length_stdev: length_stdev_range,
+        a: a_range,
+        b: b_range,
+    };
 
     let (inner, combos) = py.allow_threads(|| {
         let cuda = CudaMacz::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.macz_batch_dev(price, volume_opt, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.macz_batch_dev(price, volume_opt, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let dict = PyDict::new(py);
-    dict.set_item("fast_lengths", combos.iter().map(|p| p.fast_length.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("slow_lengths", combos.iter().map(|p| p.slow_length.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("signal_lengths", combos.iter().map(|p| p.signal_length.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("lengthz", combos.iter().map(|p| p.lengthz.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("length_stdev", combos.iter().map(|p| p.length_stdev.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("a", combos.iter().map(|p| p.a.unwrap_or(1.0)).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("b", combos.iter().map(|p| p.b.unwrap_or(1.0)).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item(
+        "fast_lengths",
+        combos
+            .iter()
+            .map(|p| p.fast_length.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "slow_lengths",
+        combos
+            .iter()
+            .map(|p| p.slow_length.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "signal_lengths",
+        combos
+            .iter()
+            .map(|p| p.signal_length.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "lengthz",
+        combos
+            .iter()
+            .map(|p| p.lengthz.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "length_stdev",
+        combos
+            .iter()
+            .map(|p| p.length_stdev.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "a",
+        combos
+            .iter()
+            .map(|p| p.a.unwrap_or(1.0))
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "b",
+        combos
+            .iter()
+            .map(|p| p.b.unwrap_or(1.0))
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
 
     Ok((DeviceArrayF32Py { inner }, dict))
 }
@@ -2288,13 +2348,26 @@ pub fn macz_cuda_many_series_one_param_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let price_tm = close_tm_f32.as_slice()?;
     let vol_tm_opt: Option<&[f32]> = volume_tm_f32.as_ref().map(|v| v.as_slice()).transpose()?;
-    let params = MaczParams { fast_length: Some(fast_length), slow_length: Some(slow_length), signal_length: Some(signal_length), lengthz: Some(lengthz), length_stdev: Some(length_stdev), a: Some(a), b: Some(b), use_lag: Some(use_lag), gamma: Some(gamma) };
+    let params = MaczParams {
+        fast_length: Some(fast_length),
+        slow_length: Some(slow_length),
+        signal_length: Some(signal_length),
+        lengthz: Some(lengthz),
+        length_stdev: Some(length_stdev),
+        a: Some(a),
+        b: Some(b),
+        use_lag: Some(use_lag),
+        gamma: Some(gamma),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaMacz::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.macz_many_series_one_param_time_major_dev(price_tm, vol_tm_opt, cols, rows, &params).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.macz_many_series_one_param_time_major_dev(price_tm, vol_tm_opt, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

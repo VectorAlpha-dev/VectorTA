@@ -43,17 +43,27 @@ pub struct CudaTsfPolicy {
 
 impl Default for CudaTsfPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Debug)]
-pub enum CudaTsfError { Cuda(String), InvalidInput(String) }
+pub enum CudaTsfError {
+    Cuda(String),
+    InvalidInput(String),
+}
 impl fmt::Display for CudaTsfError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -79,8 +89,8 @@ pub struct CudaTsf {
 impl CudaTsf {
     pub fn new(device_id: usize) -> Result<Self, CudaTsfError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
         let sm_count = device
             .get_attribute(DeviceAttribute::MultiprocessorCount)
             .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
@@ -97,7 +107,9 @@ impl CudaTsf {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[]).map_err(|e| CudaTsfError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaTsfError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -123,34 +135,46 @@ impl CudaTsf {
     }
 
     pub fn synchronize(&self) -> Result<(), CudaTsfError> {
-        self.stream.synchronize().map_err(|e| CudaTsfError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaTsfError::Cuda(e.to_string()))
     }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TSF batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTsf)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTsf)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TSF many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTsf)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTsf)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -158,14 +182,25 @@ impl CudaTsf {
     // ---------------- VRAM helpers ----------------
     #[inline]
     fn mem_check_enabled() -> bool {
-        match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && v.to_lowercase() != "false", Err(_) => true }
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { cust::memory::mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        cust::memory::mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Some((free, _)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
 
     #[inline]
@@ -180,8 +215,21 @@ impl CudaTsf {
     fn prepare_batch_inputs(
         data_f32: &[f32],
         sweep: &TsfBatchRange,
-    ) -> Result<(Vec<TsfParams>, usize, usize, Vec<i32>, Vec<f32>, Vec<f32>, Vec<f32>), CudaTsfError> {
-        if data_f32.is_empty() { return Err(CudaTsfError::InvalidInput("empty data".into())); }
+    ) -> Result<
+        (
+            Vec<TsfParams>,
+            usize,
+            usize,
+            Vec<i32>,
+            Vec<f32>,
+            Vec<f32>,
+            Vec<f32>,
+        ),
+        CudaTsfError,
+    > {
+        if data_f32.is_empty() {
+            return Err(CudaTsfError::InvalidInput("empty data".into()));
+        }
         let len = data_f32.len();
         let first_valid = data_f32
             .iter()
@@ -189,7 +237,11 @@ impl CudaTsf {
             .ok_or_else(|| CudaTsfError::InvalidInput("all values are NaN".into()))?;
 
         let combos = expand_grid_local(sweep);
-        if combos.is_empty() { return Err(CudaTsfError::InvalidInput("no parameter combinations".into())); }
+        if combos.is_empty() {
+            return Err(CudaTsfError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
 
         let mut periods_i32 = Vec::with_capacity(combos.len());
         let mut x_sums = Vec::with_capacity(combos.len());
@@ -198,13 +250,20 @@ impl CudaTsf {
 
         for combo in &combos {
             let period = combo.period.unwrap_or(0);
-            if period < 2 { return Err(CudaTsfError::InvalidInput("period must be >= 2".into())); }
+            if period < 2 {
+                return Err(CudaTsfError::InvalidInput("period must be >= 2".into()));
+            }
             if period > len {
-                return Err(CudaTsfError::InvalidInput(format!("period {} exceeds data length {}", period, len)));
+                return Err(CudaTsfError::InvalidInput(format!(
+                    "period {} exceeds data length {}",
+                    period, len
+                )));
             }
             if len - first_valid < period {
                 return Err(CudaTsfError::InvalidInput(format!(
-                    "not enough valid data for period {} (tail = {})", period, len - first_valid
+                    "not enough valid data for period {} (tail = {})",
+                    period,
+                    len - first_valid
                 )));
             }
 
@@ -219,7 +278,15 @@ impl CudaTsf {
             inv_periods.push((1.0 / pf) as f32);
         }
 
-        Ok((combos, first_valid, len, periods_i32, x_sums, denom_invs, inv_periods))
+        Ok((
+            combos,
+            first_valid,
+            len,
+            periods_i32,
+            x_sums,
+            denom_invs,
+            inv_periods,
+        ))
     }
 
     fn launch_batch_kernel(
@@ -238,11 +305,17 @@ impl CudaTsf {
             .module
             .get_function("tsf_batch_f32")
             .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.batch { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024) };
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+        };
         let grid: GridSize = self.grid_1d_for(combos_len, block_x);
         let block: BlockSize = (block_x, 1, 1).into();
 
-        unsafe { (*(self as *const _ as *mut CudaTsf)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaTsf)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
 
         unsafe {
@@ -266,7 +339,9 @@ impl CudaTsf {
                 &mut first_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
         }
         Ok(())
     }
@@ -284,7 +359,8 @@ impl CudaTsf {
     ) -> Result<DeviceArrayF32, CudaTsfError> {
         // VRAM estimate
         let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let params_bytes = combos.len() * (std::mem::size_of::<i32>() + 3 * std::mem::size_of::<f32>());
+        let params_bytes =
+            combos.len() * (std::mem::size_of::<i32>() + 3 * std::mem::size_of::<f32>());
         let out_bytes = combos.len() * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + params_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
@@ -297,10 +373,14 @@ impl CudaTsf {
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
             .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(periods_i32).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let d_x_sums = DeviceBuffer::from_slice(x_sums).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let d_denoms = DeviceBuffer::from_slice(denom_invs).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let d_inv_p = DeviceBuffer::from_slice(inv_periods).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        let d_periods =
+            DeviceBuffer::from_slice(periods_i32).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        let d_x_sums =
+            DeviceBuffer::from_slice(x_sums).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        let d_denoms =
+            DeviceBuffer::from_slice(denom_invs).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        let d_inv_p =
+            DeviceBuffer::from_slice(inv_periods).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(combos.len() * series_len) }
             .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
 
@@ -315,7 +395,11 @@ impl CudaTsf {
             first_valid,
             &mut d_out,
         )?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: series_len,
+        })
     }
 
     pub fn tsf_batch_dev(
@@ -335,7 +419,9 @@ impl CudaTsf {
             &denom_invs,
             &inv_periods,
         )?;
-        self.stream.synchronize().map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
         Ok((arr, combos))
     }
 
@@ -349,7 +435,9 @@ impl CudaTsf {
             Self::prepare_batch_inputs(data_f32, sweep)?;
         if out.len() != combos.len() * len {
             return Err(CudaTsfError::InvalidInput(format!(
-                "out slice wrong length: got {}, expected {}", out.len(), combos.len() * len
+                "out slice wrong length: got {}, expected {}",
+                out.len(),
+                combos.len() * len
             )));
         }
         let dev = self.run_batch_kernel(
@@ -362,8 +450,12 @@ impl CudaTsf {
             &denom_invs,
             &inv_periods,
         )?;
-        self.stream.synchronize().map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        dev.buf.copy_to(out).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        dev.buf
+            .copy_to(out)
+            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
         Ok((dev.rows, dev.cols, combos))
     }
 
@@ -379,20 +471,33 @@ impl CudaTsf {
             return Err(CudaTsfError::InvalidInput("data_tm size mismatch".into()));
         }
         let period = params.period.unwrap_or(0);
-        if period < 2 { return Err(CudaTsfError::InvalidInput("period must be >= 2".into())); }
-        if period > rows { return Err(CudaTsfError::InvalidInput("period exceeds series length".into())); }
+        if period < 2 {
+            return Err(CudaTsfError::InvalidInput("period must be >= 2".into()));
+        }
+        if period > rows {
+            return Err(CudaTsfError::InvalidInput(
+                "period exceeds series length".into(),
+            ));
+        }
 
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
             for t in 0..rows {
                 let v = data_tm_f32[t * cols + s];
-                if !v.is_nan() { fv = Some(t as i32); break; }
+                if !v.is_nan() {
+                    fv = Some(t as i32);
+                    break;
+                }
             }
-            let fv = fv.ok_or_else(|| CudaTsfError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv =
+                fv.ok_or_else(|| CudaTsfError::InvalidInput(format!("series {} all NaN", s)))?;
             if (rows as i32 - fv) < period as i32 {
                 return Err(CudaTsfError::InvalidInput(format!(
-                    "series {} not enough valid data (needed {}, have {})", s, period, rows as i32 - fv
+                    "series {} not enough valid data (needed {}, have {})",
+                    s,
+                    period,
+                    rows as i32 - fv
                 )));
             }
             first_valids[s] = fv;
@@ -422,10 +527,16 @@ impl CudaTsf {
             .module
             .get_function("tsf_many_series_one_param_f32")
             .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::Auto => 256, ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(1024) };
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(1024),
+        };
         let grid: GridSize = self.grid_1d_for(cols, block_x);
         let block: BlockSize = (block_x, 1, 1).into();
-        unsafe { (*(self as *const _ as *mut CudaTsf)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaTsf)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         unsafe {
@@ -449,7 +560,9 @@ impl CudaTsf {
                 &mut inv_period_f as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
         }
         Ok(())
     }
@@ -477,12 +590,21 @@ impl CudaTsf {
                 (required as f64) / (1024.0 * 1024.0)
             )));
         }
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(first_valids).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(first_valids)
+            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
+            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
 
-        self.launch_many_series_kernel(&d_prices, &d_first, cols, rows, period, x_sum, denom_inv, inv_period, &mut d_out)?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        self.launch_many_series_kernel(
+            &d_prices, &d_first, cols, rows, period, x_sum, denom_inv, inv_period, &mut d_out,
+        )?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn tsf_multi_series_one_param_time_major_dev(
@@ -495,9 +617,18 @@ impl CudaTsf {
         let (first_valids, period, x_sum, denom_inv, inv_period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(
-            data_tm_f32, cols, rows, &first_valids, period, x_sum, denom_inv, inv_period,
+            data_tm_f32,
+            cols,
+            rows,
+            &first_valids,
+            period,
+            x_sum,
+            denom_inv,
+            inv_period,
         )?;
-        self.stream.synchronize().map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
         Ok(dev)
     }
 
@@ -511,16 +642,29 @@ impl CudaTsf {
     ) -> Result<(), CudaTsfError> {
         if out_tm.len() != cols * rows {
             return Err(CudaTsfError::InvalidInput(format!(
-                "output length mismatch: expected {}, got {}", cols * rows, out_tm.len()
+                "output length mismatch: expected {}, got {}",
+                cols * rows,
+                out_tm.len()
             )));
         }
         let (first_valids, period, x_sum, denom_inv, inv_period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(
-            data_tm_f32, cols, rows, &first_valids, period, x_sum, denom_inv, inv_period,
+            data_tm_f32,
+            cols,
+            rows,
+            &first_valids,
+            period,
+            x_sum,
+            denom_inv,
+            inv_period,
         )?;
-        self.stream.synchronize().map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
-        dev.buf.copy_to(out_tm).map_err(|e| CudaTsfError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaTsfError::Cuda(e.to_string()))?;
+        dev.buf
+            .copy_to(out_tm)
+            .map_err(|e| CudaTsfError::Cuda(e.to_string()))
     }
 }
 
@@ -536,7 +680,9 @@ pub mod benches {
         crate::indicators::tsf::TsfParams,
         tsf_batch_dev,
         tsf_multi_series_one_param_time_major_dev,
-        crate::indicators::tsf::TsfBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) },
+        crate::indicators::tsf::TsfBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1)
+        },
         crate::indicators::tsf::TsfParams { period: Some(64) },
         "tsf",
         "tsf"
@@ -549,9 +695,13 @@ pub mod benches {
 fn expand_grid_local(r: &TsfBatchRange) -> Vec<TsfParams> {
     let (start, end, step) = r.period;
     if step == 0 {
-        return vec![TsfParams { period: Some(start) }];
+        return vec![TsfParams {
+            period: Some(start),
+        }];
     }
-    if start > end { return Vec::new(); }
+    if start > end {
+        return Vec::new();
+    }
     let mut v = Vec::new();
     let mut p = start;
     while p <= end {

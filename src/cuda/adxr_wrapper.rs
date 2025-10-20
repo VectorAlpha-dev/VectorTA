@@ -45,8 +45,8 @@ pub struct CudaAdxr {
 impl CudaAdxr {
     pub fn new(device_id: usize) -> Result<Self, CudaAdxrError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/adxr_kernel.ptx"));
@@ -85,12 +85,15 @@ impl CudaAdxr {
         } else {
             (start..=end).step_by(step).collect()
         };
-        ps.into_iter().map(|p| AdxrParams { period: Some(p) }).collect()
+        ps.into_iter()
+            .map(|p| AdxrParams { period: Some(p) })
+            .collect()
     }
 
     fn find_first_valid_close(close: &[f32]) -> Option<usize> {
         for (i, &v) in close.iter().enumerate() {
-            if v == v { // not NaN
+            if v == v {
+                // not NaN
                 return Some(i);
             }
         }
@@ -134,7 +137,9 @@ impl CudaAdxr {
             + periods_i32.len() * 4
             + out_elems * 4;
         if !Self::will_fit(bytes, headroom) {
-            return Err(CudaAdxrError::InvalidInput("insufficient device memory".into()));
+            return Err(CudaAdxrError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
         }
 
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }
@@ -195,7 +200,14 @@ impl CudaAdxr {
             .synchronize()
             .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: n }, combos))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: n,
+            },
+            combos,
+        ))
     }
 
     /// Many-series × one param (time-major). Returns VRAM-backed matrix with shape rows×cols.
@@ -240,7 +252,9 @@ impl CudaAdxr {
             + first_valids.len() * 4
             + n * 4;
         if !Self::will_fit(bytes, headroom) {
-            return Err(CudaAdxrError::InvalidInput("insufficient device memory".into()));
+            return Err(CudaAdxrError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
         }
 
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }
@@ -284,7 +298,11 @@ impl CudaAdxr {
             .synchronize()
             .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     /// Host-copy helper returning a contiguous f32 vector (row-major)
@@ -301,7 +319,8 @@ impl CudaAdxr {
             return Err(CudaAdxrError::InvalidInput("out length mismatch".into()));
         }
         let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(arr.len()).map_err(|e| CudaAdxrError::Cuda(e.to_string()))?
+            LockedBuffer::uninitialized(arr.len())
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?
         };
         unsafe {
             arr.buf
@@ -413,22 +432,10 @@ pub mod benches {
         let bytes_batch = (50_000usize * 3 + (1 + (60 - 5) / 5) * 50_000) * 4;
         let bytes_many = 128usize * 8192usize * 4usize * 4usize; // 3 inputs + out + firsts
         vec![
-            CudaBenchScenario::new(
-                "adxr",
-                "one_series",
-                "adxr_cuda_batch",
-                "50k",
-                prep_batch,
-            )
-            .with_mem_required(bytes_batch),
-            CudaBenchScenario::new(
-                "adxr",
-                "many_series",
-                "adxr_cuda_ms1p",
-                "128x8k",
-                prep_many,
-            )
-            .with_mem_required(bytes_many),
+            CudaBenchScenario::new("adxr", "one_series", "adxr_cuda_batch", "50k", prep_batch)
+                .with_mem_required(bytes_batch),
+            CudaBenchScenario::new("adxr", "many_series", "adxr_cuda_ms1p", "128x8k", prep_many)
+                .with_mem_required(bytes_many),
         ]
     }
 }

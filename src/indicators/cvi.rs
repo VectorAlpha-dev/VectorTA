@@ -33,6 +33,8 @@
 //! - Rationale: SIMD underperforms on strict recurrences; biggest batch wins come from shared
 //!   precomputation and reduced memory traffic.
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -60,8 +62,6 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[derive(Debug, Clone)]
 pub enum CviData<'a> {
@@ -1158,7 +1158,9 @@ pub fn cvi_cuda_batch_dev_py(
         return Err(PyValueError::new_err("mismatched input lengths"));
     }
 
-    let sweep = CviBatchRange { period: period_range };
+    let sweep = CviBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaCvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.cvi_batch_dev(high_slice, low_slice, &sweep)

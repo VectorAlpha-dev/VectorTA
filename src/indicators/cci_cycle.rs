@@ -19,6 +19,10 @@
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::cci_cycle_wrapper::CudaCciCycle;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -27,10 +31,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::cci_cycle_wrapper::CudaCciCycle;
 
 // Feature-gated imports for WASM bindings
 #[cfg(feature = "wasm")]
@@ -1760,12 +1760,19 @@ pub fn cci_cycle_cuda_batch_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice = data.as_slice()?;
-    let sweep = CciCycleBatchRange { length: length_range, factor: factor_range };
+    let sweep = CciCycleBatchRange {
+        length: length_range,
+        factor: factor_range,
+    };
     let inner = py.allow_threads(|| {
-        let cuda = CudaCciCycle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.cci_cycle_batch_dev(slice, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaCciCycle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.cci_cycle_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }
@@ -1783,12 +1790,20 @@ pub fn cci_cycle_cuda_many_series_one_param_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice = data_time_major.as_slice()?;
-    if slice.len() != cols * rows { return Err(PyValueError::new_err("size mismatch for time-major matrix")); }
-    let params = CciCycleParams { length: Some(length), factor: Some(factor) };
+    if slice.len() != cols * rows {
+        return Err(PyValueError::new_err("size mismatch for time-major matrix"));
+    }
+    let params = CciCycleParams {
+        length: Some(length),
+        factor: Some(factor),
+    };
     let inner = py.allow_threads(|| {
-        let cuda = CudaCciCycle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaCciCycle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.cci_cycle_many_series_one_param_time_major_dev(slice, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

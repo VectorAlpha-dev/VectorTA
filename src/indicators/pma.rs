@@ -1084,10 +1084,10 @@ impl PmaStreamWasm {
 //--------------------------
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1211,14 +1211,24 @@ pub fn pma_cuda_batch_dev_py(
     data_f32: numpy::PyReadonlyArray1<'_, f32>,
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice_in = data_f32.as_slice()?;
     let sweep = PmaBatchRange::default();
     let pair = py.allow_threads(|| {
         let cuda = CudaPma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.pma_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.pma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: pair.predict }, DeviceArrayF32Py { inner: pair.trigger }))
+    Ok((
+        DeviceArrayF32Py {
+            inner: pair.predict,
+        },
+        DeviceArrayF32Py {
+            inner: pair.trigger,
+        },
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1229,17 +1239,29 @@ pub fn pma_cuda_many_series_one_param_dev_py(
     data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let shape = data_tm_f32.shape();
-    if shape.len() != 2 { return Err(PyValueError::new_err("expected time-major 2D array")); }
-    let rows = shape[0]; let cols = shape[1];
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected time-major 2D array"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
     let pair = py.allow_threads(|| {
         let cuda = CudaPma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.pma_many_series_one_param_time_major_dev(flat, cols, rows)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: pair.predict }, DeviceArrayF32Py { inner: pair.trigger }))
+    Ok((
+        DeviceArrayF32Py {
+            inner: pair.predict,
+        },
+        DeviceArrayF32Py {
+            inner: pair.trigger,
+        },
+    ))
 }
 
 //--------------------------

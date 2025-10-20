@@ -1,6 +1,8 @@
 // Integration tests for CUDA RSI kernels
 
-use my_project::indicators::rsi::{rsi_batch_with_kernel, rsi_with_kernel, RsiBatchRange, RsiInput, RsiParams};
+use my_project::indicators::rsi::{
+    rsi_batch_with_kernel, rsi_with_kernel, RsiBatchRange, RsiInput, RsiParams,
+};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -47,7 +49,9 @@ fn rsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let cpu = rsi_batch_with_kernel(&price_cpu_f64, &sweep, Kernel::ScalarBatch)?;
 
     let cuda = CudaRsi::new(0).expect("CudaRsi::new");
-    let dev = cuda.rsi_batch_dev(&price_f32, &sweep).expect("rsi_batch_dev");
+    let dev = cuda
+        .rsi_batch_dev(&price_f32, &sweep)
+        .expect("rsi_batch_dev");
 
     assert_eq!(cpu.rows, dev.rows);
     assert_eq!(cpu.cols, dev.cols);
@@ -59,7 +63,13 @@ fn rsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -87,14 +97,20 @@ fn rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = price_tm[t * cols + s]; }
+        for t in 0..rows {
+            series[t] = price_tm[t * cols + s];
+        }
         // Align CPU baseline to FP32 inputs used on GPU
         let series_f32: Vec<f32> = series.iter().map(|&v| v as f32).collect();
         let series_cpu_f64: Vec<f64> = series_f32.iter().map(|&v| v as f64).collect();
-        let params = RsiParams { period: Some(period) };
+        let params = RsiParams {
+            period: Some(period),
+        };
         let input = RsiInput::from_slice(&series_cpu_f64, params);
         let out = rsi_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let prices_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
@@ -111,7 +127,11 @@ fn rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let tol = 5e-4;
     for idx in 0..g_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }

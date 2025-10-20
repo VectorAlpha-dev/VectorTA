@@ -49,8 +49,8 @@ pub struct CudaVpt {
 impl CudaVpt {
     pub fn new(device_id: usize) -> Result<Self, CudaVptError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
         let ctx = Context::new(device).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vpt_kernel.ptx"));
         let jit_opts = &[
@@ -63,7 +63,11 @@ impl CudaVpt {
             .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        Ok(Self { module, stream, _ctx: ctx })
+        Ok(Self {
+            module,
+            stream,
+            _ctx: ctx,
+        })
     }
 
     #[inline]
@@ -118,10 +122,10 @@ impl CudaVpt {
             return Err(CudaVptError::Cuda("insufficient free VRAM".into()));
         }
 
-        let d_price = DeviceBuffer::from_slice(price)
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        let d_volume = DeviceBuffer::from_slice(volume)
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        let d_price =
+            DeviceBuffer::from_slice(price).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        let d_volume =
+            DeviceBuffer::from_slice(volume).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
             .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
 
@@ -152,7 +156,11 @@ impl CudaVpt {
         self.stream
             .synchronize()
             .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: 1, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: 1,
+            cols: len,
+        })
     }
 
     /// Many-series × one-param (no real params for VPT). Time-major layout.
@@ -203,10 +211,10 @@ impl CudaVpt {
             return Err(CudaVptError::Cuda("insufficient free VRAM".into()));
         }
 
-        let d_price = DeviceBuffer::from_slice(price_tm)
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        let d_volume = DeviceBuffer::from_slice(volume_tm)
-            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        let d_price =
+            DeviceBuffer::from_slice(price_tm).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        let d_volume =
+            DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaVptError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
@@ -243,7 +251,11 @@ impl CudaVpt {
         self.stream
             .synchronize()
             .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
 
@@ -263,7 +275,8 @@ pub mod benches {
     }
     fn bytes_many_series() -> usize {
         let n = MANY_SERIES_COLS * MANY_SERIES_ROWS;
-        (3 * n * std::mem::size_of::<f32>()) + (MANY_SERIES_COLS * std::mem::size_of::<i32>())
+        (3 * n * std::mem::size_of::<f32>())
+            + (MANY_SERIES_COLS * std::mem::size_of::<i32>())
             + (64 << 20)
     }
 
@@ -291,7 +304,11 @@ pub mod benches {
             price[1] = 100.1;
             volume[1] = 500.0;
         }
-        Box::new(OneSeriesState { cuda, price, volume })
+        Box::new(OneSeriesState {
+            cuda,
+            price,
+            volume,
+        })
     }
 
     struct ManySeriesState {
@@ -325,13 +342,23 @@ pub mod benches {
                 volume_tm[t * MANY_SERIES_COLS + s] = (x * 0.0017).cos().abs() * 500.0 + 100.0;
             }
         }
-        Box::new(ManySeriesState { cuda, price_tm, volume_tm })
+        Box::new(ManySeriesState {
+            cuda,
+            price_tm,
+            volume_tm,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new("vpt", "one_series", "vpt_cuda_one_series", "1m", prep_one_series)
-                .with_mem_required(bytes_one_series()),
+            CudaBenchScenario::new(
+                "vpt",
+                "one_series",
+                "vpt_cuda_one_series",
+                "1m",
+                prep_one_series,
+            )
+            .with_mem_required(bytes_one_series()),
             CudaBenchScenario::new(
                 "vpt",
                 "many_series_one_param",
@@ -343,4 +370,3 @@ pub mod benches {
         ]
     }
 }
-

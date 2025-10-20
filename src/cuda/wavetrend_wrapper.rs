@@ -52,7 +52,10 @@ pub struct CudaWavetrendPolicy {
 }
 impl Default for CudaWavetrendPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -133,51 +136,77 @@ impl CudaWavetrend {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaWavetrendPolicy) -> Result<Self, CudaWavetrendError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaWavetrendPolicy,
+    ) -> Result<Self, CudaWavetrendError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaWavetrendPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaWavetrendPolicy { &self.policy }
+    pub fn set_policy(&mut self, policy: CudaWavetrendPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaWavetrendPolicy {
+        &self.policy
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] Wavetrend batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaWavetrend)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaWavetrend)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] Wavetrend many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaWavetrend)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaWavetrend)).debug_many_logged = true;
+                }
             }
         }
     }
 
     #[inline]
     fn mem_check_enabled() -> bool {
-        match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && v.to_lowercase() != "false", Err(_) => true }
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Ok((free, _total)) = mem_get_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Ok((free, _total)) = mem_get_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
 
     pub fn wavetrend_batch_dev(
@@ -194,14 +223,15 @@ impl CudaWavetrend {
 
         // VRAM estimate and guard
         let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let params_bytes = 3 * rows * std::mem::size_of::<i32>() + rows * std::mem::size_of::<f32>();
+        let params_bytes =
+            3 * rows * std::mem::size_of::<i32>() + rows * std::mem::size_of::<f32>();
         let out_bytes = 3 * rows * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + params_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             return Err(CudaWavetrendError::InvalidInput(format!(
                 "estimated device memory {:.2} MB exceeds free VRAM",
-                required as f64 / (1024.0*1024.0)
+                required as f64 / (1024.0 * 1024.0)
             )));
         }
 
@@ -426,7 +456,10 @@ impl CudaWavetrend {
             BatchKernelPolicy::Auto => 128,
         };
         // Record selection for debug once
-        unsafe { (*(self as *const _ as *mut CudaWavetrend)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaWavetrend)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
 
         // Chunk rows so each launch handles at most MAX_ROWS_PER_LAUNCH combos.
@@ -626,15 +659,12 @@ impl CudaWavetrend {
             .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let mut d_wt1: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let mut d_wt2: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        let mut d_wt_diff: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }
-                .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        let mut d_wt1: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        let mut d_wt2: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        let mut d_wt_diff: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
             &d_prices,
@@ -654,9 +684,21 @@ impl CudaWavetrend {
             .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
 
         Ok((
-            DeviceArrayF32 { buf: d_wt1, rows, cols },
-            DeviceArrayF32 { buf: d_wt2, rows, cols },
-            DeviceArrayF32 { buf: d_wt_diff, rows, cols },
+            DeviceArrayF32 {
+                buf: d_wt1,
+                rows,
+                cols,
+            },
+            DeviceArrayF32 {
+                buf: d_wt2,
+                rows,
+                cols,
+            },
+            DeviceArrayF32 {
+                buf: d_wt_diff,
+                rows,
+                cols,
+            },
         ))
     }
 
@@ -670,14 +712,22 @@ impl CudaWavetrend {
         wt2_tm: &mut [f32],
         wt_diff_tm: &mut [f32],
     ) -> Result<(), CudaWavetrendError> {
-        let expected = cols.checked_mul(rows).ok_or_else(|| CudaWavetrendError::InvalidInput("size overflow".into()))?;
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaWavetrendError::InvalidInput("size overflow".into()))?;
         if wt1_tm.len() != expected || wt2_tm.len() != expected || wt_diff_tm.len() != expected {
-            return Err(CudaWavetrendError::InvalidInput("output slices must be cols*rows".into()));
+            return Err(CudaWavetrendError::InvalidInput(
+                "output slices must be cols*rows".into(),
+            ));
         }
         let (wt1, wt2, wt_diff) =
             self.wavetrend_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, params)?;
-        wt1.buf.copy_to(wt1_tm).map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
-        wt2.buf.copy_to(wt2_tm).map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        wt1.buf
+            .copy_to(wt1_tm)
+            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
+        wt2.buf
+            .copy_to(wt2_tm)
+            .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
         wt_diff
             .buf
             .copy_to(wt_diff_tm)
@@ -692,7 +742,9 @@ impl CudaWavetrend {
         params: &WavetrendParams,
     ) -> Result<(Vec<i32>, i32, i32, i32, f32), CudaWavetrendError> {
         if cols == 0 || rows == 0 {
-            return Err(CudaWavetrendError::InvalidInput("cols or rows is zero".into()));
+            return Err(CudaWavetrendError::InvalidInput(
+                "cols or rows is zero".into(),
+            ));
         }
         let elems = cols
             .checked_mul(rows)
@@ -722,7 +774,8 @@ impl CudaWavetrend {
                     break;
                 }
             }
-            let fv = fv.ok_or_else(|| CudaWavetrendError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv = fv
+                .ok_or_else(|| CudaWavetrendError::InvalidInput(format!("series {} all NaN", s)))?;
             if (rows as i32) - fv < (need as i32) {
                 return Err(CudaWavetrendError::InvalidInput(format!(
                     "series {} not enough valid data (needed >= {}, valid = {})",
@@ -751,7 +804,9 @@ impl CudaWavetrend {
         d_wt2: &mut DeviceBuffer<f32>,
         d_wt_diff: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWavetrendError> {
-        if cols == 0 || rows == 0 { return Ok(()); }
+        if cols == 0 || rows == 0 {
+            return Ok(());
+        }
         let func = self
             .module
             .get_function("wavetrend_many_series_one_param_time_major_f32")
@@ -794,7 +849,10 @@ impl CudaWavetrend {
                 .map_err(|e| CudaWavetrendError::Cuda(e.to_string()))?;
         }
         // Record selection and maybe log
-        unsafe { (*(self as *const _ as *mut CudaWavetrend)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaWavetrend)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
         Ok(())
     }
@@ -857,10 +915,20 @@ pub mod benches {
     }
     impl CudaBenchState for WtManySeriesState {
         fn launch(&mut self) {
-            let params = WavetrendParams { channel_length: Some(10), average_length: Some(21), ma_length: Some(4), factor: Some(0.015) };
+            let params = WavetrendParams {
+                channel_length: Some(10),
+                average_length: Some(21),
+                ma_length: Some(4),
+                factor: Some(0.015),
+            };
             let _ = self
                 .cuda
-                .wavetrend_many_series_one_param_time_major_dev(&self.tm, MANY_SERIES_COLS, MANY_SERIES_LEN, &params)
+                .wavetrend_many_series_one_param_time_major_dev(
+                    &self.tm,
+                    MANY_SERIES_COLS,
+                    MANY_SERIES_LEN,
+                    &params,
+                )
                 .expect("wavetrend many-series");
         }
     }

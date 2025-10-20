@@ -6,9 +6,9 @@ use my_project::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
-#[cfg(feature = "cuda")]
 use my_project::cuda::cksp_wrapper::CudaCksp;
+#[cfg(feature = "cuda")]
+use my_project::cuda::cuda_available;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -45,7 +45,11 @@ fn cksp_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         close[i] = base;
     }
 
-    let sweep = CkspBatchRange { p: (5, 29, 4), x: (1.0, 1.0, 0.0), q: (7, 13, 3) };
+    let sweep = CkspBatchRange {
+        p: (5, 29, 4),
+        x: (1.0, 1.0, 0.0),
+        q: (7, 13, 3),
+    };
 
     let cpu = CkspBatchBuilder::new()
         .kernel(Kernel::ScalarBatch)
@@ -95,4 +99,3 @@ fn cksp_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
-

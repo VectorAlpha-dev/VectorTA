@@ -42,18 +42,37 @@ impl fmt::Display for CudaFisherError {
 impl std::error::Error for CudaFisherError {}
 
 #[derive(Clone, Copy, Debug, Default)]
-pub enum BatchKernelPolicy { #[default] Auto, Plain { block_x: u32 } }
+pub enum BatchKernelPolicy {
+    #[default]
+    Auto,
+    Plain {
+        block_x: u32,
+    },
+}
 
 #[derive(Clone, Copy, Debug, Default)]
-pub enum ManySeriesKernelPolicy { #[default] Auto, OneD { block_x: u32 } }
+pub enum ManySeriesKernelPolicy {
+    #[default]
+    Auto,
+    OneD {
+        block_x: u32,
+    },
+}
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct CudaFisherPolicy { pub batch: BatchKernelPolicy, pub many_series: ManySeriesKernelPolicy }
+pub struct CudaFisherPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 /// Pair of VRAM-backed arrays produced by the Fisher kernels (fisher + signal).
 pub struct DeviceFisherPair {
@@ -63,9 +82,13 @@ pub struct DeviceFisherPair {
 
 impl DeviceFisherPair {
     #[inline]
-    pub fn rows(&self) -> usize { self.fisher.rows }
+    pub fn rows(&self) -> usize {
+        self.fisher.rows
+    }
     #[inline]
-    pub fn cols(&self) -> usize { self.fisher.cols }
+    pub fn cols(&self) -> usize {
+        self.fisher.cols
+    }
 }
 
 pub struct CudaFisher {
@@ -110,74 +133,135 @@ impl CudaFisher {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaFisherPolicy) { self.policy = policy; }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaFisherPolicy) {
+        self.policy = policy;
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
-        match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && v.to_lowercase() != "false", Err(_) => true }
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Some((free, _)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!("[DEBUG] fisher batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaFisher)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaFisher)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!("[DEBUG] fisher many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaFisher)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaFisher)).debug_many_logged = true;
+                }
             }
         }
     }
 
     fn expand_grid(range: &FisherBatchRange) -> Vec<FisherParams> {
         let (s, e, st) = range.period;
-        let lens: Vec<usize> = if st == 0 || s == e { vec![s] } else { (s..=e).step_by(st).collect() };
-        lens.into_iter().map(|p| FisherParams { period: Some(p) }).collect()
+        let lens: Vec<usize> = if st == 0 || s == e {
+            vec![s]
+        } else {
+            (s..=e).step_by(st).collect()
+        };
+        lens.into_iter()
+            .map(|p| FisherParams { period: Some(p) })
+            .collect()
     }
 
     fn prepare_batch_inputs(
-        high_f32: &[f32], low_f32: &[f32], sweep: &FisherBatchRange,
+        high_f32: &[f32],
+        low_f32: &[f32],
+        sweep: &FisherBatchRange,
     ) -> Result<(Vec<FisherParams>, usize, usize, Vec<f32>), CudaFisherError> {
-        if high_f32.len() != low_f32.len() { return Err(CudaFisherError::InvalidInput("length mismatch".into())); }
+        if high_f32.len() != low_f32.len() {
+            return Err(CudaFisherError::InvalidInput("length mismatch".into()));
+        }
         let len = high_f32.len();
-        if len == 0 { return Err(CudaFisherError::InvalidInput("empty input".into())); }
+        if len == 0 {
+            return Err(CudaFisherError::InvalidInput("empty input".into()));
+        }
         // first_valid where both high/low are valid
         let mut first_valid: Option<usize> = None;
-        for i in 0..len { let h = high_f32[i]; let l = low_f32[i]; if h == h && l == l { first_valid = Some(i); break; } }
-        let first_valid = first_valid.ok_or_else(|| CudaFisherError::InvalidInput("all values are NaN".into()))?;
+        for i in 0..len {
+            let h = high_f32[i];
+            let l = low_f32[i];
+            if h == h && l == l {
+                first_valid = Some(i);
+                break;
+            }
+        }
+        let first_valid = first_valid
+            .ok_or_else(|| CudaFisherError::InvalidInput("all values are NaN".into()))?;
 
         let combos = Self::expand_grid(sweep);
-        if combos.is_empty() { return Err(CudaFisherError::InvalidInput("no parameter combinations".into())); }
-        let max_p = combos.iter().map(|c| c.period.unwrap_or(0)).max().unwrap_or(0);
-        if max_p == 0 || max_p > len { return Err(CudaFisherError::InvalidInput("invalid period".into())); }
-        if len - first_valid < max_p { return Err(CudaFisherError::InvalidInput("not enough valid data".into())); }
+        if combos.is_empty() {
+            return Err(CudaFisherError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        let max_p = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if max_p == 0 || max_p > len {
+            return Err(CudaFisherError::InvalidInput("invalid period".into()));
+        }
+        if len - first_valid < max_p {
+            return Err(CudaFisherError::InvalidInput(
+                "not enough valid data".into(),
+            ));
+        }
 
         // Precompute HL2 midpoints as batch-shared input (mirrors scalar batch code)
         let mut hl2 = vec![f32::NAN; len];
-        for i in 0..len { hl2[i] = 0.5f32 * (high_f32[i] + low_f32[i]); }
+        for i in 0..len {
+            hl2[i] = 0.5f32 * (high_f32[i] + low_f32[i]);
+        }
         Ok((combos, first_valid, len, hl2))
     }
 
@@ -204,31 +288,44 @@ impl CudaFisher {
 
         let d_hl = unsafe { DeviceBuffer::from_slice_async(&hl2, &self.stream) }
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
-        let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap_or(0) as i32).collect();
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0) as i32)
+            .collect();
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
 
-        let mut d_fish: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
-            .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
-        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
-            .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        let mut d_fish: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
+                .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        let mut d_sig: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
+                .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
 
-        let func = self.module.get_function("fisher_batch_f32")
+        let func = self
+            .module
+            .get_function("fisher_batch_f32")
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
         // Policy: one block per combo; thread 0 does the scan
-        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Auto => 128, BatchKernelPolicy::Plain { block_x } => block_x.max(32) };
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        };
         let grid_x: u32 = combos.len() as u32;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        unsafe { (*(self as *const _ as *mut CudaFisher)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaFisher)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         unsafe {
             let mut hl_ptr = d_hl.as_device_ptr().as_raw();
             let mut periods_ptr = d_periods.as_device_ptr().as_raw();
             let mut series_len_i = len as i32;
-            let mut n_combos_i   = combos.len() as i32;
-            let mut first_i      = first_valid as i32;
+            let mut n_combos_i = combos.len() as i32;
+            let mut first_i = first_valid as i32;
             let mut fish_ptr = d_fish.as_device_ptr().as_raw();
-            let mut sig_ptr  = d_sig.as_device_ptr().as_raw();
+            let mut sig_ptr = d_sig.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut hl_ptr as *mut _ as *mut c_void,
                 &mut periods_ptr as *mut _ as *mut c_void,
@@ -238,16 +335,27 @@ impl CudaFisher {
                 &mut fish_ptr as *mut _ as *mut c_void,
                 &mut sig_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)
+            self.stream
+                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
         }
-        self.stream.synchronize().map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
         self.maybe_log_batch_debug();
 
         Ok((
             DeviceFisherPair {
-                fisher: DeviceArrayF32 { buf: d_fish, rows: combos.len(), cols: len },
-                signal: DeviceArrayF32 { buf: d_sig, rows: combos.len(), cols: len },
+                fisher: DeviceArrayF32 {
+                    buf: d_fish,
+                    rows: combos.len(),
+                    cols: len,
+                },
+                signal: DeviceArrayF32 {
+                    buf: d_sig,
+                    rows: combos.len(),
+                    cols: len,
+                },
             },
             combos,
         ))
@@ -261,18 +369,38 @@ impl CudaFisher {
         rows: usize,
         period: usize,
     ) -> Result<DeviceFisherPair, CudaFisherError> {
-        if high_tm_f32.len() != low_tm_f32.len() { return Err(CudaFisherError::InvalidInput("length mismatch".into())); }
-        if cols == 0 || rows == 0 { return Err(CudaFisherError::InvalidInput("empty matrix".into())); }
-        if high_tm_f32.len() != cols * rows { return Err(CudaFisherError::InvalidInput("bad shape".into())); }
-        if period == 0 || period > rows { return Err(CudaFisherError::InvalidInput("invalid period".into())); }
+        if high_tm_f32.len() != low_tm_f32.len() {
+            return Err(CudaFisherError::InvalidInput("length mismatch".into()));
+        }
+        if cols == 0 || rows == 0 {
+            return Err(CudaFisherError::InvalidInput("empty matrix".into()));
+        }
+        if high_tm_f32.len() != cols * rows {
+            return Err(CudaFisherError::InvalidInput("bad shape".into()));
+        }
+        if period == 0 || period > rows {
+            return Err(CudaFisherError::InvalidInput("invalid period".into()));
+        }
 
         // Build HL2 time-major and first_valid per series considering both inputs
         let mut hl2_tm = vec![f32::NAN; cols * rows];
-        for r in 0..rows { for c in 0..cols { let idx = r * cols + c; hl2_tm[idx] = 0.5f32 * (high_tm_f32[idx] + low_tm_f32[idx]); } }
+        for r in 0..rows {
+            for c in 0..cols {
+                let idx = r * cols + c;
+                hl2_tm[idx] = 0.5f32 * (high_tm_f32[idx] + low_tm_f32[idx]);
+            }
+        }
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
-            for r in 0..rows { let h = high_tm_f32[r * cols + s]; let l = low_tm_f32[r * cols + s]; if h == h && l == l { fv = r as i32; break; } }
+            for r in 0..rows {
+                let h = high_tm_f32[r * cols + s];
+                let l = low_tm_f32[r * cols + s];
+                if h == h && l == l {
+                    fv = r as i32;
+                    break;
+                }
+            }
             first_valids[s] = fv;
         }
 
@@ -292,26 +420,36 @@ impl CudaFisher {
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
         let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
-        let mut d_fish: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-            .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
-        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-            .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        let mut d_fish: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        let mut d_sig: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
 
-        let func = self.module.get_function("fisher_many_series_one_param_f32")
+        let func = self
+            .module
+            .get_function("fisher_many_series_one_param_f32")
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
-        let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::Auto => 128, ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64) };
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 128,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
+        };
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        unsafe { (*(self as *const _ as *mut CudaFisher)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
         unsafe {
-            let mut hl_ptr   = d_hl.as_device_ptr().as_raw();
+            (*(self as *const _ as *mut CudaFisher)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
+        unsafe {
+            let mut hl_ptr = d_hl.as_device_ptr().as_raw();
             let mut first_ptr = d_first.as_device_ptr().as_raw();
             let mut num_series_i = cols as i32;
             let mut series_len_i = rows as i32;
-            let mut period_i     = period as i32;
+            let mut period_i = period as i32;
             let mut fish_ptr = d_fish.as_device_ptr().as_raw();
-            let mut sig_ptr  = d_sig.as_device_ptr().as_raw();
+            let mut sig_ptr = d_sig.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut hl_ptr as *mut _ as *mut c_void,
                 &mut first_ptr as *mut _ as *mut c_void,
@@ -321,15 +459,26 @@ impl CudaFisher {
                 &mut fish_ptr as *mut _ as *mut c_void,
                 &mut sig_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)
+            self.stream
+                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
         }
 
-        self.stream.synchronize().map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
         self.maybe_log_many_debug();
         Ok(DeviceFisherPair {
-            fisher: DeviceArrayF32 { buf: d_fish, rows, cols },
-            signal: DeviceArrayF32 { buf: d_sig, rows, cols },
+            fisher: DeviceArrayF32 {
+                buf: d_fish,
+                rows,
+                cols,
+            },
+            signal: DeviceArrayF32 {
+                buf: d_sig,
+                rows,
+                cols,
+            },
         })
     }
 }
@@ -368,11 +517,23 @@ pub mod benches {
         let cuda = CudaFisher::new(0).expect("CudaFisher");
         let mut high = gen_series(ONE_SERIES_LEN);
         let mut low = vec![0.0f32; ONE_SERIES_LEN];
-        for i in 0..ONE_SERIES_LEN { low[i] = 0.7 * high[i] + 0.1 * (i as f32).sin(); }
+        for i in 0..ONE_SERIES_LEN {
+            low[i] = 0.7 * high[i] + 0.1 * (i as f32).sin();
+        }
         // NaNs at start for warmup semantics
-        for i in 0..16 { high[i] = f32::NAN; low[i] = f32::NAN; }
-        let sweep = FisherBatchRange { period: (9, 9 + PARAM_SWEEP - 1, 1) };
-        Box::new(FisherBatchState { cuda, high, low, sweep })
+        for i in 0..16 {
+            high[i] = f32::NAN;
+            low[i] = f32::NAN;
+        }
+        let sweep = FisherBatchRange {
+            period: (9, 9 + PARAM_SWEEP - 1, 1),
+        };
+        Box::new(FisherBatchState {
+            cuda,
+            high,
+            low,
+            sweep,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

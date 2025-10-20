@@ -1935,22 +1935,28 @@ pub fn dx_cuda_batch_dev_py<'py>(
     close_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-)
--> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
     let c = close_f32.as_slice()?;
     let sweep = DxBatchRange::from_tuple(period_range);
     let (inner, combos) = py.allow_threads(|| {
         let cuda = CudaDx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.dx_batch_dev(h, l, c, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.dx_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
     dict.set_item(
         "periods",
-        combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     Ok((DeviceArrayF32Py { inner }, dict))
 }
@@ -1969,7 +1975,9 @@ pub fn dx_cuda_many_series_one_param_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;

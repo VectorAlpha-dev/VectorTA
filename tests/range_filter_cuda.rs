@@ -10,19 +10,23 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::CudaRangeFilter;
 
 use my_project::indicators::range_filter::{
-    range_filter_batch_with_kernel, range_filter_with_kernel, RangeFilterBatchRange, RangeFilterInput,
-    RangeFilterParams,
+    range_filter_batch_with_kernel, range_filter_with_kernel, RangeFilterBatchRange,
+    RangeFilterInput, RangeFilterParams,
 };
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
 #[test]
 fn cuda_feature_off_noop() {
     #[cfg(not(feature = "cuda"))]
-    { assert!(true); }
+    {
+        assert!(true);
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -66,9 +70,21 @@ fn range_filter_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
 
     let tol = 1.5e-3; // f32 kernel vs f64 CPU
     for idx in 0..(cpu.rows * cpu.cols) {
-        assert!(approx_eq(cpu.filter_values[idx], g_f[idx] as f64, tol), "filter mismatch at {}", idx);
-        assert!(approx_eq(cpu.high_band_values[idx], g_h[idx] as f64, tol), "high mismatch at {}", idx);
-        assert!(approx_eq(cpu.low_band_values[idx], g_l[idx] as f64, tol), "low mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu.filter_values[idx], g_f[idx] as f64, tol),
+            "filter mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu.high_band_values[idx], g_h[idx] as f64, tol),
+            "high mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu.low_band_values[idx], g_l[idx] as f64, tol),
+            "low mismatch at {}",
+            idx
+        );
     }
 
     Ok(())
@@ -78,9 +94,7 @@ fn range_filter_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
 #[test]
 fn range_filter_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[range_filter_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[range_filter_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -104,8 +118,15 @@ fn range_filter_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
     let mut l_cpu_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = data_tm[t * cols + s]; }
-        let params = RangeFilterParams { range_size: Some(range_size), range_period: Some(range_period), smooth_range: Some(smooth_range), smooth_period: Some(smooth_period) };
+        for t in 0..rows {
+            series[t] = data_tm[t * cols + s];
+        }
+        let params = RangeFilterParams {
+            range_size: Some(range_size),
+            range_period: Some(range_period),
+            smooth_range: Some(smooth_range),
+            smooth_period: Some(smooth_period),
+        };
         let input = RangeFilterInput::from_slice(&series, params);
         let out = range_filter_with_kernel(&input, Kernel::Scalar)?;
         for t in 0..rows {
@@ -123,7 +144,12 @@ fn range_filter_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
             &data_tm_f32,
             cols,
             rows,
-            &RangeFilterParams { range_size: Some(range_size), range_period: Some(range_period), smooth_range: Some(smooth_range), smooth_period: Some(smooth_period) },
+            &RangeFilterParams {
+                range_size: Some(range_size),
+                range_period: Some(range_period),
+                smooth_range: Some(smooth_range),
+                smooth_period: Some(smooth_period),
+            },
         )
         .expect("range_filter_many_series_one_param_time_major_dev");
 
@@ -138,11 +164,22 @@ fn range_filter_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
 
     let tol = 1.5e-3;
     for idx in 0..g_f_tm.len() {
-        assert!(approx_eq(f_cpu_tm[idx], g_f_tm[idx] as f64, tol), "filter mismatch at {}", idx);
-        assert!(approx_eq(h_cpu_tm[idx], g_h_tm[idx] as f64, tol), "high mismatch at {}", idx);
-        assert!(approx_eq(l_cpu_tm[idx], g_l_tm[idx] as f64, tol), "low mismatch at {}", idx);
+        assert!(
+            approx_eq(f_cpu_tm[idx], g_f_tm[idx] as f64, tol),
+            "filter mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(h_cpu_tm[idx], g_h_tm[idx] as f64, tol),
+            "high mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(l_cpu_tm[idx], g_l_tm[idx] as f64, tol),
+            "low mismatch at {}",
+            idx
+        );
     }
 
     Ok(())
 }
-

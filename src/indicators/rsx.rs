@@ -1983,11 +1983,11 @@ pub fn rsx_batch_into(
 
 // ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::rsx_wrapper::CudaRsx;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "rsx_cuda_batch_dev")]
@@ -1998,12 +1998,17 @@ pub fn rsx_cuda_batch_dev_py(
     period_range: (usize, usize, usize),
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let prices = data.as_slice()?;
-    let sweep = RsxBatchRange { period: period_range };
+    let sweep = RsxBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaRsx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.rsx_batch_dev(prices, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.rsx_batch_dev(prices, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }
@@ -2019,7 +2024,9 @@ pub fn rsx_cuda_many_series_one_param_dev_py(
     period: usize,
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let prices_tm = data_tm.as_slice()?;
     let expected = cols
         .checked_mul(rows)
@@ -2029,8 +2036,7 @@ pub fn rsx_cuda_many_series_one_param_dev_py(
     }
     let inner = py.allow_threads(|| {
         let cuda = CudaRsx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .rsx_many_series_one_param_time_major_dev(prices_tm, cols, rows, period)
+        cuda.rsx_many_series_one_param_time_major_dev(prices_tm, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })

@@ -47,7 +47,10 @@ pub struct CudaTsiPolicy {
 }
 impl Default for CudaTsiPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -65,8 +68,8 @@ pub struct CudaTsi {
 impl CudaTsi {
     pub fn new(device_id: usize) -> Result<Self, CudaTsiError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/tsi_kernel.ptx"));
         let jit_opts = &[
@@ -77,7 +80,11 @@ impl CudaTsi {
             Ok(m) => m,
             Err(_) => {
                 if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                { m } else { Module::from_ptx(ptx, &[]).map_err(|e| CudaTsiError::Cuda(e.to_string()))? }
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaTsiError::Cuda(e.to_string()))?
+                }
             }
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -95,7 +102,9 @@ impl CudaTsi {
     }
 
     #[inline]
-    pub fn set_policy(&mut self, p: CudaTsiPolicy) { self.policy = p; }
+    pub fn set_policy(&mut self, p: CudaTsiPolicy) {
+        self.policy = p;
+    }
 
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaTsiError> {
@@ -121,7 +130,9 @@ impl CudaTsi {
 
         let combos = expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaTsiError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaTsiError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         // Validate and marshal params
         let mut longs_i32 = Vec::<i32>::with_capacity(combos.len());
@@ -135,7 +146,9 @@ impl CudaTsi {
             let needed = 1 + l + s;
             if len - first_valid < needed {
                 return Err(CudaTsiError::InvalidInput(format!(
-                    "not enough valid data: need {}, have {}", needed, len - first_valid
+                    "not enough valid data: need {}, have {}",
+                    needed,
+                    len - first_valid
                 )));
             }
             longs_i32.push(l as i32);
@@ -154,20 +167,35 @@ impl CudaTsi {
             }
         }
 
-        let d_prices = DeviceBuffer::from_slice(prices_f32)
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let d_longs = DeviceBuffer::from_slice(&longs_i32)
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
-        let d_shorts = DeviceBuffer::from_slice(&shorts_i32)
-            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(prices_f32).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        let d_longs =
+            DeviceBuffer::from_slice(&longs_i32).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        let d_shorts =
+            DeviceBuffer::from_slice(&shorts_i32).map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(combos.len() * len)
                 .map_err(|e| CudaTsiError::Cuda(e.to_string()))?
         };
 
-        self.launch_batch_kernel(&d_prices, &d_longs, &d_shorts, len, first_valid, combos.len(), &mut d_out)?;
+        self.launch_batch_kernel(
+            &d_prices,
+            &d_longs,
+            &d_shorts,
+            len,
+            first_valid,
+            combos.len(),
+            &mut d_out,
+        )?;
         self.synchronize()?;
-        Ok((DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len }, combos))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
+            combos,
+        ))
     }
 
     fn launch_batch_kernel(
@@ -180,9 +208,16 @@ impl CudaTsi {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTsiError> {
-        if len == 0 || n_combos == 0 { return Ok(()); }
-        if len > i32::MAX as usize || n_combos > i32::MAX as usize || first_valid > i32::MAX as usize {
-            return Err(CudaTsiError::InvalidInput("inputs exceed kernel limits".into()));
+        if len == 0 || n_combos == 0 {
+            return Ok(());
+        }
+        if len > i32::MAX as usize
+            || n_combos > i32::MAX as usize
+            || first_valid > i32::MAX as usize
+        {
+            return Err(CudaTsiError::InvalidInput(
+                "inputs exceed kernel limits".into(),
+            ));
         }
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
@@ -249,9 +284,15 @@ impl CudaTsi {
         long_period: usize,
         short_period: usize,
     ) -> Result<DeviceArrayF32, CudaTsiError> {
-        if cols == 0 || rows == 0 { return Err(CudaTsiError::InvalidInput("cols/rows zero".into())); }
-        if prices_tm_f32.len() != cols * rows { return Err(CudaTsiError::InvalidInput("matrix size mismatch".into())); }
-        if long_period == 0 || short_period == 0 { return Err(CudaTsiError::InvalidInput("periods must be > 0".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaTsiError::InvalidInput("cols/rows zero".into()));
+        }
+        if prices_tm_f32.len() != cols * rows {
+            return Err(CudaTsiError::InvalidInput("matrix size mismatch".into()));
+        }
+        if long_period == 0 || short_period == 0 {
+            return Err(CudaTsiError::InvalidInput("periods must be > 0".into()));
+        }
 
         // Per-series first_valids
         let mut first_valids = vec![0i32; cols];
@@ -259,25 +300,35 @@ impl CudaTsi {
             let mut fv = rows as i32;
             for t in 0..rows {
                 let v = prices_tm_f32[t * cols + s];
-                if v == v { fv = t as i32; break; } // is_finite
+                if v == v {
+                    fv = t as i32;
+                    break;
+                } // is_finite
             }
             if (rows as i32) - fv < (1 + long_period + short_period) as i32 {
                 return Err(CudaTsiError::InvalidInput(format!(
-                    "series {} insufficient data for long+short={}, have {}", s, long_period + short_period + 1, (rows as i32) - fv
+                    "series {} insufficient data for long+short={}, have {}",
+                    s,
+                    long_period + short_period + 1,
+                    (rows as i32) - fv
                 )));
             }
             first_valids[s] = fv;
         }
 
         // VRAM: inputs + first_valids + output
-        let elems = cols.checked_mul(rows).ok_or_else(|| CudaTsiError::InvalidInput("overflow".into()))?;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaTsiError::InvalidInput("overflow".into()))?;
         let in_bytes = elems * std::mem::size_of::<f32>();
         let fv_bytes = cols * std::mem::size_of::<i32>();
         let out_bytes = elems * std::mem::size_of::<f32>();
         if let Ok((free, _)) = mem_get_info() {
             let head = 64usize * 1024 * 1024;
             let required = in_bytes + fv_bytes + out_bytes;
-            if required.saturating_add(head) > free { return Err(CudaTsiError::InvalidInput("insufficient VRAM".into())); }
+            if required.saturating_add(head) > free {
+                return Err(CudaTsiError::InvalidInput("insufficient VRAM".into()));
+            }
         }
 
         let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)
@@ -298,7 +349,11 @@ impl CudaTsi {
             &mut d_out_tm,
         )?;
         self.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 
     fn launch_many_series_kernel(
@@ -311,9 +366,13 @@ impl CudaTsi {
         d_first_valids: &DeviceBuffer<i32>,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTsiError> {
-        if cols == 0 || rows == 0 { return Ok(()); }
+        if cols == 0 || rows == 0 {
+            return Ok(());
+        }
         if cols > i32::MAX as usize || rows > i32::MAX as usize {
-            return Err(CudaTsiError::InvalidInput("inputs exceed kernel limits".into()));
+            return Err(CudaTsiError::InvalidInput(
+                "inputs exceed kernel limits".into(),
+            ));
         }
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
@@ -357,13 +416,22 @@ impl CudaTsi {
 
 fn expand_grid(r: &TsiBatchRange) -> Vec<TsiParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
     let longs = axis_usize(r.long_period);
     let shorts = axis_usize(r.short_period);
     let mut out = Vec::with_capacity(longs.len() * shorts.len());
-    for &l in &longs { for &s in &shorts { out.push(TsiParams { long_period: Some(l), short_period: Some(s) }); } }
+    for &l in &longs {
+        for &s in &shorts {
+            out.push(TsiParams {
+                long_period: Some(l),
+                short_period: Some(s),
+            });
+        }
+    }
     out
 }
 
@@ -382,14 +450,22 @@ pub mod benches {
         sweep: TsiBatchRange,
     }
     impl CudaBenchState for TsiBatchState {
-        fn launch(&mut self) { let _ = self.cuda.tsi_batch_dev(&self.price, &self.sweep).unwrap(); }
+        fn launch(&mut self) {
+            let _ = self.cuda.tsi_batch_dev(&self.price, &self.sweep).unwrap();
+        }
     }
     fn prep_batch() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaTsi::new(0).expect("cuda tsi");
-        cuda.set_policy(CudaTsiPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto });
+        cuda.set_policy(CudaTsiPolicy {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        });
         let price = gen_series(LEN);
         // Build a reasonable sweep of (long, short)
-        let sweep = TsiBatchRange { long_period: (10, 100, (100-10).max(1) / ROWS.max(1)), short_period: (5, 30, (30-5).max(1) / (ROWS/2).max(1)) };
+        let sweep = TsiBatchRange {
+            long_period: (10, 100, (100 - 10).max(1) / ROWS.max(1)),
+            short_period: (5, 30, (30 - 5).max(1) / (ROWS / 2).max(1)),
+        };
         Box::new(TsiBatchState { cuda, price, sweep })
     }
 
@@ -400,7 +476,7 @@ pub mod benches {
             "tsi_cuda_batch_dev",
             "1m_x_128",
             prep_batch,
-        ).with_inner_iters(4)]
+        )
+        .with_inner_iters(4)]
     }
 }
-

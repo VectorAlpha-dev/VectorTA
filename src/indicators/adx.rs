@@ -1215,13 +1215,14 @@ pub fn adx_cuda_batch_dev_py<'py>(
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
     let c = close_f32.as_slice()?;
-    let sweep = AdxBatchRange { period: period_range };
-    let (inner, combos) = py
-        .allow_threads(|| {
-            let cuda = CudaAdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.adx_batch_dev(h, l, c, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let sweep = AdxBatchRange {
+        period: period_range,
+    };
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaAdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.adx_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     let dict = PyDict::new(py);
     dict.set_item(
         "periods",
@@ -1254,13 +1255,11 @@ pub fn adx_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let inner = py
-        .allow_threads(|| {
-            let cuda = CudaAdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda
-                .adx_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.adx_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     Ok(DeviceArrayF32Py { inner })
 }
 

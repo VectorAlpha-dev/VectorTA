@@ -2124,20 +2124,15 @@ pub fn zscore_cuda_many_series_one_param_dev_py<'py>(
     }
 
     if nbdev < 0.0 || !nbdev.is_finite() {
-        return Err(PyValueError::new_err("nbdev must be non-negative and finite"));
+        return Err(PyValueError::new_err(
+            "nbdev must be non-negative and finite",
+        ));
     }
 
     let slice_in = data_tm_f32.as_slice()?;
     let inner = py.allow_threads(|| {
         let cuda = CudaZscore::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .zscore_many_series_one_param_time_major_dev(
-                slice_in,
-                cols,
-                rows,
-                period,
-                nbdev as f32,
-            )
+        cuda.zscore_many_series_one_param_time_major_dev(slice_in, cols, rows, period, nbdev as f32)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 

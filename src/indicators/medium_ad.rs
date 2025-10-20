@@ -2168,9 +2168,9 @@ pub fn medium_ad_batch_py<'py>(
 
 // ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::medium_ad_wrapper::CudaMediumAd;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "medium_ad_cuda_batch_dev")]
@@ -2186,11 +2186,13 @@ pub fn medium_ad_cuda_batch_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data_f32.as_slice()?;
-    let sweep = MediumAdBatchRange { period: period_range };
+    let sweep = MediumAdBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
-        let cuda = CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .medium_ad_batch_dev(slice, &sweep)
+        let cuda =
+            CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.medium_ad_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
@@ -2213,9 +2215,9 @@ pub fn medium_ad_cuda_many_series_one_param_dev_py(
     }
     let slice = data_tm_f32.as_slice()?;
     let inner = py.allow_threads(|| {
-        let cuda = CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .medium_ad_many_series_one_param_time_major_dev(slice, cols, rows, period)
+        let cuda =
+            CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.medium_ad_many_series_one_param_time_major_dev(slice, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })

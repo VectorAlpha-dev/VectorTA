@@ -47,9 +47,9 @@ use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaAo;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 impl<'a> AsRef<[f64]> for AoInput<'a> {
     #[inline(always)]
@@ -1920,7 +1920,9 @@ pub fn ao_cuda_batch_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
     if high_slice.len() != low_slice.len() {
@@ -1932,10 +1934,14 @@ pub fn ao_cuda_batch_dev_py(
         let l = low_slice[i];
         hl2_f32[i] = (h + l) * 0.5;
     }
-    let sweep = AoBatchRange { short_period: short_period_range, long_period: long_period_range };
+    let sweep = AoBatchRange {
+        short_period: short_period_range,
+        long_period: long_period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaAo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ao_batch_dev(&hl2_f32, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.ao_batch_dev(&hl2_f32, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }
@@ -1954,20 +1960,31 @@ pub fn ao_cuda_many_series_one_param_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let high_slice = high_tm.as_slice()?;
     let low_slice = low_tm.as_slice()?;
-    let expected = cols.checked_mul(rows).ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
     if high_slice.len() != expected || low_slice.len() != expected {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
     let mut hl2_f32 = vec![0f32; expected];
-    for i in 0..expected { hl2_f32[i] = (high_slice[i] + low_slice[i]) * 0.5; }
+    for i in 0..expected {
+        hl2_f32[i] = (high_slice[i] + low_slice[i]) * 0.5;
+    }
     let inner = py.allow_threads(|| {
         let cuda = CudaAo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .ao_many_series_one_param_time_major_dev(&hl2_f32, cols, rows, short_period, long_period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.ao_many_series_one_param_time_major_dev(
+            &hl2_f32,
+            cols,
+            rows,
+            short_period,
+            long_period,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

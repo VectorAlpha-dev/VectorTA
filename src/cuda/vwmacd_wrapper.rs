@@ -40,7 +40,10 @@ pub struct CudaVwmacdPolicy {
 }
 impl Default for CudaVwmacdPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -68,8 +71,14 @@ pub struct DeviceVwmacdTriplet {
     pub hist: DeviceArrayF32,
 }
 impl DeviceVwmacdTriplet {
-    #[inline] pub fn rows(&self) -> usize { self.macd.rows }
-    #[inline] pub fn cols(&self) -> usize { self.macd.cols }
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.macd.rows
+    }
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.macd.cols
+    }
 }
 
 pub struct CudaVwmacd {
@@ -94,7 +103,8 @@ impl CudaVwmacd {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?
@@ -104,13 +114,27 @@ impl CudaVwmacd {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
 
-        Ok(Self { module, stream, _context: context, policy: CudaVwmacdPolicy::default() })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy: CudaVwmacdPolicy::default(),
+        })
     }
 
-    #[inline] pub fn set_policy(&mut self, policy: CudaVwmacdPolicy) { self.policy = policy; }
-    #[inline] pub fn policy(&self) -> &CudaVwmacdPolicy { &self.policy }
-    #[inline] pub fn synchronize(&self) -> Result<(), CudaVwmacdError> {
-        self.stream.synchronize().map_err(|e| CudaVwmacdError::Cuda(e.to_string()))
+    #[inline]
+    pub fn set_policy(&mut self, policy: CudaVwmacdPolicy) {
+        self.policy = policy;
+    }
+    #[inline]
+    pub fn policy(&self) -> &CudaVwmacdPolicy {
+        &self.policy
+    }
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaVwmacdError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))
     }
 
     // ------------- Batch (one series × many params) -------------
@@ -122,7 +146,9 @@ impl CudaVwmacd {
     ) -> Result<(DeviceVwmacdTriplet, Vec<VwmacdParams>), CudaVwmacdError> {
         let len = prices_f32.len();
         if len == 0 || volumes_f32.len() != len {
-            return Err(CudaVwmacdError::InvalidInput("mismatched or empty inputs".into()));
+            return Err(CudaVwmacdError::InvalidInput(
+                "mismatched or empty inputs".into(),
+            ));
         }
         // Support only default MA types for device kernels
         if !sweep.fast_ma_type.eq_ignore_ascii_case("sma")
@@ -137,7 +163,9 @@ impl CudaVwmacd {
 
         let combos = expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaVwmacdError::InvalidInput("empty parameter sweep".into()));
+            return Err(CudaVwmacdError::InvalidInput(
+                "empty parameter sweep".into(),
+            ));
         }
 
         let first_valid = first_valid_pair_f32(prices_f32, volumes_f32)
@@ -148,54 +176,107 @@ impl CudaVwmacd {
             let f = c.fast_period.unwrap();
             let s = c.slow_period.unwrap();
             let macd_warm = first_valid + f.max(s) - 1;
-            if macd_warm > max_macd_warm { max_macd_warm = macd_warm; }
+            if macd_warm > max_macd_warm {
+                max_macd_warm = macd_warm;
+            }
         }
-        if len <= max_macd_warm { return Err(CudaVwmacdError::InvalidInput("not enough valid data".into())); }
+        if len <= max_macd_warm {
+            return Err(CudaVwmacdError::InvalidInput(
+                "not enough valid data".into(),
+            ));
+        }
 
         // Prefix sums (f64) matching VWMA wrapper semantics
-        let (pv_prefix, vol_prefix) = compute_prefix_sums(prices_f32, volumes_f32, first_valid, len);
+        let (pv_prefix, vol_prefix) =
+            compute_prefix_sums(prices_f32, volumes_f32, first_valid, len);
 
         // Compact params (i32)
         let rows = combos.len();
-        let fasts: Vec<i32> = combos.iter().map(|c| c.fast_period.unwrap() as i32).collect();
-        let slows: Vec<i32> = combos.iter().map(|c| c.slow_period.unwrap() as i32).collect();
-        let sigs:  Vec<i32> = combos.iter().map(|c| c.signal_period.unwrap() as i32).collect();
+        let fasts: Vec<i32> = combos
+            .iter()
+            .map(|c| c.fast_period.unwrap() as i32)
+            .collect();
+        let slows: Vec<i32> = combos
+            .iter()
+            .map(|c| c.slow_period.unwrap() as i32)
+            .collect();
+        let sigs: Vec<i32> = combos
+            .iter()
+            .map(|c| c.signal_period.unwrap() as i32)
+            .collect();
 
         // VRAM check
-        let bytes = pv_prefix.len()*8 + vol_prefix.len()*8 + (fasts.len()+slows.len()+sigs.len())*4
-            + 3*rows*len*4;
+        let bytes = pv_prefix.len() * 8
+            + vol_prefix.len() * 8
+            + (fasts.len() + slows.len() + sigs.len()) * 4
+            + 3 * rows * len * 4;
         if let Ok((free, _)) = mem_get_info() {
-            if bytes.saturating_add(64*1024*1024) > free {
-                return Err(CudaVwmacdError::InvalidInput("insufficient device memory".into()));
+            if bytes.saturating_add(64 * 1024 * 1024) > free {
+                return Err(CudaVwmacdError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
             }
         }
 
         // Stage to device (pinned + async for large spans)
-        let h_pv = LockedBuffer::from_slice(&pv_prefix).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(&vol_prefix).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let d_pv: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }
+        let h_pv = LockedBuffer::from_slice(&pv_prefix)
             .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let d_vol: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }
+        let h_vol = LockedBuffer::from_slice(&vol_prefix)
             .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let d_fasts = DeviceBuffer::from_slice(&fasts).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let d_slows = DeviceBuffer::from_slice(&slows).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let d_sigs  = DeviceBuffer::from_slice(&sigs).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let d_pv: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }
+                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let d_vol: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }
+                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let d_fasts =
+            DeviceBuffer::from_slice(&fasts).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let d_slows =
+            DeviceBuffer::from_slice(&slows).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let d_sigs =
+            DeviceBuffer::from_slice(&sigs).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
 
-        let mut d_macd: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*len, &self.stream) }
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let mut d_signal: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*len, &self.stream) }
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*len, &self.stream) }
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let mut d_macd: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
+                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let mut d_signal: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
+                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let mut d_hist: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
+                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
 
-        self.launch_batch(&d_pv, &d_vol, &d_fasts, &d_slows, &d_sigs, len, first_valid, rows,
-                          &mut d_macd, &mut d_signal, &mut d_hist)?;
+        self.launch_batch(
+            &d_pv,
+            &d_vol,
+            &d_fasts,
+            &d_slows,
+            &d_sigs,
+            len,
+            first_valid,
+            rows,
+            &mut d_macd,
+            &mut d_signal,
+            &mut d_hist,
+        )?;
         self.synchronize()?;
 
         let triplet = DeviceVwmacdTriplet {
-            macd:   DeviceArrayF32 { buf: d_macd,   rows, cols: len },
-            signal: DeviceArrayF32 { buf: d_signal, rows, cols: len },
-            hist:   DeviceArrayF32 { buf: d_hist,   rows, cols: len },
+            macd: DeviceArrayF32 {
+                buf: d_macd,
+                rows,
+                cols: len,
+            },
+            signal: DeviceArrayF32 {
+                buf: d_signal,
+                rows,
+                cols: len,
+            },
+            hist: DeviceArrayF32 {
+                buf: d_hist,
+                rows,
+                cols: len,
+            },
         };
         Ok((triplet, combos))
     }
@@ -209,59 +290,132 @@ impl CudaVwmacd {
         rows: usize,
         params: &VwmacdParams,
     ) -> Result<DeviceVwmacdTriplet, CudaVwmacdError> {
-        if cols == 0 || rows == 0 || prices_tm_f32.len() != cols*rows || volumes_tm_f32.len() != cols*rows {
-            return Err(CudaVwmacdError::InvalidInput("invalid time-major inputs".into()));
+        if cols == 0
+            || rows == 0
+            || prices_tm_f32.len() != cols * rows
+            || volumes_tm_f32.len() != cols * rows
+        {
+            return Err(CudaVwmacdError::InvalidInput(
+                "invalid time-major inputs".into(),
+            ));
         }
         let f = params.fast_period.unwrap_or(12);
         let s = params.slow_period.unwrap_or(26);
         let g = params.signal_period.unwrap_or(9);
-        if f == 0 || s == 0 || g == 0 { return Err(CudaVwmacdError::InvalidInput("zero period".into())); }
-        if !params.fast_ma_type.as_deref().unwrap_or("sma").eq_ignore_ascii_case("sma")
-            || !params.slow_ma_type.as_deref().unwrap_or("sma").eq_ignore_ascii_case("sma")
-            || !params.signal_ma_type.as_deref().unwrap_or("ema").eq_ignore_ascii_case("ema")
-        { return Err(CudaVwmacdError::Unsupported("only SMA/SMA + EMA supported in CUDA path".into())); }
+        if f == 0 || s == 0 || g == 0 {
+            return Err(CudaVwmacdError::InvalidInput("zero period".into()));
+        }
+        if !params
+            .fast_ma_type
+            .as_deref()
+            .unwrap_or("sma")
+            .eq_ignore_ascii_case("sma")
+            || !params
+                .slow_ma_type
+                .as_deref()
+                .unwrap_or("sma")
+                .eq_ignore_ascii_case("sma")
+            || !params
+                .signal_ma_type
+                .as_deref()
+                .unwrap_or("ema")
+                .eq_ignore_ascii_case("ema")
+        {
+            return Err(CudaVwmacdError::Unsupported(
+                "only SMA/SMA + EMA supported in CUDA path".into(),
+            ));
+        }
 
         let first_valids = first_valids_time_major_f32(prices_tm_f32, volumes_tm_f32, cols, rows);
         // Quick check: at least one column has enough valid data
         let mut ok = false;
-        for &fv in &first_valids { if (rows as i32 - fv) as usize > f.max(s) { ok = true; break; } }
-        if !ok { return Err(CudaVwmacdError::InvalidInput("not enough valid data".into())); }
+        for &fv in &first_valids {
+            if (rows as i32 - fv) as usize > f.max(s) {
+                ok = true;
+                break;
+            }
+        }
+        if !ok {
+            return Err(CudaVwmacdError::InvalidInput(
+                "not enough valid data".into(),
+            ));
+        }
 
-        let (pv_prefix_tm, vol_prefix_tm) =
-            compute_prefix_sums_time_major(prices_tm_f32, volumes_tm_f32, cols, rows, &first_valids);
+        let (pv_prefix_tm, vol_prefix_tm) = compute_prefix_sums_time_major(
+            prices_tm_f32,
+            volumes_tm_f32,
+            cols,
+            rows,
+            &first_valids,
+        );
 
         // VRAM check
-        let bytes = pv_prefix_tm.len()*8 + vol_prefix_tm.len()*8 + first_valids.len()*4 + 3*cols*rows*4;
+        let bytes = pv_prefix_tm.len() * 8
+            + vol_prefix_tm.len() * 8
+            + first_valids.len() * 4
+            + 3 * cols * rows * 4;
         if let Ok((free, _)) = mem_get_info() {
-            if bytes.saturating_add(64*1024*1024) > free {
-                return Err(CudaVwmacdError::InvalidInput("insufficient device memory".into()));
+            if bytes.saturating_add(64 * 1024 * 1024) > free {
+                return Err(CudaVwmacdError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
             }
         }
 
-        let h_pv = LockedBuffer::from_slice(&pv_prefix_tm).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(&vol_prefix_tm).map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let d_pv: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }
+        let h_pv = LockedBuffer::from_slice(&pv_prefix_tm)
             .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let d_vol: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }
+        let h_vol = LockedBuffer::from_slice(&vol_prefix_tm)
             .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let d_pv: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }
+                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let d_vol: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }
+                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
         let d_first: DeviceBuffer<i32> = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
 
-        let mut d_macd: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols*rows, &self.stream) }
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let mut d_signal: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols*rows, &self.stream) }
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols*rows, &self.stream) }
-            .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let mut d_macd: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let mut d_signal: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
+        let mut d_hist: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
 
-        self.launch_many_series(&d_pv, &d_vol, &d_first, f, s, g, cols, rows,
-                                &mut d_macd, &mut d_signal, &mut d_hist)?;
+        self.launch_many_series(
+            &d_pv,
+            &d_vol,
+            &d_first,
+            f,
+            s,
+            g,
+            cols,
+            rows,
+            &mut d_macd,
+            &mut d_signal,
+            &mut d_hist,
+        )?;
         self.synchronize()?;
 
         Ok(DeviceVwmacdTriplet {
-            macd:   DeviceArrayF32 { buf: d_macd,   rows, cols },
-            signal: DeviceArrayF32 { buf: d_signal, rows, cols },
-            hist:   DeviceArrayF32 { buf: d_hist,   rows, cols },
+            macd: DeviceArrayF32 {
+                buf: d_macd,
+                rows,
+                cols,
+            },
+            signal: DeviceArrayF32 {
+                buf: d_signal,
+                rows,
+                cols,
+            },
+            hist: DeviceArrayF32 {
+                buf: d_hist,
+                rows,
+                cols,
+            },
         })
     }
 
@@ -281,9 +435,14 @@ impl CudaVwmacd {
         d_signal: &mut DeviceBuffer<f32>,
         d_hist: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaVwmacdError> {
-        let func = self.module.get_function("vwmacd_batch_f32")
+        let func = self
+            .module
+            .get_function("vwmacd_batch_f32")
             .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            _ => 256,
+        };
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -313,7 +472,8 @@ impl CudaVwmacd {
                 &mut sig_ptr as *mut _ as *mut c_void,
                 &mut hist_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)
+            self.stream
+                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
         }
         Ok(())
@@ -334,9 +494,14 @@ impl CudaVwmacd {
         d_signal_tm: &mut DeviceBuffer<f32>,
         d_hist_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaVwmacdError> {
-        let func = self.module.get_function("vwmacd_many_series_one_param_time_major_f32")
+        let func = self
+            .module
+            .get_function("vwmacd_many_series_one_param_time_major_f32")
             .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 256 };
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            _ => 256,
+        };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -366,7 +531,8 @@ impl CudaVwmacd {
                 &mut signal_ptr as *mut _ as *mut c_void,
                 &mut hist_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)
+            self.stream
+                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaVwmacdError::Cuda(e.to_string()))?;
         }
         Ok(())
@@ -376,10 +542,18 @@ impl CudaVwmacd {
 // ---------- Helpers (host) ----------
 
 fn first_valid_pair_f32(close: &[f32], volume: &[f32]) -> Option<usize> {
-    close.iter().zip(volume).position(|(c, v)| !c.is_nan() && !v.is_nan())
+    close
+        .iter()
+        .zip(volume)
+        .position(|(c, v)| !c.is_nan() && !v.is_nan())
 }
 
-fn compute_prefix_sums(prices: &[f32], volumes: &[f32], first_valid: usize, len: usize) -> (Vec<f64>, Vec<f64>) {
+fn compute_prefix_sums(
+    prices: &[f32],
+    volumes: &[f32],
+    first_valid: usize,
+    len: usize,
+) -> (Vec<f64>, Vec<f64>) {
     let mut pv_prefix = vec![0f64; len];
     let mut vol_prefix = vec![0f64; len];
     let mut acc_pv = 0f64;
@@ -433,7 +607,12 @@ fn compute_prefix_sums_time_major(
     (pv_prefix, vol_prefix)
 }
 
-fn first_valids_time_major_f32(prices_tm: &[f32], volumes_tm: &[f32], cols: usize, rows: usize) -> Vec<i32> {
+fn first_valids_time_major_f32(
+    prices_tm: &[f32],
+    volumes_tm: &[f32],
+    cols: usize,
+    rows: usize,
+) -> Vec<i32> {
     let mut out = vec![0i32; cols];
     for series in 0..cols {
         let mut fv: i32 = -1;
@@ -441,7 +620,10 @@ fn first_valids_time_major_f32(prices_tm: &[f32], volumes_tm: &[f32], cols: usiz
             let idx = r * cols + series;
             let c = prices_tm[idx];
             let v = volumes_tm[idx];
-            if !c.is_nan() && !v.is_nan() { fv = r as i32; break; }
+            if !c.is_nan() && !v.is_nan() {
+                fv = r as i32;
+                break;
+            }
         }
         out[series] = if fv < 0 { rows as i32 } else { fv };
     }
@@ -450,21 +632,29 @@ fn first_valids_time_major_f32(prices_tm: &[f32], volumes_tm: &[f32], cols: usiz
 
 fn expand_grid(r: &VwmacdBatchRange) -> Vec<VwmacdParams> {
     fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
     let fasts = axis(r.fast);
     let slows = axis(r.slow);
     let signals = axis(r.signal);
-    let mut out = Vec::with_capacity(fasts.len()*slows.len()*signals.len());
-    for &f in &fasts { for &s in &slows { for &g in &signals {
-        out.push(VwmacdParams {
-            fast_period: Some(f), slow_period: Some(s), signal_period: Some(g),
-            fast_ma_type: Some(r.fast_ma_type.clone()),
-            slow_ma_type: Some(r.slow_ma_type.clone()),
-            signal_ma_type: Some(r.signal_ma_type.clone()),
-        });
-    }}};
+    let mut out = Vec::with_capacity(fasts.len() * slows.len() * signals.len());
+    for &f in &fasts {
+        for &s in &slows {
+            for &g in &signals {
+                out.push(VwmacdParams {
+                    fast_period: Some(f),
+                    slow_period: Some(s),
+                    signal_period: Some(g),
+                    fast_ma_type: Some(r.fast_ma_type.clone()),
+                    slow_ma_type: Some(r.slow_ma_type.clone()),
+                    signal_ma_type: Some(r.signal_ma_type.clone()),
+                });
+            }
+        }
+    }
     out
 }
 
@@ -490,10 +680,20 @@ pub mod benches {
         3 * elems * 4 + 2 * elems * 4 + 64 * 1024 * 1024
     }
 
-    struct BatchState { cuda: CudaVwmacd, price: Vec<f32>, vol: Vec<f32>, sweep: VwmacdBatchRange }
-    impl CudaBenchState for BatchState { fn launch(&mut self) {
-        let _ = self.cuda.vwmacd_batch_dev(&self.price, &self.vol, &self.sweep).unwrap();
-    }}
+    struct BatchState {
+        cuda: CudaVwmacd,
+        price: Vec<f32>,
+        vol: Vec<f32>,
+        sweep: VwmacdBatchRange,
+    }
+    impl CudaBenchState for BatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .vwmacd_batch_dev(&self.price, &self.vol, &self.sweep)
+                .unwrap();
+        }
+    }
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
         v.push(
@@ -519,7 +719,12 @@ pub mod benches {
                         slow_ma_type: "sma".into(),
                         signal_ma_type: "ema".into(),
                     };
-                    Box::new(BatchState { cuda, price, vol, sweep })
+                    Box::new(BatchState {
+                        cuda,
+                        price,
+                        vol,
+                        sweep,
+                    })
                 },
             )
             .with_mem_required(bytes_one_series_many_params()),
@@ -561,16 +766,19 @@ pub mod benches {
                             let _ = self
                                 .cuda
                                 .vwmacd_many_series_one_param_time_major_dev(
-                                    &self.p,
-                                    &self.v,
-                                    self.cols,
-                                    self.rows,
-                                    &self.prm,
+                                    &self.p, &self.v, self.cols, self.rows, &self.prm,
                                 )
                                 .unwrap();
                         }
                     }
-                    Box::new(S { cuda, p: price, v: vol, cols: MANY_SERIES_COLS, rows: MANY_SERIES_LEN, prm: params })
+                    Box::new(S {
+                        cuda,
+                        p: price,
+                        v: vol,
+                        cols: MANY_SERIES_COLS,
+                        rows: MANY_SERIES_LEN,
+                        prm: params,
+                    })
                 },
             )
             .with_mem_required(bytes_many_series_one_param()),

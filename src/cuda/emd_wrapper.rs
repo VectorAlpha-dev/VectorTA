@@ -48,7 +48,9 @@ pub enum BatchKernelPolicy {
     Plain { block_x: u32 },
 }
 impl Default for BatchKernelPolicy {
-    fn default() -> Self { BatchKernelPolicy::Auto }
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -57,7 +59,9 @@ pub enum ManySeriesKernelPolicy {
     OneD { block_x: u32 },
 }
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -72,8 +76,14 @@ pub struct DeviceArrayF32Triple {
     pub lower: DeviceArrayF32,
 }
 impl DeviceArrayF32Triple {
-    #[inline] pub fn rows(&self) -> usize { self.upper.rows }
-    #[inline] pub fn cols(&self) -> usize { self.upper.cols }
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.upper.rows
+    }
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.upper.cols
+    }
 }
 
 pub struct CudaEmdBatchResult {
@@ -91,8 +101,8 @@ pub struct CudaEmd {
 impl CudaEmd {
     pub fn new(device_id: usize) -> Result<Self, CudaEmdError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/emd_kernel.ptx"));
@@ -106,16 +116,27 @@ impl CudaEmd {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
-        Ok(Self { module, stream, _context: context, policy: CudaEmdPolicy::default() })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy: CudaEmdPolicy::default(),
+        })
     }
 
     #[inline]
-    pub fn set_policy(&mut self, policy: CudaEmdPolicy) { self.policy = policy; }
+    pub fn set_policy(&mut self, policy: CudaEmdPolicy) {
+        self.policy = policy;
+    }
     #[inline]
-    pub fn policy(&self) -> &CudaEmdPolicy { &self.policy }
+    pub fn policy(&self) -> &CudaEmdPolicy {
+        &self.policy
+    }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaEmdError> {
-        self.stream.synchronize().map_err(|e| CudaEmdError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))
     }
 
     #[inline]
@@ -127,34 +148,53 @@ impl CudaEmd {
     }
     #[inline]
     fn will_fit(bytes: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Ok((free, _total)) = mem_get_info() {
             bytes.saturating_add(headroom) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     // Expand the batch range into concrete parameter combos
     fn expand_combos(range: &EmdBatchRange) -> Vec<EmdParams> {
         fn axis_usize(t: (usize, usize, usize)) -> Vec<usize> {
             let (start, end, step) = t;
-            if step == 0 || start == end { return vec![start]; }
+            if step == 0 || start == end {
+                return vec![start];
+            }
             (start..=end).step_by(step).collect()
         }
         fn axis_f64(t: (f64, f64, f64)) -> Vec<f64> {
             let (start, end, step) = t;
-            if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return vec![start]; }
+            if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+                return vec![start];
+            }
             let mut v = Vec::new();
             let mut x = start;
-            while x <= end + 1e-12 { v.push(x); x += step; }
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += step;
+            }
             v
         }
         let periods = axis_usize(range.period);
         let deltas = axis_f64(range.delta);
-        let fracs  = axis_f64(range.fraction);
+        let fracs = axis_f64(range.fraction);
         let mut out = Vec::with_capacity(periods.len() * deltas.len() * fracs.len());
-        for &p in &periods { for &d in &deltas { for &f in &fracs {
-            out.push(EmdParams { period: Some(p), delta: Some(d), fraction: Some(f) });
-        }}}
+        for &p in &periods {
+            for &d in &deltas {
+                for &f in &fracs {
+                    out.push(EmdParams {
+                        period: Some(p),
+                        delta: Some(d),
+                        fraction: Some(f),
+                    });
+                }
+            }
+        }
         out
     }
 
@@ -166,31 +206,40 @@ impl CudaEmd {
         sweep: &EmdBatchRange,
     ) -> Result<CudaEmdBatchResult, CudaEmdError> {
         if high.is_empty() || high.len() != low.len() {
-            return Err(CudaEmdError::InvalidInput("high/low must be non-empty and same length".into()));
+            return Err(CudaEmdError::InvalidInput(
+                "high/low must be non-empty and same length".into(),
+            ));
         }
         let len = high.len();
-        let first_valid = (0..len).find(|&i| high[i].is_finite() && low[i].is_finite())
+        let first_valid = (0..len)
+            .find(|&i| high[i].is_finite() && low[i].is_finite())
             .ok_or_else(|| CudaEmdError::InvalidInput("all values are NaN".into()))?;
 
         let combos = Self::expand_combos(sweep);
         if combos.is_empty() {
-            return Err(CudaEmdError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaEmdError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         let max_p = combos.iter().map(|c| c.period.unwrap_or(20)).max().unwrap();
         // Basic feasibility guard: ensure tail can cover the longest warmup
         if len - first_valid < (2 * max_p).max(50) {
-            return Err(CudaEmdError::InvalidInput("not enough valid data for warmup".into()));
+            return Err(CudaEmdError::InvalidInput(
+                "not enough valid data for warmup".into(),
+            ));
         }
 
         // Host precompute: midpoint prices
         let mut prices = vec![f32::NAN; len];
-        for i in first_valid..len { prices[i] = 0.5f32 * (high[i] + low[i]); }
+        for i in first_valid..len {
+            prices[i] = 0.5f32 * (high[i] + low[i]);
+        }
 
         // Gather params
         let n = combos.len();
         let mut periods_i32 = Vec::with_capacity(n);
-        let mut deltas_f32  = Vec::with_capacity(n);
-        let mut fracs_f32   = Vec::with_capacity(n);
+        let mut deltas_f32 = Vec::with_capacity(n);
+        let mut fracs_f32 = Vec::with_capacity(n);
         for c in &combos {
             periods_i32.push(c.period.unwrap_or(20) as i32);
             deltas_f32.push(c.delta.unwrap_or(0.5) as f32);
@@ -203,14 +252,20 @@ impl CudaEmd {
         let out_bytes = 3 * n * len * std::mem::size_of::<f32>();
         let required = in_bytes + params_bytes + out_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaEmdError::InvalidInput("insufficient device memory for emd batch".into()));
+            return Err(CudaEmdError::InvalidInput(
+                "insufficient device memory for emd batch".into(),
+            ));
         }
 
         // H2D
-        let d_prices = DeviceBuffer::from_slice(&prices).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let d_p = DeviceBuffer::from_slice(&periods_i32).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let d_d = DeviceBuffer::from_slice(&deltas_f32).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let d_f = DeviceBuffer::from_slice(&fracs_f32).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(&prices).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let d_p = DeviceBuffer::from_slice(&periods_i32)
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let d_d =
+            DeviceBuffer::from_slice(&deltas_f32).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let d_f =
+            DeviceBuffer::from_slice(&fracs_f32).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
         let elems = n * len;
         let mut d_ub: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
@@ -235,15 +290,15 @@ impl CudaEmd {
                 .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
             let mut p_prices = d_prices.as_device_ptr().as_raw();
-            let mut p_p      = d_p.as_device_ptr().as_raw();
-            let mut p_d      = d_d.as_device_ptr().as_raw();
-            let mut p_f      = d_f.as_device_ptr().as_raw();
-            let mut len_i    = len as i32;
-            let mut n_i      = n as i32;
-            let mut fv_i     = first_valid as i32;
-            let mut p_ub     = d_ub.as_device_ptr().as_raw();
-            let mut p_mb     = d_mb.as_device_ptr().as_raw();
-            let mut p_lb     = d_lb.as_device_ptr().as_raw();
+            let mut p_p = d_p.as_device_ptr().as_raw();
+            let mut p_d = d_d.as_device_ptr().as_raw();
+            let mut p_f = d_f.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut n_i = n as i32;
+            let mut fv_i = first_valid as i32;
+            let mut p_ub = d_ub.as_device_ptr().as_raw();
+            let mut p_mb = d_mb.as_device_ptr().as_raw();
+            let mut p_lb = d_lb.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut p_prices as *mut _ as *mut c_void,
                 &mut p_p as *mut _ as *mut c_void,
@@ -263,12 +318,26 @@ impl CudaEmd {
                 .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
         }
 
-        self.stream.synchronize().map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
         let outputs = DeviceArrayF32Triple {
-            upper: DeviceArrayF32 { buf: d_ub, rows: n, cols: len },
-            middle: DeviceArrayF32 { buf: d_mb, rows: n, cols: len },
-            lower: DeviceArrayF32 { buf: d_lb, rows: n, cols: len },
+            upper: DeviceArrayF32 {
+                buf: d_ub,
+                rows: n,
+                cols: len,
+            },
+            middle: DeviceArrayF32 {
+                buf: d_mb,
+                rows: n,
+                cols: len,
+            },
+            lower: DeviceArrayF32 {
+                buf: d_lb,
+                rows: n,
+                cols: len,
+            },
         };
         Ok(CudaEmdBatchResult { outputs, combos })
     }
@@ -283,10 +352,14 @@ impl CudaEmd {
         first_valids: &[i32],
     ) -> Result<DeviceArrayF32Triple, CudaEmdError> {
         if cols == 0 || rows == 0 || data_tm_f32.len() != cols * rows {
-            return Err(CudaEmdError::InvalidInput("invalid time-major input shape".into()));
+            return Err(CudaEmdError::InvalidInput(
+                "invalid time-major input shape".into(),
+            ));
         }
         if first_valids.len() != cols {
-            return Err(CudaEmdError::InvalidInput("first_valids length must equal cols".into()));
+            return Err(CudaEmdError::InvalidInput(
+                "first_valids length must equal cols".into(),
+            ));
         }
         let period = params.period.unwrap_or(20) as i32;
         let delta = params.delta.unwrap_or(0.5) as f32;
@@ -297,11 +370,15 @@ impl CudaEmd {
             + first_valids.len() * std::mem::size_of::<i32>()
             + 3 * data_tm_f32.len() * std::mem::size_of::<f32>();
         if !Self::will_fit(bytes, 64 * 1024 * 1024) {
-            return Err(CudaEmdError::InvalidInput("insufficient device memory for emd many-series".into()));
+            return Err(CudaEmdError::InvalidInput(
+                "insufficient device memory for emd many-series".into(),
+            ));
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(first_valids).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let d_fv = DeviceBuffer::from_slice(first_valids)
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
         let mut d_ub: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
         let mut d_mb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
@@ -309,7 +386,10 @@ impl CudaEmd {
         let mut d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::Auto => 256, ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(1024) } as u32;
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(1024),
+        } as u32;
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         unsafe {
             let func = self
@@ -317,15 +397,15 @@ impl CudaEmd {
                 .get_function("emd_many_series_one_param_time_major_f32")
                 .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
             let mut p_prices = d_prices.as_device_ptr().as_raw();
-            let mut cols_i   = cols as i32;
-            let mut rows_i   = rows as i32;
+            let mut cols_i = cols as i32;
+            let mut rows_i = rows as i32;
             let mut period_i = period as i32;
-            let mut delta_f  = delta;
-            let mut frac_f   = fraction;
-            let mut p_fv     = d_fv.as_device_ptr().as_raw();
-            let mut p_ub     = d_ub.as_device_ptr().as_raw();
-            let mut p_mb     = d_mb.as_device_ptr().as_raw();
-            let mut p_lb     = d_lb.as_device_ptr().as_raw();
+            let mut delta_f = delta;
+            let mut frac_f = fraction;
+            let mut p_fv = d_fv.as_device_ptr().as_raw();
+            let mut p_ub = d_ub.as_device_ptr().as_raw();
+            let mut p_mb = d_mb.as_device_ptr().as_raw();
+            let mut p_lb = d_lb.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut p_prices as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
@@ -344,11 +424,25 @@ impl CudaEmd {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
         }
-        self.stream.synchronize().map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32Triple {
-            upper: DeviceArrayF32 { buf: d_ub, rows, cols },
-            middle: DeviceArrayF32 { buf: d_mb, rows, cols },
-            lower: DeviceArrayF32 { buf: d_lb, rows, cols },
+            upper: DeviceArrayF32 {
+                buf: d_ub,
+                rows,
+                cols,
+            },
+            middle: DeviceArrayF32 {
+                buf: d_mb,
+                rows,
+                cols,
+            },
+            lower: DeviceArrayF32 {
+                buf: d_lb,
+                rows,
+                cols,
+            },
         })
     }
 }
@@ -359,8 +453,22 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new("emd", "batch_dev", "emd_cuda_batch_dev", "60k_x_27combos", prep_emd_batch_box).with_inner_iters(8),
-            CudaBenchScenario::new("emd", "many_series_one_param", "emd_cuda_many_series_one_param_dev", "128x120k", prep_emd_many_series_box).with_inner_iters(4),
+            CudaBenchScenario::new(
+                "emd",
+                "batch_dev",
+                "emd_cuda_batch_dev",
+                "60k_x_27combos",
+                prep_emd_batch_box,
+            )
+            .with_inner_iters(8),
+            CudaBenchScenario::new(
+                "emd",
+                "many_series_one_param",
+                "emd_cuda_many_series_one_param_dev",
+                "128x120k",
+                prep_emd_many_series_box,
+            )
+            .with_inner_iters(4),
         ]
     }
 
@@ -372,16 +480,32 @@ pub mod benches {
     }
     impl CudaBenchState for EmdBatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.emd_batch_dev(&self.high, &self.low, &self.sweep).expect("emd batch");
+            let _ = self
+                .cuda
+                .emd_batch_dev(&self.high, &self.low, &self.sweep)
+                .expect("emd batch");
             let _ = self.cuda.synchronize();
         }
     }
     fn prep_emd_batch_box() -> Box<dyn CudaBenchState> {
         let mut high = vec![f32::NAN; 60_000];
         let mut low = vec![f32::NAN; 60_000];
-        for i in 2..60_000 { let x = i as f32; high[i] = (x * 0.001).sin() + 0.0002 * x + 0.5; low[i] = (x * 0.001).sin() + 0.0002 * x - 0.5; }
-        let sweep = EmdBatchRange { period: (8, 20, 4), delta: (0.3, 0.7, 0.2), fraction: (0.05, 0.15, 0.05) };
-        Box::new(EmdBatchState { cuda: CudaEmd::new(0).expect("cuda emd"), high, low, sweep })
+        for i in 2..60_000 {
+            let x = i as f32;
+            high[i] = (x * 0.001).sin() + 0.0002 * x + 0.5;
+            low[i] = (x * 0.001).sin() + 0.0002 * x - 0.5;
+        }
+        let sweep = EmdBatchRange {
+            period: (8, 20, 4),
+            delta: (0.3, 0.7, 0.2),
+            fraction: (0.05, 0.15, 0.05),
+        };
+        Box::new(EmdBatchState {
+            cuda: CudaEmd::new(0).expect("cuda emd"),
+            high,
+            low,
+            sweep,
+        })
     }
 
     struct EmdManySeriesState {
@@ -394,16 +518,43 @@ pub mod benches {
     }
     impl CudaBenchState for EmdManySeriesState {
         fn launch(&mut self) {
-            let _ = self.cuda.emd_many_series_one_param_time_major_dev(&self.data_tm, self.cols, self.rows, &self.params, &self.first_valids).expect("emd many series");
+            let _ = self
+                .cuda
+                .emd_many_series_one_param_time_major_dev(
+                    &self.data_tm,
+                    self.cols,
+                    self.rows,
+                    &self.params,
+                    &self.first_valids,
+                )
+                .expect("emd many series");
             let _ = self.cuda.synchronize();
         }
     }
     fn prep_emd_many_series_box() -> Box<dyn CudaBenchState> {
-        let cols = 128usize; let rows = 120_000usize;
+        let cols = 128usize;
+        let rows = 120_000usize;
         let mut data_tm = vec![f32::NAN; cols * rows];
         let mut first_valids = vec![0i32; cols];
-        for s in 0..cols { first_valids[s] = 2; for t in 2..rows { let x = (t as f32) + 0.1 * (s as f32); data_tm[t * cols + s] = (x * 0.0008).sin() + 0.0001 * x; } }
-        let params = EmdParams { period: Some(18), delta: Some(0.5), fraction: Some(0.1) };
-        Box::new(EmdManySeriesState { cuda: CudaEmd::new(0).expect("cuda emd"), data_tm, cols, rows, params, first_valids })
+        for s in 0..cols {
+            first_valids[s] = 2;
+            for t in 2..rows {
+                let x = (t as f32) + 0.1 * (s as f32);
+                data_tm[t * cols + s] = (x * 0.0008).sin() + 0.0001 * x;
+            }
+        }
+        let params = EmdParams {
+            period: Some(18),
+            delta: Some(0.5),
+            fraction: Some(0.1),
+        };
+        Box::new(EmdManySeriesState {
+            cuda: CudaEmd::new(0).expect("cuda emd"),
+            data_tm,
+            cols,
+            rows,
+            params,
+            first_valids,
+        })
     }
 }

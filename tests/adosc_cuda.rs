@@ -76,7 +76,13 @@ fn adosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -85,9 +91,7 @@ fn adosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn adosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[adosc_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[adosc_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -164,9 +168,12 @@ fn adosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
 
     let tol = 2e-3;
     for idx in 0..gpu_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, tol), "tm mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, tol),
+            "tm mismatch at {}",
+            idx
+        );
     }
 
     Ok(())
 }
-

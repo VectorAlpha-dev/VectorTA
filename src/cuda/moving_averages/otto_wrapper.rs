@@ -111,7 +111,10 @@ impl CudaOtto {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaOttoPolicy) -> Result<Self, CudaOttoError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaOttoPolicy,
+    ) -> Result<Self, CudaOttoError> {
         let mut me = Self::new(device_id)?;
         me.policy = policy;
         Ok(me)
@@ -121,11 +124,17 @@ impl CudaOtto {
         self.policy = policy;
     }
     #[inline]
-    pub fn policy(&self) -> &CudaOttoPolicy { &self.policy }
+    pub fn policy(&self) -> &CudaOttoPolicy {
+        &self.policy
+    }
     #[inline]
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
     #[inline]
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaOttoError> {
         self.stream
@@ -134,17 +143,26 @@ impl CudaOtto {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn mem_check_enabled() -> bool {
-        match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && v.to_lowercase() != "false", Err(_) => true }
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     // ------- Batch (one series × many params) -------
@@ -163,7 +181,9 @@ impl CudaOtto {
         let required = prices_bytes + cabs_bytes + params_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024usize;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaOttoError::InvalidInput("insufficient device memory for OTTO batch".into()));
+            return Err(CudaOttoError::InvalidInput(
+                "insufficient device memory for OTTO batch".into(),
+            ));
         }
 
         // H2D copies (pinned/async for prices + cabs)
@@ -208,8 +228,16 @@ impl CudaOtto {
             .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
 
         Ok((
-            DeviceArrayF32 { buf: d_hott, rows: inputs.combos.len(), cols: inputs.series_len },
-            DeviceArrayF32 { buf: d_lott, rows: inputs.combos.len(), cols: inputs.series_len },
+            DeviceArrayF32 {
+                buf: d_hott,
+                rows: inputs.combos.len(),
+                cols: inputs.series_len,
+            },
+            DeviceArrayF32 {
+                buf: d_lott,
+                rows: inputs.combos.len(),
+                cols: inputs.series_len,
+            },
             inputs.combos,
         ))
     }
@@ -306,7 +334,9 @@ impl CudaOtto {
         let out_bytes = cols * rows * 4 * 2;
         let required = prices_bytes + out_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaOttoError::InvalidInput("insufficient device memory for OTTO many-series".into()));
+            return Err(CudaOttoError::InvalidInput(
+                "insufficient device memory for OTTO many-series".into(),
+            ));
         }
 
         let d_prices_tm = self.htod_copy_f32(prices_tm_f32)?;
@@ -335,8 +365,16 @@ impl CudaOtto {
             .map_err(|e| CudaOttoError::Cuda(e.to_string()))?;
 
         Ok((
-            DeviceArrayF32 { buf: d_hott_tm, rows, cols },
-            DeviceArrayF32 { buf: d_lott_tm, rows, cols },
+            DeviceArrayF32 {
+                buf: d_hott_tm,
+                rows,
+                cols,
+            },
+            DeviceArrayF32 {
+                buf: d_lott_tm,
+                rows,
+                cols,
+            },
         ))
     }
 
@@ -411,26 +449,34 @@ impl CudaOtto {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] OTTO batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut Self)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut Self)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] OTTO many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut Self)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut Self)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -444,7 +490,9 @@ impl CudaOtto {
         }
         let combos = expand_grid_otto(sweep);
         if combos.is_empty() {
-            return Err(CudaOttoError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaOttoError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
 
         // First valid (Pine-style nz -> treat NaN as 0.0 for diffs); still detect all-NaN stream
@@ -469,20 +517,40 @@ impl CudaOtto {
             coco.push(p.correcting_constant.unwrap_or(100000.0) as f32);
         }
 
-        Ok(BatchInputs { combos, series_len, first_valid, cabs, ott_periods, ott_percents, fast, slow, coco })
+        Ok(BatchInputs {
+            combos,
+            series_len,
+            first_valid,
+            cabs,
+            ott_periods,
+            ott_percents,
+            fast,
+            slow,
+            coco,
+        })
     }
 }
 
 fn expand_grid_otto(r: &OttoBatchRange) -> Vec<OttoParams> {
     fn axis_usize(a: (usize, usize, usize)) -> Vec<usize> {
         let (s, e, st) = a;
-        if st == 0 || s == e { return vec![s]; }
+        if st == 0 || s == e {
+            return vec![s];
+        }
         (s..=e).step_by(st).collect()
     }
     fn axis_f64(a: (f64, f64, f64)) -> Vec<f64> {
         let (s, e, st) = a;
-        if st.abs() < 1e-12 || (s - e).abs() < 1e-12 { return vec![s]; }
-        let mut v = Vec::new(); let mut x = s; while x <= e + 1e-12 { v.push(x); x += st; } v
+        if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+            return vec![s];
+        }
+        let mut v = Vec::new();
+        let mut x = s;
+        while x <= e + 1e-12 {
+            v.push(x);
+            x += st;
+        }
+        v
     }
     let p = axis_usize(r.ott_period);
     let op = axis_f64(r.ott_percent);
@@ -491,9 +559,26 @@ fn expand_grid_otto(r: &OttoBatchRange) -> Vec<OttoParams> {
     let cc = axis_f64(r.correcting_constant);
     let mt = &r.ma_types;
     let mut v = Vec::with_capacity(p.len() * op.len() * fv.len() * sv.len() * cc.len() * mt.len());
-    for &pp in &p { for &oo in &op { for &ff in &fv { for &ss in &sv { for &ccv in &cc { for m in mt {
-        v.push(OttoParams { ott_period: Some(pp), ott_percent: Some(oo), fast_vidya_length: Some(ff), slow_vidya_length: Some(ss), correcting_constant: Some(ccv), ma_type: Some(m.clone()) });
-    }}}}}}
+    for &pp in &p {
+        for &oo in &op {
+            for &ff in &fv {
+                for &ss in &sv {
+                    for &ccv in &cc {
+                        for m in mt {
+                            v.push(OttoParams {
+                                ott_period: Some(pp),
+                                ott_percent: Some(oo),
+                                fast_vidya_length: Some(ff),
+                                slow_vidya_length: Some(ss),
+                                correcting_constant: Some(ccv),
+                                ma_type: Some(m.clone()),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
     v
 }
 
@@ -503,24 +588,43 @@ fn build_cmo_abs9(prices: &[f32]) -> Vec<f32> {
     const P: usize = 9;
     let n = prices.len();
     let mut out = vec![0.0f32; n];
-    if n == 0 { return out; }
+    if n == 0 {
+        return out;
+    }
     let mut ring_up = [0.0f64; P];
     let mut ring_dn = [0.0f64; P];
-    let mut sum_up = 0.0f64; let mut sum_dn = 0.0f64; let mut head = 0usize;
+    let mut sum_up = 0.0f64;
+    let mut sum_dn = 0.0f64;
+    let mut head = 0usize;
     let mut prev = prices[0] as f64;
     for i in 0..n {
         let x = prices[i] as f64;
         if i > 0 {
             let mut d = x - prev;
-            if !x.is_finite() || !prev.is_finite() { d = 0.0; }
-            if i >= P { sum_up -= ring_up[head]; sum_dn -= ring_dn[head]; }
+            if !x.is_finite() || !prev.is_finite() {
+                d = 0.0;
+            }
+            if i >= P {
+                sum_up -= ring_up[head];
+                sum_dn -= ring_dn[head];
+            }
             let (up, dn) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
-            ring_up[head] = up; ring_dn[head] = dn; sum_up += up; sum_dn += dn;
-            head += 1; if head == P { head = 0; }
+            ring_up[head] = up;
+            ring_dn[head] = dn;
+            sum_up += up;
+            sum_dn += dn;
+            head += 1;
+            if head == P {
+                head = 0;
+            }
         }
         prev = x;
         let denom = sum_up + sum_dn;
-        let c = if i >= P && denom != 0.0 { ((sum_up - sum_dn) / denom).abs() } else { 0.0 };
+        let c = if i >= P && denom != 0.0 {
+            ((sum_up - sum_dn) / denom).abs()
+        } else {
+            0.0
+        };
         out[i] = c as f32;
     }
     out
@@ -601,13 +705,26 @@ pub mod benches {
 
     fn prep_otto_batch() -> OttoBatchState {
         let mut cuda = CudaOtto::new(0).expect("cuda otto");
-        cuda.set_policy(CudaOttoPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto });
+        cuda.set_policy(CudaOttoPolicy {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        });
 
         let len = 60_000usize;
         let mut price = vec![f32::NAN; len];
-        for i in 1..len { let x = i as f32; price[i] = (x * 0.0011).sin() + 0.0002 * x; }
+        for i in 1..len {
+            let x = i as f32;
+            price[i] = (x * 0.0011).sin() + 0.0002 * x;
+        }
 
-        let sweep = OttoBatchRange { ott_period: (2, 33, 5), ott_percent: (0.6, 0.6, 0.0), fast_vidya: (10, 10, 0), slow_vidya: (25, 25, 0), correcting_constant: (100000.0, 100000.0, 0.0), ma_types: vec!["VAR".into()] };
+        let sweep = OttoBatchRange {
+            ott_period: (2, 33, 5),
+            ott_percent: (0.6, 0.6, 0.0),
+            fast_vidya: (10, 10, 0),
+            slow_vidya: (25, 25, 0),
+            correcting_constant: (100000.0, 100000.0, 0.0),
+            ma_types: vec!["VAR".into()],
+        };
         let inputs = CudaOtto::prepare_batch_inputs(&price, &sweep).expect("inputs");
         let rows = inputs.combos.len();
 
@@ -618,12 +735,29 @@ pub mod benches {
         let d_fast = DeviceBuffer::from_slice(&inputs.fast).expect("fast");
         let d_slow = DeviceBuffer::from_slice(&inputs.slow).expect("slow");
         let d_coco = DeviceBuffer::from_slice(&inputs.coco).expect("coco");
-        let d_hott: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len * rows) }.expect("hott");
-        let d_lott: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len * rows) }.expect("lott");
+        let d_hott: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len * rows) }.expect("hott");
+        let d_lott: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len * rows) }.expect("lott");
 
-        OttoBatchState { cuda, d_prices, d_cabs, d_ottp, d_ottk, d_fast, d_slow, d_coco, d_hott, d_lott, len, rows }
+        OttoBatchState {
+            cuda,
+            d_prices,
+            d_cabs,
+            d_ottp,
+            d_ottk,
+            d_fast,
+            d_slow,
+            d_coco,
+            d_hott,
+            d_lott,
+            len,
+            rows,
+        }
     }
-    fn prep_otto_batch_box() -> Box<dyn CudaBenchState> { Box::new(prep_otto_batch()) }
+    fn prep_otto_batch_box() -> Box<dyn CudaBenchState> {
+        Box::new(prep_otto_batch())
+    }
 
     struct OttoManySeriesState {
         cuda: CudaOtto,
@@ -656,16 +790,37 @@ pub mod benches {
 
     fn prep_otto_many_series() -> OttoManySeriesState {
         let mut cuda = CudaOtto::new(0).expect("cuda otto");
-        cuda.set_policy(CudaOttoPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto });
-        let cols = 512usize; let rows = 64_000usize;
+        cuda.set_policy(CudaOttoPolicy {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        });
+        let cols = 512usize;
+        let rows = 64_000usize;
         let mut tm = vec![f32::NAN; cols * rows];
-        for s in 0..rows { for t in 0..cols { let x = (t as f32) + (s as f32) * 0.01; tm[t * rows + s] = (x * 0.002).sin() + 0.0001 * x; } }
+        for s in 0..rows {
+            for t in 0..cols {
+                let x = (t as f32) + (s as f32) * 0.01;
+                tm[t * rows + s] = (x * 0.002).sin() + 0.0001 * x;
+            }
+        }
         let params = OttoParams::default();
 
         let d_prices_tm = DeviceBuffer::from_slice(&tm).expect("tm");
-        let d_hott_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("hott");
-        let d_lott_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("lott");
-        OttoManySeriesState { cuda, d_prices_tm, d_hott_tm, d_lott_tm, cols, rows, params }
+        let d_hott_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("hott");
+        let d_lott_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("lott");
+        OttoManySeriesState {
+            cuda,
+            d_prices_tm,
+            d_hott_tm,
+            d_lott_tm,
+            cols,
+            rows,
+            params,
+        }
     }
-    fn prep_otto_many_series_box() -> Box<dyn CudaBenchState> { Box::new(prep_otto_many_series()) }
+    fn prep_otto_many_series_box() -> Box<dyn CudaBenchState> {
+        Box::new(prep_otto_many_series())
+    }
 }

@@ -55,11 +55,11 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::mfi_wrapper::CudaMfi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[derive(Debug, Clone)]
 pub enum MfiData<'a> {
@@ -1324,11 +1324,17 @@ pub fn mfi_cuda_batch_dev_py(
     period_range: (usize, usize, usize),
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let tp = typical_price.as_slice()?;
     let vol = volume.as_slice()?;
-    if tp.len() != vol.len() { return Err(PyValueError::new_err("mismatched input lengths")); }
-    let sweep = MfiBatchRange { period: period_range };
+    if tp.len() != vol.len() {
+        return Err(PyValueError::new_err("mismatched input lengths"));
+    }
+    let sweep = MfiBatchRange {
+        period: period_range,
+    };
     let (inner, _combos) = py.allow_threads(|| {
         let cuda = CudaMfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.mfi_batch_dev(tp, vol, &sweep)
@@ -1349,11 +1355,17 @@ pub fn mfi_cuda_many_series_one_param_dev_py(
     period: usize,
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let tp = typical_price_tm.as_slice()?;
     let vol = volume_tm.as_slice()?;
-    if tp.len() != vol.len() { return Err(PyValueError::new_err("mismatched input lengths")); }
-    if tp.len() != cols * rows { return Err(PyValueError::new_err("unexpected matrix size")); }
+    if tp.len() != vol.len() {
+        return Err(PyValueError::new_err("mismatched input lengths"));
+    }
+    if tp.len() != cols * rows {
+        return Err(PyValueError::new_err("unexpected matrix size"));
+    }
     let inner = py.allow_threads(|| {
         let cuda = CudaMfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.mfi_many_series_one_param_time_major_dev(tp, vol, cols, rows, period)

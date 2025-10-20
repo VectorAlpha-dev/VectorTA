@@ -1099,7 +1099,8 @@ pub fn medprice_cuda_dev_py(
     let ls = low.as_slice()?;
 
     let inner = py.allow_threads(|| {
-        let cuda = CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.medprice_dev(hs, ls)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -1116,12 +1117,16 @@ pub fn medprice_cuda_batch_dev_py(
     low: numpy::PyReadonlyArray1<'_, f32>,
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let hs = high.as_slice()?;
     let ls = low.as_slice()?;
     let inner = py.allow_threads(|| {
-        let cuda = CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.medprice_batch_dev(hs, ls).map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.medprice_batch_dev(hs, ls)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }
@@ -1137,11 +1142,14 @@ pub fn medprice_cuda_many_series_one_param_dev_py(
     rows: usize,
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let hs = high_tm.as_slice()?;
     let ls = low_tm.as_slice()?;
     let inner = py.allow_threads(|| {
-        let cuda = CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.medprice_many_series_one_param_time_major_dev(hs, ls, cols, rows)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

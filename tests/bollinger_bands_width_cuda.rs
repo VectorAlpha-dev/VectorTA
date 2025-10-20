@@ -10,9 +10,9 @@ use my_project::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
-#[cfg(feature = "cuda")]
 use my_project::cuda::bollinger_bands_width_wrapper::CudaBbw;
+#[cfg(feature = "cuda")]
+use my_project::cuda::cuda_available;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -67,7 +67,13 @@ fn bollinger_bands_width_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::err
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
 
     Ok(())
@@ -78,9 +84,7 @@ fn bollinger_bands_width_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::err
 fn bollinger_bands_width_cuda_many_series_one_param_matches_cpu(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[bbw_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[bbw_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -151,4 +155,3 @@ fn bollinger_bands_width_cuda_many_series_one_param_matches_cpu(
     }
     Ok(())
 }
-

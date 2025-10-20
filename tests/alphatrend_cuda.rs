@@ -8,12 +8,14 @@ use my_project::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
-#[cfg(feature = "cuda")]
 use my_project::cuda::alphatrend_wrapper::CudaAlphaTrend;
+#[cfg(feature = "cuda")]
+use my_project::cuda::cuda_available;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -45,10 +47,22 @@ fn alphatrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
         close[i] = (high[i] + low[i]) * 0.5 + 0.001 * (x * 0.001).cos();
         volume[i] = (x * 0.0009).cos().abs() + 0.5;
     }
-    let sweep = AlphaTrendBatchRange { coeff: (0.9, 1.1, 0.1), period: (10, 30, 10), no_volume: true };
+    let sweep = AlphaTrendBatchRange {
+        coeff: (0.9, 1.1, 0.1),
+        period: (10, 30, 10),
+        no_volume: true,
+    };
 
     let open = close.clone();
-    let cpu = alphatrend_batch_slice(&open, &high, &low, &close, &volume, &sweep, Kernel::ScalarBatch)?;
+    let cpu = alphatrend_batch_slice(
+        &open,
+        &high,
+        &low,
+        &close,
+        &volume,
+        &sweep,
+        Kernel::ScalarBatch,
+    )?;
 
     let h32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let l32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
@@ -75,8 +89,20 @@ fn alphatrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
         let gk1 = k1_host[idx] as f64;
         let ck2 = cpu.values_k2[idx];
         let gk2 = k2_host[idx] as f64;
-        assert!(approx_eq(ck1, gk1, tol), "k1 mismatch at {}: cpu={} gpu={}", idx, ck1, gk1);
-        assert!(approx_eq(ck2, gk2, tol), "k2 mismatch at {}: cpu={} gpu={}", idx, ck2, gk2);
+        assert!(
+            approx_eq(ck1, gk1, tol),
+            "k1 mismatch at {}: cpu={} gpu={}",
+            idx,
+            ck1,
+            gk1
+        );
+        assert!(
+            approx_eq(ck2, gk2, tol),
+            "k2 mismatch at {}: cpu={} gpu={}",
+            idx,
+            ck2,
+            gk2
+        );
     }
 
     Ok(())
@@ -98,7 +124,8 @@ fn alphatrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
     let mut close_tm = vec![f64::NAN; cols * rows];
     let mut vol_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
-        for t in (s + 3)..rows { // stagger valid starts
+        for t in (s + 3)..rows {
+            // stagger valid starts
             let idx = t * cols + s;
             let x = (t as f64) + (s as f64) * 0.3;
             high_tm[idx] = (x * 0.0009).sin() + 0.03;
@@ -129,8 +156,16 @@ fn alphatrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
             v[t] = vol_tm[idx];
         }
         let input = AlphaTrendInput::from_slices(
-            &o, &h, &l, &c, &v,
-            AlphaTrendParams { coeff: Some(coeff), period: Some(period), no_volume: Some(no_volume) },
+            &o,
+            &h,
+            &l,
+            &c,
+            &v,
+            AlphaTrendParams {
+                coeff: Some(coeff),
+                period: Some(period),
+                no_volume: Some(no_volume),
+            },
         );
         let mut k1 = vec![0.0; rows];
         let mut k2 = vec![0.0; rows];

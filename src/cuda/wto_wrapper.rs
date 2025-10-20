@@ -68,7 +68,9 @@ pub enum BatchKernelPolicy {
 }
 
 impl Default for BatchKernelPolicy {
-    fn default() -> Self { BatchKernelPolicy::Auto }
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,7 +80,9 @@ pub enum ManySeriesKernelPolicy {
 }
 
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -107,13 +111,17 @@ impl CudaWto {
         // Prefer context-targeted JIT with moderate opt level, fallback to simpler modes
         let module = match Module::from_ptx(
             ptx,
-            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)],
+            &[
+                ModuleJitOption::DetermineTargetFromContext,
+                ModuleJitOption::OptLevel(OptLevel::O2),
+            ],
         ) {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaWtoError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaWtoError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -123,7 +131,10 @@ impl CudaWto {
             stream,
             _context: context,
             device_id: device_id as u32,
-            policy: CudaWtoPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto },
+            policy: CudaWtoPolicy {
+                batch: BatchKernelPolicy::Auto,
+                many_series: ManySeriesKernelPolicy::Auto,
+            },
             debug_batch_logged: false,
             debug_many_logged: false,
         })

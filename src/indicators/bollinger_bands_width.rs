@@ -54,9 +54,9 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::bollinger_bands_width_wrapper::CudaBbw;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
@@ -2493,19 +2493,18 @@ pub fn bollinger_bands_width_cuda_many_series_one_param_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_tm_f32.as_slice()?;
-    let inner = py
-        .allow_threads(|| {
-            let cuda = CudaBbw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.bbw_many_series_one_param_time_major_dev(
-                slice_in,
-                cols,
-                rows,
-                period,
-                devup as f32,
-                devdn as f32,
-            )
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaBbw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.bbw_many_series_one_param_time_major_dev(
+            slice_in,
+            cols,
+            rows,
+            period,
+            devup as f32,
+            devdn as f32,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     Ok(DeviceArrayF32Py { inner })
 }
 

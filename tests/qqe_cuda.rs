@@ -1,7 +1,7 @@
 // Integration tests for CUDA QQE kernels
 
 use my_project::indicators::qqe::{
-    qqe_batch_with_kernel, qqe_with_kernel, QqeBatchRange, QqeInput, QqeParams, QqeData,
+    qqe_batch_with_kernel, qqe_with_kernel, QqeBatchRange, QqeData, QqeInput, QqeParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -51,7 +51,9 @@ fn qqe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaQqe::new(0).expect("CudaQqe::new");
-    let (dev, combos) = cuda.qqe_batch_dev(&price_f32, &sweep).expect("qqe_batch_dev");
+    let (dev, combos) = cuda
+        .qqe_batch_dev(&price_f32, &sweep)
+        .expect("qqe_batch_dev");
 
     assert_eq!(dev.cols, cpu.cols);
     assert_eq!(dev.rows, 2 * combos.len());
@@ -70,8 +72,18 @@ fn qqe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             let c_slow = cpu.slow_values[row * cols + t];
             let g_fast = out[g_row_fast * cols + t] as f64;
             let g_slow = out[g_row_slow * cols + t] as f64;
-            assert!(approx_eq(c_fast, g_fast, tol), "fast mismatch at (row={}, t={})", row, t);
-            assert!(approx_eq(c_slow, g_slow, tol), "slow mismatch at (row={}, t={})", row, t);
+            assert!(
+                approx_eq(c_fast, g_fast, tol),
+                "fast mismatch at (row={}, t={})",
+                row,
+                t
+            );
+            assert!(
+                approx_eq(c_slow, g_slow, tol),
+                "slow mismatch at (row={}, t={})",
+                row,
+                t
+            );
         }
     }
 
@@ -95,15 +107,24 @@ fn qqe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             tm[t * cols + s] = (x * 0.002).sin() + 0.00031 * x;
         }
     }
-    let params = QqeParams { rsi_period: Some(14), smoothing_factor: Some(5), fast_factor: Some(4.236) };
+    let params = QqeParams {
+        rsi_period: Some(14),
+        smoothing_factor: Some(5),
+        fast_factor: Some(4.236),
+    };
 
     // CPU baseline per series
     let mut cpu_fast_tm = vec![f64::NAN; cols * rows];
     let mut cpu_slow_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = tm[t * cols + s]; }
-        let input = QqeInput { data: QqeData::Slice(&series), params: params.clone() };
+        for t in 0..rows {
+            series[t] = tm[t * cols + s];
+        }
+        let input = QqeInput {
+            data: QqeData::Slice(&series),
+            params: params.clone(),
+        };
         let out = qqe_with_kernel(&input, Kernel::Scalar)?;
         for t in 0..rows {
             cpu_fast_tm[t * cols + s] = out.fast[t];
@@ -128,11 +149,20 @@ fn qqe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             let g_slow = out[t * (2 * cols) + (s + cols)] as f64;
             let c_fast = cpu_fast_tm[t * cols + s];
             let c_slow = cpu_slow_tm[t * cols + s];
-            assert!(approx_eq(c_fast, g_fast, tol), "fast mismatch at (s={}, t={})", s, t);
-            assert!(approx_eq(c_slow, g_slow, tol), "slow mismatch at (s={}, t={})", s, t);
+            assert!(
+                approx_eq(c_fast, g_fast, tol),
+                "fast mismatch at (s={}, t={})",
+                s,
+                t
+            );
+            assert!(
+                approx_eq(c_slow, g_slow, tol),
+                "slow mismatch at (s={}, t={})",
+                s,
+                t
+            );
         }
     }
 
     Ok(())
 }
-

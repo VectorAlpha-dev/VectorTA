@@ -2259,9 +2259,14 @@ pub fn ift_rsi_cuda_batch_dev_py(
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::CudaIftRsi;
     use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice_in: &[f32] = data_f32.as_slice()?;
-    let sweep = IftRsiBatchRange { rsi_period: rsi_range, wma_period: wma_range };
+    let sweep = IftRsiBatchRange {
+        rsi_period: rsi_range,
+        wma_period: wma_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaIftRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, _combos) = cuda
@@ -2286,15 +2291,19 @@ pub fn ift_rsi_cuda_many_series_one_param_dev_py(
     use crate::cuda::oscillators::CudaIftRsi;
     use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
     use numpy::PyUntypedArrayMethods;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let flat_in: &[f32] = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = IftRsiParams { rsi_period: Some(rsi_period), wma_period: Some(wma_period) };
+    let params = IftRsiParams {
+        rsi_period: Some(rsi_period),
+        wma_period: Some(wma_period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaIftRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .ift_rsi_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+        cuda.ift_rsi_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })

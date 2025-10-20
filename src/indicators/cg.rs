@@ -750,8 +750,7 @@ pub fn cg_cuda_batch_dev_py(
     let inner = py.allow_threads(|| {
         let cuda = crate::cuda::oscillators::cg_wrapper::CudaCg::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .cg_batch_dev(slice, &sweep)
+        cuda.cg_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
@@ -774,14 +773,17 @@ pub fn cg_cuda_many_series_one_param_dev_py(
     }
     let tm = time_major.as_slice()?;
     if tm.len() != cols * rows {
-        return Err(PyValueError::new_err("time-major slice length != cols*rows"));
+        return Err(PyValueError::new_err(
+            "time-major slice length != cols*rows",
+        ));
     }
-    let params = CgParams { period: Some(period) };
+    let params = CgParams {
+        period: Some(period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = crate::cuda::oscillators::cg_wrapper::CudaCg::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .cg_many_series_one_param_time_major_dev(tm, cols, rows, &params)
+        cuda.cg_many_series_one_param_time_major_dev(tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })

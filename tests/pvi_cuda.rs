@@ -47,7 +47,9 @@ fn pvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let inits = vec![500.0, 1000.0, 1500.0, 2000.0];
     let mut cpu_rows: Vec<Vec<f64>> = Vec::new();
     for &iv in &inits {
-        let params = PviParams { initial_value: Some(iv) };
+        let params = PviParams {
+            initial_value: Some(iv),
+        };
         let input = PviInput::from_slices(&close, &volume, params);
         let out = pvi_with_kernel(&input, Kernel::Scalar)?.values;
         cpu_rows.push(out);
@@ -78,7 +80,14 @@ fn pvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         for c in 0..len {
             let g = host[r * len + c] as f64;
             let s = cpu_rows[r][c];
-            assert!(approx_eq(s, g, tol), "row {} col {} mismatch: cpu={} gpu={}", r, c, s, g);
+            assert!(
+                approx_eq(s, g, tol),
+                "row {} col {} mismatch: cpu={} gpu={}",
+                r,
+                c,
+                s,
+                g
+            );
         }
     }
     Ok(())
@@ -88,9 +97,7 @@ fn pvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn pvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[pvi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[pvi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -116,7 +123,9 @@ fn pvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             c[t] = close_tm[t * cols + s];
             v[t] = volume_tm[t * cols + s];
         }
-        let params = PviParams { initial_value: Some(initial_value) };
+        let params = PviParams {
+            initial_value: Some(initial_value),
+        };
         let input = PviInput::from_slices(&c, &v, params);
         let out = pvi_with_kernel(&input, Kernel::Scalar)?.values;
         for t in 0..rows {
@@ -143,10 +152,7 @@ fn pvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
                 );
                 return Ok(());
             }
-            panic!(
-                "pvi_many_series_one_param_time_major_dev failed: {}",
-                msg
-            );
+            panic!("pvi_many_series_one_param_time_major_dev failed: {}", msg);
         }
     };
     assert_eq!(dev.rows, rows);
@@ -157,7 +163,13 @@ fn pvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     for idx in 0..host.len() {
         let g = host[idx] as f64;
         let s = cpu_tm[idx];
-        assert!(approx_eq(s, g, tol), "mismatch at {}: cpu={} gpu={}", idx, s, g);
+        assert!(
+            approx_eq(s, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            s,
+            g
+        );
     }
     Ok(())
 }

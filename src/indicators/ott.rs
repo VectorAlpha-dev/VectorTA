@@ -22,6 +22,12 @@
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaOtt;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -30,12 +36,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaOtt;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
 
 // Feature-gated imports for WASM bindings
 #[cfg(feature = "wasm")]
@@ -1835,18 +1835,21 @@ pub fn ott_cuda_batch_dev_py(
     percent_range: (f64, f64, f64),
     ma_types: Vec<String>,
     device_id: usize,
-)
-    -> PyResult<DeviceArrayF32Py>
-{
+) -> PyResult<DeviceArrayF32Py> {
     use numpy::PyUntypedArrayMethods;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_f32.as_slice()?;
-    let sweep = OttBatchRange { period: period_range, percent: percent_range, ma_types };
+    let sweep = OttBatchRange {
+        period: period_range,
+        percent: percent_range,
+        ma_types,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaOtt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ott_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.ott_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }
@@ -1869,7 +1872,11 @@ pub fn ott_cuda_many_series_one_param_dev_py(
     let flat = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = OttParams { period: Some(period), percent: Some(percent), ma_type: Some(ma_type.to_string()) };
+    let params = OttParams {
+        period: Some(period),
+        percent: Some(percent),
+        ma_type: Some(ma_type.to_string()),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaOtt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.ott_many_series_one_param_time_major_dev(flat, cols, rows, &params)

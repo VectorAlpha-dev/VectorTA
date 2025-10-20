@@ -55,7 +55,10 @@ pub struct CudaModGodModePolicy {
 }
 impl Default for CudaModGodModePolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -70,18 +73,29 @@ pub struct CudaModGodMode {
 impl CudaModGodMode {
     pub fn new(device_id: usize) -> Result<Self, CudaModGodModeError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mod_god_mode_kernel.ptx"));
-        let jit_opts = &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)];
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => Module::from_ptx(ptx, &[]).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?,
+            Err(_) => {
+                Module::from_ptx(ptx, &[]).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?
+            }
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        Ok(Self { module, stream, _context: context, policy: CudaModGodModePolicy::default(), debug_logged: false })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy: CudaModGodModePolicy::default(),
+            debug_logged: false,
+        })
     }
 
     fn device_mem_info() -> Option<(usize, usize)> {
@@ -89,48 +103,101 @@ impl CudaModGodMode {
             let mut free: usize = 0;
             let mut total: usize = 0;
             let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS { Some((free, total)) } else { None }
+            if res == cu::CUresult::CUDA_SUCCESS {
+                Some((free, total))
+            } else {
+                None
+            }
         }
     }
     fn mem_check_enabled() -> bool {
-        match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && v.to_lowercase() != "false", Err(_) => true }
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
     }
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Some((free, _)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
 
     fn expand_range(r: &ModGodModeBatchRange) -> Vec<ModGodModeParams> {
         fn axis(a: (usize, usize, usize)) -> Vec<usize> {
-            let (s, e, st) = a; if st == 0 || s == e { vec![s] } else { (s..=e).step_by(st).collect() }
+            let (s, e, st) = a;
+            if st == 0 || s == e {
+                vec![s]
+            } else {
+                (s..=e).step_by(st).collect()
+            }
         }
         let n1s = axis(r.n1);
         let n2s = axis(r.n2);
         let n3s = axis(r.n3);
         let mut v = Vec::with_capacity(n1s.len() * n2s.len() * n3s.len());
-        for &a in &n1s { for &b in &n2s { for &c in &n3s {
-            v.push(ModGodModeParams { n1: Some(a), n2: Some(b), n3: Some(c), mode: Some(r.mode), use_volume: Some(false) });
-        }}}
+        for &a in &n1s {
+            for &b in &n2s {
+                for &c in &n3s {
+                    v.push(ModGodModeParams {
+                        n1: Some(a),
+                        n2: Some(b),
+                        n3: Some(c),
+                        mode: Some(r.mode),
+                        use_volume: Some(false),
+                    });
+                }
+            }
+        }
         v
     }
 
     pub fn mod_god_mode_batch_dev(
         &self,
-        high: &[f32], low: &[f32], close: &[f32], volume: Option<&[f32]>,
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+        volume: Option<&[f32]>,
         sweep: &ModGodModeBatchRange,
     ) -> Result<CudaModGodModeBatchResult, CudaModGodModeError> {
         let n = close.len();
-        if n == 0 { return Err(CudaModGodModeError::InvalidInput("empty inputs".into())); }
-        if high.len() != n || low.len() != n { return Err(CudaModGodModeError::InvalidInput("H/L/C length mismatch".into())); }
-        if let Some(v) = volume { if v.len() != n { return Err(CudaModGodModeError::InvalidInput("volume length mismatch".into())); } }
+        if n == 0 {
+            return Err(CudaModGodModeError::InvalidInput("empty inputs".into()));
+        }
+        if high.len() != n || low.len() != n {
+            return Err(CudaModGodModeError::InvalidInput(
+                "H/L/C length mismatch".into(),
+            ));
+        }
+        if let Some(v) = volume {
+            if v.len() != n {
+                return Err(CudaModGodModeError::InvalidInput(
+                    "volume length mismatch".into(),
+                ));
+            }
+        }
         let combos = Self::expand_range(sweep);
-        if combos.is_empty() { return Err(CudaModGodModeError::InvalidInput("no parameter combinations".into())); }
+        if combos.is_empty() {
+            return Err(CudaModGodModeError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         let rows = combos.len();
 
         // First valid index
         let mut first_valid = None;
-        for (i, &v) in close.iter().enumerate() { if v.is_finite() { first_valid = Some(i); break; } }
-        let first_valid = first_valid.ok_or_else(|| CudaModGodModeError::InvalidInput("all values are NaN".into()))?;
+        for (i, &v) in close.iter().enumerate() {
+            if v.is_finite() {
+                first_valid = Some(i);
+                break;
+            }
+        }
+        let first_valid = first_valid
+            .ok_or_else(|| CudaModGodModeError::InvalidInput("all values are NaN".into()))?;
 
         // Build param arrays
         let mut n1s: Vec<i32> = Vec::with_capacity(rows);
@@ -141,48 +208,88 @@ impl CudaModGodMode {
             n1s.push(p.n1.unwrap() as i32);
             n2s.push(p.n2.unwrap() as i32);
             n3s.push(p.n3.unwrap() as i32);
-            let m = match p.mode.unwrap() { ModGodModeMode::Godmode => 0, ModGodModeMode::Tradition => 1, ModGodModeMode::GodmodeMg => 2, ModGodModeMode::TraditionMg => 3 };
+            let m = match p.mode.unwrap() {
+                ModGodModeMode::Godmode => 0,
+                ModGodModeMode::Tradition => 1,
+                ModGodModeMode::GodmodeMg => 2,
+                ModGodModeMode::TraditionMg => 3,
+            };
             modes.push(m);
         }
 
         // VRAM estimation
-        let in_bytes = 3 * n * std::mem::size_of::<f32>() + volume.map(|_| n * std::mem::size_of::<f32>()).unwrap_or(0);
+        let in_bytes = 3 * n * std::mem::size_of::<f32>()
+            + volume.map(|_| n * std::mem::size_of::<f32>()).unwrap_or(0);
         let param_bytes = 4 * rows * std::mem::size_of::<i32>();
         let out_bytes = 3 * rows * n * std::mem::size_of::<f32>();
         let required = in_bytes + param_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaModGodModeError::InvalidInput(format!("estimated device memory {:.2} MB exceeds free VRAM", required as f64 / (1024.0 * 1024.0))));
+            return Err(CudaModGodModeError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                required as f64 / (1024.0 * 1024.0)
+            )));
         }
 
         // Upload inputs
-        let d_high = DeviceBuffer::from_slice(high).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_volume = if let Some(v) = volume { Some(DeviceBuffer::from_slice(v).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?) } else { None };
-        let d_n1s = DeviceBuffer::from_slice(&n1s).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_n2s = DeviceBuffer::from_slice(&n2s).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_n3s = DeviceBuffer::from_slice(&n3s).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_modes = DeviceBuffer::from_slice(&modes).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_high =
+            DeviceBuffer::from_slice(high).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_low =
+            DeviceBuffer::from_slice(low).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close)
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_volume = if let Some(v) = volume {
+            Some(
+                DeviceBuffer::from_slice(v)
+                    .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let d_n1s =
+            DeviceBuffer::from_slice(&n1s).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_n2s =
+            DeviceBuffer::from_slice(&n2s).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_n3s =
+            DeviceBuffer::from_slice(&n3s).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_modes = DeviceBuffer::from_slice(&modes)
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
 
-        let mut d_wt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let mut d_wt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
 
         // Launch
-        let func = self.module.get_function("mod_god_mode_batch_f32").map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Auto => 128, BatchKernelPolicy::Plain { block_x } => block_x.max(32) };
+        let func = self
+            .module
+            .get_function("mod_god_mode_batch_f32")
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        };
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         if !self.debug_logged && std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
-            eprintln!("[mod_god_mode] batch policy selected: block_x={} grid_x={}", block_x, grid_x);
+            eprintln!(
+                "[mod_god_mode] batch policy selected: block_x={} grid_x={}",
+                block_x, grid_x
+            );
             // Log once (interior mutation via raw self pointer to avoid lint)
-            unsafe { (*(self as *const _ as *mut CudaModGodMode)).debug_logged = true; }
+            unsafe {
+                (*(self as *const _ as *mut CudaModGodMode)).debug_logged = true;
+            }
         }
         unsafe {
             // Chunk by grid.x limit ~65k blocks as a conservative guard.
-            let block_x = match self.policy.batch { BatchKernelPolicy::Auto => 128, BatchKernelPolicy::Plain { block_x } => block_x.max(32) } as usize;
+            let block_x = match self.policy.batch {
+                BatchKernelPolicy::Auto => 128,
+                BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+            } as usize;
             let max_blocks = 65_535usize; // conservative
             let rows_per_launch = max_blocks.saturating_mul(block_x);
             let mut launched = 0usize;
@@ -192,19 +299,29 @@ impl CudaModGodMode {
                 let mut high_ptr = d_high.as_device_ptr().as_raw();
                 let mut low_ptr = d_low.as_device_ptr().as_raw();
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
-                let mut vol_ptr = d_volume.as_ref().map(|b| b.as_device_ptr().as_raw()).unwrap_or(0);
+                let mut vol_ptr = d_volume
+                    .as_ref()
+                    .map(|b| b.as_device_ptr().as_raw())
+                    .unwrap_or(0);
                 let mut len_i = n as i32;
                 let mut first_i = first_valid as i32;
                 let mut rows_i = chunk as i32;
                 // Offset param/output pointers for chunk start
-                let mut n1_ptr = d_n1s.as_device_ptr().as_raw() + (launched * std::mem::size_of::<i32>()) as u64;
-                let mut n2_ptr = d_n2s.as_device_ptr().as_raw() + (launched * std::mem::size_of::<i32>()) as u64;
-                let mut n3_ptr = d_n3s.as_device_ptr().as_raw() + (launched * std::mem::size_of::<i32>()) as u64;
-                let mut modes_ptr = d_modes.as_device_ptr().as_raw() + (launched * std::mem::size_of::<i32>()) as u64;
+                let mut n1_ptr =
+                    d_n1s.as_device_ptr().as_raw() + (launched * std::mem::size_of::<i32>()) as u64;
+                let mut n2_ptr =
+                    d_n2s.as_device_ptr().as_raw() + (launched * std::mem::size_of::<i32>()) as u64;
+                let mut n3_ptr =
+                    d_n3s.as_device_ptr().as_raw() + (launched * std::mem::size_of::<i32>()) as u64;
+                let mut modes_ptr = d_modes.as_device_ptr().as_raw()
+                    + (launched * std::mem::size_of::<i32>()) as u64;
                 let mut use_vol_i = if volume.is_some() { 1i32 } else { 0i32 };
-                let mut wt_ptr = d_wt.as_device_ptr().as_raw() + (launched * n * std::mem::size_of::<f32>()) as u64;
-                let mut sig_ptr = d_sig.as_device_ptr().as_raw() + (launched * n * std::mem::size_of::<f32>()) as u64;
-                let mut hist_ptr = d_hist.as_device_ptr().as_raw() + (launched * n * std::mem::size_of::<f32>()) as u64;
+                let mut wt_ptr = d_wt.as_device_ptr().as_raw()
+                    + (launched * n * std::mem::size_of::<f32>()) as u64;
+                let mut sig_ptr = d_sig.as_device_ptr().as_raw()
+                    + (launched * n * std::mem::size_of::<f32>()) as u64;
+                let mut hist_ptr = d_hist.as_device_ptr().as_raw()
+                    + (launched * n * std::mem::size_of::<f32>()) as u64;
 
                 let args: &mut [*mut c_void] = &mut [
                     &mut high_ptr as *mut _ as *mut c_void,
@@ -226,57 +343,134 @@ impl CudaModGodMode {
                 // Compute per-chunk grid size
                 let grid_x = ((chunk as u32) + (block_x as u32) - 1) / (block_x as u32);
                 let grid: GridSize = (grid_x.max(1), 1, 1).into();
-                self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
                 launched += chunk;
             }
         }
-        self.stream.synchronize().map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
 
         let outputs = DeviceArrayF32Triplet {
-            wt1: DeviceArrayF32 { buf: d_wt, rows, cols: n },
-            wt2: DeviceArrayF32 { buf: d_sig, rows, cols: n },
-            hist: DeviceArrayF32 { buf: d_hist, rows, cols: n },
+            wt1: DeviceArrayF32 {
+                buf: d_wt,
+                rows,
+                cols: n,
+            },
+            wt2: DeviceArrayF32 {
+                buf: d_sig,
+                rows,
+                cols: n,
+            },
+            hist: DeviceArrayF32 {
+                buf: d_hist,
+                rows,
+                cols: n,
+            },
         };
         Ok(CudaModGodModeBatchResult { outputs, combos })
     }
 
     pub fn mod_god_mode_many_series_one_param_time_major_dev(
         &self,
-        high_tm: &[f32], low_tm: &[f32], close_tm: &[f32], volume_tm: Option<&[f32]>,
-        cols: usize, rows: usize, params: &ModGodModeParams,
+        high_tm: &[f32],
+        low_tm: &[f32],
+        close_tm: &[f32],
+        volume_tm: Option<&[f32]>,
+        cols: usize,
+        rows: usize,
+        params: &ModGodModeParams,
     ) -> Result<DeviceArrayF32Triplet, CudaModGodModeError> {
-        if cols == 0 || rows == 0 { return Err(CudaModGodModeError::InvalidInput("cols/rows must be > 0".into())); }
-        let elems = cols.checked_mul(rows).ok_or_else(|| CudaModGodModeError::InvalidInput("cols*rows overflow".into()))?;
-        if high_tm.len() != elems || low_tm.len() != elems || close_tm.len() != elems { return Err(CudaModGodModeError::InvalidInput("time-major inputs must be cols*rows".into())); }
-        if let Some(v) = volume_tm { if v.len() != elems { return Err(CudaModGodModeError::InvalidInput("volume_tm length mismatch".into())); } }
-        let n1 = params.n1.unwrap_or(17); let n2 = params.n2.unwrap_or(6); let n3 = params.n3.unwrap_or(4);
-        let mode_i = match params.mode.unwrap_or(ModGodModeMode::TraditionMg) { ModGodModeMode::Godmode => 0, ModGodModeMode::Tradition => 1, ModGodModeMode::GodmodeMg => 2, ModGodModeMode::TraditionMg => 3 };
+        if cols == 0 || rows == 0 {
+            return Err(CudaModGodModeError::InvalidInput(
+                "cols/rows must be > 0".into(),
+            ));
+        }
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaModGodModeError::InvalidInput("cols*rows overflow".into()))?;
+        if high_tm.len() != elems || low_tm.len() != elems || close_tm.len() != elems {
+            return Err(CudaModGodModeError::InvalidInput(
+                "time-major inputs must be cols*rows".into(),
+            ));
+        }
+        if let Some(v) = volume_tm {
+            if v.len() != elems {
+                return Err(CudaModGodModeError::InvalidInput(
+                    "volume_tm length mismatch".into(),
+                ));
+            }
+        }
+        let n1 = params.n1.unwrap_or(17);
+        let n2 = params.n2.unwrap_or(6);
+        let n3 = params.n3.unwrap_or(4);
+        let mode_i = match params.mode.unwrap_or(ModGodModeMode::TraditionMg) {
+            ModGodModeMode::Godmode => 0,
+            ModGodModeMode::Tradition => 1,
+            ModGodModeMode::GodmodeMg => 2,
+            ModGodModeMode::TraditionMg => 3,
+        };
         let use_vol = params.use_volume.unwrap_or(false) && volume_tm.is_some();
 
-        let d_high = DeviceBuffer::from_slice(high_tm).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_tm).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_vol = if let Some(v) = volume_tm { Some(DeviceBuffer::from_slice(v).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?) } else { None };
-        let mut d_wt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high_tm)
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_low = DeviceBuffer::from_slice(low_tm)
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close_tm)
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_vol = if let Some(v) = volume_tm {
+            Some(
+                DeviceBuffer::from_slice(v)
+                    .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let mut d_wt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
 
-        let func = self.module.get_function("mod_god_mode_many_series_one_param_time_major_f32").map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let bx = match self.policy.many_series { ManySeriesKernelPolicy::Auto | ManySeriesKernelPolicy::OneD { .. } => 32 };
+        let func = self
+            .module
+            .get_function("mod_god_mode_many_series_one_param_time_major_f32")
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let bx = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto | ManySeriesKernelPolicy::OneD { .. } => 32,
+        };
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (bx, 1, 1).into();
         if !self.debug_logged && std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
-            eprintln!("[mod_god_mode] many-series policy selected: block_x={} grid.x={}", bx, cols);
-            unsafe { (*(self as *const _ as *mut CudaModGodMode)).debug_logged = true; }
+            eprintln!(
+                "[mod_god_mode] many-series policy selected: block_x={} grid.x={}",
+                bx, cols
+            );
+            unsafe {
+                (*(self as *const _ as *mut CudaModGodMode)).debug_logged = true;
+            }
         }
         unsafe {
             let mut high_ptr = d_high.as_device_ptr().as_raw();
             let mut low_ptr = d_low.as_device_ptr().as_raw();
             let mut close_ptr = d_close.as_device_ptr().as_raw();
-            let mut vol_ptr = d_vol.as_ref().map(|b| b.as_device_ptr().as_raw()).unwrap_or(0);
-            let mut cols_i = cols as i32; let mut rows_i = rows as i32;
-            let mut n1_i = n1 as i32; let mut n2_i = n2 as i32; let mut n3_i = n3 as i32; let mut mode_i32 = mode_i as i32; let mut use_vol_i = if use_vol {1i32} else {0i32};
-            let mut wt_ptr = d_wt.as_device_ptr().as_raw(); let mut sig_ptr = d_sig.as_device_ptr().as_raw(); let mut hist_ptr = d_hist.as_device_ptr().as_raw();
+            let mut vol_ptr = d_vol
+                .as_ref()
+                .map(|b| b.as_device_ptr().as_raw())
+                .unwrap_or(0);
+            let mut cols_i = cols as i32;
+            let mut rows_i = rows as i32;
+            let mut n1_i = n1 as i32;
+            let mut n2_i = n2 as i32;
+            let mut n3_i = n3 as i32;
+            let mut mode_i32 = mode_i as i32;
+            let mut use_vol_i = if use_vol { 1i32 } else { 0i32 };
+            let mut wt_ptr = d_wt.as_device_ptr().as_raw();
+            let mut sig_ptr = d_sig.as_device_ptr().as_raw();
+            let mut hist_ptr = d_hist.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut high_ptr as *mut _ as *mut c_void,
                 &mut low_ptr as *mut _ as *mut c_void,
@@ -293,13 +487,29 @@ impl CudaModGodMode {
                 &mut sig_ptr as *mut _ as *mut c_void,
                 &mut hist_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
         }
-        self.stream.synchronize().map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32Triplet {
-            wt1: DeviceArrayF32 { buf: d_wt, rows, cols },
-            wt2: DeviceArrayF32 { buf: d_sig, rows, cols },
-            hist: DeviceArrayF32 { buf: d_hist, rows, cols },
+            wt1: DeviceArrayF32 {
+                buf: d_wt,
+                rows,
+                cols,
+            },
+            wt2: DeviceArrayF32 {
+                buf: d_sig,
+                rows,
+                cols,
+            },
+            hist: DeviceArrayF32 {
+                buf: d_hist,
+                rows,
+                cols,
+            },
         })
     }
 }
@@ -339,9 +549,23 @@ pub mod benches {
         let close = gen_series(ONE_SERIES_LEN);
         let mut high = close.clone();
         let mut low = close.clone();
-        for i in 0..ONE_SERIES_LEN { high[i] += 0.5; low[i] -= 0.5; }
-        let sweep = ModGodModeBatchRange { n1: (10, 10 + PARAM_SWEEP - 1, 1), n2: (6, 6, 0), n3: (4, 4, 0), mode: ModGodModeMode::TraditionMg };
-        Box::new(MgBatchState { cuda, high, low, close, sweep })
+        for i in 0..ONE_SERIES_LEN {
+            high[i] += 0.5;
+            low[i] -= 0.5;
+        }
+        let sweep = ModGodModeBatchRange {
+            n1: (10, 10 + PARAM_SWEEP - 1, 1),
+            n2: (6, 6, 0),
+            n3: (4, 4, 0),
+            mode: ModGodModeMode::TraditionMg,
+        };
+        Box::new(MgBatchState {
+            cuda,
+            high,
+            low,
+            close,
+            sweep,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

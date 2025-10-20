@@ -1252,8 +1252,7 @@ pub fn obv_cuda_batch_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaObv::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .obv_batch_dev(close_slice, volume_slice)
+        cuda.obv_batch_dev(close_slice, volume_slice)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
@@ -1284,8 +1283,7 @@ pub fn obv_cuda_many_series_one_param_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaObv::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .obv_many_series_one_param_time_major_dev(close_slice, volume_slice, cols, rows)
+        cuda.obv_many_series_one_param_time_major_dev(close_slice, volume_slice, cols, rows)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 

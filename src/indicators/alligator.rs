@@ -2934,24 +2934,42 @@ pub fn alligator_cuda_batch_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = prices_f32.as_slice()?;
-    let sweep = AlligatorBatchRange { jaw_period, jaw_offset, teeth_period, teeth_offset, lips_period, lips_offset };
-    let (jaw, teeth, lips, rows, cols, jp, jo, tp, to, lp, lo) = py
-        .allow_threads(|| {
-            let cuda = CudaAlligator::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let res = cuda
-                .alligator_batch_dev(slice, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let rows = res.outputs.rows();
-            let cols = res.outputs.cols();
-            let jp: Vec<usize> = res.combos.iter().map(|c| c.jaw_period.unwrap()).collect();
-            let jo: Vec<usize> = res.combos.iter().map(|c| c.jaw_offset.unwrap()).collect();
-            let tp: Vec<usize> = res.combos.iter().map(|c| c.teeth_period.unwrap()).collect();
-            let to: Vec<usize> = res.combos.iter().map(|c| c.teeth_offset.unwrap()).collect();
-            let lp: Vec<usize> = res.combos.iter().map(|c| c.lips_period.unwrap()).collect();
-            let lo: Vec<usize> = res.combos.iter().map(|c| c.lips_offset.unwrap()).collect();
-            Ok::<_, PyErr>((res.outputs.jaw, res.outputs.teeth, res.outputs.lips, rows, cols, jp, jo, tp, to, lp, lo))
-        })?;
+    let sweep = AlligatorBatchRange {
+        jaw_period,
+        jaw_offset,
+        teeth_period,
+        teeth_offset,
+        lips_period,
+        lips_offset,
+    };
+    let (jaw, teeth, lips, rows, cols, jp, jo, tp, to, lp, lo) = py.allow_threads(|| {
+        let cuda =
+            CudaAlligator::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let res = cuda
+            .alligator_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let rows = res.outputs.rows();
+        let cols = res.outputs.cols();
+        let jp: Vec<usize> = res.combos.iter().map(|c| c.jaw_period.unwrap()).collect();
+        let jo: Vec<usize> = res.combos.iter().map(|c| c.jaw_offset.unwrap()).collect();
+        let tp: Vec<usize> = res.combos.iter().map(|c| c.teeth_period.unwrap()).collect();
+        let to: Vec<usize> = res.combos.iter().map(|c| c.teeth_offset.unwrap()).collect();
+        let lp: Vec<usize> = res.combos.iter().map(|c| c.lips_period.unwrap()).collect();
+        let lo: Vec<usize> = res.combos.iter().map(|c| c.lips_offset.unwrap()).collect();
+        Ok::<_, PyErr>((
+            res.outputs.jaw,
+            res.outputs.teeth,
+            res.outputs.lips,
+            rows,
+            cols,
+            jp,
+            jo,
+            tp,
+            to,
+            lp,
+            lo,
+        ))
+    })?;
     use numpy::IntoPyArray;
     let d = PyDict::new(py);
     d.set_item("jaw", Py::new(py, DeviceArrayF32Py { inner: jaw })?)?;
@@ -2987,20 +3005,28 @@ pub fn alligator_cuda_many_series_one_param_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let shape = data_tm_f32.shape();
-    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array")); }
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array"));
+    }
     let rows = shape[0];
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
-    let params = AlligatorParams { jaw_period: Some(jaw_period), jaw_offset: Some(jaw_offset), teeth_period: Some(teeth_period), teeth_offset: Some(teeth_offset), lips_period: Some(lips_period), lips_offset: Some(lips_offset) };
-    let (jaw, teeth, lips) = py
-        .allow_threads(|| {
-            let cuda = CudaAlligator::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let out = cuda
-                .alligator_many_series_one_param_time_major_dev(flat, cols, rows, &params)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, PyErr>((out.jaw, out.teeth, out.lips))
-        })?;
+    let params = AlligatorParams {
+        jaw_period: Some(jaw_period),
+        jaw_offset: Some(jaw_offset),
+        teeth_period: Some(teeth_period),
+        teeth_offset: Some(teeth_offset),
+        lips_period: Some(lips_period),
+        lips_offset: Some(lips_offset),
+    };
+    let (jaw, teeth, lips) = py.allow_threads(|| {
+        let cuda =
+            CudaAlligator::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let out = cuda
+            .alligator_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((out.jaw, out.teeth, out.lips))
+    })?;
     let d = PyDict::new(py);
     d.set_item("jaw", Py::new(py, DeviceArrayF32Py { inner: jaw })?)?;
     d.set_item("teeth", Py::new(py, DeviceArrayF32Py { inner: teeth })?)?;

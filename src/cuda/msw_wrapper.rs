@@ -41,16 +41,26 @@ impl fmt::Display for CudaMswError {
 impl std::error::Error for CudaMswError {}
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelPolicy { Auto, Plain { block_x: u32 } }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy { Auto, OneD { block_x: u32 } }
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaMsw {
     module: Module,
@@ -68,8 +78,8 @@ pub struct CudaMsw {
 impl CudaMsw {
     pub fn new(device_id: usize) -> Result<Self, CudaMswError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaMswError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaMswError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/msw_kernel.ptx"));
         let jit_opts = &[
@@ -79,7 +89,8 @@ impl CudaMsw {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaMswError::Cuda(e.to_string()))?
@@ -103,41 +114,63 @@ impl CudaMsw {
     }
 
     // ----- Policy control & introspection -----
-    pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) { self.policy_batch = p; }
-    pub fn set_many_series_policy(&mut self, p: ManySeriesKernelPolicy) { self.policy_many = p; }
-    pub fn batch_policy(&self) -> BatchKernelPolicy { self.policy_batch }
-    pub fn many_series_policy(&self) -> ManySeriesKernelPolicy { self.policy_many }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) {
+        self.policy_batch = p;
+    }
+    pub fn set_many_series_policy(&mut self, p: ManySeriesKernelPolicy) {
+        self.policy_many = p;
+    }
+    pub fn batch_policy(&self) -> BatchKernelPolicy {
+        self.policy_batch
+    }
+    pub fn many_series_policy(&self) -> ManySeriesKernelPolicy {
+        self.policy_many
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaMswError> {
-        self.stream.synchronize().map_err(|e| CudaMswError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMswError::Cuda(e.to_string()))
     }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per = env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] MSW batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMsw)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMsw)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per = env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] MSW many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMsw)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMsw)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -150,24 +183,49 @@ impl CudaMsw {
         }
     }
     fn will_fit(required_bytes: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Ok((free, _)) = mem_get_info() { required_bytes.saturating_add(headroom) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Ok((free, _)) = mem_get_info() {
+            required_bytes.saturating_add(headroom) <= free
+        } else {
+            true
+        }
     }
     fn first_valid_f32(series: &[f32]) -> Result<usize, CudaMswError> {
-        if series.is_empty() { return Err(CudaMswError::InvalidInput("empty series".into())); }
-        series.iter().position(|x| x.is_finite()).ok_or_else(|| CudaMswError::InvalidInput("all values are NaN".into()))
+        if series.is_empty() {
+            return Err(CudaMswError::InvalidInput("empty series".into()));
+        }
+        series
+            .iter()
+            .position(|x| x.is_finite())
+            .ok_or_else(|| CudaMswError::InvalidInput("all values are NaN".into()))
     }
     fn expand_grid(range: &MswBatchRange) -> Vec<MswParams> {
-        let (s,e,step) = range.period;
-        let periods = if step == 0 || s == e { vec![s] } else { (s..=e).step_by(step).collect::<Vec<_>>() };
-        periods.into_iter().map(|p| MswParams { period: Some(p) }).collect()
+        let (s, e, step) = range.period;
+        let periods = if step == 0 || s == e {
+            vec![s]
+        } else {
+            (s..=e).step_by(step).collect::<Vec<_>>()
+        };
+        periods
+            .into_iter()
+            .map(|p| MswParams { period: Some(p) })
+            .collect()
     }
 
     // dynamic shared memory: floats needed = cos(P) + sin(P) + tile(block_x + P - 1)
     #[inline]
-    fn dyn_smem_floats(period: usize, block_x: u32) -> usize { (block_x as usize) + 3usize.saturating_mul(period) - 1 }
+    fn dyn_smem_floats(period: usize, block_x: u32) -> usize {
+        (block_x as usize) + 3usize.saturating_mul(period) - 1
+    }
 
-    fn try_pick_block_x(&self, func: &Function, period: usize, prefer: Option<u32>) -> Result<(u32, usize), CudaMswError> {
+    fn try_pick_block_x(
+        &self,
+        func: &Function,
+        period: usize,
+        prefer: Option<u32>,
+    ) -> Result<(u32, usize), CudaMswError> {
         let mut candidates = [512u32, 384, 256, 192, 128, 96, 64, 48, 32];
         if let Some(px) = prefer {
             if !candidates.contains(&px) {
@@ -175,25 +233,42 @@ impl CudaMsw {
             } else {
                 let mut v = vec![px];
                 v.extend(candidates.into_iter().filter(|&b| b != px));
-                candidates = v.try_into().unwrap_or([px, 256, 192, 128, 96, 64, 48, 32, 32]);
+                candidates = v
+                    .try_into()
+                    .unwrap_or([px, 256, 192, 128, 96, 64, 48, 32, 32]);
             }
         }
-        let dev = Device::get_device(self.device_id).map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock).unwrap_or(1024) as u32;
+        let dev =
+            Device::get_device(self.device_id).map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let max_threads = dev
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
 
         for &bx in &candidates {
-            if bx > max_threads { continue; }
+            if bx > max_threads {
+                continue;
+            }
             let need_bytes = Self::dyn_smem_floats(period, bx) * std::mem::size_of::<f32>();
-            let avail = func.available_dynamic_shared_memory_per_block(GridSize::xy(1,1), BlockSize::xyz(bx,1,1)).unwrap_or(48*1024);
-            if need_bytes <= avail { return Ok((bx, need_bytes)); }
+            let avail = func
+                .available_dynamic_shared_memory_per_block(
+                    GridSize::xy(1, 1),
+                    BlockSize::xyz(bx, 1, 1),
+                )
+                .unwrap_or(48 * 1024);
+            if need_bytes <= avail {
+                return Ok((bx, need_bytes));
+            }
         }
         // Fallback: try a small bx if nothing fit
         let bx = 64u32.min(max_threads);
         let need_bytes = Self::dyn_smem_floats(period, bx) * std::mem::size_of::<f32>();
-        let avail = func.available_dynamic_shared_memory_per_block(GridSize::xy(1,1), BlockSize::xyz(bx,1,1)).unwrap_or(48*1024);
+        let avail = func
+            .available_dynamic_shared_memory_per_block(GridSize::xy(1, 1), BlockSize::xyz(bx, 1, 1))
+            .unwrap_or(48 * 1024);
         if need_bytes > avail {
             return Err(CudaMswError::InvalidInput(format!(
-                "period {} requires too much shared memory (need {}B, avail {}B)", period, need_bytes, avail
+                "period {} requires too much shared memory (need {}B, avail {}B)",
+                period, need_bytes, avail
             )));
         }
         Ok((bx, need_bytes))
@@ -212,7 +287,10 @@ impl CudaMsw {
         block_x: u32,
         shared_bytes: usize,
     ) -> Result<(), CudaMswError> {
-        let mut func = self.module.get_function("msw_batch_f32").map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let mut func = self
+            .module
+            .get_function("msw_batch_f32")
+            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid_y = chunk_rows as u32;
         let grid: GridSize = (grid_x.max(1), grid_y, 1).into();
@@ -236,10 +314,14 @@ impl CudaMsw {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, shared_bytes as u32, args)
+            self.stream
+                .launch(&func, grid, block, shared_bytes as u32, args)
                 .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
         }
-        unsafe { (*(self as *const _ as *mut CudaMsw)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaMsw)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
         Ok(())
     }
@@ -249,19 +331,38 @@ impl CudaMsw {
         prices_f32: &[f32],
         sweep: &MswBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<MswParams>), CudaMswError> {
-        if prices_f32.is_empty() { return Err(CudaMswError::InvalidInput("empty series".into())); }
+        if prices_f32.is_empty() {
+            return Err(CudaMswError::InvalidInput("empty series".into()));
+        }
         let first_valid = Self::first_valid_f32(prices_f32)?;
         let combos = Self::expand_grid(sweep);
-        if combos.is_empty() { return Err(CudaMswError::InvalidInput("no parameter combinations".into())); }
+        if combos.is_empty() {
+            return Err(CudaMswError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
 
         let len = prices_f32.len();
         let mut periods_i32 = Vec::with_capacity(combos.len());
         let mut max_p = 0usize;
         for prm in &combos {
             let p = prm.period.unwrap_or(0);
-            if p == 0 { return Err(CudaMswError::InvalidInput("period must be >= 1".into())); }
-            if p > len { return Err(CudaMswError::InvalidInput(format!("period {} exceeds length {}", p, len))); }
-            if len - first_valid < p { return Err(CudaMswError::InvalidInput(format!("not enough valid data: need {}, valid {}", p, len - first_valid))); }
+            if p == 0 {
+                return Err(CudaMswError::InvalidInput("period must be >= 1".into()));
+            }
+            if p > len {
+                return Err(CudaMswError::InvalidInput(format!(
+                    "period {} exceeds length {}",
+                    p, len
+                )));
+            }
+            if len - first_valid < p {
+                return Err(CudaMswError::InvalidInput(format!(
+                    "not enough valid data: need {}, valid {}",
+                    p,
+                    len - first_valid
+                )));
+            }
             max_p = max_p.max(p);
             periods_i32.push(p as i32);
         }
@@ -270,32 +371,65 @@ impl CudaMsw {
         let req = len * 4 + periods_i32.len() * 4 + (2 * combos.len() * len) * 4;
         let headroom = 64 * 1024 * 1024usize;
         if !Self::will_fit(req, headroom) {
-            return Err(CudaMswError::InvalidInput("insufficient VRAM for MSW batch".into()));
+            return Err(CudaMswError::InvalidInput(
+                "insufficient VRAM for MSW batch".into(),
+            ));
         }
 
         // Device buffers
         let d_prices = unsafe { DeviceBuffer::from_slice_async(prices_f32, &self.stream) }
             .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32).map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(2 * combos.len() * len, &self.stream) }
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(2 * combos.len() * len, &self.stream) }
+                .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
 
         // Select block_x based on max_p for shared memory sizing once using the function handle
         // (we still pass it to launch method via try_pick inside, so warm up function cache here)
-        let func = self.module.get_function("msw_batch_f32").map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let (block_x, shared_bytes) = self.try_pick_block_x(&func, max_p, match self.policy_batch { BatchKernelPolicy::Plain { block_x } => Some(block_x), _ => None })?;
+        let func = self
+            .module
+            .get_function("msw_batch_f32")
+            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let (block_x, shared_bytes) = self.try_pick_block_x(
+            &func,
+            max_p,
+            match self.policy_batch {
+                BatchKernelPolicy::Plain { block_x } => Some(block_x),
+                _ => None,
+            },
+        )?;
 
         // Chunk grid.y if needed
         let mut base = 0usize;
         const MAX_Y: usize = 65_535;
         while base < combos.len() {
             let take = (combos.len() - base).min(MAX_Y);
-            self.launch_batch_chunk(&d_prices, &d_periods, len, first_valid, take, base, &mut d_out, block_x, shared_bytes)?;
+            self.launch_batch_chunk(
+                &d_prices,
+                &d_periods,
+                len,
+                first_valid,
+                take,
+                base,
+                &mut d_out,
+                block_x,
+                shared_bytes,
+            )?;
             base += take;
         }
-        self.stream.synchronize().map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows: 2 * combos.len(), cols: len }, combos))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: 2 * combos.len(),
+                cols: len,
+            },
+            combos,
+        ))
     }
 
     // ----- Many-series: time‑major, one param -----
@@ -306,10 +440,18 @@ impl CudaMsw {
         rows: usize,
         params: &MswParams,
     ) -> Result<DeviceArrayF32, CudaMswError> {
-        if cols == 0 || rows == 0 { return Err(CudaMswError::InvalidInput("cols/rows must be > 0".into())); }
-        if prices_tm_f32.len() != cols * rows { return Err(CudaMswError::InvalidInput("data length != cols*rows".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaMswError::InvalidInput("cols/rows must be > 0".into()));
+        }
+        if prices_tm_f32.len() != cols * rows {
+            return Err(CudaMswError::InvalidInput(
+                "data length != cols*rows".into(),
+            ));
+        }
         let period = params.period.unwrap_or(0);
-        if period == 0 { return Err(CudaMswError::InvalidInput("period must be >= 1".into())); }
+        if period == 0 {
+            return Err(CudaMswError::InvalidInput("period must be >= 1".into()));
+        }
 
         // Per-series first_valid and validation
         let mut first_valids = vec![0i32; cols];
@@ -317,11 +459,20 @@ impl CudaMsw {
             let mut fv = None;
             for t in 0..rows {
                 let idx = t * cols + s;
-                if prices_tm_f32[idx].is_finite() { fv = Some(t as i32); break; }
+                if prices_tm_f32[idx].is_finite() {
+                    fv = Some(t as i32);
+                    break;
+                }
             }
-            let found = fv.ok_or_else(|| CudaMswError::InvalidInput(format!("series {} all NaN", s)))?;
+            let found =
+                fv.ok_or_else(|| CudaMswError::InvalidInput(format!("series {} all NaN", s)))?;
             if (rows as i32 - found) < period as i32 {
-                return Err(CudaMswError::InvalidInput(format!("series {} lacks data: need {}, valid {}", s, period, rows as i32 - found)));
+                return Err(CudaMswError::InvalidInput(format!(
+                    "series {} lacks data: need {}, valid {}",
+                    s,
+                    period,
+                    rows as i32 - found
+                )));
             }
             first_valids[s] = found;
         }
@@ -329,18 +480,31 @@ impl CudaMsw {
         // VRAM: input + first_valids + output (rows * 2*cols)
         let req = (cols * rows * 4) + (cols * 4) + (rows * 2 * cols * 4);
         if !Self::will_fit(req, 64 * 1024 * 1024) {
-            return Err(CudaMswError::InvalidInput("insufficient VRAM for MSW many-series".into()));
+            return Err(CudaMswError::InvalidInput(
+                "insufficient VRAM for MSW many-series".into(),
+            ));
         }
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }
             .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows * 2 * cols, &self.stream) }
+        let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * 2 * cols, &self.stream) }
+                .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
 
-        let mut func = self.module.get_function("msw_many_series_one_param_time_major_f32")
+        let mut func = self
+            .module
+            .get_function("msw_many_series_one_param_time_major_f32")
             .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let (block_x, shared_bytes) = self.try_pick_block_x(&func, period, match self.policy_many { ManySeriesKernelPolicy::OneD { block_x } => Some(block_x), _ => None })?;
+        let (block_x, shared_bytes) = self.try_pick_block_x(
+            &func,
+            period,
+            match self.policy_many {
+                ManySeriesKernelPolicy::OneD { block_x } => Some(block_x),
+                _ => None,
+            },
+        )?;
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -360,14 +524,24 @@ impl CudaMsw {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, shared_bytes as u32, args)
+            self.stream
+                .launch(&func, grid, block, shared_bytes as u32, args)
                 .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
         }
-        unsafe { (*(self as *const _ as *mut CudaMsw)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaMsw)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
-        self.stream.synchronize().map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols: 2 * cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols: 2 * cols,
+        })
     }
 }
 
@@ -383,39 +557,100 @@ pub mod benches {
 
     fn gen_series(n: usize) -> Vec<f32> {
         let mut v = vec![f32::NAN; n];
-        for i in 64..n { let x = i as f32; v[i] = (x * 0.00123).sin() + 0.0001 * x; }
+        for i in 64..n {
+            let x = i as f32;
+            v[i] = (x * 0.00123).sin() + 0.0001 * x;
+        }
         v
     }
 
-    struct BatchState { cuda: CudaMsw, prices: Vec<f32>, sweep: MswBatchRange }
-    impl CudaBenchState for BatchState { fn launch(&mut self) { let _ = self.cuda.msw_batch_dev(&self.prices, &self.sweep).unwrap(); } }
+    struct BatchState {
+        cuda: CudaMsw,
+        prices: Vec<f32>,
+        sweep: MswBatchRange,
+    }
+    impl CudaBenchState for BatchState {
+        fn launch(&mut self) {
+            let _ = self.cuda.msw_batch_dev(&self.prices, &self.sweep).unwrap();
+        }
+    }
 
-    struct ManyState { cuda: CudaMsw, prices_tm: Vec<f32>, cols: usize, rows: usize, params: MswParams }
-    impl CudaBenchState for ManyState { fn launch(&mut self) { let _ = self.cuda.msw_many_series_one_param_time_major_dev(&self.prices_tm, self.cols, self.rows, &self.params).unwrap(); } }
+    struct ManyState {
+        cuda: CudaMsw,
+        prices_tm: Vec<f32>,
+        cols: usize,
+        rows: usize,
+        params: MswParams,
+    }
+    impl CudaBenchState for ManyState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .msw_many_series_one_param_time_major_dev(
+                    &self.prices_tm,
+                    self.cols,
+                    self.rows,
+                    &self.params,
+                )
+                .unwrap();
+        }
+    }
 
     fn prep_batch() -> Box<dyn CudaBenchState> {
         let cuda = CudaMsw::new(0).expect("cuda msw");
         let prices = gen_series(ONE_SERIES_LEN);
-        let sweep = MswBatchRange { period: (8, 8 + PARAM_SWEEP - 1, 1) };
-        Box::new(BatchState { cuda, prices, sweep })
+        let sweep = MswBatchRange {
+            period: (8, 8 + PARAM_SWEEP - 1, 1),
+        };
+        Box::new(BatchState {
+            cuda,
+            prices,
+            sweep,
+        })
     }
     fn prep_many() -> Box<dyn CudaBenchState> {
         let cuda = CudaMsw::new(0).expect("cuda msw");
-        let cols = MANY_COLS; let rows = MANY_ROWS;
+        let cols = MANY_COLS;
+        let rows = MANY_ROWS;
         let mut tm = vec![f32::NAN; cols * rows];
-        for s in 0..cols { for t in s..rows { let x = (t as f32) + 0.1 * (s as f32); tm[t*cols + s] = (0.002*x).sin() + 0.0003*x; } }
+        for s in 0..cols {
+            for t in s..rows {
+                let x = (t as f32) + 0.1 * (s as f32);
+                tm[t * cols + s] = (0.002 * x).sin() + 0.0003 * x;
+            }
+        }
         let params = MswParams { period: Some(32) };
-        Box::new(ManyState { cuda, prices_tm: tm, cols, rows, params })
+        Box::new(ManyState {
+            cuda,
+            prices_tm: tm,
+            cols,
+            rows,
+            params,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new("msw", "one_series_many_params", "msw_cuda_batch_dev", "1m_x_256", prep_batch)
-                .with_sample_size(12)
-                .with_mem_required(ONE_SERIES_LEN * 4 + ONE_SERIES_LEN * PARAM_SWEEP * 2 * 4 + 64*1024*1024),
-            CudaBenchScenario::new("msw", "many_series_one_param", "msw_cuda_many_series_one_param_dev", "256x16k", prep_many)
-                .with_sample_size(12)
-                .with_mem_required(MANY_COLS * MANY_ROWS * 3 * 4 + 64*1024*1024),
+            CudaBenchScenario::new(
+                "msw",
+                "one_series_many_params",
+                "msw_cuda_batch_dev",
+                "1m_x_256",
+                prep_batch,
+            )
+            .with_sample_size(12)
+            .with_mem_required(
+                ONE_SERIES_LEN * 4 + ONE_SERIES_LEN * PARAM_SWEEP * 2 * 4 + 64 * 1024 * 1024,
+            ),
+            CudaBenchScenario::new(
+                "msw",
+                "many_series_one_param",
+                "msw_cuda_many_series_one_param_dev",
+                "256x16k",
+                prep_many,
+            )
+            .with_sample_size(12)
+            .with_mem_required(MANY_COLS * MANY_ROWS * 3 * 4 + 64 * 1024 * 1024),
         ]
     }
 }

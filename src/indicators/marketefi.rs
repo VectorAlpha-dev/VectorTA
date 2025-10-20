@@ -877,16 +877,22 @@ pub fn marketefi_cuda_batch_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use numpy::PyArrayMethods;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
     let v = volume_f32.as_slice()?;
     if h.len() != l.len() || l.len() != v.len() {
-        return Err(PyValueError::new_err("high, low, volume must have same length"));
+        return Err(PyValueError::new_err(
+            "high, low, volume must have same length",
+        ));
     }
     let inner = py.allow_threads(|| {
-        let cuda = CudaMarketefi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.marketefi_batch_dev(h, l, v).map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaMarketefi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.marketefi_batch_dev(h, l, v)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }
@@ -902,7 +908,9 @@ pub fn marketefi_cuda_many_series_one_param_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use numpy::{PyArrayMethods, PyUntypedArrayMethods};
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let v = volume_tm_f32.as_slice()?;
@@ -910,12 +918,15 @@ pub fn marketefi_cuda_many_series_one_param_dev_py(
     let shp_l = low_tm_f32.shape();
     let shp_v = volume_tm_f32.shape();
     if shp_h.len() != 2 || shp_h != shp_l || shp_h != shp_v {
-        return Err(PyValueError::new_err("high_tm, low_tm, volume_tm must have same 2D shape"));
+        return Err(PyValueError::new_err(
+            "high_tm, low_tm, volume_tm must have same 2D shape",
+        ));
     }
     let rows = shp_h[0];
     let cols = shp_h[1];
     let inner = py.allow_threads(|| {
-        let cuda = CudaMarketefi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaMarketefi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.marketefi_many_series_one_param_time_major_dev(h, l, v, cols, rows)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

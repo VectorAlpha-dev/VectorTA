@@ -98,8 +98,12 @@ impl CudaAd {
             let mut low_ptr = d_low.as_device_ptr().as_raw();
             let mut close_ptr = d_close.as_device_ptr().as_raw();
             let mut vol_ptr = d_volume.as_device_ptr().as_raw();
-            let mut len_i = len as i32;
-            let mut n_i = n_series as i32;
+            let mut len_i: i32 = len
+                .try_into()
+                .map_err(|_| CudaAdError::InvalidInput("length exceeds i32".into()))?;
+            let mut n_i: i32 = n_series
+                .try_into()
+                .map_err(|_| CudaAdError::InvalidInput("n_series exceeds i32".into()))?;
             let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut high_ptr as *mut _ as *mut c_void,
@@ -127,22 +131,24 @@ impl CudaAd {
         let len = Self::validate_hlcv(high, low, close, volume)?;
 
         // Pinned host buffers for async HtoD copies
-        let h_high = LockedBuffer::from_slice(high).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_high =
+            LockedBuffer::from_slice(high).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
         let h_low = LockedBuffer::from_slice(low).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
         let h_close =
             LockedBuffer::from_slice(close).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(volume).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_vol =
+            LockedBuffer::from_slice(volume).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
 
-        let mut d_high: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_low: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_close: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_vol: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_vol: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
 
         // Async copies on the stream
         unsafe {
@@ -188,16 +194,24 @@ impl CudaAd {
             .get_function("ad_many_series_one_param_time_major_f32")
             .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
 
-        let grid: GridSize = (num_series as u32, 1, 1).into();
-        let block: BlockSize = (32, 1, 1).into(); // thread 0 performs the scan
+        // Time-major fast path: one thread per series with coalesced loads across a warp.
+        // Use a larger block so many threads process many series concurrently.
+        let block_x: u32 = 256; // should match/default to AD_BLOCK_SIZE_TM in the kernel
+        let grid_x = ((num_series as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut high_ptr = d_high_tm.as_device_ptr().as_raw();
             let mut low_ptr = d_low_tm.as_device_ptr().as_raw();
             let mut close_ptr = d_close_tm.as_device_ptr().as_raw();
             let mut vol_ptr = d_volume_tm.as_device_ptr().as_raw();
-            let mut n_i = num_series as i32;
-            let mut len_i = series_len as i32;
+            let mut n_i: i32 = num_series
+                .try_into()
+                .map_err(|_| CudaAdError::InvalidInput("num_series exceeds i32 range".into()))?;
+            let mut len_i: i32 = series_len
+                .try_into()
+                .map_err(|_| CudaAdError::InvalidInput("series_len exceeds i32 range".into()))?;
             let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut high_ptr as *mut _ as *mut c_void,
@@ -225,7 +239,9 @@ impl CudaAd {
         rows: usize,
     ) -> Result<DeviceArrayF32, CudaAdError> {
         if cols == 0 || rows == 0 {
-            return Err(CudaAdError::InvalidInput("cols and rows must be > 0".into()));
+            return Err(CudaAdError::InvalidInput(
+                "cols and rows must be > 0".into(),
+            ));
         }
         let elems = cols
             .checked_mul(rows)
@@ -241,21 +257,24 @@ impl CudaAd {
         }
 
         // Pinned host + async copies
-        let h_high = LockedBuffer::from_slice(high_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let h_low = LockedBuffer::from_slice(low_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_high =
+            LockedBuffer::from_slice(high_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_low =
+            LockedBuffer::from_slice(low_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
         let h_close =
             LockedBuffer::from_slice(close_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(volume_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_high: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_low: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_close: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_vol: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_vol =
+            LockedBuffer::from_slice(volume_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_vol: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
 
         unsafe {
             d_high
@@ -273,15 +292,174 @@ impl CudaAd {
         }
 
         self.launch_many_series_kernel(&d_high, &d_low, &d_close, &d_vol, cols, rows, &mut d_out)?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
-            rows,       // time-major rows
-            cols,       // number of series
+            rows, // time-major rows
+            cols, // number of series
         })
+    }
+
+    /// Expose the internal CUDA stream for async pipelines.
+    #[inline]
+    pub fn stream(&self) -> &Stream {
+        &self.stream
+    }
+
+    /// Async variant: single-series; no forced synchronize.
+    pub fn ad_series_dev_async(
+        &self,
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+        volume: &[f32],
+    ) -> Result<DeviceArrayF32, CudaAdError> {
+        let len = Self::validate_hlcv(high, low, close, volume)?;
+
+        let h_high =
+            LockedBuffer::from_slice(high).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_low = LockedBuffer::from_slice(low).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_close =
+            LockedBuffer::from_slice(close).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_vol =
+            LockedBuffer::from_slice(volume).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+
+        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_vol: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+
+        unsafe {
+            d_high
+                .async_copy_from(h_high.as_slice(), &self.stream)
+                .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+            d_low
+                .async_copy_from(h_low.as_slice(), &self.stream)
+                .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+            d_close
+                .async_copy_from(h_close.as_slice(), &self.stream)
+                .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+            d_vol
+                .async_copy_from(h_vol.as_slice(), &self.stream)
+                .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        }
+        self.launch_series_kernel(&d_high, &d_low, &d_close, &d_vol, len, 1, &mut d_out)?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: 1,
+            cols: len,
+        })
+    }
+
+    /// Async variant: many-series time-major; no forced synchronize.
+    pub fn ad_many_series_one_param_time_major_dev_async(
+        &self,
+        high_tm: &[f32],
+        low_tm: &[f32],
+        close_tm: &[f32],
+        volume_tm: &[f32],
+        cols: usize,
+        rows: usize,
+    ) -> Result<DeviceArrayF32, CudaAdError> {
+        if cols == 0 || rows == 0 {
+            return Err(CudaAdError::InvalidInput(
+                "cols and rows must be > 0".into(),
+            ));
+        }
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAdError::InvalidInput("cols*rows overflow".into()))?;
+        if high_tm.len() != elems
+            || low_tm.len() != elems
+            || close_tm.len() != elems
+            || volume_tm.len() != elems
+        {
+            return Err(CudaAdError::InvalidInput(
+                "time-major buffers must be cols*rows in length".into(),
+            ));
+        }
+
+        let h_high =
+            LockedBuffer::from_slice(high_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_low =
+            LockedBuffer::from_slice(low_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_close =
+            LockedBuffer::from_slice(close_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_vol =
+            LockedBuffer::from_slice(volume_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_vol: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+
+        unsafe {
+            d_high
+                .async_copy_from(h_high.as_slice(), &self.stream)
+                .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+            d_low
+                .async_copy_from(h_low.as_slice(), &self.stream)
+                .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+            d_close
+                .async_copy_from(h_close.as_slice(), &self.stream)
+                .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+            d_vol
+                .async_copy_from(h_vol.as_slice(), &self.stream)
+                .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        }
+        self.launch_many_series_kernel(&d_high, &d_low, &d_close, &d_vol, cols, rows, &mut d_out)?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
+    }
+
+    /// Device-to-device overload: row-major.
+    pub fn ad_series_device_inplace(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        n_series: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaAdError> {
+        self.launch_series_kernel(d_high, d_low, d_close, d_volume, len, n_series, d_out)
+    }
+
+    /// Device-to-device overload: time-major many-series.
+    pub fn ad_many_series_one_param_time_major_device_inplace(
+        &self,
+        d_high_tm: &DeviceBuffer<f32>,
+        d_low_tm: &DeviceBuffer<f32>,
+        d_close_tm: &DeviceBuffer<f32>,
+        d_volume_tm: &DeviceBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaAdError> {
+        self.launch_many_series_kernel(
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            d_volume_tm,
+            cols,
+            rows,
+            d_out_tm,
+        )
     }
 }
 
@@ -315,7 +493,9 @@ pub mod benches {
         let mut vol = vec![0.0f32; close.len()];
         for i in 0..close.len() {
             let v = close[i];
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let x = i as f32 * 0.0021;
             let off = (0.0033 * x.cos()).abs() + 0.12;
             high[i] = v + off;
@@ -344,7 +524,13 @@ pub mod benches {
         let cuda = CudaAd::new(0).expect("cuda ad");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low, vol) = synth_hlcv_from_close(&close);
-        Box::new(OneSeriesState { cuda, high, low, close, vol })
+        Box::new(OneSeriesState {
+            cuda,
+            high,
+            low,
+            close,
+            vol,
+        })
     }
 
     struct ManyState {
@@ -390,20 +576,22 @@ pub mod benches {
                 vol_tm[idx] = ((x * 1.13).cos().abs() + 0.85) * 1200.0;
             }
         }
-        Box::new(ManyState { cuda, high_tm, low_tm, close_tm: prices_tm, vol_tm, cols, rows })
+        Box::new(ManyState {
+            cuda,
+            high_tm,
+            low_tm,
+            close_tm: prices_tm,
+            vol_tm,
+            cols,
+            rows,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new(
-                "ad",
-                "one_series",
-                "ad_cuda_series",
-                "1m",
-                prep_one_series,
-            )
-            .with_sample_size(10)
-            .with_mem_required(bytes_one_series()),
+            CudaBenchScenario::new("ad", "one_series", "ad_cuda_series", "1m", prep_one_series)
+                .with_sample_size(10)
+                .with_mem_required(bytes_one_series()),
             CudaBenchScenario::new(
                 "ad",
                 "many_series_one_param",

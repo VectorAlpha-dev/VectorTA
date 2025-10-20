@@ -25,10 +25,10 @@
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1777,10 +1777,12 @@ pub fn kurtosis_cuda_batch_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_f32.as_slice()?;
-    let sweep = KurtosisBatchRange { period: period_range };
+    let sweep = KurtosisBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
-        let cuda = CudaKurtosis::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaKurtosis::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, _combos) = cuda
             .kurtosis_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1812,10 +1814,9 @@ pub fn kurtosis_cuda_many_series_one_param_dev_py(
     let cols = shape[1];
     let slice_in = data_tm_f32.as_slice()?;
     let inner = py.allow_threads(|| {
-        let cuda = CudaKurtosis::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .kurtosis_many_series_one_param_time_major_dev(slice_in, cols, rows, period)
+        let cuda =
+            CudaKurtosis::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.kurtosis_many_series_one_param_time_major_dev(slice_in, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })

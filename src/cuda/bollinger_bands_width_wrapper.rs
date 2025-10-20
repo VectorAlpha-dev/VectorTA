@@ -62,7 +62,10 @@ impl CudaBbw {
             Device::get_device(device_id as u32).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
 
-        let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/bollinger_bands_width_kernel.ptx"));
+        let ptx: &str = include_str!(concat!(
+            env!("OUT_DIR"),
+            "/bollinger_bands_width_kernel.ptx"
+        ));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -231,12 +234,10 @@ impl CudaBbw {
         let len = data_f32.len();
         let (ps, ps2, pn) = Self::build_prefixes(data_f32);
 
-        let d_ps =
-            DeviceBuffer::from_slice(&ps).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        let d_ps = DeviceBuffer::from_slice(&ps).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
         let d_ps2 =
             DeviceBuffer::from_slice(&ps2).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-        let d_pn =
-            DeviceBuffer::from_slice(&pn).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        let d_pn = DeviceBuffer::from_slice(&pn).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
 
         let periods: Vec<i32> = combos.iter().map(|c| c.period as i32).collect();
         let uplusd: Vec<f32> = combos.iter().map(|c| c.u_plus_d).collect();
@@ -262,8 +263,8 @@ impl CudaBbw {
                 let rows = combos.len();
                 let bytes_per_row = len * std::mem::size_of::<f32>();
                 if bytes_per_row > 0 {
-                    let max_rows = ((free.saturating_sub(in_bytes + headroom)) / bytes_per_row)
-                        .max(1);
+                    let max_rows =
+                        ((free.saturating_sub(in_bytes + headroom)) / bytes_per_row).max(1);
                     y_chunks = (rows + max_rows - 1) / max_rows;
                 }
             }
@@ -281,9 +282,14 @@ impl CudaBbw {
         {
             eprintln!(
                 "[bbw] policy={:?}/{:?} len={} rows={} chunks={}",
-                self.batch_policy, self.many_policy, len, combos.len(), y_chunks
+                self.batch_policy,
+                self.many_policy,
+                len,
+                combos.len(),
+                y_chunks
             );
-            self.debug_logged.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.debug_logged
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Launch in chunks across rows
@@ -291,14 +297,28 @@ impl CudaBbw {
         let chunk_rows = (rows + y_chunks - 1) / y_chunks;
         for c in 0..y_chunks {
             let start_row = c * chunk_rows;
-            if start_row >= rows { break; }
+            if start_row >= rows {
+                break;
+            }
             let end_row = ((c + 1) * chunk_rows).min(rows);
             let n_rows = end_row - start_row;
 
             // slice param buffers
-            let periods_ptr = unsafe { d_periods.as_device_ptr().offset((start_row as isize).try_into().unwrap()) };
-            let uplusd_ptr  = unsafe { d_uplusd.as_device_ptr().offset((start_row as isize).try_into().unwrap()) };
-            let out_ptr     = unsafe { d_out.as_device_ptr().offset(((start_row * len) as isize).try_into().unwrap()) };
+            let periods_ptr = unsafe {
+                d_periods
+                    .as_device_ptr()
+                    .offset((start_row as isize).try_into().unwrap())
+            };
+            let uplusd_ptr = unsafe {
+                d_uplusd
+                    .as_device_ptr()
+                    .offset((start_row as isize).try_into().unwrap())
+            };
+            let out_ptr = unsafe {
+                d_out
+                    .as_device_ptr()
+                    .offset(((start_row * len) as isize).try_into().unwrap())
+            };
 
             self.launch_batch_kernel_ptrs(
                 &d_ps,
@@ -407,7 +427,9 @@ impl CudaBbw {
         period: usize,
     ) -> Result<ManySeriesPrepared, CudaBbwError> {
         if cols == 0 || rows == 0 {
-            return Err(CudaBbwError::InvalidInput("matrix dims must be positive".into()));
+            return Err(CudaBbwError::InvalidInput(
+                "matrix dims must be positive".into(),
+            ));
         }
         if data_tm_f32.len() != cols * rows {
             return Err(CudaBbwError::InvalidInput("matrix shape mismatch".into()));
@@ -427,9 +449,8 @@ impl CudaBbw {
                     break;
                 }
             }
-            let fv = fv.ok_or_else(|| {
-                CudaBbwError::InvalidInput(format!("series {} has all NaN", s))
-            })?;
+            let fv =
+                fv.ok_or_else(|| CudaBbwError::InvalidInput(format!("series {} has all NaN", s)))?;
             if rows - fv < period {
                 return Err(CudaBbwError::InvalidInput(format!(
                     "series {} lacks data: needed >= {}, valid = {}",
@@ -441,8 +462,14 @@ impl CudaBbw {
             first_valids[s] = fv as i32;
         }
 
-        let (ps_tm, ps2_tm, pn_tm) = compute_prefix_sums_time_major(data_tm_f32, cols, rows, &first_valids);
-        Ok(ManySeriesPrepared { first_valids, ps_tm, ps2_tm, pn_tm })
+        let (ps_tm, ps2_tm, pn_tm) =
+            compute_prefix_sums_time_major(data_tm_f32, cols, rows, &first_valids);
+        Ok(ManySeriesPrepared {
+            first_valids,
+            ps_tm,
+            ps2_tm,
+            pn_tm,
+        })
     }
 
     fn run_many_series_kernel(
@@ -453,12 +480,12 @@ impl CudaBbw {
         period: usize,
         uplusd: f32,
     ) -> Result<DeviceArrayF32, CudaBbwError> {
-        let d_ps_tm = DeviceBuffer::from_slice(&prep.ps_tm)
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        let d_ps_tm =
+            DeviceBuffer::from_slice(&prep.ps_tm).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
         let d_ps2_tm = DeviceBuffer::from_slice(&prep.ps2_tm)
             .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
-        let d_pn_tm = DeviceBuffer::from_slice(&prep.pn_tm)
-            .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
+        let d_pn_tm =
+            DeviceBuffer::from_slice(&prep.pn_tm).map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&prep.first_valids)
             .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
 
@@ -481,7 +508,11 @@ impl CudaBbw {
             .synchronize()
             .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 
     fn launch_many_series_kernel(
@@ -501,7 +532,9 @@ impl CudaBbw {
             .get_function("bbw_multi_series_one_param_tm_f32")
             .map_err(|e| CudaBbwError::Cuda(e.to_string()))?;
         if period > i32::MAX as usize || cols > i32::MAX as usize || rows > i32::MAX as usize {
-            return Err(CudaBbwError::InvalidInput("arguments exceed kernel limits".into()));
+            return Err(CudaBbwError::InvalidInput(
+                "arguments exceed kernel limits".into(),
+            ));
         }
         let block_x: u32 = match self.many_policy {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,

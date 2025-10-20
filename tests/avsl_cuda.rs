@@ -5,13 +5,14 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use my_project::cuda::{cuda_available, CudaAvsl};
 use my_project::indicators::avsl::{
-    avsl_batch_with_kernel, avsl_with_kernel, AvslBatchRange, AvslInput, AvslParams,
-    AvslData,
+    avsl_batch_with_kernel, avsl_with_kernel, AvslBatchRange, AvslData, AvslInput, AvslParams,
 };
 use my_project::utilities::data_loader::Candles;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -38,7 +39,11 @@ fn avsl_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         low[i] = close[i] - 0.25 * (0.5 + (x * 0.01).cos().abs());
         volume[i] = (x * 0.00077).cos().abs() + 0.5;
     }
-    let sweep = AvslBatchRange { fast_period: (4, 28, 4), slow_period: (32, 96, 16), multiplier: (2.0, 2.0, 0.0) };
+    let sweep = AvslBatchRange {
+        fast_period: (4, 28, 4),
+        slow_period: (32, 96, 16),
+        multiplier: (2.0, 2.0, 0.0),
+    };
 
     let cpu = avsl_batch_with_kernel(&close, &low, &volume, &sweep, Kernel::ScalarBatch)?;
 
@@ -106,10 +111,23 @@ fn avsl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             l[t] = low_tm[t * cols + s];
             v[t] = vol_tm[t * cols + s];
         }
-        let params = AvslParams { fast_period: Some(fast), slow_period: Some(slow), multiplier: Some(mult) };
-        let input = AvslInput { data: AvslData::Slices { close: &c, low: &l, volume: &v }, params };
+        let params = AvslParams {
+            fast_period: Some(fast),
+            slow_period: Some(slow),
+            multiplier: Some(mult),
+        };
+        let input = AvslInput {
+            data: AvslData::Slices {
+                close: &c,
+                low: &l,
+                volume: &v,
+            },
+            params,
+        };
         let out = avsl_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let close_tm_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
@@ -123,7 +141,11 @@ fn avsl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             &vol_tm_f32,
             cols,
             rows,
-            &AvslParams { fast_period: Some(fast), slow_period: Some(slow), multiplier: Some(mult) },
+            &AvslParams {
+                fast_period: Some(fast),
+                slow_period: Some(slow),
+                multiplier: Some(mult),
+            },
         )
         .expect("avsl_many_series_one_param_time_major_dev");
 
@@ -134,7 +156,11 @@ fn avsl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     dev.buf.copy_to(&mut gpu_tm)?;
     let tol = 1.5e-2;
     for idx in 0..gpu_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
 
     Ok(())

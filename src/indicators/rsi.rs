@@ -1964,9 +1964,10 @@ pub fn rsi_cuda_batch_dev_py<'py>(
     data_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-)
--> PyResult<(crate::indicators::moving_averages::alma::DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)>
-{
+) -> PyResult<(
+    crate::indicators::moving_averages::alma::DeviceArrayF32Py,
+    Bound<'py, pyo3::types::PyDict>,
+)> {
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::rsi_wrapper::CudaRsi;
     use numpy::IntoPyArray;
@@ -1977,7 +1978,9 @@ pub fn rsi_cuda_batch_dev_py<'py>(
     }
 
     let prices = data_f32.as_slice()?;
-    let sweep = RsiBatchRange { period: period_range };
+    let sweep = RsiBatchRange {
+        period: period_range,
+    };
 
     let inner = py.allow_threads(|| {
         let cuda = CudaRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1988,13 +1991,21 @@ pub fn rsi_cuda_batch_dev_py<'py>(
     let dict = PyDict::new(py);
     let (start, end, step) = period_range;
     let mut periods: Vec<u64> = Vec::new();
-    if step == 0 { periods.push(start as u64); } else {
+    if step == 0 {
+        periods.push(start as u64);
+    } else {
         let mut p = start;
-        while p <= end { periods.push(p as u64); p = p.saturating_add(step); }
+        while p <= end {
+            periods.push(p as u64);
+            p = p.saturating_add(step);
+        }
     }
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner }, dict))
+    Ok((
+        crate::indicators::moving_averages::alma::DeviceArrayF32Py { inner },
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2009,7 +2020,9 @@ pub fn rsi_cuda_many_series_one_param_dev_py(
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::rsi_wrapper::CudaRsi;
     use numpy::PyUntypedArrayMethods;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
 
     let flat = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];

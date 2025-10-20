@@ -113,14 +113,21 @@ impl CudaMom {
 
         let d_prices =
             DeviceBuffer::from_slice(prices_f32).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
-        let d_periods =
-            DeviceBuffer::from_slice(&periods_i32).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)
+            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(len * n_combos)
                 .map_err(|e| CudaMomError::Cuda(e.to_string()))?
         };
 
-        self.launch_batch(&d_prices, &d_periods, len, first_valid, n_combos, &mut d_out)?;
+        self.launch_batch(
+            &d_prices,
+            &d_periods,
+            len,
+            first_valid,
+            n_combos,
+            &mut d_out,
+        )?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -224,10 +231,7 @@ impl CudaMom {
                 }
             }
             if fv < 0 {
-                return Err(CudaMomError::InvalidInput(format!(
-                    "series {} all NaN",
-                    s
-                )));
+                return Err(CudaMomError::InvalidInput(format!("series {} all NaN", s)));
             }
             first_valids[s] = fv;
         }
@@ -235,7 +239,8 @@ impl CudaMom {
         // VRAM estimate
         if let Ok((free, _)) = mem_get_info() {
             let n = expected;
-            let bytes = (2 * n) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>()
+            let bytes = (2 * n) * std::mem::size_of::<f32>()
+                + cols * std::mem::size_of::<i32>()
                 + 64 * 1024 * 1024;
             if bytes > free {
                 return Err(CudaMomError::InvalidInput(
@@ -244,10 +249,10 @@ impl CudaMom {
             }
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices_tm_f32).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
-        let d_first =
-            DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices_tm_f32)
+            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(expected).map_err(|e| CudaMomError::Cuda(e.to_string()))?
         };
@@ -314,7 +319,9 @@ impl CudaMom {
         let (start, end, step) = sweep.period;
         let mut combos = Vec::new();
         if step == 0 || start == end {
-            combos.push(MomParams { period: Some(start) });
+            combos.push(MomParams {
+                period: Some(start),
+            });
         } else {
             let mut v = start;
             while v <= end {
@@ -378,17 +385,31 @@ pub mod benches {
     }
     impl CudaBenchState for MomBatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.mom_batch_dev(&self.prices, &self.sweep).expect("mom batch");
+            let _ = self
+                .cuda
+                .mom_batch_dev(&self.prices, &self.sweep)
+                .expect("mom batch");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaMom::new(0).expect("cuda mom");
         let mut prices = gen_series(ONE_SERIES_LEN);
         // introduce a small NaN warmup and trend
-        for i in 0..8 { prices[i] = f32::NAN; }
-        for i in 8..ONE_SERIES_LEN { let x = i as f32 * 0.0019; prices[i] += 0.0005 * x.sin(); }
-        let sweep = MomBatchRange { period: (2, 1 + PARAM_SWEEP, 1) };
-        Box::new(MomBatchState { cuda, prices, sweep })
+        for i in 0..8 {
+            prices[i] = f32::NAN;
+        }
+        for i in 8..ONE_SERIES_LEN {
+            let x = i as f32 * 0.0019;
+            prices[i] += 0.0005 * x.sin();
+        }
+        let sweep = MomBatchRange {
+            period: (2, 1 + PARAM_SWEEP, 1),
+        };
+        Box::new(MomBatchState {
+            cuda,
+            prices,
+            sweep,
+        })
     }
 
     struct MomManyState {
@@ -409,13 +430,17 @@ pub mod benches {
         let mut base = gen_series(n);
         let mut prices = vec![f32::NAN; n];
         for s in 0..MANY_COLS {
-            for t in s..MANY_ROWS { // stagger first_valids
+            for t in s..MANY_ROWS {
+                // stagger first_valids
                 let idx = t * MANY_COLS + s;
                 let x = (t as f32) * 0.002 + (s as f32) * 0.01;
                 prices[idx] = base[idx] + 0.05 * x.sin();
             }
         }
-        Box::new(MomManyState { cuda, prices_tm: prices })
+        Box::new(MomManyState {
+            cuda,
+            prices_tm: prices,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -441,4 +466,3 @@ pub mod benches {
         ]
     }
 }
-

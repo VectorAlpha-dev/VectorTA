@@ -28,6 +28,10 @@
 //!   dominates.
 //! - **WebAssembly**: Has SIMD128 helper matching scalar logic for parity.
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaVidya;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -36,10 +40,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::CudaVidya;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -2291,8 +2291,7 @@ pub fn vidya_cuda_batch_dev_py(
     };
     let inner = py.allow_threads(|| {
         let cuda = CudaVidya::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .vidya_batch_dev(slice, &sweep)
+        cuda.vidya_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
@@ -2329,8 +2328,7 @@ pub fn vidya_cuda_many_series_one_param_dev_py(
     };
     let inner = py.allow_threads(|| {
         let cuda = CudaVidya::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .vidya_many_series_one_param_time_major_dev(slice, cols, rows, &params)
+        cuda.vidya_many_series_one_param_time_major_dev(slice, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })

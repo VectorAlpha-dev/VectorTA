@@ -75,7 +75,13 @@ fn vpt_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for c in 0..len {
         let g = host[c] as f64;
         let s = cpu[c];
-        assert!(approx_eq(s, g, tol), "col {} mismatch: cpu={} gpu={}", c, s, g);
+        assert!(
+            approx_eq(s, g, tol),
+            "col {} mismatch: cpu={} gpu={}",
+            c,
+            s,
+            g
+        );
     }
     Ok(())
 }
@@ -84,9 +90,7 @@ fn vpt_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn vpt_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[vpt_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[vpt_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -123,27 +127,20 @@ fn vpt_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let price_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
     let volume_f32: Vec<f32> = volume_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaVpt::new(0).expect("CudaVpt::new");
-    let dev = match cuda.vpt_many_series_one_param_time_major_dev(
-        &price_f32,
-        &volume_f32,
-        cols,
-        rows,
-    ) {
-        Ok(d) => d,
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("named symbol not found") {
-                eprintln!(
+    let dev =
+        match cuda.vpt_many_series_one_param_time_major_dev(&price_f32, &volume_f32, cols, rows) {
+            Ok(d) => d,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("named symbol not found") {
+                    eprintln!(
                     "[vpt_cuda_many_series_one_param_matches_cpu] skipped - kernel symbol not found"
                 );
-                return Ok(());
+                    return Ok(());
+                }
+                panic!("vpt_many_series_one_param_time_major_dev failed: {}", msg);
             }
-            panic!(
-                "vpt_many_series_one_param_time_major_dev failed: {}",
-                msg
-            );
-        }
-    };
+        };
     assert_eq!(dev.rows, rows);
     assert_eq!(dev.cols, cols);
     let mut host = vec![0f32; dev.len()];
@@ -152,8 +149,13 @@ fn vpt_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     for idx in 0..host.len() {
         let g = host[idx] as f64;
         let s = cpu_tm[idx];
-        assert!(approx_eq(s, g, tol), "mismatch at {}: cpu={} gpu={}", idx, s, g);
+        assert!(
+            approx_eq(s, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            s,
+            g
+        );
     }
     Ok(())
 }
-

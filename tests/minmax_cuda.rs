@@ -1,8 +1,6 @@
 // Integration tests for CUDA MinMax kernels
 
-use my_project::indicators::minmax::{
-    minmax_batch_with_kernel, MinmaxBatchRange,
-};
+use my_project::indicators::minmax::{minmax_batch_with_kernel, MinmaxBatchRange};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -13,7 +11,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::minmax_wrapper::CudaMinmax;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -78,10 +78,34 @@ fn minmax_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         let g_max = is_max_host[idx] as f64;
         let g_lmin = last_min_host[idx] as f64;
         let g_lmax = last_max_host[idx] as f64;
-        assert!(approx_eq(c_min, g_min, tol), "is_min mismatch at {}: cpu={} gpu={}", idx, c_min, g_min);
-        assert!(approx_eq(c_max, g_max, tol), "is_max mismatch at {}: cpu={} gpu={}", idx, c_max, g_max);
-        assert!(approx_eq(c_lmin, g_lmin, tol), "last_min mismatch at {}: cpu={} gpu={}", idx, c_lmin, g_lmin);
-        assert!(approx_eq(c_lmax, g_lmax, tol), "last_max mismatch at {}: cpu={} gpu={}", idx, c_lmax, g_lmax);
+        assert!(
+            approx_eq(c_min, g_min, tol),
+            "is_min mismatch at {}: cpu={} gpu={}",
+            idx,
+            c_min,
+            g_min
+        );
+        assert!(
+            approx_eq(c_max, g_max, tol),
+            "is_max mismatch at {}: cpu={} gpu={}",
+            idx,
+            c_max,
+            g_max
+        );
+        assert!(
+            approx_eq(c_lmin, g_lmin, tol),
+            "last_min mismatch at {}: cpu={} gpu={}",
+            idx,
+            c_lmin,
+            g_lmin
+        );
+        assert!(
+            approx_eq(c_lmax, g_lmax, tol),
+            "last_max mismatch at {}: cpu={} gpu={}",
+            idx,
+            c_lmax,
+            g_lmax
+        );
     }
 
     Ok(())
@@ -119,7 +143,11 @@ fn minmax_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
         let mut l = vec![f64::NAN; rows];
-        for t in 0..rows { let idx = t * cols + s; h[t] = high_tm[idx]; l[t] = low_tm[idx]; }
+        for t in 0..rows {
+            let idx = t * cols + s;
+            h[t] = high_tm[idx];
+            l[t] = low_tm[idx];
+        }
         let params = MinmaxParams { order: Some(order) };
         let input = MinmaxInput::from_slices(&h, &l, params);
         let out = minmax_with_kernel(&input, Kernel::Scalar).unwrap();
@@ -136,7 +164,13 @@ fn minmax_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaMinmax::new(0).expect("CudaMinmax::new");
     let quad_tm = cuda
-        .minmax_many_series_one_param_time_major_dev(&high_tm_f32, &low_tm_f32, cols, rows, &MinmaxParams { order: Some(order) })
+        .minmax_many_series_one_param_time_major_dev(
+            &high_tm_f32,
+            &low_tm_f32,
+            cols,
+            rows,
+            &MinmaxParams { order: Some(order) },
+        )
         .expect("minmax many_series device");
 
     assert_eq!(quad_tm.rows, rows);
@@ -153,12 +187,27 @@ fn minmax_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
 
     let tol = 1e-4;
     for idx in 0..g_is_min.len() {
-        assert!(approx_eq(cpu_is_min[idx], g_is_min[idx] as f64, tol), "is_min mismatch at {}", idx);
-        assert!(approx_eq(cpu_is_max[idx], g_is_max[idx] as f64, tol), "is_max mismatch at {}", idx);
-        assert!(approx_eq(cpu_last_min[idx], g_last_min[idx] as f64, tol), "last_min mismatch at {}", idx);
-        assert!(approx_eq(cpu_last_max[idx], g_last_max[idx] as f64, tol), "last_max mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_is_min[idx], g_is_min[idx] as f64, tol),
+            "is_min mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu_is_max[idx], g_is_max[idx] as f64, tol),
+            "is_max mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu_last_min[idx], g_last_min[idx] as f64, tol),
+            "last_min mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu_last_max[idx], g_last_max[idx] as f64, tol),
+            "last_max mismatch at {}",
+            idx
+        );
     }
 
     Ok(())
 }
-

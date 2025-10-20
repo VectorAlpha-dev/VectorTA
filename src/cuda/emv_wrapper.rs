@@ -56,7 +56,10 @@ pub struct CudaEmvPolicy {
 }
 impl Default for CudaEmvPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -116,10 +119,18 @@ impl CudaEmv {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaEmvPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaEmvPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaEmvPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaEmvPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaEmvError> {
         self.stream
             .synchronize()
@@ -129,28 +140,38 @@ impl CudaEmv {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EMV batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEmv)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEmv)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EMV many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEmv)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEmv)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -163,13 +184,19 @@ impl CudaEmv {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     // ---- Batch path (one series × many params; EMV has no params) ----
@@ -184,16 +211,20 @@ impl CudaEmv {
         }
         let len = high.len();
         if low.len() != len || volume.len() != len {
-            return Err(CudaEmvError::InvalidInput("input slice length mismatch".into()));
+            return Err(CudaEmvError::InvalidInput(
+                "input slice length mismatch".into(),
+            ));
         }
-        let first = (0..len).find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
+        let first = (0..len)
+            .find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
             .ok_or_else(|| CudaEmvError::InvalidInput("all values are NaN".into()))?;
         let valid_after = (first..len)
             .filter(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
             .count();
         if valid_after < 2 {
             return Err(CudaEmvError::InvalidInput(format!(
-                "not enough valid data: need at least 2, found {}", valid_after
+                "not enough valid data: need at least 2, found {}",
+                valid_after
             )));
         }
         Ok((first, len))
@@ -274,13 +305,17 @@ impl CudaEmv {
         let bytes = (3 * len + len) * std::mem::size_of::<f32>();
         let headroom = 64 * 1024 * 1024; // 64MB
         if !Self::will_fit(bytes, headroom) {
-            return Err(CudaEmvError::InvalidInput("insufficient VRAM for EMV batch".into()));
+            return Err(CudaEmvError::InvalidInput(
+                "insufficient VRAM for EMV batch".into(),
+            ));
         }
 
         // Use pinned host buffers for better H2D throughput
-        let h_high = LockedBuffer::from_slice(high).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+        let h_high =
+            LockedBuffer::from_slice(high).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
         let h_low = LockedBuffer::from_slice(low).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(volume).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+        let h_vol =
+            LockedBuffer::from_slice(volume).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
 
         let mut d_high = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
             .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
@@ -292,9 +327,15 @@ impl CudaEmv {
             .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
 
         unsafe {
-            d_high.async_copy_from(&h_high, &self.stream).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-            d_low .async_copy_from(&h_low, &self.stream) .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-            d_vol .async_copy_from(&h_vol, &self.stream) .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+            d_high
+                .async_copy_from(&h_high, &self.stream)
+                .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+            d_low
+                .async_copy_from(&h_low, &self.stream)
+                .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+            d_vol
+                .async_copy_from(&h_vol, &self.stream)
+                .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
         }
 
         self.launch_batch_kernel(&d_high, &d_low, &d_vol, len, 1, first, &mut d_out)?;
@@ -305,7 +346,11 @@ impl CudaEmv {
         // Selection introspection optional; keep None to avoid &mut self requirement.
         self.maybe_log_batch_debug();
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: 1, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: 1,
+            cols: len,
+        })
     }
 
     // ---- Many-series × one-param (time-major) ----
@@ -318,9 +363,14 @@ impl CudaEmv {
         rows: usize,
     ) -> Result<Vec<i32>, CudaEmvError> {
         if cols == 0 || rows == 0 {
-            return Err(CudaEmvError::InvalidInput("matrix dimensions must be positive".into()));
+            return Err(CudaEmvError::InvalidInput(
+                "matrix dimensions must be positive".into(),
+            ));
         }
-        if high_tm.len() != cols * rows || low_tm.len() != cols * rows || vol_tm.len() != cols * rows {
+        if high_tm.len() != cols * rows
+            || low_tm.len() != cols * rows
+            || vol_tm.len() != cols * rows
+        {
             return Err(CudaEmvError::InvalidInput("matrix shape mismatch".into()));
         }
         let mut fv = vec![0i32; cols];
@@ -334,7 +384,10 @@ impl CudaEmv {
                 }
             }
             if found < 0 {
-                return Err(CudaEmvError::InvalidInput(format!("all NaN in series {}", s)));
+                return Err(CudaEmvError::InvalidInput(format!(
+                    "all NaN in series {}",
+                    s
+                )));
             }
             // Require at least two valid points
             let mut valid = 0usize;
@@ -346,7 +399,8 @@ impl CudaEmv {
             }
             if valid < 2 {
                 return Err(CudaEmvError::InvalidInput(format!(
-                    "not enough valid data in series {}: need >=2, found {}", s, valid
+                    "not enough valid data in series {}: need >=2, found {}",
+                    s, valid
                 )));
             }
             fv[s] = found;
@@ -425,27 +479,46 @@ impl CudaEmv {
 
         // VRAM estimate: 3 inputs + first_valids + out
         let elems = cols * rows;
-        let bytes = (3 * elems + elems) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>();
+        let bytes =
+            (3 * elems + elems) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>();
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
-            return Err(CudaEmvError::InvalidInput("insufficient VRAM for EMV many-series".into()));
+            return Err(CudaEmvError::InvalidInput(
+                "insufficient VRAM for EMV many-series".into(),
+            ));
         }
 
-        let d_high_tm = DeviceBuffer::from_slice(high_tm).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let d_low_tm = DeviceBuffer::from_slice(low_tm).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let d_vol_tm = DeviceBuffer::from_slice(vol_tm).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+        let d_high_tm =
+            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+        let d_low_tm =
+            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+        let d_vol_tm =
+            DeviceBuffer::from_slice(vol_tm).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
 
-        self.launch_many_series_kernel(&d_high_tm, &d_low_tm, &d_vol_tm, &d_first, cols, rows, &mut d_out_tm)?;
+        self.launch_many_series_kernel(
+            &d_high_tm,
+            &d_low_tm,
+            &d_vol_tm,
+            &d_first,
+            cols,
+            rows,
+            &mut d_out_tm,
+        )?;
         self.stream
             .synchronize()
             .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
         // Selection introspection optional; keep None to avoid &mut self requirement.
         self.maybe_log_many_debug();
 
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 }
 
@@ -476,7 +549,9 @@ pub mod benches {
         let mut l = price.to_vec();
         for i in 0..price.len() {
             let v = price[i];
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let x = i as f32 * 0.0019;
             let off = (0.0027 * x.cos()).abs() + 0.07;
             h[i] = v + off;
@@ -501,7 +576,10 @@ pub mod benches {
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.emv_batch_dev(&self.high, &self.low, &self.vol).expect("emv_batch_dev");
+            let _ = self
+                .cuda
+                .emv_batch_dev(&self.high, &self.low, &self.vol)
+                .expect("emv_batch_dev");
         }
     }
     fn prep_one_series() -> Box<dyn CudaBenchState> {
@@ -509,7 +587,12 @@ pub mod benches {
         let (high, low) = synth_hl_from_price(&price);
         let vol = synth_volume(ONE_SERIES_LEN);
         let cuda = CudaEmv::new(0).expect("cuda");
-        Box::new(BatchState { cuda, high, low, vol })
+        Box::new(BatchState {
+            cuda,
+            high,
+            low,
+            vol,
+        })
     }
 
     struct ManyState {
@@ -541,7 +624,14 @@ pub mod benches {
         let (high_tm, low_tm) = synth_hl_from_price(&price_tm);
         let vol_tm = gen_time_major_volumes(cols, rows);
         let cuda = CudaEmv::new(0).expect("cuda");
-        Box::new(ManyState { cuda, high_tm, low_tm, vol_tm, cols, rows })
+        Box::new(ManyState {
+            cuda,
+            high_tm,
+            low_tm,
+            vol_tm,
+            cols,
+            rows,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

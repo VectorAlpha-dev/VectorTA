@@ -44,17 +44,37 @@ pub struct DeviceArrayF32Pair {
     pub b: DeviceArrayF32,
 }
 impl DeviceArrayF32Pair {
-    #[inline] pub fn rows(&self) -> usize { self.a.rows }
-    #[inline] pub fn cols(&self) -> usize { self.a.cols }
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.a.rows
+    }
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.a.cols
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelPolicy { Auto, Plain { block_x: u32 } }
-impl Default for BatchKernelPolicy { fn default() -> Self { Self::Auto } }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+impl Default for BatchKernelPolicy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy { Auto, OneD { block_x: u32 } }
-impl Default for ManySeriesKernelPolicy { fn default() -> Self { Self::Auto } }
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CudaViPolicy {
@@ -76,27 +96,43 @@ impl CudaVi {
 
     pub fn new_with_policy(device_id: usize, policy: CudaViPolicy) -> Result<Self, CudaViError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaViError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaViError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vi_kernel.ptx"));
-        let jit = [ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)];
+        let jit = [
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
         let module = Module::from_ptx(ptx, &jit)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))
             .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
+            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
-        Ok(Self { module, stream, _context: context, policy })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy,
+        })
     }
 
     #[inline]
     fn mem_ok(bytes: usize, headroom: usize) -> bool {
-        if env::var("CUDA_MEM_CHECK").ok().filter(|v| v == "0" || v.eq_ignore_ascii_case("false")).is_some() {
+        if env::var("CUDA_MEM_CHECK")
+            .ok()
+            .filter(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .is_some()
+        {
             return true;
         }
-        mem_get_info().map(|(free, _)| bytes.saturating_add(headroom) <= free).unwrap_or(true)
+        mem_get_info()
+            .map(|(free, _)| bytes.saturating_add(headroom) <= free)
+            .unwrap_or(true)
     }
 
     // ---------------- Host prefix sums (single series) ----------------
@@ -110,8 +146,11 @@ impl CudaVi {
             return Err(CudaViError::InvalidInput("length mismatch".into()));
         }
         let n = high.len();
-        if n == 0 { return Err(CudaViError::InvalidInput("empty input".into())); }
-        let first = (0..n).find(|&i| high[i].is_finite() && low[i].is_finite() && close[i].is_finite())
+        if n == 0 {
+            return Err(CudaViError::InvalidInput("empty input".into()));
+        }
+        let first = (0..n)
+            .find(|&i| high[i].is_finite() && low[i].is_finite() && close[i].is_finite())
             .ok_or_else(|| CudaViError::InvalidInput("all values NaN".into()))?;
 
         // Accumulate in f64 for numerical parity with scalar path; cast to f32 for device
@@ -159,8 +198,14 @@ impl CudaVi {
         if high_tm.len() != low_tm.len() || high_tm.len() != close_tm.len() {
             return Err(CudaViError::InvalidInput("length mismatch".into()));
         }
-        if cols == 0 || rows == 0 { return Err(CudaViError::InvalidInput("invalid dims".into())); }
-        if high_tm.len() != cols * rows { return Err(CudaViError::InvalidInput("dims do not match data length".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaViError::InvalidInput("invalid dims".into()));
+        }
+        if high_tm.len() != cols * rows {
+            return Err(CudaViError::InvalidInput(
+                "dims do not match data length".into(),
+            ));
+        }
 
         let mut first_valids = vec![-1i32; cols];
         let mut pfx_tr64 = vec![0.0f64; cols * rows];
@@ -175,7 +220,10 @@ impl CudaVi {
                 let h = high_tm[idx];
                 let l = low_tm[idx];
                 let c = close_tm[idx];
-                if h.is_finite() && l.is_finite() && c.is_finite() { first = Some(r); break; }
+                if h.is_finite() && l.is_finite() && c.is_finite() {
+                    first = Some(r);
+                    break;
+                }
             }
             if let Some(fv) = first {
                 first_valids[s] = fv as i32;
@@ -227,22 +275,36 @@ impl CudaVi {
             return Err(CudaViError::InvalidInput("length mismatch".into()));
         }
         let len = high_f32.len();
-        if len == 0 { return Err(CudaViError::InvalidInput("empty input".into())); }
+        if len == 0 {
+            return Err(CudaViError::InvalidInput("empty input".into()));
+        }
 
         fn expand_grid_local(r: &ViBatchRange) -> Vec<ViParams> {
             let (start, end, step) = r.period;
             if step == 0 || start == end {
-                return vec![ViParams { period: Some(start) }];
+                return vec![ViParams {
+                    period: Some(start),
+                }];
             }
-            (start..=end).step_by(step).map(|p| ViParams { period: Some(p) }).collect()
+            (start..=end)
+                .step_by(step)
+                .map(|p| ViParams { period: Some(p) })
+                .collect()
         }
         let combos = expand_grid_local(sweep);
-        if combos.is_empty() { return Err(CudaViError::InvalidInput("no parameter combinations".into())); }
+        if combos.is_empty() {
+            return Err(CudaViError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 
-        let (first_valid, pfx_tr, pfx_vp, pfx_vm) = self.build_prefix_single(high_f32, low_f32, close_f32)?;
+        let (first_valid, pfx_tr, pfx_vp, pfx_vm) =
+            self.build_prefix_single(high_f32, low_f32, close_f32)?;
         if len - first_valid < max_p {
-            return Err(CudaViError::InvalidInput("insufficient valid data after first_valid".into()));
+            return Err(CudaViError::InvalidInput(
+                "insufficient valid data after first_valid".into(),
+            ));
         }
 
         // VRAM estimate (inputs already host-only; device: 3*pfx + periods + 2*out)
@@ -250,22 +312,37 @@ impl CudaVi {
         let bytes = 3 * len * std::mem::size_of::<f32>()
             + rows * std::mem::size_of::<i32>()
             + 2 * rows * len * std::mem::size_of::<f32>();
-        let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
         if !Self::mem_ok(bytes, headroom) {
-            return Err(CudaViError::InvalidInput(format!("estimated device memory {:.2} MB exceeds free VRAM", bytes as f64 / (1024.0*1024.0))));
+            return Err(CudaViError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                bytes as f64 / (1024.0 * 1024.0)
+            )));
         }
 
         // Upload inputs (use pinned buffers for large arrays)
         let (d_tr, d_vp, d_vm) = if len >= 131072 {
-            let h_tr = LockedBuffer::from_slice(&pfx_tr).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let h_vp = LockedBuffer::from_slice(&pfx_vp).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let h_vm = LockedBuffer::from_slice(&pfx_vm).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_tr = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_vp = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_vm = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_tr.async_copy_from(&h_tr, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_vp.async_copy_from(&h_vp, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_vm.async_copy_from(&h_vm, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let h_tr =
+                LockedBuffer::from_slice(&pfx_tr).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let h_vp =
+                LockedBuffer::from_slice(&pfx_vp).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let h_vm =
+                LockedBuffer::from_slice(&pfx_vm).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let mut d_tr = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let mut d_vp = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let mut d_vm = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            unsafe { d_tr.async_copy_from(&h_tr, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            unsafe { d_vp.async_copy_from(&h_vp, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            unsafe { d_vm.async_copy_from(&h_vm, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
             (d_tr, d_vp, d_vm)
         } else {
             (
@@ -276,16 +353,25 @@ impl CudaVi {
         };
 
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods_host).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods_host)
+            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
 
         // Allocate outputs
-        let mut d_plus  = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-        let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }
+            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }
+            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
 
         // Launch kernel
-        let mut func: Function = self.module.get_function("vi_batch_f32").map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let mut func: Function = self
+            .module
+            .get_function("vi_batch_f32")
+            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024), _ => 256 };
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+            _ => 256,
+        };
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -298,7 +384,7 @@ impl CudaVi {
             let mut len_i = len as i32;
             let mut rows_i = rows as i32;
             let mut first_i = first_valid as i32;
-            let mut plus_ptr  = d_plus.as_device_ptr().as_raw();
+            let mut plus_ptr = d_plus.as_device_ptr().as_raw();
             let mut minus_ptr = d_minus.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut tr_ptr as *mut _ as *mut c_void,
@@ -311,13 +397,26 @@ impl CudaVi {
                 &mut plus_ptr as *mut _ as *mut c_void,
                 &mut minus_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
         }
 
-        Ok((DeviceArrayF32Pair {
-            a: DeviceArrayF32 { buf: d_plus, rows, cols: len },
-            b: DeviceArrayF32 { buf: d_minus, rows, cols: len },
-        }, combos))
+        Ok((
+            DeviceArrayF32Pair {
+                a: DeviceArrayF32 {
+                    buf: d_plus,
+                    rows,
+                    cols: len,
+                },
+                b: DeviceArrayF32 {
+                    buf: d_minus,
+                    rows,
+                    cols: len,
+                },
+            },
+            combos,
+        ))
     }
 
     // ---------------- Many-series (time-major) entry ----------------
@@ -330,14 +429,22 @@ impl CudaVi {
         rows: usize,
         params: &ViParams,
     ) -> Result<DeviceArrayF32Pair, CudaViError> {
-        if cols == 0 || rows == 0 { return Err(CudaViError::InvalidInput("invalid dims".into())); }
-        if high_tm_f32.len() != cols * rows || low_tm_f32.len() != cols * rows || close_tm_f32.len() != cols * rows {
+        if cols == 0 || rows == 0 {
+            return Err(CudaViError::InvalidInput("invalid dims".into()));
+        }
+        if high_tm_f32.len() != cols * rows
+            || low_tm_f32.len() != cols * rows
+            || close_tm_f32.len() != cols * rows
+        {
             return Err(CudaViError::InvalidInput("dims do not match data".into()));
         }
         let period = params.period.unwrap_or(14);
-        if period == 0 || period > rows { return Err(CudaViError::InvalidInput("invalid period".into())); }
+        if period == 0 || period > rows {
+            return Err(CudaViError::InvalidInput("invalid period".into()));
+        }
 
-        let (first_valids, pfx_tr, pfx_vp, pfx_vm) = self.build_prefix_time_major(high_tm_f32, low_tm_f32, close_tm_f32, cols, rows)?;
+        let (first_valids, pfx_tr, pfx_vp, pfx_vm) =
+            self.build_prefix_time_major(high_tm_f32, low_tm_f32, close_tm_f32, cols, rows)?;
         // Validate sufficient tail per series; if any series lacks enough tail, we still run and kernel will NaN-fill
 
         // VRAM estimate (3 * rows*cols + first_valids + 2*out)
@@ -345,22 +452,37 @@ impl CudaVi {
         let bytes = 3 * n * std::mem::size_of::<f32>()
             + cols * std::mem::size_of::<i32>()
             + 2 * n * std::mem::size_of::<f32>();
-        let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
         if !Self::mem_ok(bytes, headroom) {
-            return Err(CudaViError::InvalidInput(format!("estimated device memory {:.2} MB exceeds free VRAM", bytes as f64 / (1024.0*1024.0))));
+            return Err(CudaViError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                bytes as f64 / (1024.0 * 1024.0)
+            )));
         }
 
         // Upload inputs
         let (d_tr, d_vp, d_vm) = if n >= 131072 {
-            let h_tr = LockedBuffer::from_slice(&pfx_tr).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let h_vp = LockedBuffer::from_slice(&pfx_vp).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let h_vm = LockedBuffer::from_slice(&pfx_vm).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_tr = unsafe { DeviceBuffer::<f32>::uninitialized_async(n, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_vp = unsafe { DeviceBuffer::<f32>::uninitialized_async(n, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_vm = unsafe { DeviceBuffer::<f32>::uninitialized_async(n, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_tr.async_copy_from(&h_tr, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_vp.async_copy_from(&h_vp, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_vm.async_copy_from(&h_vm, &self.stream) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let h_tr =
+                LockedBuffer::from_slice(&pfx_tr).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let h_vp =
+                LockedBuffer::from_slice(&pfx_vp).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let h_vm =
+                LockedBuffer::from_slice(&pfx_vm).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let mut d_tr = unsafe { DeviceBuffer::<f32>::uninitialized_async(n, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let mut d_vp = unsafe { DeviceBuffer::<f32>::uninitialized_async(n, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let mut d_vm = unsafe { DeviceBuffer::<f32>::uninitialized_async(n, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            unsafe { d_tr.async_copy_from(&h_tr, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            unsafe { d_vp.async_copy_from(&h_vp, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            unsafe { d_vm.async_copy_from(&h_vm, &self.stream) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
             (d_tr, d_vp, d_vm)
         } else {
             (
@@ -369,16 +491,25 @@ impl CudaVi {
                 DeviceBuffer::from_slice(&pfx_vm).map_err(|e| CudaViError::Cuda(e.to_string()))?,
             )
         };
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
 
         // Allocate outputs
-        let mut d_plus  = unsafe { DeviceBuffer::<f32>::uninitialized(n) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
-        let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }.map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }
+            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }
+            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
 
         // Launch kernel
-        let mut func: Function = self.module.get_function("vi_many_series_one_param_f32").map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let mut func: Function = self
+            .module
+            .get_function("vi_many_series_one_param_f32")
+            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024), _ => 256 };
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
+            _ => 256,
+        };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -391,7 +522,7 @@ impl CudaVi {
             let mut cols_i = cols as i32;
             let mut rows_i = rows as i32;
             let mut p_i = period as i32;
-            let mut plus_ptr  = d_plus.as_device_ptr().as_raw();
+            let mut plus_ptr = d_plus.as_device_ptr().as_raw();
             let mut minus_ptr = d_minus.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut tr_ptr as *mut _ as *mut c_void,
@@ -404,12 +535,22 @@ impl CudaVi {
                 &mut plus_ptr as *mut _ as *mut c_void,
                 &mut minus_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
         }
 
         Ok(DeviceArrayF32Pair {
-            a: DeviceArrayF32 { buf: d_plus, rows, cols },
-            b: DeviceArrayF32 { buf: d_minus, rows, cols },
+            a: DeviceArrayF32 {
+                buf: d_plus,
+                rows,
+                cols,
+            },
+            b: DeviceArrayF32 {
+                buf: d_minus,
+                rows,
+                cols,
+            },
         })
     }
 }
@@ -419,11 +560,26 @@ pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
-    struct BatchState { cuda: CudaVi, d: DeviceArrayF32Pair, _combos: Vec<ViParams> }
-    impl CudaBenchState for BatchState { fn launch(&mut self) { let _ = self.cuda.stream.synchronize(); } }
+    struct BatchState {
+        cuda: CudaVi,
+        d: DeviceArrayF32Pair,
+        _combos: Vec<ViParams>,
+    }
+    impl CudaBenchState for BatchState {
+        fn launch(&mut self) {
+            let _ = self.cuda.stream.synchronize();
+        }
+    }
 
-    struct ManyState { cuda: CudaVi, d: DeviceArrayF32Pair }
-    impl CudaBenchState for ManyState { fn launch(&mut self) { let _ = self.cuda.stream.synchronize(); } }
+    struct ManyState {
+        cuda: CudaVi,
+        d: DeviceArrayF32Pair,
+    }
+    impl CudaBenchState for ManyState {
+        fn launch(&mut self) {
+            let _ = self.cuda.stream.synchronize();
+        }
+    }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         // Keep sizes reasonable to avoid OOM across varied GPUs
@@ -438,11 +594,20 @@ pub mod benches {
                 let mut h = vec![f32::NAN; len];
                 let mut l = vec![f32::NAN; len];
                 let mut c = vec![f32::NAN; len];
-                for i in 5..len { let x = i as f32; h[i] = x.sin() + 0.01*x; l[i] = h[i] - 0.5; c[i] = (0.5*x).cos() + 0.02*x; }
+                for i in 5..len {
+                    let x = i as f32;
+                    h[i] = x.sin() + 0.01 * x;
+                    l[i] = h[i] - 0.5;
+                    c[i] = (0.5 * x).cos() + 0.02 * x;
+                }
                 let sweep = ViBatchRange { period: (7, 35, 2) };
                 let cuda = CudaVi::new(0).unwrap();
                 let (d, combos) = cuda.vi_batch_dev(&h, &l, &c, &sweep).unwrap();
-                Box::new(BatchState { cuda, d, _combos: combos }) as Box<dyn CudaBenchState>
+                Box::new(BatchState {
+                    cuda,
+                    d,
+                    _combos: combos,
+                }) as Box<dyn CudaBenchState>
             },
         ));
 
@@ -452,14 +617,25 @@ pub mod benches {
             "vi_many",
             "vi_many/rows65536xcols64/period14",
             || {
-                let rows = 65_536usize; let cols = 64usize;
-                let mut h = vec![f32::NAN; rows*cols];
-                let mut l = vec![f32::NAN; rows*cols];
-                let mut c = vec![f32::NAN; rows*cols];
-                for s in 0..cols { for r in s..rows { let idx = r*cols + s; let x = (r as f32)*0.002 + (s as f32)*0.01; h[idx]=x.sin()+0.01*x; l[idx]=h[idx]-0.4; c[idx]=0.5*x.cos()+0.02*x; }}
+                let rows = 65_536usize;
+                let cols = 64usize;
+                let mut h = vec![f32::NAN; rows * cols];
+                let mut l = vec![f32::NAN; rows * cols];
+                let mut c = vec![f32::NAN; rows * cols];
+                for s in 0..cols {
+                    for r in s..rows {
+                        let idx = r * cols + s;
+                        let x = (r as f32) * 0.002 + (s as f32) * 0.01;
+                        h[idx] = x.sin() + 0.01 * x;
+                        l[idx] = h[idx] - 0.4;
+                        c[idx] = 0.5 * x.cos() + 0.02 * x;
+                    }
+                }
                 let cuda = CudaVi::new(0).unwrap();
                 let params = ViParams { period: Some(14) };
-                let d = cuda.vi_many_series_one_param_time_major_dev(&h, &l, &c, cols, rows, &params).unwrap();
+                let d = cuda
+                    .vi_many_series_one_param_time_major_dev(&h, &l, &c, cols, rows, &params)
+                    .unwrap();
                 Box::new(ManyState { cuda, d }) as Box<dyn CudaBenchState>
             },
         ));

@@ -35,10 +35,14 @@ pub enum ObvManySeriesKernelPolicy {
 }
 
 impl Default for ObvBatchKernelPolicy {
-    fn default() -> Self { ObvBatchKernelPolicy::Auto }
+    fn default() -> Self {
+        ObvBatchKernelPolicy::Auto
+    }
 }
 impl Default for ObvManySeriesKernelPolicy {
-    fn default() -> Self { ObvManySeriesKernelPolicy::Auto }
+    fn default() -> Self {
+        ObvManySeriesKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -166,10 +170,10 @@ impl CudaObv {
         }
 
         // H2D copies
-        let d_close = DeviceBuffer::from_slice(close)
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let d_volume = DeviceBuffer::from_slice(volume)
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+        let d_close =
+            DeviceBuffer::from_slice(close).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+        let d_volume =
+            DeviceBuffer::from_slice(volume).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
             .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
 
@@ -278,8 +282,8 @@ impl CudaObv {
         }
 
         // VRAM estimate: 2 inputs + first_valids + 1 output
-        let bytes = (close_tm.len() + volume_tm.len() + cols + close_tm.len())
-            * std::mem::size_of::<f32>();
+        let bytes =
+            (close_tm.len() + volume_tm.len() + cols + close_tm.len()) * std::mem::size_of::<f32>();
         let bytes = bytes + cols * std::mem::size_of::<i32>();
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
@@ -288,10 +292,10 @@ impl CudaObv {
             ));
         }
 
-        let d_close = DeviceBuffer::from_slice(close_tm)
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
-        let d_volume = DeviceBuffer::from_slice(volume_tm)
-            .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+        let d_close =
+            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
+        let d_volume =
+            DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaObvError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaObvError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
@@ -379,7 +383,8 @@ pub mod benches {
     fn bytes_many_series() -> usize {
         let elems = MANY_ROWS * MANY_COLS;
         // 2 inputs + 1 output + first_valids
-        (2 * elems + elems) * std::mem::size_of::<f32>() + MANY_COLS * std::mem::size_of::<i32>()
+        (2 * elems + elems) * std::mem::size_of::<f32>()
+            + MANY_COLS * std::mem::size_of::<i32>()
             + 32 * 1024 * 1024
     }
 
@@ -429,7 +434,11 @@ pub mod benches {
         let cuda = CudaObv::new(0).expect("cuda obv");
         let close = gen_series(ONE_SERIES_LEN);
         let volume = synth_volume_from_price(&close);
-        Box::new(ObvBatchState { cuda, close, volume })
+        Box::new(ObvBatchState {
+            cuda,
+            close,
+            volume,
+        })
     }
 
     fn prep_many_series() -> Box<dyn CudaBenchState> {

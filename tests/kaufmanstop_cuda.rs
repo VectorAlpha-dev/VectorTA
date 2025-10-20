@@ -1,8 +1,8 @@
 // Integration tests for CUDA Kaufmanstop kernels
 
 use my_project::indicators::kaufmanstop::{
-    kaufmanstop_batch_with_kernel, KaufmanstopBatchBuilder, KaufmanstopBatchRange, KaufmanstopBuilder,
-    KaufmanstopParams,
+    kaufmanstop_batch_with_kernel, KaufmanstopBatchBuilder, KaufmanstopBatchRange,
+    KaufmanstopBuilder, KaufmanstopParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -72,7 +72,13 @@ fn kaufmanstop_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let d = g[idx] as f64;
-        assert!(approx_eq(c, d, tol), "mismatch at {}: cpu={} gpu={}", idx, c, d);
+        assert!(
+            approx_eq(c, d, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            d
+        );
     }
 
     Ok(())
@@ -82,9 +88,7 @@ fn kaufmanstop_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
 #[test]
 fn kaufmanstop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[kaufmanstop_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[kaufmanstop_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -133,7 +137,13 @@ fn kaufmanstop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaKaufmanstop::new(0).expect("CudaKaufmanstop::new");
     let dev_tm = cuda
-        .kaufmanstop_many_series_one_param_time_major_dev(&high_tm_f32, &low_tm_f32, cols, rows, &params)
+        .kaufmanstop_many_series_one_param_time_major_dev(
+            &high_tm_f32,
+            &low_tm_f32,
+            cols,
+            rows,
+            &params,
+        )
         .expect("kaufmanstop many-series");
 
     assert_eq!(dev_tm.rows, rows);
@@ -143,9 +153,12 @@ fn kaufmanstop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
 
     let tol = 5e-4;
     for idx in 0..g_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
 
     Ok(())
 }
-

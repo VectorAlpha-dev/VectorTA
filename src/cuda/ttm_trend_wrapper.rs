@@ -41,7 +41,10 @@ impl fmt::Display for CudaTtmTrendError {
 impl Error for CudaTtmTrendError {}
 
 #[derive(Clone, Debug)]
-struct Combo { period: i32, warm: i32 }
+struct Combo {
+    period: i32,
+    warm: i32,
+}
 
 pub struct CudaTtmTrend {
     pub(crate) module: Module,
@@ -52,8 +55,8 @@ pub struct CudaTtmTrend {
 impl CudaTtmTrend {
     pub fn new(device_id: usize) -> Result<Self, CudaTtmTrendError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
         let ctx = Context::new(device).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ttm_trend_kernel.ptx"));
         // JIT with context-target + O2, then fallback
@@ -67,17 +70,29 @@ impl CudaTtmTrend {
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        Ok(Self { module, stream, _ctx: ctx })
+        Ok(Self {
+            module,
+            stream,
+            _ctx: ctx,
+        })
     }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom: usize) -> bool {
-        if let Ok((free, _)) = mem_get_info() { required_bytes.saturating_add(headroom) <= free } else { true }
+        if let Ok((free, _)) = mem_get_info() {
+            required_bytes.saturating_add(headroom) <= free
+        } else {
+            true
+        }
     }
 
     fn expand_grid(range: &TtmTrendBatchRange) -> Vec<i32> {
         let (start, end, step) = range.period;
-        if step == 0 || start == end { vec![start as i32] } else { (start..=end).step_by(step).map(|p| p as i32).collect() }
+        if step == 0 || start == end {
+            vec![start as i32]
+        } else {
+            (start..=end).step_by(step).map(|p| p as i32).collect()
+        }
     }
 
     fn prepare_batch_inputs(
@@ -86,21 +101,34 @@ impl CudaTtmTrend {
         sweep: &TtmTrendBatchRange,
     ) -> Result<(Vec<Combo>, usize, usize), CudaTtmTrendError> {
         if source_f32.len() != close_f32.len() {
-            return Err(CudaTtmTrendError::InvalidInput("source/close length mismatch".into()));
+            return Err(CudaTtmTrendError::InvalidInput(
+                "source/close length mismatch".into(),
+            ));
         }
         let len = source_f32.len();
-        if len == 0 { return Err(CudaTtmTrendError::InvalidInput("empty inputs".into())); }
+        if len == 0 {
+            return Err(CudaTtmTrendError::InvalidInput("empty inputs".into()));
+        }
         let first = source_f32
             .iter()
             .zip(close_f32)
             .position(|(&s, &c)| !s.is_nan() && !c.is_nan())
             .ok_or_else(|| CudaTtmTrendError::InvalidInput("all values are NaN".into()))?;
         let periods = Self::expand_grid(sweep);
-        if periods.is_empty() { return Err(CudaTtmTrendError::InvalidInput("no parameter combinations".into())); }
+        if periods.is_empty() {
+            return Err(CudaTtmTrendError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         let mut combos = Vec::with_capacity(periods.len());
         for &p in &periods {
             let pu = p as usize;
-            if pu == 0 || pu > len { return Err(CudaTtmTrendError::InvalidInput(format!("invalid period {} for len {}", pu, len))); }
+            if pu == 0 || pu > len {
+                return Err(CudaTtmTrendError::InvalidInput(format!(
+                    "invalid period {} for len {}",
+                    pu, len
+                )));
+            }
             if len - first < pu {
                 return Err(CudaTtmTrendError::InvalidInput(format!(
                     "not enough valid data: needed >= {}, valid = {}",
@@ -119,7 +147,9 @@ impl CudaTtmTrend {
         let mut pref = vec![0.0f64; n];
         if first_valid < n {
             pref[first_valid] = source_f32[first_valid] as f64;
-            for i in (first_valid + 1)..n { pref[i] = pref[i - 1] + (source_f32[i] as f64); }
+            for i in (first_valid + 1)..n {
+                pref[i] = pref[i - 1] + (source_f32[i] as f64);
+            }
         }
         pref
     }
@@ -144,12 +174,16 @@ impl CudaTtmTrend {
         let prefix = Self::build_prefix_source_f64(source_f32, first);
 
         // Device buffers
-        let d_prefix = DeviceBuffer::from_slice(&prefix).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_close  = DeviceBuffer::from_slice(close_f32).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let d_prefix = DeviceBuffer::from_slice(&prefix)
+            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close_f32)
+            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
-        let warms:   Vec<i32> = combos.iter().map(|c| c.warm).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_warms   = DeviceBuffer::from_slice(&warms).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let warms: Vec<i32> = combos.iter().map(|c| c.warm).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods)
+            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let d_warms =
+            DeviceBuffer::from_slice(&warms).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
 
@@ -158,7 +192,9 @@ impl CudaTtmTrend {
             + n_combos * (std::mem::size_of::<i32>() * 2)
             + n_combos * len * std::mem::size_of::<f32>();
         if !Self::will_fit(est_bytes, 64usize << 20) {
-            return Err(CudaTtmTrendError::InvalidInput("insufficient free VRAM".into()));
+            return Err(CudaTtmTrendError::InvalidInput(
+                "insufficient free VRAM".into(),
+            ));
         }
 
         // Launch kernel by chunks of rows (grid.x = rows chunk; blockDim.x = 256)
@@ -178,8 +214,14 @@ impl CudaTtmTrend {
             unsafe {
                 let mut pref_ptr = d_prefix.as_device_ptr().as_raw();
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
-                let mut per_ptr = d_periods.as_device_ptr().as_raw().wrapping_add(launched as u64 * std::mem::size_of::<i32>() as u64);
-                let mut warm_ptr = d_warms.as_device_ptr().as_raw().wrapping_add(launched as u64 * std::mem::size_of::<i32>() as u64);
+                let mut per_ptr = d_periods
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add(launched as u64 * std::mem::size_of::<i32>() as u64);
+                let mut warm_ptr = d_warms
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add(launched as u64 * std::mem::size_of::<i32>() as u64);
                 let mut len_i = len as i32;
                 let mut first_i = first as i32;
                 let mut ncomb_i = cur as i32;
@@ -208,7 +250,11 @@ impl CudaTtmTrend {
             .synchronize()
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: len,
+        })
     }
 
     pub fn ttm_trend_many_series_one_param_time_major_dev(
@@ -220,7 +266,9 @@ impl CudaTtmTrend {
         period: usize,
     ) -> Result<DeviceArrayF32, CudaTtmTrendError> {
         if cols == 0 || rows == 0 {
-            return Err(CudaTtmTrendError::InvalidInput("cols/rows must be > 0".into()));
+            return Err(CudaTtmTrendError::InvalidInput(
+                "cols/rows must be > 0".into(),
+            ));
         }
         let expected = cols
             .checked_mul(rows)
@@ -241,9 +289,13 @@ impl CudaTtmTrend {
             for t in 0..rows {
                 let si = source_tm_f32[t * cols + s];
                 let ci = close_tm_f32[t * cols + s];
-                if !si.is_nan() && !ci.is_nan() { fv = Some(t as i32); break; }
+                if !si.is_nan() && !ci.is_nan() {
+                    fv = Some(t as i32);
+                    break;
+                }
             }
-            let fv = fv.ok_or_else(|| CudaTtmTrendError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv =
+                fv.ok_or_else(|| CudaTtmTrendError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - (fv as usize) < period {
                 return Err(CudaTtmTrendError::InvalidInput(format!(
                     "series {} not enough valid data: needed >= {}, valid = {}",
@@ -256,9 +308,12 @@ impl CudaTtmTrend {
         }
 
         // Device buffers
-        let d_src  = DeviceBuffer::from_slice(source_tm_f32).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm_f32).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_fv   = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let d_src = DeviceBuffer::from_slice(source_tm_f32)
+            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close_tm_f32)
+            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
 
@@ -273,10 +328,10 @@ impl CudaTtmTrend {
         unsafe {
             let mut src_ptr = d_src.as_device_ptr().as_raw();
             let mut close_ptr = d_close.as_device_ptr().as_raw();
-            let mut fv_ptr  = d_fv.as_device_ptr().as_raw();
-            let mut cols_i  = cols as i32;
-            let mut rows_i  = rows as i32;
-            let mut p_i     = period as i32;
+            let mut fv_ptr = d_fv.as_device_ptr().as_raw();
+            let mut cols_i = cols as i32;
+            let mut rows_i = rows as i32;
+            let mut p_i = period as i32;
             let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut src_ptr as *mut _ as *mut c_void,
@@ -294,7 +349,11 @@ impl CudaTtmTrend {
         self.stream
             .synchronize()
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn synchronize(&self) -> Result<(), CudaTtmTrendError> {
@@ -311,7 +370,10 @@ pub mod benches {
 
     fn gen_series(n: usize) -> Vec<f32> {
         let mut v = vec![f32::NAN; n];
-        for i in 8..n { let x = i as f32; v[i] = (x * 0.00123).sin() + 0.00031 * x; }
+        for i in 8..n {
+            let x = i as f32;
+            v[i] = (x * 0.00123).sin() + 0.00031 * x;
+        }
         v
     }
 
@@ -321,7 +383,14 @@ pub mod benches {
         close: Vec<f32>,
         sweep: TtmTrendBatchRange,
     }
-    impl CudaBenchState for TtmBatchState { fn launch(&mut self) { let _ = self.cuda.ttm_trend_batch_dev(&self.src, &self.close, &self.sweep).unwrap(); } }
+    impl CudaBenchState for TtmBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .ttm_trend_batch_dev(&self.src, &self.close, &self.sweep)
+                .unwrap();
+        }
+    }
 
     fn prep_batch() -> Box<dyn CudaBenchState> {
         let cuda = CudaTtmTrend::new(0).expect("cuda ttm");
@@ -329,9 +398,19 @@ pub mod benches {
         let src = gen_series(len);
         // Close is a noisy variant of source
         let mut close = vec![f32::NAN; len];
-        for i in 8..len { let x = i as f32; close[i] = src[i] + 0.05 * (x * 0.00071).cos(); }
-        let sweep = TtmTrendBatchRange { period: (5, 254, 1) };
-        Box::new(TtmBatchState { cuda, src, close, sweep })
+        for i in 8..len {
+            let x = i as f32;
+            close[i] = src[i] + 0.05 * (x * 0.00071).cos();
+        }
+        let sweep = TtmTrendBatchRange {
+            period: (5, 254, 1),
+        };
+        Box::new(TtmBatchState {
+            cuda,
+            src,
+            close,
+            sweep,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -344,4 +423,3 @@ pub mod benches {
         )]
     }
 }
-

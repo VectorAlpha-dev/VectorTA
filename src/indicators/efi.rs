@@ -1169,9 +1169,13 @@ pub fn efi_cuda_batch_dev_py(
     let p = price_f32.as_slice()?;
     let v = volume_f32.as_slice()?;
     if p.len() != v.len() {
-        return Err(PyValueError::new_err("price and volume must have same length"));
+        return Err(PyValueError::new_err(
+            "price and volume must have same length",
+        ));
     }
-    let sweep = EfiBatchRange { period: period_range };
+    let sweep = EfiBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaEfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.efi_batch_dev(p, v, &sweep)
@@ -1200,11 +1204,15 @@ pub fn efi_cuda_many_series_one_param_dev_py(
     let shp_p = prices_tm_f32.shape();
     let shp_v = volumes_tm_f32.shape();
     if shp_p.len() != 2 || shp_v.len() != 2 || shp_p != shp_v {
-        return Err(PyValueError::new_err("prices_tm and volumes_tm must be same 2D shape"));
+        return Err(PyValueError::new_err(
+            "prices_tm and volumes_tm must be same 2D shape",
+        ));
     }
     let rows = shp_p[0];
     let cols = shp_p[1];
-    let params = EfiParams { period: Some(period) };
+    let params = EfiParams {
+        period: Some(period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaEfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.efi_many_series_one_param_time_major_dev(p_flat, v_flat, cols, rows, &params)

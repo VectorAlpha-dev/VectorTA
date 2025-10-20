@@ -160,7 +160,8 @@ fn zscore_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let rows = 1536usize;
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
-        for t in (s % 5)..rows { // stagger first_valid per series
+        for t in (s % 5)..rows {
+            // stagger first_valid per series
             let x = (t as f64) + (s as f64) * 0.3;
             let base = (x * 0.00131).sin() + (x * 0.00071).cos();
             let noise = 0.0005 * ((t + s) % 17) as f64;

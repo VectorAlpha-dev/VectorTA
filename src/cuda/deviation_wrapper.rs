@@ -17,7 +17,7 @@ use crate::indicators::deviation::{deviation_expand_grid, DeviationBatchRange, D
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, DeviceCopy};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -41,6 +41,53 @@ impl fmt::Display for CudaDeviationError {
 }
 impl std::error::Error for CudaDeviationError {}
 
+// ---------------------- Host mirror for CUDA float2 ----------------------
+// 8-byte aligned to match device-side float2 alignment.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Default)]
+pub struct Float2 {
+    pub x: f32, // hi
+    pub y: f32, // lo
+}
+unsafe impl DeviceCopy for Float2 {}
+
+#[inline(always)]
+fn two_sum(a: f32, b: f32) -> (f32, f32) {
+    let s = a + b;
+    let bb = s - a;
+    let e = (a - (s - bb)) + (b - bb);
+    (s, e)
+}
+
+#[inline(always)]
+fn quick_two_sum(a: f32, b: f32) -> (f32, f32) {
+    let s = a + b;
+    let e = b - (s - a);
+    (s, e)
+}
+
+#[inline(always)]
+fn add_twof(x: Float2, y: Float2) -> Float2 {
+    let (s, e) = two_sum(x.x, y.x);
+    let t = x.y + y.y;
+    let (hi, lo) = quick_two_sum(s, e + t);
+    Float2 { x: hi, y: lo }
+}
+
+#[inline(always)]
+fn add_scalar_twof(x: Float2, a: f32) -> Float2 {
+    let (s, e) = two_sum(x.x, a);
+    let (hi, lo) = quick_two_sum(s, e + x.y);
+    Float2 { x: hi, y: lo }
+}
+
+#[inline(always)]
+fn two_prod(a: f32, b: f32) -> (f32, f32) {
+    let p = a * b;
+    let e = a.mul_add(b, -p);
+    (p, e)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
@@ -61,7 +108,10 @@ pub struct CudaDeviationPolicy {
 
 impl Default for CudaDeviationPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -76,8 +126,8 @@ pub struct CudaDeviation {
 impl CudaDeviation {
     pub fn new(device_id: usize) -> Result<Self, CudaDeviationError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/deviation_kernel.ptx"));
@@ -89,16 +139,26 @@ impl CudaDeviation {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[]).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?,
+                Err(_) => Module::from_ptx(ptx, &[])
+                    .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?,
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
 
-        Ok(Self { module, stream, _context: context, policy: CudaDeviationPolicy::default(), debug_logged: std::sync::atomic::AtomicBool::new(false) })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy: CudaDeviationPolicy::default(),
+            debug_logged: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaDeviationPolicy) -> Result<Self, CudaDeviationError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaDeviationPolicy,
+    ) -> Result<Self, CudaDeviationError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
@@ -122,27 +182,39 @@ impl CudaDeviation {
 
     #[inline]
     fn will_fit(bytes: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Ok((free, _)) = mem_get_info() { bytes.saturating_add(headroom) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Ok((free, _)) = mem_get_info() {
+            bytes.saturating_add(headroom) <= free
+        } else {
+            true
+        }
     }
 
-    fn build_prefixes_1d(data_f32: &[f32]) -> (Vec<f64>, Vec<f64>, Vec<i32>, usize, usize) {
+    fn build_prefixes_1d(data_f32: &[f32]) -> (Vec<Float2>, Vec<Float2>, Vec<i32>, usize, usize) {
         let len = data_f32.len();
         let first_valid = data_f32.iter().position(|v| !v.is_nan()).unwrap_or(len);
-        let mut ps  = vec![0f64; len + 1];
-        let mut ps2 = vec![0f64; len + 1];
-        let mut pn  = vec![0i32; len + 1];
-        let mut a = 0.0f64; let mut b = 0.0f64; let mut c = 0i32;
+        let mut ps: Vec<Float2> = vec![Float2::default(); len + 1];
+        let mut ps2: Vec<Float2> = vec![Float2::default(); len + 1];
+        let mut pn = vec![0i32; len + 1];
+        let mut s = Float2::default();
+        let mut s2 = Float2::default();
+        let mut c = 0i32;
         for i in 0..len {
             if i >= first_valid {
                 let v = data_f32[i];
                 if v.is_nan() {
                     c += 1;
                 } else {
-                    let dv = v as f64; a += dv; b += dv * dv;
+                    s = add_scalar_twof(s, v);
+                    let (p, pe) = two_prod(v, v);
+                    s2 = add_twof(s2, Float2 { x: p, y: pe });
                 }
             }
-            ps[i + 1] = a; ps2[i + 1] = b; pn[i + 1] = c;
+            ps[i + 1] = s;
+            ps2[i + 1] = s2;
+            pn[i + 1] = c;
         }
         (ps, ps2, pn, first_valid, len)
     }
@@ -152,22 +224,33 @@ impl CudaDeviation {
         cols: usize,
         rows: usize,
         first_valids: &[i32],
-    ) -> (Vec<f64>, Vec<f64>, Vec<i32>) {
+    ) -> (Vec<Float2>, Vec<Float2>, Vec<i32>) {
         // Same layout as BBW: prefix at (t,s) stored at index (t*cols + s) + 1
         let total = data_tm_f32.len();
-        let mut ps  = vec![0.0f64; total + 1];
-        let mut ps2 = vec![0.0f64; total + 1];
-        let mut pn  = vec![0i32;  total + 1];
+        let mut ps: Vec<Float2> = vec![Float2::default(); total + 1];
+        let mut ps2: Vec<Float2> = vec![Float2::default(); total + 1];
+        let mut pn = vec![0i32; total + 1];
         for s in 0..cols {
             let fv = first_valids[s].max(0) as usize;
-            let mut a = 0.0f64; let mut b = 0.0f64; let mut c = 0i32;
+            let mut sx = Float2::default();
+            let mut sx2 = Float2::default();
+            let mut c = 0i32;
             for t in 0..rows {
                 let idx = t * cols + s;
                 if t >= fv {
                     let v = data_tm_f32[idx];
-                    if v.is_nan() { c += 1; } else { let dv = v as f64; a += dv; b += dv * dv; }
+                    if v.is_nan() {
+                        c += 1;
+                    } else {
+                        sx = add_scalar_twof(sx, v);
+                        let (p, pe) = two_prod(v, v);
+                        sx2 = add_twof(sx2, Float2 { x: p, y: pe });
+                    }
                 }
-                let w = idx + 1; ps[w] = a; ps2[w] = b; pn[w] = c;
+                let w = idx + 1;
+                ps[w] = sx;
+                ps2[w] = sx2;
+                pn[w] = c;
             }
         }
         (ps, ps2, pn)
@@ -212,7 +295,7 @@ impl CudaDeviation {
         let rows = combos.len();
         let out_elems = rows * len;
         let out_bytes = out_elems * std::mem::size_of::<f32>();
-        let in_bytes = (ps.len() + ps2.len()) * std::mem::size_of::<f64>()
+        let in_bytes = (ps.len() + ps2.len()) * std::mem::size_of::<Float2>()
             + pn.len() * std::mem::size_of::<i32>()
             + periods.len() * std::mem::size_of::<i32>();
         let headroom = Self::headroom_bytes();
@@ -237,14 +320,19 @@ impl CudaDeviation {
                 "[deviation] policy={:?}/{:?} len={} rows={} chunks={}",
                 self.policy.batch, self.policy.many_series, len, rows, y_chunks
             );
-            self.debug_logged.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.debug_logged
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Upload static inputs
-        let d_ps = DeviceBuffer::from_slice(&ps).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
-        let d_ps2 = DeviceBuffer::from_slice(&ps2).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
-        let d_pn = DeviceBuffer::from_slice(&pn).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
+        let d_ps =
+            DeviceBuffer::from_slice(&ps).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
+        let d_ps2 =
+            DeviceBuffer::from_slice(&ps2).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
+        let d_pn =
+            DeviceBuffer::from_slice(&pn).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods)
+            .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }
             .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
 
@@ -252,27 +340,53 @@ impl CudaDeviation {
         let chunk_rows = (rows + y_chunks - 1) / y_chunks;
         for c in 0..y_chunks {
             let start_row = c * chunk_rows;
-            if start_row >= rows { break; }
+            if start_row >= rows {
+                break;
+            }
             let end_row = ((c + 1) * chunk_rows).min(rows);
             let n_rows = end_row - start_row;
 
             // Sub-pointer views
-            let periods_ptr = unsafe { d_periods.as_device_ptr().offset((start_row as isize).try_into().unwrap()) };
-            let out_ptr = unsafe { d_out.as_device_ptr().offset(((start_row * len) as isize).try_into().unwrap()) };
-            self.launch_batch_kernel_ptrs(&d_ps, &d_ps2, &d_pn, periods_ptr, len, first_valid, n_rows, out_ptr)?;
+            let periods_ptr = unsafe {
+                d_periods
+                    .as_device_ptr()
+                    .offset((start_row as isize).try_into().unwrap())
+            };
+            let out_ptr = unsafe {
+                d_out
+                    .as_device_ptr()
+                    .offset(((start_row * len) as isize).try_into().unwrap())
+            };
+            self.launch_batch_kernel_ptrs(
+                &d_ps,
+                &d_ps2,
+                &d_pn,
+                periods_ptr,
+                len,
+                first_valid,
+                n_rows,
+                out_ptr,
+            )?;
         }
 
         self.stream
             .synchronize()
             .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows, cols: len }, combos))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            },
+            combos,
+        ))
     }
 
     fn launch_batch_kernel_ptrs(
         &self,
-        d_ps: &DeviceBuffer<f64>,
-        d_ps2: &DeviceBuffer<f64>,
+        d_ps: &DeviceBuffer<Float2>,
+        d_ps2: &DeviceBuffer<Float2>,
         d_pn: &DeviceBuffer<i32>,
         periods_ptr: cust::memory::DevicePointer<i32>,
         len: usize,
@@ -286,7 +400,9 @@ impl CudaDeviation {
             .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
 
         if len > i32::MAX as usize || n_combos > i32::MAX as usize {
-            return Err(CudaDeviationError::InvalidInput("inputs exceed kernel argument width".into()));
+            return Err(CudaDeviationError::InvalidInput(
+                "inputs exceed kernel argument width".into(),
+            ));
         }
 
         let block_x: u32 = match self.policy.batch {
@@ -332,7 +448,9 @@ impl CudaDeviation {
     ) -> Result<(usize, usize, Vec<DeviationParams>), CudaDeviationError> {
         let (dev, combos) = self.deviation_batch_dev(data_f32, sweep)?;
         if out_host.len() != dev.rows * dev.cols {
-            return Err(CudaDeviationError::InvalidInput("output slice length mismatch".into()));
+            return Err(CudaDeviationError::InvalidInput(
+                "output slice length mismatch".into(),
+            ));
         }
         dev.buf
             .copy_to(out_host)
@@ -349,15 +467,21 @@ impl CudaDeviation {
         params: &DeviationParams,
     ) -> Result<DeviceArrayF32, CudaDeviationError> {
         if cols == 0 || rows == 0 {
-            return Err(CudaDeviationError::InvalidInput("matrix dims must be positive".into()));
+            return Err(CudaDeviationError::InvalidInput(
+                "matrix dims must be positive".into(),
+            ));
         }
         if data_tm_f32.len() != cols * rows {
-            return Err(CudaDeviationError::InvalidInput("matrix shape mismatch".into()));
+            return Err(CudaDeviationError::InvalidInput(
+                "matrix shape mismatch".into(),
+            ));
         }
         let period = params.period.unwrap_or(0);
         let devtype = params.devtype.unwrap_or(0);
         if period == 0 {
-            return Err(CudaDeviationError::InvalidInput("period must be > 0".into()));
+            return Err(CudaDeviationError::InvalidInput(
+                "period must be > 0".into(),
+            ));
         }
         if devtype != 0 {
             return Err(CudaDeviationError::InvalidInput(
@@ -371,37 +495,60 @@ impl CudaDeviation {
             let mut fv = None;
             for t in 0..rows {
                 let idx = t * cols + s;
-                if !data_tm_f32[idx].is_nan() { fv = Some(t); break; }
+                if !data_tm_f32[idx].is_nan() {
+                    fv = Some(t);
+                    break;
+                }
             }
-            let fv = fv.ok_or_else(|| CudaDeviationError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv = fv
+                .ok_or_else(|| CudaDeviationError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv < period {
-                return Err(CudaDeviationError::InvalidInput(
-                    format!("series {} insufficient tail for period {}", s, period),
-                ));
+                return Err(CudaDeviationError::InvalidInput(format!(
+                    "series {} insufficient tail for period {}",
+                    s, period
+                )));
             }
             first_valids[s] = fv as i32;
         }
 
-        let (ps_tm, ps2_tm, pn_tm) = Self::build_prefixes_time_major(data_tm_f32, cols, rows, &first_valids);
+        let (ps_tm, ps2_tm, pn_tm) =
+            Self::build_prefixes_time_major(data_tm_f32, cols, rows, &first_valids);
 
-        let d_ps_tm = DeviceBuffer::from_slice(&ps_tm).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
-        let d_ps2_tm = DeviceBuffer::from_slice(&ps2_tm).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
-        let d_pn_tm = DeviceBuffer::from_slice(&pn_tm).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
+        let d_ps_tm = DeviceBuffer::from_slice(&ps_tm)
+            .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
+        let d_ps2_tm = DeviceBuffer::from_slice(&ps2_tm)
+            .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
+        let d_pn_tm = DeviceBuffer::from_slice(&pn_tm)
+            .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
         let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
             .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
 
-        self.launch_many_series_kernel(&d_ps_tm, &d_ps2_tm, &d_pn_tm, &d_first, cols, rows, period, &mut d_out_tm)?;
+        self.launch_many_series_kernel(
+            &d_ps_tm,
+            &d_ps2_tm,
+            &d_pn_tm,
+            &d_first,
+            cols,
+            rows,
+            period,
+            &mut d_out_tm,
+        )?;
         self.stream
             .synchronize()
             .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 
     fn launch_many_series_kernel(
         &self,
-        d_ps_tm: &DeviceBuffer<f64>,
-        d_ps2_tm: &DeviceBuffer<f64>,
+        d_ps_tm: &DeviceBuffer<Float2>,
+        d_ps2_tm: &DeviceBuffer<Float2>,
         d_pn_tm: &DeviceBuffer<i32>,
         d_first: &DeviceBuffer<i32>,
         cols: usize,
@@ -414,7 +561,9 @@ impl CudaDeviation {
             .get_function("deviation_many_series_one_param_f32")
             .map_err(|e| CudaDeviationError::Cuda(e.to_string()))?;
         if cols > i32::MAX as usize || rows > i32::MAX as usize || period > i32::MAX as usize {
-            return Err(CudaDeviationError::InvalidInput("inputs exceed kernel limits".into()));
+            return Err(CudaDeviationError::InvalidInput(
+                "inputs exceed kernel limits".into(),
+            ));
         }
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
@@ -484,7 +633,10 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaDeviation::new(0).expect("cuda deviation");
         let price = gen_series(ONE_SERIES_LEN);
-        let sweep = DeviationBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1), devtype: (0, 0, 0) };
+        let sweep = DeviationBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            devtype: (0, 0, 0),
+        };
         Box::new(DeviationBatchState { cuda, price, sweep })
     }
 

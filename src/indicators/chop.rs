@@ -63,11 +63,11 @@ use std::mem::ManuallyDrop;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaChop;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[derive(Debug, Clone)]
 pub enum ChopData<'a> {
@@ -2346,11 +2346,17 @@ pub fn chop_cuda_batch_dev_py(
     drift_range: (usize, usize, usize),
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
     let c = close_f32.as_slice()?;
-    let sweep = ChopBatchRange { period: period_range, scalar: scalar_range, drift: drift_range };
+    let sweep = ChopBatchRange {
+        period: period_range,
+        scalar: scalar_range,
+        drift: drift_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaChop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (arr, _combos) = cuda
@@ -2376,11 +2382,17 @@ pub fn chop_cuda_many_series_one_param_dev_py(
     drift: usize,
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let params = ChopParams { period: Some(period), scalar: Some(scalar), drift: Some(drift) };
+    let params = ChopParams {
+        period: Some(period),
+        scalar: Some(scalar),
+        drift: Some(drift),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaChop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.chop_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)

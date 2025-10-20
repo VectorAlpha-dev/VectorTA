@@ -169,4 +169,3 @@ fn cuda_feature_off_noop() {
         assert!(true);
     }
 }
-

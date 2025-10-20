@@ -16,10 +16,10 @@ use crate::indicators::adosc::{AdoscBatchRange, AdoscParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
+use cust::memory::mem_get_info;
 use cust::memory::DeviceBuffer;
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
-use cust::memory::mem_get_info;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
@@ -64,11 +64,12 @@ impl CudaAdosc {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit_opts).or_else(|_| {
-            Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                .or_else(|_| Module::from_ptx(ptx, &[]))
-        })
-        .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| {
+                Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                    .or_else(|_| Module::from_ptx(ptx, &[]))
+            })
+            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
 
@@ -85,15 +86,24 @@ impl CudaAdosc {
     }
 
     /// Create using an explicit policy (for testing/tuning).
-    pub fn new_with_policy(device_id: usize, policy: CudaAdoscPolicy) -> Result<Self, CudaAdoscError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaAdoscPolicy,
+    ) -> Result<Self, CudaAdoscError> {
         let mut s = Self::new(device_id)?;
-        unsafe { (*( &s as *const _ as *mut CudaAdosc)).policy = policy; }
+        unsafe {
+            (*(&s as *const _ as *mut CudaAdosc)).policy = policy;
+        }
         Ok(s)
     }
     #[inline]
-    pub fn set_policy(&mut self, policy: CudaAdoscPolicy) { self.policy = policy; }
+    pub fn set_policy(&mut self, policy: CudaAdoscPolicy) {
+        self.policy = policy;
+    }
     #[inline]
-    pub fn policy(&self) -> &CudaAdoscPolicy { &self.policy }
+    pub fn policy(&self) -> &CudaAdoscPolicy {
+        &self.policy
+    }
 
     /// One-series × many-params. Returns a row-major device matrix of size
     /// (rows = #combos, cols = series_len).
@@ -117,19 +127,18 @@ impl CudaAdosc {
         }
 
         // Copy inputs
-        let d_high = DeviceBuffer::from_slice(high)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_volume = DeviceBuffer::from_slice(volume)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_high =
+            DeviceBuffer::from_slice(high).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_low =
+            DeviceBuffer::from_slice(low).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_close =
+            DeviceBuffer::from_slice(close).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_volume =
+            DeviceBuffer::from_slice(volume).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
 
         // Precompute ADL on device
         let mut d_adl: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len)
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(len).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
         };
         self.launch_adl(&d_high, &d_low, &d_close, &d_volume, len, &mut d_adl)?;
 
@@ -148,10 +157,10 @@ impl CudaAdosc {
             shorts.push(sp);
             longs.push(lp);
         }
-        let d_shorts = DeviceBuffer::from_slice(&shorts)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_longs = DeviceBuffer::from_slice(&longs)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_shorts =
+            DeviceBuffer::from_slice(&shorts).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_longs =
+            DeviceBuffer::from_slice(&longs).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
 
         // Estimate VRAM and chunk launches if needed
         let (rows, cols) = (combos.len(), len);
@@ -216,7 +225,11 @@ impl CudaAdosc {
             }
             let d_out = DeviceBuffer::from_slice(&host_out)
                 .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-            return Ok(DeviceArrayF32 { buf: d_out, rows, cols });
+            return Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols,
+            });
         }
 
         // Unreachable; both branches return
@@ -226,7 +239,11 @@ impl CudaAdosc {
         {
             let d_out = DeviceBuffer::from_slice(&vec![0f32; rows * cols])
                 .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-            Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+            Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols,
+            })
         }
     }
 
@@ -256,23 +273,20 @@ impl CudaAdosc {
             ));
         }
         if short == 0 || long == 0 || short >= long {
-            return Err(CudaAdoscError::InvalidInput(
-                "invalid short/long".into(),
-            ));
+            return Err(CudaAdoscError::InvalidInput("invalid short/long".into()));
         }
 
-        let d_high = DeviceBuffer::from_slice(high_tm)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_tm)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_volume = DeviceBuffer::from_slice(volume_tm)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_high =
+            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_low =
+            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_close =
+            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_volume =
+            DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
 
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len)
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(len).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
         };
         self.launch_many_series_one_param(
             &d_high, &d_low, &d_close, &d_volume, cols, rows, short, long, &mut d_out,
@@ -452,7 +466,10 @@ pub struct CudaAdoscPolicy {
 }
 impl Default for CudaAdoscPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -543,7 +560,13 @@ pub mod benches {
         fn launch(&mut self) {
             let _ = self
                 .cuda
-                .adosc_batch_dev(&self.high, &self.low, &self.close, &self.volume, &self.sweep)
+                .adosc_batch_dev(
+                    &self.high,
+                    &self.low,
+                    &self.close,
+                    &self.volume,
+                    &self.sweep,
+                )
                 .expect("adosc batch");
         }
     }

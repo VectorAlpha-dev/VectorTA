@@ -93,8 +93,8 @@ pub struct CudaTrix {
 impl CudaTrix {
     pub fn new(device_id: usize) -> Result<Self, CudaTrixError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaTrixError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaTrixError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaTrixError::Cuda(e.to_string()))?;
         let max_grid_x = device
             .get_attribute(DeviceAttribute::MaxGridDimX)
             .map_err(|e| CudaTrixError::Cuda(e.to_string()))? as u32;
@@ -127,15 +127,26 @@ impl CudaTrix {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaTrixPolicy) -> Result<Self, CudaTrixError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaTrixPolicy,
+    ) -> Result<Self, CudaTrixError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaTrixPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaTrixPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaTrixPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaTrixPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaTrixError> {
         self.stream
             .synchronize()
@@ -150,13 +161,19 @@ impl CudaTrix {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     pub fn trix_batch_dev(
@@ -179,7 +196,8 @@ impl CudaTrix {
         if out.len() != expected {
             return Err(CudaTrixError::InvalidInput(format!(
                 "out slice wrong length: got {}, expected {}",
-                out.len(), expected
+                out.len(),
+                expected
             )));
         }
         let arr = self.run_batch_kernel(&inputs)?;
@@ -291,12 +309,10 @@ impl CudaTrix {
         // Host precompute: ln(prices) already prepared in inputs.logs
         let d_logs = self.htod_copy_f32(&inputs.logs)?;
         let d_periods = self.htod_copy_i32(&inputs.periods)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(inputs.series_len * inputs.combos.len())
-        }
-        .map_err(|e| CudaTrixError::Cuda(e.to_string()))?;
-        memset_f32_qnan_async(&self.stream, &mut d_out)
-            .map_err(|e| CudaTrixError::Cuda(e))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(inputs.series_len * inputs.combos.len()) }
+                .map_err(|e| CudaTrixError::Cuda(e.to_string()))?;
+        memset_f32_qnan_async(&self.stream, &mut d_out).map_err(|e| CudaTrixError::Cuda(e))?;
 
         self.launch_batch_kernel(
             &d_logs,
@@ -340,8 +356,7 @@ impl CudaTrix {
             self.maybe_log_batch_debug();
 
             unsafe {
-                let mut logs_ptr = d_logs.as_device_ptr().as_raw()
-                    + (0) as u64; // logs always start at 0
+                let mut logs_ptr = d_logs.as_device_ptr().as_raw() + (0) as u64; // logs always start at 0
                 let mut periods_ptr = d_periods.as_device_ptr().as_raw()
                     + (launched * core::mem::size_of::<i32>()) as u64;
                 let mut series_len_i = series_len as i32;
@@ -429,12 +444,12 @@ impl CudaTrix {
         }
         let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }
             .map_err(|e| CudaTrixError::Cuda(e.to_string()))?;
-        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&inputs.first_valids, &self.stream) }
-            .map_err(|e| CudaTrixError::Cuda(e.to_string()))?;
+        let d_first_valids =
+            unsafe { DeviceBuffer::from_slice_async(&inputs.first_valids, &self.stream) }
+                .map_err(|e| CudaTrixError::Cuda(e.to_string()))?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaTrixError::Cuda(e.to_string()))?;
-        memset_f32_qnan_async(&self.stream, &mut d_out_tm)
-            .map_err(|e| CudaTrixError::Cuda(e))?;
+        memset_f32_qnan_async(&self.stream, &mut d_out_tm).map_err(|e| CudaTrixError::Cuda(e))?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -445,7 +460,11 @@ impl CudaTrix {
             &mut d_out_tm,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 
     fn prepare_batch_inputs(
@@ -499,7 +518,9 @@ impl CudaTrix {
 
         // Shared host precompute: ln(price)
         let mut logs = vec![0f32; series_len];
-        for i in 0..first_valid { logs[i] = 0.0; }
+        for i in 0..first_valid {
+            logs[i] = 0.0;
+        }
         for i in first_valid..series_len {
             logs[i] = prices[i].ln();
         }
@@ -528,7 +549,9 @@ impl CudaTrix {
             return Err(CudaTrixError::InvalidInput("matrix shape mismatch".into()));
         }
         if period == 0 {
-            return Err(CudaTrixError::InvalidInput("period must be positive".into()));
+            return Err(CudaTrixError::InvalidInput(
+                "period must be positive".into(),
+            ));
         }
         if period > i32::MAX as usize {
             return Err(CudaTrixError::InvalidInput(
@@ -548,16 +571,15 @@ impl CudaTrix {
                 }
             }
             let first = fv.ok_or_else(|| {
-                CudaTrixError::InvalidInput(format!(
-                    "series {} has all NaN values",
-                    series_idx
-                ))
+                CudaTrixError::InvalidInput(format!("series {} has all NaN values", series_idx))
             })?;
             let needed = 3 * (period - 1) + 2;
             if rows - first < needed {
                 return Err(CudaTrixError::InvalidInput(format!(
                     "series {} lacks data: needed >= {}, valid = {}",
-                    series_idx, needed, rows - first
+                    series_idx,
+                    needed,
+                    rows - first
                 )));
             }
             first_valids[series_idx] = first as i32;
@@ -595,7 +617,9 @@ impl CudaTrix {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_scenario =
@@ -603,14 +627,18 @@ impl CudaTrix {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TRIX batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTrix)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTrix)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per_scenario =
@@ -618,7 +646,9 @@ impl CudaTrix {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] TRIX many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaTrix)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaTrix)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -647,7 +677,9 @@ pub mod benches {
 fn expand_grid_trix(range: &TrixBatchRange) -> Vec<TrixParams> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {
-        return vec![TrixParams { period: Some(start) }];
+        return vec![TrixParams {
+            period: Some(start),
+        }];
     }
     (start..=end)
         .step_by(step)

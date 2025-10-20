@@ -1744,9 +1744,9 @@ pub fn register_mom_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
 
 // ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaMom;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "mom_cuda_batch_dev")]
@@ -1765,11 +1765,12 @@ pub fn mom_cuda_batch_dev_py(
     if slice.is_empty() {
         return Err(PyValueError::new_err("empty input"));
     }
-    let sweep = MomBatchRange { period: period_range };
+    let sweep = MomBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaMom::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .mom_batch_dev(slice, &sweep)
+        cuda.mom_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
@@ -1799,8 +1800,7 @@ pub fn mom_cuda_many_series_one_param_dev_py(
     }
     let inner = py.allow_threads(|| {
         let cuda = CudaMom::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .mom_many_series_one_param_time_major_dev(slice, cols, rows, period)
+        cuda.mom_many_series_one_param_time_major_dev(slice, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })

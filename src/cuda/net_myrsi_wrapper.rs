@@ -59,7 +59,10 @@ pub struct CudaNetMyrsiPolicy {
 }
 impl Default for CudaNetMyrsiPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -124,36 +127,52 @@ impl CudaNetMyrsi {
             .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))
     }
 
-    pub fn set_policy(&mut self, policy: CudaNetMyrsiPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaNetMyrsiPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaNetMyrsiPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaNetMyrsiPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] NET_MyRSI batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaNetMyrsi)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaNetMyrsi)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] NET_MyRSI many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaNetMyrsi)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaNetMyrsi)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -166,17 +185,27 @@ impl CudaNetMyrsi {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Some((free, _)) = Self::device_mem_info() { required.saturating_add(headroom) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required.saturating_add(headroom) <= free
+        } else {
+            true
+        }
     }
 
     // ---------- Batch (one series × many params) ----------
 
     fn expand_periods((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
 
@@ -195,14 +224,17 @@ impl CudaNetMyrsi {
 
         let periods = Self::expand_periods(sweep.period);
         if periods.is_empty() {
-            return Err(CudaNetMyrsiError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaNetMyrsiError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         let mut combos = Vec::with_capacity(periods.len());
         let mut max_p = 1usize;
         for p in periods {
             if p == 0 || p > len {
                 return Err(CudaNetMyrsiError::InvalidInput(format!(
-                    "invalid period {} for length {}", p, len
+                    "invalid period {} for length {}",
+                    p, len
                 )));
             }
             if len - first_valid < p + 1 {
@@ -224,7 +256,8 @@ impl CudaNetMyrsi {
         data_f32: &[f32],
         sweep: &NetMyrsiBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<NetMyrsiParams>), CudaNetMyrsiError> {
-        let (combos, first_valid, series_len, _max_p) = Self::prepare_batch_inputs(data_f32, sweep)?;
+        let (combos, first_valid, series_len, _max_p) =
+            Self::prepare_batch_inputs(data_f32, sweep)?;
 
         let prices_bytes = series_len * core::mem::size_of::<f32>();
         let out_bytes = combos.len() * series_len * core::mem::size_of::<f32>();
@@ -285,7 +318,14 @@ impl CudaNetMyrsi {
         }
         self.synchronize()?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: series_len }, combos))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: series_len,
+            },
+            combos,
+        ))
     }
 
     // ---------- Many-series × one param (time-major) ----------
@@ -297,7 +337,9 @@ impl CudaNetMyrsi {
         params: &NetMyrsiParams,
     ) -> Result<(Vec<i32>, usize), CudaNetMyrsiError> {
         if cols == 0 || rows == 0 || data_tm_f32.len() != cols * rows {
-            return Err(CudaNetMyrsiError::InvalidInput("invalid matrix shape".into()));
+            return Err(CudaNetMyrsiError::InvalidInput(
+                "invalid matrix shape".into(),
+            ));
         }
         let period = params.period.unwrap_or(14);
         if period == 0 || period > rows {
@@ -308,9 +350,13 @@ impl CudaNetMyrsi {
             let mut fv = None;
             for t in 0..rows {
                 let v = data_tm_f32[t * cols + s];
-                if !v.is_nan() { fv = Some(t); break; }
+                if !v.is_nan() {
+                    fv = Some(t);
+                    break;
+                }
             }
-            let fv = fv.ok_or_else(|| CudaNetMyrsiError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv =
+                fv.ok_or_else(|| CudaNetMyrsiError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv < period + 1 {
                 return Err(CudaNetMyrsiError::InvalidInput(format!(
                     "series {} not enough valid data (need >= {}, valid = {})",
@@ -331,7 +377,8 @@ impl CudaNetMyrsi {
         rows: usize,
         params: &NetMyrsiParams,
     ) -> Result<DeviceArrayF32, CudaNetMyrsiError> {
-        let (first_valids, period) = Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
+        let (first_valids, period) =
+            Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         let prices_bytes = cols * rows * core::mem::size_of::<f32>();
         let fvs_bytes = cols * core::mem::size_of::<i32>();
@@ -339,7 +386,9 @@ impl CudaNetMyrsi {
         let required = prices_bytes + fvs_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaNetMyrsiError::InvalidInput("insufficient free VRAM".into()));
+            return Err(CudaNetMyrsiError::InvalidInput(
+                "insufficient free VRAM".into(),
+            ));
         }
 
         let d_prices = unsafe {
@@ -355,7 +404,10 @@ impl CudaNetMyrsi {
                 .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?
         };
 
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, ManySeriesKernelPolicy::Auto => 256 };
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            ManySeriesKernelPolicy::Auto => 256,
+        };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let func = self
             .module
@@ -383,7 +435,11 @@ impl CudaNetMyrsi {
                 .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?;
         }
         self.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
 
@@ -399,7 +455,9 @@ pub mod benches {
 
     fn gen_prices(len: usize) -> Vec<f32> {
         let mut v = vec![f32::NAN; len];
-        for i in 5..len { v[i] = (i as f32 * 0.00087).sin() + 0.001 * (i % 9) as f32; }
+        for i in 5..len {
+            v[i] = (i as f32 * 0.00087).sin() + 0.001 * (i % 9) as f32;
+        }
         v
     }
 
@@ -409,7 +467,9 @@ pub mod benches {
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let sweep = NetMyrsiBatchRange { period: (8, 128, 8) };
+            let sweep = NetMyrsiBatchRange {
+                period: (8, 128, 8),
+            };
             let _ = self.cuda.net_myrsi_batch_dev(&self.data, &sweep).unwrap();
         }
     }
@@ -436,14 +496,27 @@ pub mod benches {
     }
 
     fn prep_batch() -> Box<dyn CudaBenchState> {
-        Box::new(BatchState { cuda: CudaNetMyrsi::new(0).expect("cuda"), data: gen_prices(LEN_1M) })
+        Box::new(BatchState {
+            cuda: CudaNetMyrsi::new(0).expect("cuda"),
+            data: gen_prices(LEN_1M),
+        })
     }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
         let cols = COLS_256;
         let rows = ROWS_1M / COLS_256;
         let mut data_tm = vec![f32::NAN; cols * rows];
-        for s in 0..cols { for r in s..rows { data_tm[r * cols + s] = (r as f32 * 0.0013 + s as f32 * 0.01).sin(); } }
-        Box::new(ManyState { cuda: CudaNetMyrsi::new(0).expect("cuda"), data_tm, cols, rows, params: NetMyrsiParams { period: Some(64) } })
+        for s in 0..cols {
+            for r in s..rows {
+                data_tm[r * cols + s] = (r as f32 * 0.0013 + s as f32 * 0.01).sin();
+            }
+        }
+        Box::new(ManyState {
+            cuda: CudaNetMyrsi::new(0).expect("cuda"),
+            data_tm,
+            cols,
+            rows,
+            params: NetMyrsiParams { period: Some(64) },
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

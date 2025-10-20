@@ -1602,7 +1602,10 @@ pub fn register_nadaraya_watson_envelope_module(m: &Bound<'_, PyModule>) -> PyRe
     m.add_class::<NweStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
-        m.add_function(wrap_pyfunction!(nadaraya_watson_envelope_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            nadaraya_watson_envelope_cuda_batch_dev_py,
+            m
+        )?)?;
         m.add_function(wrap_pyfunction!(
             nadaraya_watson_envelope_cuda_many_series_one_param_dev_py,
             m
@@ -1613,9 +1616,9 @@ pub fn register_nadaraya_watson_envelope_module(m: &Bound<'_, PyModule>) -> PyRe
 
 // ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaNwe};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "nadaraya_watson_envelope_cuda_batch_dev")]
@@ -1628,16 +1631,29 @@ pub fn nadaraya_watson_envelope_cuda_batch_dev_py<'py>(
     lookback_range: (usize, usize, usize),
     device_id: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice = data_f32.as_slice()?;
-    let sweep = NweBatchRange { bandwidth: bandwidth_range, multiplier: multiplier_range, lookback: lookback_range };
+    let sweep = NweBatchRange {
+        bandwidth: bandwidth_range,
+        multiplier: multiplier_range,
+        lookback: lookback_range,
+    };
     let dict = PyDict::new(py);
     let (pair, combos) = py.allow_threads(|| {
         let cuda = CudaNwe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.nwe_batch_dev(slice, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.nwe_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    dict.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: pair.upper })?)?;
-    dict.set_item("lower", Py::new(py, DeviceArrayF32Py { inner: pair.lower })?)?;
+    dict.set_item(
+        "upper",
+        Py::new(py, DeviceArrayF32Py { inner: pair.upper })?,
+    )?;
+    dict.set_item(
+        "lower",
+        Py::new(py, DeviceArrayF32Py { inner: pair.lower })?,
+    )?;
     // Return parameter vectors for row mapping
     use numpy::IntoPyArray;
     let bws: Vec<f64> = combos.iter().map(|c| c.bandwidth.unwrap_or(8.0)).collect();
@@ -1662,22 +1678,36 @@ pub fn nadaraya_watson_envelope_cuda_many_series_one_param_dev_py<'py>(
     lookback: usize,
     device_id: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     use numpy::PyUntypedArrayMethods;
     let shape = data_tm_f32.shape();
-    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D time-major array")); }
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D time-major array"));
+    }
     let rows = shape[0];
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
-    let params = NweParams { bandwidth: Some(bandwidth), multiplier: Some(multiplier), lookback: Some(lookback) };
+    let params = NweParams {
+        bandwidth: Some(bandwidth),
+        multiplier: Some(multiplier),
+        lookback: Some(lookback),
+    };
     let pair = py.allow_threads(|| {
         let cuda = CudaNwe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.nwe_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: pair.upper })?)?;
-    dict.set_item("lower", Py::new(py, DeviceArrayF32Py { inner: pair.lower })?)?;
+    dict.set_item(
+        "upper",
+        Py::new(py, DeviceArrayF32Py { inner: pair.upper })?,
+    )?;
+    dict.set_item(
+        "lower",
+        Py::new(py, DeviceArrayF32Py { inner: pair.lower })?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("bandwidth", bandwidth)?;

@@ -20,6 +20,8 @@
 //! - Batch Support: ✓ Parallel per-row sweep; row-specific SIMD not attempted (no reusable
 //!   precompute across rows).
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -28,8 +30,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1378,7 +1378,10 @@ pub fn sar_cuda_batch_dev_py(
     if h.len() != l.len() {
         return Err(PyValueError::new_err("high/low length mismatch"));
     }
-    let sweep = SarBatchRange { acceleration: acceleration_range, maximum: maximum_range };
+    let sweep = SarBatchRange {
+        acceleration: acceleration_range,
+        maximum: maximum_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaSar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.sar_batch_dev(h, l, &sweep)
@@ -1410,9 +1413,14 @@ pub fn sar_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     if cols.checked_mul(rows).unwrap_or(0) != h.len() || h.len() != l.len() {
-        return Err(PyValueError::new_err("time‑major inputs must be equal length and cols*rows"));
+        return Err(PyValueError::new_err(
+            "time‑major inputs must be equal length and cols*rows",
+        ));
     }
-    let params = SarParams { acceleration: Some(acceleration), maximum: Some(maximum) };
+    let params = SarParams {
+        acceleration: Some(acceleration),
+        maximum: Some(maximum),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaSar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.sar_many_series_one_param_time_major_dev(h, l, cols, rows, &params)

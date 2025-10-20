@@ -56,12 +56,12 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-use crate::indicators::mfi::{mfi_with_kernel, MfiInput, MfiParams};
-use crate::indicators::rsi::{rsi_with_kernel, RsiInput, RsiParams};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::alphatrend_wrapper::CudaAlphaTrend;
+use crate::indicators::mfi::{mfi_with_kernel, MfiInput, MfiParams};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::indicators::rsi::{rsi_with_kernel, RsiInput, RsiParams};
 
 impl<'a> AsRef<[f64]> for AlphaTrendInput<'a> {
     #[inline(always)]
@@ -2209,10 +2209,12 @@ pub fn alphatrend_cuda_batch_dev_py<'py>(
     period_range: (usize, usize, usize),
     no_volume: bool,
     device_id: usize,
-)-> PyResult<Bound<'py, PyDict>> {
-    use numpy::IntoPyArray;
+) -> PyResult<Bound<'py, PyDict>> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    use numpy::IntoPyArray;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let (h, l, c, v) = (
         high_f32.as_slice()?,
         low_f32.as_slice()?,
@@ -2222,13 +2224,23 @@ pub fn alphatrend_cuda_batch_dev_py<'py>(
     if h.len() != l.len() || h.len() != c.len() || h.len() != v.len() {
         return Err(PyValueError::new_err("Inconsistent data lengths"));
     }
-    let sweep = AlphaTrendBatchRange { coeff: coeff_range, period: period_range, no_volume };
+    let sweep = AlphaTrendBatchRange {
+        coeff: coeff_range,
+        period: period_range,
+        no_volume,
+    };
     let (batch, coeffs_vec, periods_vec) = py.allow_threads(|| {
-        let cuda = CudaAlphaTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let out = cuda.alphatrend_batch_dev(h, l, c, v, &sweep)
+        let cuda =
+            CudaAlphaTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let out = cuda
+            .alphatrend_batch_dev(h, l, c, v, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let coeffs: Vec<f64> = out.combos.iter().map(|p| p.coeff.unwrap_or(1.0)).collect();
-        let periods: Vec<u64> = out.combos.iter().map(|p| p.period.unwrap_or(14) as u64).collect();
+        let periods: Vec<u64> = out
+            .combos
+            .iter()
+            .map(|p| p.period.unwrap_or(14) as u64)
+            .collect();
         Ok::<_, PyErr>((out, coeffs, periods))
     })?;
 
@@ -2261,22 +2273,34 @@ pub fn alphatrend_cuda_many_series_one_param_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let (h, l, c, v) = (
         high_tm_f32.as_slice()?,
         low_tm_f32.as_slice()?,
         close_tm_f32.as_slice()?,
         volume_tm_f32.as_slice()?,
     );
-    if h.len() != cols * rows || l.len() != cols * rows || c.len() != cols * rows || v.len() != cols * rows {
+    if h.len() != cols * rows
+        || l.len() != cols * rows
+        || c.len() != cols * rows
+        || v.len() != cols * rows
+    {
         return Err(PyValueError::new_err("Inconsistent time-major shapes"));
     }
     let (k1, k2) = py.allow_threads(|| {
-        let cuda = CudaAlphaTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.alphatrend_many_series_one_param_time_major_dev(h, l, c, v, cols, rows, coeff, period, no_volume)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaAlphaTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.alphatrend_many_series_one_param_time_major_dev(
+            h, l, c, v, cols, rows, coeff, period, no_volume,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: k1 }, DeviceArrayF32Py { inner: k2 }))
+    Ok((
+        DeviceArrayF32Py { inner: k1 },
+        DeviceArrayF32Py { inner: k2 },
+    ))
 }
 
 // ==================== ENHANCED WASM BINDINGS ====================

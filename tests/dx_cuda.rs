@@ -9,12 +9,19 @@ use cust::memory::CopyDestination;
 use my_project::cuda::{cuda_available, CudaDx};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
 #[test]
-fn cuda_feature_off_noop() { #[cfg(not(feature = "cuda"))] { assert!(true); } }
+fn cuda_feature_off_noop() {
+    #[cfg(not(feature = "cuda"))]
+    {
+        assert!(true);
+    }
+}
 
 #[cfg(feature = "cuda")]
 #[test]
@@ -25,10 +32,22 @@ fn dx_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let len = 8192usize;
     let mut close = vec![f64::NAN; len];
-    for i in 0..len { if i >= 4 { let x = i as f64; close[i] = (x*0.0023).sin() + 0.0004*x; } }
+    for i in 0..len {
+        if i >= 4 {
+            let x = i as f64;
+            close[i] = (x * 0.0023).sin() + 0.0004 * x;
+        }
+    }
     let mut high = close.clone();
     let mut low = close.clone();
-    for i in 0..len { if !close[i].is_nan() { let x = i as f64*0.0025; let off = (0.002*x.sin()).abs() + 0.15; high[i] = close[i] + off; low[i] = close[i] - off; }}
+    for i in 0..len {
+        if !close[i].is_nan() {
+            let x = i as f64 * 0.0025;
+            let off = (0.002 * x.sin()).abs() + 0.15;
+            high[i] = close[i] + off;
+            low[i] = close[i] - off;
+        }
+    }
     let sweep = DxBatchRange { period: (6, 30, 3) };
 
     // Quantize to f32 to match CUDA input domain
@@ -57,7 +76,13 @@ fn dx_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[idx];
         let b = gpu_host[idx] as f64;
-        assert!(approx_eq(a, b, tol), "mismatch at {}: cpu={} gpu={}", idx, a, b);
+        assert!(
+            approx_eq(a, b, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            a,
+            b
+        );
     }
     Ok(())
 }
@@ -72,10 +97,25 @@ fn dx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     let cols = 16usize; // series
     let rows = 2048usize; // time
     let mut close_tm = vec![f64::NAN; cols * rows];
-    for s in 0..cols { for t in s..rows { let x = (t as f64) + (s as f64)*0.2; close_tm[t*cols+s] = (x*0.002).sin() + 0.0003*x; }}
+    for s in 0..cols {
+        for t in s..rows {
+            let x = (t as f64) + (s as f64) * 0.2;
+            close_tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+        }
+    }
     let mut high_tm = close_tm.clone();
     let mut low_tm = close_tm.clone();
-    for s in 0..cols { for t in 0..rows { let idx = t*cols + s; if !close_tm[idx].is_nan() { let x = (t as f64)*0.0025; let off = (0.002*x.sin()).abs() + 0.15; high_tm[idx] = close_tm[idx] + off; low_tm[idx] = close_tm[idx] - off; }}}
+    for s in 0..cols {
+        for t in 0..rows {
+            let idx = t * cols + s;
+            if !close_tm[idx].is_nan() {
+                let x = (t as f64) * 0.0025;
+                let off = (0.002 * x.sin()).abs() + 0.15;
+                high_tm[idx] = close_tm[idx] + off;
+                low_tm[idx] = close_tm[idx] - off;
+            }
+        }
+    }
 
     let period = 14usize;
 
@@ -85,14 +125,22 @@ fn dx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         let mut h = vec![f64::NAN; rows];
         let mut l = vec![f64::NAN; rows];
         let mut c = vec![f64::NAN; rows];
-        for t in 0..rows { h[t] = high_tm[t*cols+s]; l[t] = low_tm[t*cols+s]; c[t] = close_tm[t*cols+s]; }
-        let sweep = DxBatchRange { period: (period, period, 0) };
+        for t in 0..rows {
+            h[t] = high_tm[t * cols + s];
+            l[t] = low_tm[t * cols + s];
+            c[t] = close_tm[t * cols + s];
+        }
+        let sweep = DxBatchRange {
+            period: (period, period, 0),
+        };
         let hq: Vec<f64> = h.iter().map(|&v| (v as f32) as f64).collect();
         let lq: Vec<f64> = l.iter().map(|&v| (v as f32) as f64).collect();
         let cq: Vec<f64> = c.iter().map(|&v| (v as f32) as f64).collect();
         let out = dx_batch_with_kernel(&hq, &lq, &cq, &sweep, Kernel::ScalarBatch)?;
         let row = 0usize;
-        for t in 0..rows { cpu_tm[t*cols+s] = out.values[row*out.cols + t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[row * out.cols + t];
+        }
     }
 
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
@@ -100,7 +148,14 @@ fn dx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     let close_tm_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaDx::new(0).expect("CudaDx::new");
     let dev = cuda
-        .dx_many_series_one_param_time_major_dev(&high_tm_f32, &low_tm_f32, &close_tm_f32, cols, rows, period)
+        .dx_many_series_one_param_time_major_dev(
+            &high_tm_f32,
+            &low_tm_f32,
+            &close_tm_f32,
+            cols,
+            rows,
+            period,
+        )
         .expect("dx many-series");
     assert_eq!(dev.rows, rows);
     assert_eq!(dev.cols, cols);
@@ -109,7 +164,11 @@ fn dx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     dev.buf.copy_to(&mut g_tm)?;
     let tol = 1e-1; // DX is more sensitive than ADX; allow 0.1 abs
     for i in 0..g_tm.len() {
-        assert!(approx_eq(cpu_tm[i], g_tm[i] as f64, tol), "mismatch at {}", i);
+        assert!(
+            approx_eq(cpu_tm[i], g_tm[i] as f64, tol),
+            "mismatch at {}",
+            i
+        );
     }
     Ok(())
 }

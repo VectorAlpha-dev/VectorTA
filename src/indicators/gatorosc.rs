@@ -3784,8 +3784,15 @@ pub fn gatorosc_cuda_batch_dev_py(
     lips_length_range: (usize, usize, usize),
     lips_shift_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+) -> PyResult<(
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let data = data_f32.as_slice()?;
     let sweep = GatorOscBatchRange {
         jaws_length: jaws_length_range,
@@ -3796,18 +3803,21 @@ pub fn gatorosc_cuda_batch_dev_py(
         lips_shift: lips_shift_range,
     };
     let (upper, lower, upper_change, lower_change) = py.allow_threads(|| {
-        let cuda = CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let quad = cuda
             .gatorosc_batch_dev(data, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>(
-            (
-                DeviceArrayF32Py { inner: quad.upper },
-                DeviceArrayF32Py { inner: quad.lower },
-                DeviceArrayF32Py { inner: quad.upper_change },
-                DeviceArrayF32Py { inner: quad.lower_change },
-            ),
-        )
+        Ok::<_, PyErr>((
+            DeviceArrayF32Py { inner: quad.upper },
+            DeviceArrayF32Py { inner: quad.lower },
+            DeviceArrayF32Py {
+                inner: quad.upper_change,
+            },
+            DeviceArrayF32Py {
+                inner: quad.lower_change,
+            },
+        ))
     })?;
     Ok((upper, lower, upper_change, lower_change))
 }
@@ -3827,8 +3837,15 @@ pub fn gatorosc_cuda_many_series_one_param_dev_py(
     lips_length: usize,
     lips_shift: usize,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+) -> PyResult<(
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let prices = prices_tm_f32.as_slice()?;
     let expected = cols
         .checked_mul(rows)
@@ -3837,7 +3854,8 @@ pub fn gatorosc_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
     let (upper, lower, upper_change, lower_change) = py.allow_threads(|| {
-        let cuda = CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let quad = cuda
             .gatorosc_many_series_one_param_time_major_dev(
                 prices,
@@ -3851,14 +3869,16 @@ pub fn gatorosc_cuda_many_series_one_param_dev_py(
                 lips_shift,
             )
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>(
-            (
-                DeviceArrayF32Py { inner: quad.upper },
-                DeviceArrayF32Py { inner: quad.lower },
-                DeviceArrayF32Py { inner: quad.upper_change },
-                DeviceArrayF32Py { inner: quad.lower_change },
-            ),
-        )
+        Ok::<_, PyErr>((
+            DeviceArrayF32Py { inner: quad.upper },
+            DeviceArrayF32Py { inner: quad.lower },
+            DeviceArrayF32Py {
+                inner: quad.upper_change,
+            },
+            DeviceArrayF32Py {
+                inner: quad.lower_change,
+            },
+        ))
     })?;
     Ok((upper, lower, upper_change, lower_change))
 }

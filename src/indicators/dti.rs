@@ -1326,7 +1326,11 @@ pub fn dti_cuda_batch_dev_py<'py>(
     }
     let high = high_f32.as_slice()?;
     let low = low_f32.as_slice()?;
-    let sweep = DtiBatchRange { r: r_range, s: s_range, u: u_range };
+    let sweep = DtiBatchRange {
+        r: r_range,
+        s: s_range,
+        u: u_range,
+    };
     let (inner, combos) = py.allow_threads(|| {
         let cuda = CudaDti::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.dti_batch_dev(high, low, &sweep)
@@ -1366,7 +1370,11 @@ pub fn dti_cuda_many_series_one_param_dev_py(
     if low_tm_f32.shape() != [rows, cols] {
         return Err(PyValueError::new_err("high/low shapes mismatch"));
     }
-    let params = DtiParams { r: Some(r), s: Some(s), u: Some(u) };
+    let params = DtiParams {
+        r: Some(r),
+        s: Some(s),
+        u: Some(u),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaDti::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.dti_many_series_one_param_time_major_dev(high_flat, low_flat, cols, rows, &params)

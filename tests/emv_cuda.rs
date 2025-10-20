@@ -11,7 +11,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::CudaEmv;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -56,9 +58,7 @@ fn emv_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let l32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let v32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
     let cuda = CudaEmv::new(0).expect("CudaEmv::new");
-    let dev = cuda
-        .emv_batch_dev(&h32, &l32, &v32)
-        .expect("emv_batch_dev");
+    let dev = cuda.emv_batch_dev(&h32, &l32, &v32).expect("emv_batch_dev");
 
     assert_eq!(dev.rows, 1);
     assert_eq!(dev.cols, len);
@@ -120,7 +120,9 @@ fn emv_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
         let input = EmvInput::from_slices(&h, &l, &c, &v);
         let out = emv_with_kernel(&input, Kernel::Scalar)?.values;
-        for r in 0..rows { cpu_tm[r * cols + s] = out[r]; }
+        for r in 0..rows {
+            cpu_tm[r * cols + s] = out[r];
+        }
     }
 
     // GPU
@@ -138,8 +140,11 @@ fn emv_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let tol = 1e-3;
     for idx in 0..gpu_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }
-

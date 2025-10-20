@@ -42,14 +42,18 @@ impl std::error::Error for CudaApoError {}
 pub enum BatchKernelPolicy {
     #[default]
     Auto,
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
-    OneD { block_x: u32 },
+    OneD {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -81,8 +85,9 @@ impl CudaApo {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaApoError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaApoError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -170,7 +175,11 @@ impl CudaApo {
             &mut d_out,
         )?;
         self.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: n, cols: prep.series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n,
+            cols: prep.series_len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -245,9 +254,15 @@ impl CudaApo {
                 .map_err(|e| CudaApoError::Cuda(e.to_string()))?
         };
 
-        self.launch_many_series_kernel(&d_prices, &d_first, sp, a_s, lp, a_l, num_series, series_len, &mut d_out)?;
+        self.launch_many_series_kernel(
+            &d_prices, &d_first, sp, a_s, lp, a_l, num_series, series_len, &mut d_out,
+        )?;
         self.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: series_len, cols: num_series })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: series_len,
+            cols: num_series,
+        })
     }
 
     // -------------------- Launch helpers --------------------
@@ -399,7 +414,9 @@ impl CudaApo {
             let s = p.short_period.unwrap_or(0);
             let l = p.long_period.unwrap_or(0);
             if s == 0 || l == 0 || s >= l {
-                return Err(CudaApoError::InvalidInput("invalid short/long periods".into()));
+                return Err(CudaApoError::InvalidInput(
+                    "invalid short/long periods".into(),
+                ));
             }
             short_periods.push(s as i32);
             long_periods.push(l as i32);
@@ -454,8 +471,8 @@ impl CudaApo {
                     break;
                 }
             }
-            let fv = fv
-                .ok_or_else(|| CudaApoError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv =
+                fv.ok_or_else(|| CudaApoError::InvalidInput(format!("series {} all NaN", s)))?;
             let remaining = series_len - fv as usize;
             if remaining < lp as usize {
                 return Err(CudaApoError::InvalidInput(format!(
@@ -501,7 +518,10 @@ fn expand_grid(r: &ApoBatchRange) -> Vec<ApoParams> {
     for &s in &shorts {
         for &l in &longs {
             if s > 0 && l > 0 && s < l {
-                out.push(ApoParams { short_period: Some(s), long_period: Some(l) });
+                out.push(ApoParams {
+                    short_period: Some(s),
+                    long_period: Some(l),
+                });
             }
         }
     }
@@ -520,11 +540,16 @@ pub mod benches {
         crate::indicators::apo::ApoParams,
         apo_batch_dev,
         apo_many_series_one_param_time_major_dev,
-        crate::indicators::apo::ApoBatchRange { short: (5, 5 + PARAM_SWEEP - 1, 1), long: (20, 20 + PARAM_SWEEP - 1, 1) },
-        crate::indicators::apo::ApoParams { short_period: Some(10), long_period: Some(20) },
+        crate::indicators::apo::ApoBatchRange {
+            short: (5, 5 + PARAM_SWEEP - 1, 1),
+            long: (20, 20 + PARAM_SWEEP - 1, 1)
+        },
+        crate::indicators::apo::ApoParams {
+            short_period: Some(10),
+            long_period: Some(20)
+        },
         "apo",
         "apo"
     );
     pub use apo_benches::bench_profiles;
 }
-

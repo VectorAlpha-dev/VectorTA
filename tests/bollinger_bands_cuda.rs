@@ -3,10 +3,10 @@
 use my_project::indicators::bollinger_bands::{
     bollinger_bands_batch_with_kernel, BollingerBandsBatchRange,
 };
-use my_project::utilities::enums::Kernel;
 use my_project::indicators::bollinger_bands::{
-    BollingerBandsParams, BollingerBandsInput, bollinger_bands_with_kernel,
+    bollinger_bands_with_kernel, BollingerBandsInput, BollingerBandsParams,
 };
+use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
@@ -16,14 +16,18 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::CudaBollingerBands;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
 #[test]
 fn cuda_feature_off_noop() {
     #[cfg(not(feature = "cuda"))]
-    { assert!(true); }
+    {
+        assert!(true);
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -36,7 +40,13 @@ fn bollinger_bands_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
 
     let len = 4096usize;
     let mut data = vec![f64::NAN; len];
-    for i in 5..len { let x = i as f64; data[i] = (x * 0.00037).sin() + 0.00021 * x; if i % 253 == 0 { data[i] = f64::NAN; } }
+    for i in 5..len {
+        let x = i as f64;
+        data[i] = (x * 0.00037).sin() + 0.00021 * x;
+        if i % 253 == 0 {
+            data[i] = f64::NAN;
+        }
+    }
 
     let sweep = BollingerBandsBatchRange {
         period: (10, 30, 10),
@@ -71,15 +81,24 @@ fn bollinger_bands_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
     let tol = 1e-3;
     for i in 0..(cpu.rows * cpu.cols) {
         if !approx_eq(cpu.upper[i], up[i] as f64, tol) {
-            eprintln!("DEBUG mismatch upper idx {}: cpu={} gpu={}", i, cpu.upper[i], up[i]);
+            eprintln!(
+                "DEBUG mismatch upper idx {}: cpu={} gpu={}",
+                i, cpu.upper[i], up[i]
+            );
             panic!("upper mismatch at {}", i);
         }
         if !approx_eq(cpu.middle[i], mid[i] as f64, tol) {
-            eprintln!("DEBUG mismatch middle idx {}: cpu={} gpu={}", i, cpu.middle[i], mid[i]);
+            eprintln!(
+                "DEBUG mismatch middle idx {}: cpu={} gpu={}",
+                i, cpu.middle[i], mid[i]
+            );
             panic!("middle mismatch at {}", i);
         }
         if !approx_eq(cpu.lower[i], lo[i] as f64, tol) {
-            eprintln!("DEBUG mismatch lower idx {}: cpu={} gpu={}", i, cpu.lower[i], lo[i]);
+            eprintln!(
+                "DEBUG mismatch lower idx {}: cpu={} gpu={}",
+                i, cpu.lower[i], lo[i]
+            );
             panic!("lower mismatch at {}", i);
         }
     }
@@ -88,15 +107,27 @@ fn bollinger_bands_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
 
 #[cfg(feature = "cuda")]
 #[test]
-fn bollinger_bands_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+fn bollinger_bands_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
+{
     if !cuda_available() {
-        eprintln!("[bollinger_bands_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        eprintln!(
+            "[bollinger_bands_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
+        );
         return Ok(());
     }
 
-    let cols = 8usize; let rows = 1024usize; let period = 20usize; let devup = 2.0f64; let devdn = 2.0f64;
+    let cols = 8usize;
+    let rows = 1024usize;
+    let period = 20usize;
+    let devup = 2.0f64;
+    let devdn = 2.0f64;
     let mut tm = vec![f64::NAN; cols * rows];
-    for s in 0..cols { for t in s..rows { let x = (t as f64) + 0.1 * (s as f64); tm[t*cols+s] = (x*0.003).sin() + 0.0002 * x; } }
+    for s in 0..cols {
+        for t in s..rows {
+            let x = (t as f64) + 0.1 * (s as f64);
+            tm[t * cols + s] = (x * 0.003).sin() + 0.0002 * x;
+        }
+    }
 
     // CPU baseline per series using scalar function
     let mut cpu_up_tm = vec![f64::NAN; cols * rows];
@@ -104,18 +135,35 @@ fn bollinger_bands_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
     let mut cpu_lo_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = tm[t * cols + s]; }
-        let params = BollingerBandsParams { period: Some(period), devup: Some(devup), devdn: Some(devdn), matype: Some("sma".into()), devtype: Some(0) };
+        for t in 0..rows {
+            series[t] = tm[t * cols + s];
+        }
+        let params = BollingerBandsParams {
+            period: Some(period),
+            devup: Some(devup),
+            devdn: Some(devdn),
+            matype: Some("sma".into()),
+            devtype: Some(0),
+        };
         let input = BollingerBandsInput::from_slice(&series, params);
         let out = bollinger_bands_with_kernel(&input, Kernel::Scalar).unwrap();
-        for t in 0..rows { cpu_up_tm[t*cols+s] = out.upper_band[t]; cpu_mid_tm[t*cols+s] = out.middle_band[t]; cpu_lo_tm[t*cols+s] = out.lower_band[t]; }
+        for t in 0..rows {
+            cpu_up_tm[t * cols + s] = out.upper_band[t];
+            cpu_mid_tm[t * cols + s] = out.middle_band[t];
+            cpu_lo_tm[t * cols + s] = out.lower_band[t];
+        }
     }
 
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaBollingerBands::new(0).expect("CudaBollingerBands::new");
     let (dev_up_tm, dev_mid_tm, dev_lo_tm) = cuda
         .bollinger_bands_many_series_one_param_time_major_dev(
-            &tm_f32, cols, rows, period, devup as f32, devdn as f32,
+            &tm_f32,
+            cols,
+            rows,
+            period,
+            devup as f32,
+            devdn as f32,
         )
         .expect("bollinger_bands_many_series_one_param_time_major_dev");
 
@@ -135,9 +183,21 @@ fn bollinger_bands_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
 
     let tol = 1e-4;
     for idx in 0..(cols * rows) {
-        assert!(approx_eq(cpu_up_tm[idx], up_tm[idx] as f64, tol), "upper mismatch at {}", idx);
-        assert!(approx_eq(cpu_mid_tm[idx], mid_tm[idx] as f64, tol), "middle mismatch at {}", idx);
-        assert!(approx_eq(cpu_lo_tm[idx], lo_tm[idx] as f64, tol), "lower mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_up_tm[idx], up_tm[idx] as f64, tol),
+            "upper mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu_mid_tm[idx], mid_tm[idx] as f64, tol),
+            "middle mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu_lo_tm[idx], lo_tm[idx] as f64, tol),
+            "lower mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }

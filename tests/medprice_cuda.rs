@@ -96,21 +96,32 @@ fn medprice_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
         let mut l = vec![f64::NAN; rows];
-        for t in 0..rows { let idx = t * cols + s; h[t] = high_tm[idx] as f64; l[t] = low_tm[idx] as f64; }
+        for t in 0..rows {
+            let idx = t * cols + s;
+            h[t] = high_tm[idx] as f64;
+            l[t] = low_tm[idx] as f64;
+        }
         let input = MedpriceInput::from_slices(&h, &l, MedpriceParams::default());
         let out = medprice_with_kernel(&input, Kernel::Scalar)?.values;
-        for t in 0..rows { cpu[t * cols + s] = out[t]; }
+        for t in 0..rows {
+            cpu[t * cols + s] = out[t];
+        }
     }
     let cuda = CudaMedprice::new(0).expect("CudaMedprice::new");
     let dev = cuda
         .medprice_many_series_one_param_time_major_dev(&high_tm, &low_tm, cols, rows)
         .expect("many_series_one_param");
-    assert_eq!(dev.rows, rows); assert_eq!(dev.cols, cols);
+    assert_eq!(dev.rows, rows);
+    assert_eq!(dev.cols, cols);
     let mut got = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut got)?;
     let tol = 1e-5;
     for i in 0..got.len() {
-        if cpu[i].is_nan() { assert!(got[i].is_nan()); } else { assert!((cpu[i] - got[i] as f64).abs() <= tol); }
+        if cpu[i].is_nan() {
+            assert!(got[i].is_nan());
+        } else {
+            assert!((cpu[i] - got[i] as f64).abs() <= tol);
+        }
     }
     Ok(())
 }

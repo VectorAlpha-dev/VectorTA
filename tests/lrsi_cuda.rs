@@ -6,19 +6,24 @@ use my_project::indicators::lrsi::{
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
+use cust::memory::CopyDestination;
+#[cfg(feature = "cuda")]
 use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::oscillators::CudaLrsi;
-#[cfg(feature = "cuda")]
-use cust::memory::CopyDestination;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
 #[test]
-fn cuda_feature_off_noop() { #[cfg(not(feature = "cuda"))] assert!(true); }
+fn cuda_feature_off_noop() {
+    #[cfg(not(feature = "cuda"))]
+    assert!(true);
+}
 
 #[cfg(feature = "cuda")]
 #[test]
@@ -37,7 +42,9 @@ fn lrsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         high[i] = mid + off;
         low[i] = mid - off;
     }
-    let sweep = LrsiBatchRange { alpha: (0.1, 0.9, 0.2) };
+    let sweep = LrsiBatchRange {
+        alpha: (0.1, 0.9, 0.2),
+    };
     let cpu = lrsi_batch_with_kernel(&high, &low, &sweep, Kernel::ScalarBatch)?;
 
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
@@ -55,7 +62,13 @@ fn lrsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -88,10 +101,22 @@ fn lrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     for s in 0..cols {
         let mut high = vec![f64::NAN; rows];
         let mut low = vec![f64::NAN; rows];
-        for t in 0..rows { let idx = t * cols + s; high[t] = high_tm[idx]; low[t] = low_tm[idx]; }
-        let inp = LrsiInput { data: LrsiData::Slices { high: &high, low: &low }, params: LrsiParams { alpha: Some(alpha) } };
+        for t in 0..rows {
+            let idx = t * cols + s;
+            high[t] = high_tm[idx];
+            low[t] = low_tm[idx];
+        }
+        let inp = LrsiInput {
+            data: LrsiData::Slices {
+                high: &high,
+                low: &low,
+            },
+            params: LrsiParams { alpha: Some(alpha) },
+        };
         let out = lrsi(&inp)?.values;
-        for t in 0..rows { cpu_tm[t * cols + s] = out[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out[t];
+        }
     }
 
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
@@ -107,8 +132,11 @@ fn lrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let tol = 1e-4;
     for i in 0..host.len() {
-        assert!(approx_eq(cpu_tm[i], host[i] as f64, tol), "mismatch at {}", i);
+        assert!(
+            approx_eq(cpu_tm[i], host[i] as f64, tol),
+            "mismatch at {}",
+            i
+        );
     }
     Ok(())
 }
-

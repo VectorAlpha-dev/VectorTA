@@ -63,7 +63,10 @@ pub struct CudaAroonOscPolicy {
 }
 impl Default for CudaAroonOscPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -79,8 +82,8 @@ pub struct CudaAroonOsc {
 impl CudaAroonOsc {
     pub fn new(device_id: usize) -> Result<Self, CudaAroonOscError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/aroonosc_kernel.ptx"));
@@ -109,8 +112,12 @@ impl CudaAroonOsc {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaAroonOscPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaAroonOscPolicy { &self.policy }
+    pub fn set_policy(&mut self, policy: CudaAroonOscPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaAroonOscPolicy {
+        &self.policy
+    }
 
     // ---------- Batch: one-series × many-params ----------
 
@@ -120,7 +127,8 @@ impl CudaAroonOsc {
         low_f32: &[f32],
         sweep: &AroonOscBatchRange,
     ) -> Result<DeviceArrayF32, CudaAroonOscError> {
-        let (combos, first_valid, series_len) = Self::prepare_batch_inputs(high_f32, low_f32, sweep)?;
+        let (combos, first_valid, series_len) =
+            Self::prepare_batch_inputs(high_f32, low_f32, sweep)?;
         let n_combos = combos.len();
         let lengths_i32: Vec<i32> = combos
             .iter()
@@ -163,7 +171,11 @@ impl CudaAroonOsc {
             &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -220,7 +232,9 @@ impl CudaAroonOsc {
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if self.last_batch_block != Some(block_x) {
                 eprintln!("[DEBUG] aroonosc batch block_x={}", block_x);
-                unsafe { (*(self as *const _ as *mut CudaAroonOsc)).last_batch_block = Some(block_x); }
+                unsafe {
+                    (*(self as *const _ as *mut CudaAroonOsc)).last_batch_block = Some(block_x);
+                }
             }
         }
         Ok(())
@@ -240,7 +254,9 @@ impl CudaAroonOsc {
 
         let combos = expand_lengths(sweep);
         if combos.is_empty() {
-            return Err(CudaAroonOscError::InvalidInput("no length combinations".into()));
+            return Err(CudaAroonOscError::InvalidInput(
+                "no length combinations".into(),
+            ));
         }
 
         let first_valid = (0..len)
@@ -253,7 +269,9 @@ impl CudaAroonOsc {
             .max()
             .unwrap_or(0);
         if max_len == 0 {
-            return Err(CudaAroonOscError::InvalidInput("length must be positive".into()));
+            return Err(CudaAroonOscError::InvalidInput(
+                "length must be positive".into(),
+            ));
         }
         let window = max_len + 1;
         let valid = len - first_valid;
@@ -329,9 +347,21 @@ impl CudaAroonOsc {
                 .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?
         };
 
-        self.launch_many_series_kernel(&d_high, &d_low, &d_fv, rows as i32, cols as i32, length as i32, &mut d_out)?;
+        self.launch_many_series_kernel(
+            &d_high,
+            &d_low,
+            &d_fv,
+            rows as i32,
+            cols as i32,
+            length as i32,
+            &mut d_out,
+        )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -384,7 +414,9 @@ impl CudaAroonOsc {
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if self.last_many_block != Some(block_x) {
                 eprintln!("[DEBUG] aroonosc many-series block_x={}", block_x);
-                unsafe { (*(self as *const _ as *mut CudaAroonOsc)).last_many_block = Some(block_x); }
+                unsafe {
+                    (*(self as *const _ as *mut CudaAroonOsc)).last_many_block = Some(block_x);
+                }
             }
         }
         Ok(())
@@ -398,7 +430,8 @@ impl CudaAroonOsc {
         sweep: &AroonOscBatchRange,
         out: &mut [f32],
     ) -> Result<(usize, usize, Vec<AroonOscParams>), CudaAroonOscError> {
-        let (combos, first_valid, series_len) = Self::prepare_batch_inputs(high_f32, low_f32, sweep)?;
+        let (combos, first_valid, series_len) =
+            Self::prepare_batch_inputs(high_f32, low_f32, sweep)?;
         if out.len() != combos.len() * series_len {
             return Err(CudaAroonOscError::InvalidInput(format!(
                 "out wrong length: got {}, expected {}",
@@ -452,7 +485,9 @@ impl CudaAroonOsc {
 fn expand_lengths(range: &AroonOscBatchRange) -> Vec<AroonOscParams> {
     let (start, end, step) = range.length;
     if step == 0 || start == end {
-        return vec![AroonOscParams { length: Some(start) }];
+        return vec![AroonOscParams {
+            length: Some(start),
+        }];
     }
     let mut v = Vec::new();
     let mut cur = start;
@@ -483,7 +518,9 @@ pub mod benches {
         let mut low = close.to_vec();
         for i in 0..close.len() {
             let v = close[i];
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let x = i as f32 * 0.0021;
             let off = (0.0033 * x.sin()).abs() + 0.1;
             high[i] = v + off;
@@ -510,8 +547,15 @@ pub mod benches {
         let cuda = CudaAroonOsc::new(0).expect("cuda aroonosc");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hl_from_close(&close);
-        let sweep = AroonOscBatchRange { length: (10, 10 + PARAM_SWEEP - 1, 1) };
-        Box::new(AroonOscBatchState { cuda, high, low, sweep })
+        let sweep = AroonOscBatchRange {
+            length: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        Box::new(AroonOscBatchState {
+            cuda,
+            high,
+            low,
+            sweep,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

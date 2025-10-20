@@ -2829,9 +2829,14 @@ pub fn safezonestop_cuda_batch_dev_py<'py>(
     }
     let high = high_f32.as_slice()?;
     let low = low_f32.as_slice()?;
-    let sweep = SafeZoneStopBatchRange { period: period_range, mult: mult_range, max_lookback: max_lookback_range };
+    let sweep = SafeZoneStopBatchRange {
+        period: period_range,
+        mult: mult_range,
+        max_lookback: max_lookback_range,
+    };
     let (inner, combos) = py.allow_threads(|| {
-        let cuda = CudaSafeZoneStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaSafeZoneStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.safezonestop_batch_dev(high, low, direction, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -2839,7 +2844,10 @@ pub fn safezonestop_cuda_batch_dev_py<'py>(
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|p| p.period.unwrap() as u64).collect();
     let mults: Vec<f64> = combos.iter().map(|p| p.mult.unwrap()).collect();
-    let looks: Vec<u64> = combos.iter().map(|p| p.max_lookback.unwrap() as u64).collect();
+    let looks: Vec<u64> = combos
+        .iter()
+        .map(|p| p.max_lookback.unwrap() as u64)
+        .collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
     dict.set_item("mults", mults.into_pyarray(py))?;
     dict.set_item("max_lookbacks", looks.into_pyarray(py))?;
@@ -2867,9 +2875,19 @@ pub fn safezonestop_cuda_many_series_one_param_dev_py<'py>(
     let high = high_tm_f32.as_slice()?;
     let low = low_tm_f32.as_slice()?;
     let inner = py.allow_threads(|| {
-        let cuda = CudaSafeZoneStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.safezonestop_many_series_one_param_time_major_dev(high, low, cols, rows, period, mult, max_lookback, direction)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaSafeZoneStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.safezonestop_many_series_one_param_time_major_dev(
+            high,
+            low,
+            cols,
+            rows,
+            period,
+            mult,
+            max_lookback,
+            direction,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

@@ -353,10 +353,7 @@ impl CudaHighpass {
                 let mut periods_ptr = d_periods.as_device_ptr().add(launched).as_raw();
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = rows as i32;
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .add(launched * series_len)
-                    .as_raw();
+                let mut out_ptr = d_out.as_device_ptr().add(launched * series_len).as_raw();
                 let args: &mut [*mut std::ffi::c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut std::ffi::c_void,
                     &mut periods_ptr as *mut _ as *mut std::ffi::c_void,

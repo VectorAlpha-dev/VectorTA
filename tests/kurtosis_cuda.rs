@@ -1,7 +1,8 @@
 // CUDA integration tests for the Kurtosis indicator.
 
 use my_project::indicators::kurtosis::{
-    kurtosis_batch_with_kernel, kurtosis_with_kernel, KurtosisBatchRange, KurtosisInput, KurtosisParams,
+    kurtosis_batch_with_kernel, kurtosis_with_kernel, KurtosisBatchRange, KurtosisInput,
+    KurtosisParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -13,7 +14,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::CudaKurtosis;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -39,7 +42,9 @@ fn kurtosis_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         let x = i as f64;
         let base = (x * 0.00041).sin() + 0.00027 * x;
         data[i] = base + 0.0003 * ((i % 13) as f64 - 6.0);
-        if i % 257 == 0 { data[i] = f64::NAN; }
+        if i % 257 == 0 {
+            data[i] = f64::NAN;
+        }
     }
 
     let sweep = KurtosisBatchRange { period: (8, 32, 8) };
@@ -66,7 +71,9 @@ fn kurtosis_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         assert!(
             approx_eq(cpu_val, gpu_val as f64, tol),
             "mismatch at {}: cpu={} gpu={}",
-            idx, cpu_val, gpu_val
+            idx,
+            cpu_val,
+            gpu_val
         );
     }
     Ok(())
@@ -94,10 +101,19 @@ fn kurtosis_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = data_tm[t * cols + s]; }
-        let input = KurtosisInput::from_slice(&series, KurtosisParams { period: Some(period) });
+        for t in 0..rows {
+            series[t] = data_tm[t * cols + s];
+        }
+        let input = KurtosisInput::from_slice(
+            &series,
+            KurtosisParams {
+                period: Some(period),
+            },
+        );
         let out = kurtosis_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
@@ -114,7 +130,11 @@ fn kurtosis_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
 
     let tol = 1e-3;
     for i in 0..gpu_tm.len() {
-        assert!(approx_eq(cpu_tm[i], gpu_tm[i] as f64, tol), "mismatch at {}", i);
+        assert!(
+            approx_eq(cpu_tm[i], gpu_tm[i] as f64, tol),
+            "mismatch at {}",
+            i
+        );
     }
     Ok(())
 }

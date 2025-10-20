@@ -2088,13 +2088,11 @@ pub fn pivot_cuda_batch_dev_py<'py>(
     let c = close_f32.as_slice()?;
     let o = open_f32.as_slice()?;
     let sweep = PivotBatchRange { mode: mode_range };
-    let (inner, combos) = py
-        .allow_threads(|| {
-            let cuda = CudaPivot::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda
-                .pivot_batch_dev(h, l, c, o, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let (inner, combos) = py.allow_threads(|| {
+        let cuda = CudaPivot::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.pivot_batch_dev(h, l, c, o, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     let dict = PyDict::new(py);
     dict.set_item(
         "modes",
@@ -2129,13 +2127,11 @@ pub fn pivot_cuda_many_series_one_param_dev_py(
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
     let o = open_tm_f32.as_slice()?;
-    let inner = py
-        .allow_threads(|| {
-            let cuda = CudaPivot::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda
-                .pivot_many_series_one_param_time_major_dev(h, l, c, o, cols, rows, mode)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaPivot::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.pivot_many_series_one_param_time_major_dev(h, l, c, o, cols, rows, mode)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     Ok(DeviceArrayF32Py { inner })
 }
 

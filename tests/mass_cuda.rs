@@ -1,7 +1,7 @@
 // Integration tests for CUDA Mass Index kernels
 
 use my_project::indicators::mass::{
-    mass_batch_with_kernel, mass_with_kernel, MassBatchRange, MassInput, MassParams, MassData,
+    mass_batch_with_kernel, mass_with_kernel, MassBatchRange, MassData, MassInput, MassParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -11,7 +11,9 @@ use cust::memory::CopyDestination;
 use my_project::cuda::{cuda_available, CudaMass};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -49,7 +51,9 @@ fn mass_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
 
     let mut cuda = CudaMass::new(0).expect("CudaMass::new");
-    let (dev, combos) = cuda.mass_batch_dev(&high_f32, &low_f32, &sweep).expect("cuda mass batch");
+    let (dev, combos) = cuda
+        .mass_batch_dev(&high_f32, &low_f32, &sweep)
+        .expect("cuda mass batch");
     assert_eq!(cpu.rows, combos.len());
     assert_eq!(dev.rows, combos.len());
     assert_eq!(dev.cols, len);
@@ -99,18 +103,36 @@ fn mass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
         let mut l = vec![f64::NAN; rows];
-        for t in 0..rows { h[t] = high_tm[t * cols + s]; l[t] = low_tm[t * cols + s]; }
-        let params = MassParams { period: Some(period) };
-        let input = MassInput { data: MassData::Slices { high: &h, low: &l }, params };
+        for t in 0..rows {
+            h[t] = high_tm[t * cols + s];
+            l[t] = low_tm[t * cols + s];
+        }
+        let params = MassParams {
+            period: Some(period),
+        };
+        let input = MassInput {
+            data: MassData::Slices { high: &h, low: &l },
+            params,
+        };
         let out = mass_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let mut cuda = CudaMass::new(0).expect("CudaMass::new");
     let dev = cuda
-        .mass_many_series_one_param_time_major_dev(&high_tm_f32, &low_tm_f32, cols, rows, &MassParams { period: Some(period) })
+        .mass_many_series_one_param_time_major_dev(
+            &high_tm_f32,
+            &low_tm_f32,
+            cols,
+            rows,
+            &MassParams {
+                period: Some(period),
+            },
+        )
         .expect("mass many-series");
     assert_eq!(dev.rows, rows);
     assert_eq!(dev.cols, cols);
@@ -120,8 +142,11 @@ fn mass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let tol = 1e-3;
     for idx in 0..host.len() {
-        assert!(approx_eq(cpu_tm[idx], host[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], host[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }
-

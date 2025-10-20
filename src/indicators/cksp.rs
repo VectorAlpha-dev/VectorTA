@@ -34,22 +34,22 @@ use std::error::Error;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaCksp};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::{cuda_available, CudaCksp};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -3449,19 +3449,50 @@ pub fn cksp_cuda_batch_dev_py<'py>(
     let hs = high.as_slice()?;
     let ls = low.as_slice()?;
     let cs = close.as_slice()?;
-    let sweep = CkspBatchRange { p: p_range, x: (x_range.0 as f64, x_range.1 as f64, x_range.2 as f64), q: q_range };
+    let sweep = CkspBatchRange {
+        p: p_range,
+        x: (x_range.0 as f64, x_range.1 as f64, x_range.2 as f64),
+        q: q_range,
+    };
     let (pair, combos) = py.allow_threads(|| {
         let cuda = CudaCksp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.cksp_batch_dev(hs, ls, cs, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("long_values", Py::new(py, DeviceArrayF32Py { inner: pair.long })?)?;
-    dict.set_item("short_values", Py::new(py, DeviceArrayF32Py { inner: pair.short })?)?;
+    dict.set_item(
+        "long_values",
+        Py::new(py, DeviceArrayF32Py { inner: pair.long })?,
+    )?;
+    dict.set_item(
+        "short_values",
+        Py::new(py, DeviceArrayF32Py { inner: pair.short })?,
+    )?;
     use numpy::IntoPyArray;
-    dict.set_item("p", combos.iter().map(|c| c.p.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("x", combos.iter().map(|c| c.x.unwrap() as f64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("q", combos.iter().map(|c| c.q.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item(
+        "p",
+        combos
+            .iter()
+            .map(|c| c.p.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "x",
+        combos
+            .iter()
+            .map(|c| c.x.unwrap() as f64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "q",
+        combos
+            .iter()
+            .map(|c| c.q.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     dict.set_item("rows", combos.len())?;
     dict.set_item("cols", cs.len())?;
     Ok(dict)
@@ -3487,22 +3518,34 @@ pub fn cksp_cuda_many_series_one_param_dev_py<'py>(
     let sl = low_tm.shape();
     let sc = close_tm.shape();
     if sh.len() != 2 || sl.len() != 2 || sc.len() != 2 || sh != sl || sh != sc {
-        return Err(PyValueError::new_err("expected 2D arrays with identical shape"));
+        return Err(PyValueError::new_err(
+            "expected 2D arrays with identical shape",
+        ));
     }
     let rows = sh[0];
     let cols = sh[1];
     let hflat = high_tm.as_slice()?;
     let lflat = low_tm.as_slice()?;
     let cflat = close_tm.as_slice()?;
-    let params = CkspParams { p: Some(p), x: Some(x), q: Some(q) };
+    let params = CkspParams {
+        p: Some(p),
+        x: Some(x),
+        q: Some(q),
+    };
     let pair = py.allow_threads(|| {
         let cuda = CudaCksp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.cksp_many_series_one_param_time_major_dev(hflat, lflat, cflat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("long_values", Py::new(py, DeviceArrayF32Py { inner: pair.long })?)?;
-    dict.set_item("short_values", Py::new(py, DeviceArrayF32Py { inner: pair.short })?)?;
+    dict.set_item(
+        "long_values",
+        Py::new(py, DeviceArrayF32Py { inner: pair.long })?,
+    )?;
+    dict.set_item(
+        "short_values",
+        Py::new(py, DeviceArrayF32Py { inner: pair.short })?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("p", p)?;

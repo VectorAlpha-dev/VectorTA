@@ -1,7 +1,7 @@
 use my_project::utilities::enums::Kernel;
 
 use my_project::indicators::mfi::{
-    mfi_batch_with_kernel, mfi_with_kernel, MfiBatchRange, MfiInput, MfiParams, MfiData,
+    mfi_batch_with_kernel, mfi_with_kernel, MfiBatchRange, MfiData, MfiInput, MfiParams,
 };
 
 #[cfg(feature = "cuda")]
@@ -12,12 +12,19 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::CudaMfi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
 #[test]
-fn cuda_feature_off_noop() { #[cfg(not(feature = "cuda"))] { assert!(true); } }
+fn cuda_feature_off_noop() {
+    #[cfg(not(feature = "cuda"))]
+    {
+        assert!(true);
+    }
+}
 
 #[cfg(feature = "cuda")]
 #[test]
@@ -43,10 +50,11 @@ fn mfi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let vol_cpu: Vec<f64> = vol32.iter().map(|&v| v as f64).collect();
     let cpu = mfi_batch_with_kernel(&tp_cpu, &vol_cpu, &sweep, Kernel::ScalarBatch)?;
 
-    
     // No debug: end local checks
     let cuda = CudaMfi::new(0).expect("CudaMfi::new");
-    let (dev, combos) = cuda.mfi_batch_dev(&tp32, &vol32, &sweep).expect("mfi_batch_dev");
+    let (dev, combos) = cuda
+        .mfi_batch_dev(&tp32, &vol32, &sweep)
+        .expect("mfi_batch_dev");
 
     assert_eq!(cpu.rows, dev.rows);
     assert_eq!(cpu.cols, dev.cols);
@@ -61,7 +69,10 @@ fn mfi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             let row = idx / cpu.cols;
             let col = idx % cpu.cols;
             let p = cpu.combos[row].period.unwrap();
-            eprintln!("row {} col {} (idx {}) period {} cpu={} gpu={}", row, col, idx, p, cpu.values[idx], host[idx]);
+            eprintln!(
+                "row {} col {} (idx {}) period {} cpu={} gpu={}",
+                row, col, idx, p, cpu.values[idx], host[idx]
+            );
             assert!(false, "mismatch at {}", idx);
         }
     }
@@ -97,10 +108,20 @@ fn mfi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             tp[t] = (tp_tm[t * cols + s] as f32) as f64;
             vol[t] = (vol_tm[t * cols + s] as f32) as f64;
         }
-        let params = MfiParams { period: Some(period) };
-        let input = MfiInput { data: MfiData::Slices { typical_price: &tp, volume: &vol }, params };
+        let params = MfiParams {
+            period: Some(period),
+        };
+        let input = MfiInput {
+            data: MfiData::Slices {
+                typical_price: &tp,
+                volume: &vol,
+            },
+            params,
+        };
         let out = mfi_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu[t * cols + s] = out.values[t];
+        }
     }
 
     let tp32: Vec<f32> = tp_tm.iter().map(|&v| v as f32).collect();

@@ -1179,8 +1179,8 @@ pub fn linearreg_slope_cuda_batch_dev_py<'py>(
     };
 
     let (inner, combos) = py.allow_threads(|| {
-        let cuda = CudaLinearregSlope::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaLinearregSlope::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.linearreg_slope_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -1211,11 +1211,13 @@ pub fn linearreg_slope_cuda_many_series_one_param_dev_py(
     let flat_in = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = LinearRegSlopeParams { period: Some(period) };
+    let params = LinearRegSlopeParams {
+        period: Some(period),
+    };
 
     let inner = py.allow_threads(|| {
-        let cuda = CudaLinearregSlope::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaLinearregSlope::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.linearreg_slope_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

@@ -2098,15 +2098,15 @@ pub unsafe fn mab_scalar_classic_sma(
 
 // ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaMab};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::{pyfunction, PyResult, Python};
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
 // PyValueError already imported above under `#[cfg(feature = "python")]`.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::{pyfunction, PyResult, Python};
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "mab_cuda_batch_dev")]
@@ -2122,15 +2122,25 @@ pub fn mab_cuda_batch_dev_py(
     slow_ma_type: &str,
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice = data_f32.as_slice()?;
     let sweep = MabBatchRange {
         fast_period: fast_period_range,
         slow_period: slow_period_range,
         devup: devup_range,
         devdn: devdn_range,
-        fast_ma_type: (fast_ma_type.to_string(), fast_ma_type.to_string(), String::new()),
-        slow_ma_type: (slow_ma_type.to_string(), slow_ma_type.to_string(), String::new()),
+        fast_ma_type: (
+            fast_ma_type.to_string(),
+            fast_ma_type.to_string(),
+            String::new(),
+        ),
+        slow_ma_type: (
+            slow_ma_type.to_string(),
+            slow_ma_type.to_string(),
+            String::new(),
+        ),
     };
     let (up, mid, lo) = py.allow_threads(|| {
         let cuda = CudaMab::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2139,7 +2149,11 @@ pub fn mab_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, pyo3::PyErr>((trip.upper, trip.middle, trip.lower))
     })?;
-    Ok((DeviceArrayF32Py{ inner: up }, DeviceArrayF32Py{ inner: mid }, DeviceArrayF32Py{ inner: lo }))
+    Ok((
+        DeviceArrayF32Py { inner: up },
+        DeviceArrayF32Py { inner: mid },
+        DeviceArrayF32Py { inner: lo },
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2156,11 +2170,13 @@ pub fn mab_cuda_many_series_one_param_dev_py(
     slow_ma_type: &str,
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let flat: &[f32] = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = MabParams{
+    let params = MabParams {
         fast_period: Some(fast_period),
         slow_period: Some(slow_period),
         devup: Some(devup),
@@ -2170,11 +2186,16 @@ pub fn mab_cuda_many_series_one_param_dev_py(
     };
     let (up, mid, lo) = py.allow_threads(|| {
         let cuda = CudaMab::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let trip = cuda.mab_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+        let trip = cuda
+            .mab_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, pyo3::PyErr>((trip.upper, trip.middle, trip.lower))
     })?;
-    Ok((DeviceArrayF32Py{ inner: up }, DeviceArrayF32Py{ inner: mid }, DeviceArrayF32Py{ inner: lo }))
+    Ok((
+        DeviceArrayF32Py { inner: up },
+        DeviceArrayF32Py { inner: mid },
+        DeviceArrayF32Py { inner: lo },
+    ))
 }
 
 #[cfg(test)]

@@ -1,6 +1,8 @@
 // Integration tests for CUDA CCI kernels
 
-use my_project::indicators::cci::{CciBatchBuilder, CciBatchRange, CciBuilder, CciInput, CciParams};
+use my_project::indicators::cci::{
+    CciBatchBuilder, CciBatchRange, CciBuilder, CciInput, CciParams,
+};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -11,14 +13,18 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::oscillators::CudaCci;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
 #[test]
 fn cuda_feature_off_noop() {
     #[cfg(not(feature = "cuda"))]
-    { assert!(true); }
+    {
+        assert!(true);
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -57,7 +63,11 @@ fn cci_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let tol = 6e-4; // f32 vs f64 baseline
     for idx in 0..(cpu.rows * cpu.cols) {
-        assert!(approx_eq(cpu.values[idx], host[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu.values[idx], host[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }
@@ -66,9 +76,7 @@ fn cci_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn cci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[cci_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[cci_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -87,10 +95,19 @@ fn cci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut col = vec![f64::NAN; rows];
-        for r in 0..rows { col[r] = tm[r * cols + s]; }
-        let input = CciInput::from_slice(&col, CciParams { period: Some(period) });
+        for r in 0..rows {
+            col[r] = tm[r * cols + s];
+        }
+        let input = CciInput::from_slice(
+            &col,
+            CciParams {
+                period: Some(period),
+            },
+        );
         let out = my_project::indicators::cci::cci_with_kernel(&input, Kernel::Scalar)?.values;
-        for r in 0..rows { cpu_tm[r * cols + s] = out[r]; }
+        for r in 0..rows {
+            cpu_tm[r * cols + s] = out[r];
+        }
     }
 
     // GPU
@@ -106,9 +123,12 @@ fn cci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let tol = 7e-4;
     for idx in 0..host.len() {
-        assert!(approx_eq(cpu_tm[idx], host[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], host[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
 
     Ok(())
 }
-

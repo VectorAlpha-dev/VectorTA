@@ -36,10 +36,16 @@ impl fmt::Display for CudaMedpriceError {
 impl std::error::Error for CudaMedpriceError {}
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelPolicy { Auto, Plain { block_x: u32 } }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy { Auto, OneD { block_x: u32 } }
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
 
 pub struct CudaMedprice {
     module: Module,
@@ -120,7 +126,9 @@ impl CudaMedprice {
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMedpriceError> {
         if len == 0 {
-            return Err(CudaMedpriceError::InvalidInput("len must be positive".into()));
+            return Err(CudaMedpriceError::InvalidInput(
+                "len must be positive".into(),
+            ));
         }
 
         let func = self
@@ -167,8 +175,11 @@ impl CudaMedprice {
         low: &[f32],
     ) -> Result<DeviceArrayF32, CudaMedpriceError> {
         let len = high.len().min(low.len());
-        if len == 0 { return Err(CudaMedpriceError::InvalidInput("empty input".into())); }
-        let first = (0..len).find(|&i| !high[i].is_nan() && !low[i].is_nan())
+        if len == 0 {
+            return Err(CudaMedpriceError::InvalidInput("empty input".into()));
+        }
+        let first = (0..len)
+            .find(|&i| !high[i].is_nan() && !low[i].is_nan())
             .ok_or_else(|| CudaMedpriceError::InvalidInput("all values are NaN".into()))?;
 
         // VRAM check (2 inputs + 1 output + 1 i32 first_valid + 64MB headroom)
@@ -177,24 +188,37 @@ impl CudaMedprice {
                 + len * std::mem::size_of::<f32>()
                 + std::mem::size_of::<i32>()
                 + 64 * 1024 * 1024;
-            if need > free { return Err(CudaMedpriceError::InvalidInput("insufficient device memory".into())); }
+            if need > free {
+                return Err(CudaMedpriceError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
-        let d_high = DeviceBuffer::from_slice(&high[..len]).map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(&low[..len]).map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(&high[..len])
+            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let d_low = DeviceBuffer::from_slice(&low[..len])
+            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
             .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
 
-        let func = self.module.get_function("medprice_batch_f32").map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let func = self
+            .module
+            .get_function("medprice_batch_f32")
+            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
         // rows=1; grid.y <= 65_535 satisfied
-        let block_x = match self.batch_policy { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain{block_x} => block_x.max(32) };
+        let block_x = match self.batch_policy {
+            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        };
         let grid_x = ((len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1u32, 1u32).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         // first_valids (len 1)
         let first_valids = [first as i32];
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
 
         unsafe {
             let mut h = d_high.as_device_ptr().as_raw();
@@ -211,11 +235,16 @@ impl CudaMedprice {
                 &mut fv as *mut _ as *mut c_void,
                 &mut out_p as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, &mut args)
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
         }
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: 1, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: 1,
+            cols: len,
+        })
     }
 
     // -------- Many-series × one-param (time-major) --------
@@ -226,9 +255,17 @@ impl CudaMedprice {
         cols: usize,
         rows: usize,
     ) -> Result<DeviceArrayF32, CudaMedpriceError> {
-        if cols == 0 || rows == 0 { return Err(CudaMedpriceError::InvalidInput("cols/rows must be > 0".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaMedpriceError::InvalidInput(
+                "cols/rows must be > 0".into(),
+            ));
+        }
         let n = cols * rows;
-        if high_tm.len() < n || low_tm.len() < n { return Err(CudaMedpriceError::InvalidInput("input size mismatch".into())); }
+        if high_tm.len() < n || low_tm.len() < n {
+            return Err(CudaMedpriceError::InvalidInput(
+                "input size mismatch".into(),
+            ));
+        }
 
         // Per-series first_valid
         let mut first_valids = vec![rows as i32; cols];
@@ -237,25 +274,45 @@ impl CudaMedprice {
                 let idx = t * cols + s;
                 let h = high_tm[idx];
                 let l = low_tm[idx];
-                if !h.is_nan() && !l.is_nan() { first_valids[s] = t as i32; break; }
+                if !h.is_nan() && !l.is_nan() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
             }
-            if first_valids[s] as usize == rows { first_valids[s] = rows as i32; }
+            if first_valids[s] as usize == rows {
+                first_valids[s] = rows as i32;
+            }
         }
 
         // VRAM check: 2*n inputs + n out + first_valids (cols * i32) + 64MB headroom
         if let Ok((free, _)) = mem_get_info() {
-            let need: usize = 3 * n * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>()
+            let need: usize = 3 * n * std::mem::size_of::<f32>()
+                + cols * std::mem::size_of::<i32>()
                 + 64 * 1024 * 1024;
-            if need > free { return Err(CudaMedpriceError::InvalidInput("insufficient device memory".into())); }
+            if need > free {
+                return Err(CudaMedpriceError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
-        let d_high = DeviceBuffer::from_slice(&high_tm[..n]).map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(&low_tm[..n]).map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(&high_tm[..n])
+            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let d_low = DeviceBuffer::from_slice(&low_tm[..n])
+            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }
+            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
 
-        let func = self.module.get_function("medprice_many_series_one_param_f32").map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let block_x = match self.many_policy { ManySeriesKernelPolicy::Auto => 256, ManySeriesKernelPolicy::OneD{block_x} => block_x.max(32) };
+        let func = self
+            .module
+            .get_function("medprice_many_series_one_param_f32")
+            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
+        let block_x = match self.many_policy {
+            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+        };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1u32, 1u32).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -275,11 +332,16 @@ impl CudaMedprice {
                 &mut fv as *mut _ as *mut c_void,
                 &mut out_p as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, &mut args)
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
         }
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
 

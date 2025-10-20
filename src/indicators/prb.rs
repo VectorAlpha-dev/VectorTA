@@ -2501,7 +2501,6 @@ use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use pyo3::{pyfunction, PyResult, Python};
 #[cfg(all(feature = "python", feature = "cuda"))]
 // PyValueError already imported above under `#[cfg(feature = "python")]`.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "prb_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, smooth_data, smooth_period_range=(10,10,0), regression_period_range=(100,100,0), polynomial_order_range=(2,2,0), regression_offset_range=(0,0,0), device_id=0))]
@@ -2515,7 +2514,9 @@ pub fn prb_cuda_batch_dev_py(
     regression_offset_range: (i32, i32, i32),
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice = data_f32.as_slice()?;
     let sweep = PrbBatchRange {
         smooth_period: smooth_period_range,
@@ -2528,7 +2529,11 @@ pub fn prb_cuda_batch_dev_py(
         cuda.prb_batch_dev(slice, &sweep, smooth_data)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: main_d }, DeviceArrayF32Py { inner: up_d }, DeviceArrayF32Py { inner: lo_d }))
+    Ok((
+        DeviceArrayF32Py { inner: main_d },
+        DeviceArrayF32Py { inner: up_d },
+        DeviceArrayF32Py { inner: lo_d },
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2547,7 +2552,9 @@ pub fn prb_cuda_many_series_one_param_dev_py(
     ndev: f64,
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let tm = prices_tm_f32.as_slice()?;
     let params = PrbParams {
         smooth_data: Some(smooth_data),
@@ -2563,7 +2570,11 @@ pub fn prb_cuda_many_series_one_param_dev_py(
         cuda.prb_many_series_one_param_time_major_dev(tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: m_d }, DeviceArrayF32Py { inner: u_d }, DeviceArrayF32Py { inner: l_d }))
+    Ok((
+        DeviceArrayF32Py { inner: m_d },
+        DeviceArrayF32Py { inner: u_d },
+        DeviceArrayF32Py { inner: l_d },
+    ))
 }
 
 // ==================== TESTS ====================

@@ -21,10 +21,10 @@
 //! - Memory: uses `alloc_with_nan_prefix` and avoids O(N) temporaries beyond required reference series.
 //! - Batch: parallel per-row sweep. Added row-optimized fast path for SMA + stddev using shared prefix sums
 //!   to compute mean/stddev in O(1) per index; other matypes/devtypes fall back to scalar per row.
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -37,7 +37,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaVlma};
 use crate::indicators::deviation::{deviation, DevInput, DevParams};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -55,10 +59,6 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::{cuda_available, CudaVlma};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 impl<'a> AsRef<[f64]> for VlmaInput<'a> {
     #[inline(always)]
@@ -1867,7 +1867,8 @@ pub fn vlma_cuda_batch_dev_py(
     };
 
     let inner = py.allow_threads(|| {
-        let mut cuda = CudaVlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut cuda =
+            CudaVlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.vlma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -1899,7 +1900,8 @@ pub fn vlma_cuda_many_series_one_param_dev_py(
         devtype: Some(devtype),
     };
     let inner = py.allow_threads(|| {
-        let mut cuda = CudaVlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut cuda =
+            CudaVlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.vlma_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

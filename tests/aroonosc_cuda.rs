@@ -1,6 +1,9 @@
 // Integration tests for CUDA AROONOSC kernels
 
-use my_project::indicators::aroonosc::{AroonOscBatchBuilder, AroonOscBatchRange, AroonOscInput, AroonOscParams, aroon_osc_with_kernel, AroonOscData};
+use my_project::indicators::aroonosc::{
+    aroon_osc_with_kernel, AroonOscBatchBuilder, AroonOscBatchRange, AroonOscData, AroonOscInput,
+    AroonOscParams,
+};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -11,7 +14,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::oscillators::CudaAroonOsc;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -125,16 +130,25 @@ fn aroonosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
             low[t] = low_tm[idx] as f64;
         }
         let inp = AroonOscInput {
-            data: AroonOscData::SlicesHL { high: &high, low: &low },
-            params: AroonOscParams { length: Some(length) },
+            data: AroonOscData::SlicesHL {
+                high: &high,
+                low: &low,
+            },
+            params: AroonOscParams {
+                length: Some(length),
+            },
         };
         let cpu = aroon_osc_with_kernel(&inp, Kernel::Scalar)?;
         for t in 0..cols {
             let idx = t * rows + s;
-            assert!(approx_eq(cpu.values[t], gpu_host[idx] as f64, tol), "series {} [{}]", s, t);
+            assert!(
+                approx_eq(cpu.values[t], gpu_host[idx] as f64, tol),
+                "series {} [{}]",
+                s,
+                t
+            );
         }
     }
 
     Ok(())
 }
-

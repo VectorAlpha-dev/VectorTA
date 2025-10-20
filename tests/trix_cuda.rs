@@ -1,7 +1,7 @@
 // Integration tests for CUDA TRIX kernels
 
 use my_project::indicators::trix::{
-    trix_batch_with_kernel, TrixBatchRange, TrixInput, TrixParams, TrixData,
+    trix_batch_with_kernel, TrixBatchRange, TrixData, TrixInput, TrixParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -63,7 +63,13 @@ fn trix_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -72,9 +78,7 @@ fn trix_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn trix_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[trix_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[trix_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -97,7 +101,12 @@ fn trix_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         for t in 0..rows {
             p[t] = (price_tm[t * cols + s] as f32) as f64;
         }
-        let input = TrixInput { data: TrixData::Slice(&p), params: TrixParams { period: Some(period) } };
+        let input = TrixInput {
+            data: TrixData::Slice(&p),
+            params: TrixParams {
+                period: Some(period),
+            },
+        };
         let out = my_project::indicators::trix::trix(&input)?;
         for t in 0..rows {
             cpu_tm[t * cols + s] = out.values[t];
@@ -118,9 +127,12 @@ fn trix_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let tol = 5e-3;
     for idx in 0..g_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
 
     Ok(())
 }
-

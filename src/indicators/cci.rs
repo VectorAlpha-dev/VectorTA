@@ -17,6 +17,10 @@
 //! - **Memory Optimization**: GOOD - properly uses alloc_with_nan_prefix helper for zero-copy allocation
 //! - Note: CCI’s MAD requires a full window scan; SIMD accelerates that scan but cannot make it O(1).
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaCci;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -25,10 +29,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::CudaCci;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -2114,7 +2114,9 @@ pub fn cci_cuda_batch_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data.as_slice()?;
-    let sweep = CciBatchRange { period: period_range };
+    let sweep = CciBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.cci_batch_dev(slice, &sweep)

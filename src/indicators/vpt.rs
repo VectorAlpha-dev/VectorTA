@@ -1312,7 +1312,6 @@ pub fn vpt_cuda_batch_dev_py(
     price: PyReadonlyArray1<'_, f32>,
     volume: PyReadonlyArray1<'_, f32>,
     device_id: usize,
-    
 ) -> PyResult<DeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));

@@ -147,7 +147,9 @@ impl CudaPivot {
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] pivot batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaPivot)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaPivot)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -165,7 +167,9 @@ impl CudaPivot {
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] pivot many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaPivot)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaPivot)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -233,10 +237,14 @@ impl CudaPivot {
             ));
         }
 
-        let d_high = DeviceBuffer::from_slice(high).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let d_open = DeviceBuffer::from_slice(open).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_high =
+            DeviceBuffer::from_slice(high).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_low =
+            DeviceBuffer::from_slice(low).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_close =
+            DeviceBuffer::from_slice(close).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_open =
+            DeviceBuffer::from_slice(open).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
         let mut modes_i32 = Vec::with_capacity(n_combos);
         for p in &combos {
             modes_i32.push(p.mode.unwrap_or(3) as i32);
@@ -246,7 +254,17 @@ impl CudaPivot {
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(9 * n_combos * n) }
             .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
 
-        self.launch_pivot_batch(&d_high, &d_low, &d_close, &d_open, n, first_valid, &d_modes, n_combos, &mut d_out)?;
+        self.launch_pivot_batch(
+            &d_high,
+            &d_low,
+            &d_close,
+            &d_open,
+            n,
+            first_valid,
+            &d_modes,
+            n_combos,
+            &mut d_out,
+        )?;
         self.stream
             .synchronize()
             .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
@@ -299,7 +317,10 @@ impl CudaPivot {
                 let mut l = d_low.as_device_ptr().as_raw();
                 let mut c = d_close.as_device_ptr().as_raw();
                 let mut o = d_open.as_device_ptr().as_raw();
-                let mut m = d_modes.as_device_ptr().as_raw().wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
+                let mut m = d_modes
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
                 let mut n_i = n as i32;
                 let mut fv_i = first_valid as i32;
                 let mut combos_i = chunk as i32;
@@ -326,7 +347,10 @@ impl CudaPivot {
             remaining -= chunk;
         }
         // Record selection once
-        unsafe { (*(self as *const _ as *mut CudaPivot)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaPivot)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
         Ok(())
     }
@@ -346,7 +370,11 @@ impl CudaPivot {
             return Err(CudaPivotError::InvalidInput("empty dims".into()));
         }
         let elems = cols * rows;
-        if high_tm.len() != elems || low_tm.len() != elems || close_tm.len() != elems || open_tm.len() != elems {
+        if high_tm.len() != elems
+            || low_tm.len() != elems
+            || close_tm.len() != elems
+            || open_tm.len() != elems
+        {
             return Err(CudaPivotError::InvalidInput(
                 "time-major inputs must all be cols*rows".into(),
             ));
@@ -382,7 +410,8 @@ impl CudaPivot {
         }
 
         // VRAM estimate: 4 inputs + first_valids + outputs (9 planes)
-        let bytes = (4 * elems + 9 * elems) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>()
+        let bytes = (4 * elems + 9 * elems) * std::mem::size_of::<f32>()
+            + cols * std::mem::size_of::<i32>()
             + 64 * 1024 * 1024;
         if !Self::will_fit(bytes, 0) {
             return Err(CudaPivotError::InvalidInput(
@@ -390,20 +419,31 @@ impl CudaPivot {
             ));
         }
 
-        let d_high = DeviceBuffer::from_slice(high_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let d_open = DeviceBuffer::from_slice(open_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_high =
+            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_low =
+            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_close =
+            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_open =
+            DeviceBuffer::from_slice(open_tm).map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(9 * elems) }
             .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
 
-        self.launch_pivot_many_series_tm(&d_high, &d_low, &d_close, &d_open, &d_fv, cols, rows, mode, &mut d_out)?;
+        self.launch_pivot_many_series_tm(
+            &d_high, &d_low, &d_close, &d_open, &d_fv, cols, rows, mode, &mut d_out,
+        )?;
         self.stream
             .synchronize()
             .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: 9 * rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: 9 * rows,
+            cols,
+        })
     }
 
     fn launch_pivot_many_series_tm(
@@ -458,7 +498,10 @@ impl CudaPivot {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaPivotError::Cuda(e.to_string()))?;
         }
-        unsafe { (*(self as *const _ as *mut CudaPivot)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaPivot)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
         Ok(())
     }
@@ -480,7 +523,8 @@ pub mod benches {
     }
     fn bytes_many() -> usize {
         let elems = MANY_ROWS * MANY_COLS;
-        (4 * elems + 9 * elems) * std::mem::size_of::<f32>() + MANY_COLS * std::mem::size_of::<i32>()
+        (4 * elems + 9 * elems) * std::mem::size_of::<f32>()
+            + MANY_COLS * std::mem::size_of::<i32>()
             + 64 * 1024 * 1024
     }
 
@@ -494,7 +538,10 @@ pub mod benches {
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.pivot_batch_dev(&self.h, &self.l, &self.c, &self.o, &self.sweep).unwrap();
+            let _ = self
+                .cuda
+                .pivot_batch_dev(&self.h, &self.l, &self.c, &self.o, &self.sweep)
+                .unwrap();
         }
     }
 
@@ -510,13 +557,7 @@ pub mod benches {
             let _ = self
                 .cuda
                 .pivot_many_series_one_param_time_major_dev(
-                    &self.h_tm,
-                    &self.l_tm,
-                    &self.c_tm,
-                    &self.o_tm,
-                    MANY_COLS,
-                    MANY_ROWS,
-                    3,
+                    &self.h_tm, &self.l_tm, &self.c_tm, &self.o_tm, MANY_COLS, MANY_ROWS, 3,
                 )
                 .unwrap();
         }
@@ -538,7 +579,14 @@ pub mod benches {
             h[i] = base + range;
         }
         let sweep = PivotBatchRange { mode: (0, 4, 1) };
-        Box::new(BatchState { cuda, h, l, c, o, sweep })
+        Box::new(BatchState {
+            cuda,
+            h,
+            l,
+            c,
+            o,
+            sweep,
+        })
     }
 
     fn prep_many() -> Box<dyn CudaBenchState> {
@@ -560,18 +608,36 @@ pub mod benches {
                 h_tm[idx] = base + rng;
             }
         }
-        Box::new(ManyState { cuda, h_tm, l_tm, c_tm, o_tm })
+        Box::new(ManyState {
+            cuda,
+            h_tm,
+            l_tm,
+            c_tm,
+            o_tm,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let combos = 5usize; // modes 0..4
         vec![
-            CudaBenchScenario::new("pivot", "batch", "pivot_cuda_batch", "1m × 5 modes", prep_batch)
-                .with_sample_size(10)
-                .with_mem_required(bytes_batch(combos)),
-            CudaBenchScenario::new("pivot", "many_series", "pivot_cuda_many_series_tm", "200k × 128", prep_many)
-                .with_sample_size(10)
-                .with_mem_required(bytes_many()),
+            CudaBenchScenario::new(
+                "pivot",
+                "batch",
+                "pivot_cuda_batch",
+                "1m × 5 modes",
+                prep_batch,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_batch(combos)),
+            CudaBenchScenario::new(
+                "pivot",
+                "many_series",
+                "pivot_cuda_many_series_tm",
+                "200k × 128",
+                prep_many,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_many()),
         ]
     }
 }

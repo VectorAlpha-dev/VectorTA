@@ -2104,9 +2104,14 @@ pub fn tsi_cuda_batch_dev_py<'py>(
     short_period_range: (usize, usize, usize),
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice_in = data_f32.as_slice()?;
-    let sweep = TsiBatchRange { long_period: long_period_range, short_period: short_period_range };
+    let sweep = TsiBatchRange {
+        long_period: long_period_range,
+        short_period: short_period_range,
+    };
     let (inner, combos) = py.allow_threads(|| {
         let mut cuda = CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.tsi_batch_dev(slice_in, &sweep)
@@ -2117,11 +2122,19 @@ pub fn tsi_cuda_batch_dev_py<'py>(
     let dict = PyDict::new(py);
     dict.set_item(
         "long_periods",
-        combos.iter().map(|p| p.long_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.long_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     dict.set_item(
         "short_periods",
-        combos.iter().map(|p| p.short_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.short_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     Ok((DeviceArrayF32Py { inner }, dict))
 }
@@ -2138,12 +2151,20 @@ pub fn tsi_cuda_many_series_one_param_dev_py<'py>(
     short_period: usize,
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice_in = data_tm_f32.as_slice()?;
     let inner = py.allow_threads(|| {
         let mut cuda = CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.tsi_many_series_one_param_time_major_dev(slice_in, cols, rows, long_period, short_period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.tsi_many_series_one_param_time_major_dev(
+            slice_in,
+            cols,
+            rows,
+            long_period,
+            short_period,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

@@ -14,7 +14,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::CudaLinearregAngle;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -58,16 +60,25 @@ fn linearreg_angle_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
 
 #[cfg(feature = "cuda")]
 #[test]
-fn linearreg_angle_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+fn linearreg_angle_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
+{
     if !cuda_available() {
-        eprintln!("[linearreg_angle_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        eprintln!(
+            "[linearreg_angle_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
+        );
         return Ok(());
     }
 
@@ -75,7 +86,8 @@ fn linearreg_angle_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
     let rows = 2048usize; // series length
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
-        for r in s..rows { // staggered start
+        for r in s..rows {
+            // staggered start
             let x = (r as f64) + (s as f64) * 0.25;
             data_tm[r * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
@@ -86,16 +98,22 @@ fn linearreg_angle_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for r in 0..rows { series[r] = data_tm[r * cols + s]; }
+        for r in 0..rows {
+            series[r] = data_tm[r * cols + s];
+        }
         let out = Linearreg_angleBuilder::new()
             .period(period)
             .kernel(Kernel::Scalar)
             .apply_slice(&series)?;
-        for r in 0..rows { cpu_tm[r * cols + s] = out.values[r]; }
+        for r in 0..rows {
+            cpu_tm[r * cols + s] = out.values[r];
+        }
     }
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
-    let params = Linearreg_angleParams { period: Some(period) };
+    let params = Linearreg_angleParams {
+        period: Some(period),
+    };
     let cuda = CudaLinearregAngle::new(0).expect("CudaLinearregAngle::new");
     let dev_tm = cuda
         .linearreg_angle_many_series_one_param_time_major_dev(&data_tm_f32, cols, rows, &params)
@@ -109,7 +127,11 @@ fn linearreg_angle_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
 
     let tol = 5e-4;
     for idx in 0..g_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }

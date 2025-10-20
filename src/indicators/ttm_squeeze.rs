@@ -1534,7 +1534,6 @@ use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use numpy::PyReadonlyArray1;
 #[cfg(all(feature = "python", feature = "cuda"))]
 // PyValueError already imported in Python bindings above.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ttm_squeeze_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, length_range, bb_mult_range, kc_high_range, kc_mid_range, kc_low_range, device_id=0))]
@@ -1550,14 +1549,29 @@ pub fn ttm_squeeze_cuda_batch_dev_py(
     kc_low_range: (f64, f64, f64),
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
-    let h = high_f32.as_slice()?; let l = low_f32.as_slice()?; let c = close_f32.as_slice()?;
-    let sweep = TtmSqueezeBatchRange { length: length_range, bb_mult: bb_mult_range, kc_high: kc_high_range, kc_mid: kc_mid_range, kc_low: kc_low_range };
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+    let sweep = TtmSqueezeBatchRange {
+        length: length_range,
+        bb_mult: bb_mult_range,
+        kc_high: kc_high_range,
+        kc_mid: kc_mid_range,
+        kc_low: kc_low_range,
+    };
     let (mo, sq) = py.allow_threads(|| {
-        let cuda = CudaTtmSqueeze::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ttm_squeeze_batch_dev(h, l, c, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaTtmSqueeze::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ttm_squeeze_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: mo }, DeviceArrayF32Py { inner: sq }))
+    Ok((
+        DeviceArrayF32Py { inner: mo },
+        DeviceArrayF32Py { inner: sq },
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1577,14 +1591,24 @@ pub fn ttm_squeeze_cuda_many_series_one_param_dev_py(
     kc_low: f32,
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
-    let h = high_tm_f32.as_slice()?; let l = low_tm_f32.as_slice()?; let c = close_tm_f32.as_slice()?;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let c = close_tm_f32.as_slice()?;
     let (mo, sq) = py.allow_threads(|| {
-        let cuda = CudaTtmSqueeze::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ttm_squeeze_many_series_one_param_time_major_dev(h, l, c, cols, rows, length, bb_mult, kc_high, kc_mid, kc_low)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaTtmSqueeze::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.ttm_squeeze_many_series_one_param_time_major_dev(
+            h, l, c, cols, rows, length, bb_mult, kc_high, kc_mid, kc_low,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: mo }, DeviceArrayF32Py { inner: sq }))
+    Ok((
+        DeviceArrayF32Py { inner: mo },
+        DeviceArrayF32Py { inner: sq },
+    ))
 }
 
 #[cfg(feature = "python")]

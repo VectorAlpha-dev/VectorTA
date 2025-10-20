@@ -54,14 +54,21 @@ pub struct CudaDecyclerPolicy {
 }
 impl Default for CudaDecyclerPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaDecycler {
     module: Module,
@@ -111,21 +118,39 @@ impl CudaDecycler {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaDecyclerPolicy) -> Result<Self, CudaDecyclerError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaDecyclerPolicy,
+    ) -> Result<Self, CudaDecyclerError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaDecyclerPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaDecyclerPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaDecyclerPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaDecyclerPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaDecyclerError> {
-        self.stream.synchronize().map_err(|e| CudaDecyclerError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))
     }
 
     #[inline]
-    fn calc_launch_1d(&self, func: &Function, n_items: usize, override_block: Option<u32>) -> (BlockSize, GridSize) {
+    fn calc_launch_1d(
+        &self,
+        func: &Function,
+        n_items: usize,
+        override_block: Option<u32>,
+    ) -> (BlockSize, GridSize) {
         if let Some(bx) = override_block {
             let bx = bx.max(32);
             let gx = ((n_items as u32 + bx - 1) / bx).max(1);
@@ -146,47 +171,70 @@ impl CudaDecycler {
 
     #[inline]
     fn mem_check_enabled() -> bool {
-        match std::env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"), Err(_) => true }
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Some((free, _)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] DECYCLER batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaDecycler)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaDecycler)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] DECYCLER many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaDecycler)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaDecycler)).debug_many_logged = true;
+                }
             }
         }
     }
 
     // -------- Batch (one series × many params) --------
 
-    pub fn decycler_batch_dev(&self, data_f32: &[f32], sweep: &DecyclerBatchRange) -> Result<DeviceArrayF32, CudaDecyclerError> {
+    pub fn decycler_batch_dev(
+        &self,
+        data_f32: &[f32],
+        sweep: &DecyclerBatchRange,
+    ) -> Result<DeviceArrayF32, CudaDecyclerError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n = prepared.combos.len();
 
@@ -204,14 +252,16 @@ impl CudaDecycler {
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
             .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }
-            .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
+        let d_periods =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }
+                .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
         let d_c = unsafe { DeviceBuffer::from_slice_async(&prepared.c_vals, &self.stream) }
             .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
         let d_two = unsafe { DeviceBuffer::from_slice_async(&prepared.two_1m_vals, &self.stream) }
             .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
-        let d_neg = unsafe { DeviceBuffer::from_slice_async(&prepared.neg_oma_sq_vals, &self.stream) }
-            .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
+        let d_neg =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.neg_oma_sq_vals, &self.stream) }
+                .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
         let d_diff = unsafe { DeviceBuffer::from_slice_async(&prepared.diff, &self.stream) }
             .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
@@ -232,7 +282,11 @@ impl CudaDecycler {
             &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n, cols: prepared.series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n,
+            cols: prepared.series_len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -249,9 +303,15 @@ impl CudaDecycler {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaDecyclerError> {
-        let func = self.module.get_function("decycler_batch_f32").map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
+        let func = self
+            .module
+            .get_function("decycler_batch_f32")
+            .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
         let (block, grid) = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => ((block_x, 1, 1).into(), (((n_combos as u32 + block_x - 1) / block_x).max(1), 1, 1).into()),
+            BatchKernelPolicy::Plain { block_x } => (
+                (block_x, 1, 1).into(),
+                (((n_combos as u32 + block_x - 1) / block_x).max(1), 1, 1).into(),
+            ),
             BatchKernelPolicy::Auto => self.calc_launch_1d(&func, n_combos, None),
         };
         unsafe {
@@ -277,11 +337,17 @@ impl CudaDecycler {
                 &mut first_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, &mut args).map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
+                .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
         }
         unsafe {
-            let bx = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, BatchKernelPolicy::Auto => block.x };
-            (*(self as *const _ as *mut CudaDecycler)).last_batch = Some(BatchKernelSelected::Plain { block_x: bx });
+            let bx = match self.policy.batch {
+                BatchKernelPolicy::Plain { block_x } => block_x,
+                BatchKernelPolicy::Auto => block.x,
+            };
+            (*(self as *const _ as *mut CudaDecycler)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x: bx });
         }
         self.maybe_log_batch_debug();
         Ok(())
@@ -329,7 +395,11 @@ impl CudaDecycler {
             rows,
             &mut d_out,
         )?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -345,10 +415,15 @@ impl CudaDecycler {
         series_len: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaDecyclerError> {
-        let func = self.module.get_function("decycler_many_series_one_param_f32")
+        let func = self
+            .module
+            .get_function("decycler_many_series_one_param_f32")
             .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
         let (block, grid) = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } => ((block_x, 1, 1).into(), (((num_series as u32 + block_x - 1) / block_x).max(1), 1, 1).into()),
+            ManySeriesKernelPolicy::OneD { block_x } => (
+                (block_x, 1, 1).into(),
+                (((num_series as u32 + block_x - 1) / block_x).max(1), 1, 1).into(),
+            ),
             ManySeriesKernelPolicy::Auto => self.calc_launch_1d(&func, num_series, None),
         };
         unsafe {
@@ -373,11 +448,17 @@ impl CudaDecycler {
                 &mut out_ptr as *mut _ as *mut c_void,
                 std::ptr::null_mut(), // padding (unused)
             ];
-            self.stream.launch(&func, grid, block, 0, &mut args).map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
+                .map_err(|e| CudaDecyclerError::Cuda(e.to_string()))?;
         }
         unsafe {
-            let bx = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, ManySeriesKernelPolicy::Auto => block.x };
-            (*(self as *const _ as *mut CudaDecycler)).last_many = Some(ManySeriesKernelSelected::OneD { block_x: bx });
+            let bx = match self.policy.many_series {
+                ManySeriesKernelPolicy::OneD { block_x } => block_x,
+                ManySeriesKernelPolicy::Auto => block.x,
+            };
+            (*(self as *const _ as *mut CudaDecycler)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x: bx });
         }
         self.maybe_log_many_debug();
         Ok(())
@@ -390,25 +471,37 @@ impl CudaDecycler {
         sweep: &DecyclerBatchRange,
     ) -> Result<PreparedDecyclerBatch, CudaDecyclerError> {
         let series_len = data_f32.len();
-        if series_len == 0 { return Err(CudaDecyclerError::InvalidInput("empty series".into())); }
+        if series_len == 0 {
+            return Err(CudaDecyclerError::InvalidInput("empty series".into()));
+        }
         let combos = expand_grid(sweep);
-        if combos.is_empty() { return Err(CudaDecyclerError::InvalidInput("empty param grid".into())); }
+        if combos.is_empty() {
+            return Err(CudaDecyclerError::InvalidInput("empty param grid".into()));
+        }
 
         // first valid (non-NaN) index
         let mut first_valid: Option<usize> = None;
-        for i in 0..series_len { if data_f32[i].is_finite() { first_valid = Some(i); break; } }
-        let fv = first_valid.ok_or_else(|| CudaDecyclerError::InvalidInput("all values are NaN".into()))?;
+        for i in 0..series_len {
+            if data_f32[i].is_finite() {
+                first_valid = Some(i);
+                break;
+            }
+        }
+        let fv = first_valid
+            .ok_or_else(|| CudaDecyclerError::InvalidInput("all values are NaN".into()))?;
         let max_p = combos.iter().map(|c| c.hp_period.unwrap()).max().unwrap();
         if series_len - fv < max_p {
             return Err(CudaDecyclerError::InvalidInput(format!(
-                "not enough valid data: needed >= {}, valid = {}", max_p, series_len - fv
+                "not enough valid data: needed >= {}, valid = {}",
+                max_p,
+                series_len - fv
             )));
         }
 
         // host precompute: second difference reused across rows
         let mut diff = vec![0f32; series_len];
         for i in (fv + 2)..series_len {
-            let x  = data_f32[i];
+            let x = data_f32[i];
             let x1 = data_f32[i - 1];
             let x2 = data_f32[i - 2];
             diff[i] = x - 2.0 * x1 + x2;
@@ -429,18 +522,44 @@ impl CudaDecycler {
             neg_oma_sq_vals.push(coeffs.neg_oma_sq);
         }
 
-        Ok(PreparedDecyclerBatch { combos, first_valid: fv, series_len, periods_i32, c_vals, two_1m_vals, neg_oma_sq_vals, diff })
+        Ok(PreparedDecyclerBatch {
+            combos,
+            first_valid: fv,
+            series_len,
+            periods_i32,
+            c_vals,
+            two_1m_vals,
+            neg_oma_sq_vals,
+            diff,
+        })
     }
 
     fn prepare_many_series_inputs(
-        data_tm_f32: &[f32], cols: usize, rows: usize, params: &DecyclerParams,
+        data_tm_f32: &[f32],
+        cols: usize,
+        rows: usize,
+        params: &DecyclerParams,
     ) -> Result<PreparedDecyclerMany, CudaDecyclerError> {
-        if cols == 0 || rows == 0 { return Err(CudaDecyclerError::InvalidInput("empty matrix".into())); }
-        if data_tm_f32.len() != cols * rows { return Err(CudaDecyclerError::InvalidInput("data shape mismatch".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaDecyclerError::InvalidInput("empty matrix".into()));
+        }
+        if data_tm_f32.len() != cols * rows {
+            return Err(CudaDecyclerError::InvalidInput(
+                "data shape mismatch".into(),
+            ));
+        }
         let period = params.hp_period.unwrap_or(125);
         let k = params.k.unwrap_or(0.707);
-        if period < 2 { return Err(CudaDecyclerError::InvalidInput("hp_period must be >= 2".into())); }
-        if !(k.is_finite()) || k <= 0.0 { return Err(CudaDecyclerError::InvalidInput("k must be positive and finite".into())); }
+        if period < 2 {
+            return Err(CudaDecyclerError::InvalidInput(
+                "hp_period must be >= 2".into(),
+            ));
+        }
+        if !(k.is_finite()) || k <= 0.0 {
+            return Err(CudaDecyclerError::InvalidInput(
+                "k must be positive and finite".into(),
+            ));
+        }
 
         // per-series first valid
         let needed = period;
@@ -449,19 +568,32 @@ impl CudaDecycler {
             let mut fv: Option<usize> = None;
             for t in 0..rows {
                 let v = data_tm_f32[t * cols + s];
-                if v.is_finite() { fv = Some(t); break; }
+                if v.is_finite() {
+                    fv = Some(t);
+                    break;
+                }
             }
-            let fvu = fv.ok_or_else(|| CudaDecyclerError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fvu =
+                fv.ok_or_else(|| CudaDecyclerError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fvu < needed {
                 return Err(CudaDecyclerError::InvalidInput(format!(
-                    "series {} not enough valid data: needed >= {}, valid = {}", s, needed, rows - fvu
+                    "series {} not enough valid data: needed >= {}, valid = {}",
+                    s,
+                    needed,
+                    rows - fvu
                 )));
             }
             first_valids.push(fvu as i32);
         }
 
         let coeffs = compute_coefficients(period, k);
-        Ok(PreparedDecyclerMany { first_valids, period: period as i32, c: coeffs.c, two_1m: coeffs.two_1m, neg_oma_sq: coeffs.neg_oma_sq })
+        Ok(PreparedDecyclerMany {
+            first_valids,
+            period: period as i32,
+            c: coeffs.c,
+            two_1m: coeffs.two_1m,
+            neg_oma_sq: coeffs.neg_oma_sq,
+        })
     }
 }
 
@@ -495,8 +627,14 @@ pub mod benches {
         crate::indicators::decycler::DecyclerParams,
         decycler_batch_dev,
         decycler_many_series_one_param_time_major_dev,
-        crate::indicators::decycler::DecyclerBatchRange { hp_period: (10, 10 + PARAM_SWEEP - 1, 1), k: (0.5, 0.5, 0.0) },
-        crate::indicators::decycler::DecyclerParams { hp_period: Some(64), k: Some(0.5) },
+        crate::indicators::decycler::DecyclerBatchRange {
+            hp_period: (10, 10 + PARAM_SWEEP - 1, 1),
+            k: (0.5, 0.5, 0.0)
+        },
+        crate::indicators::decycler::DecyclerParams {
+            hp_period: Some(64),
+            k: Some(0.5)
+        },
         "decycler",
         "decycler"
     );
@@ -504,7 +642,11 @@ pub mod benches {
 }
 
 // ---- Utilities ----
-struct Coefficients { c: f32, two_1m: f32, neg_oma_sq: f32 }
+struct Coefficients {
+    c: f32,
+    two_1m: f32,
+    neg_oma_sq: f32,
+}
 fn compute_coefficients(period: usize, k: f64) -> Coefficients {
     use std::f64::consts::PI;
     let theta = 2.0 * PI * k / period as f64;
@@ -515,23 +657,44 @@ fn compute_coefficients(period: usize, k: f64) -> Coefficients {
     let oma = 1.0 - alpha;
     let two_1m = 2.0 * oma;
     let neg_oma_sq = -(oma * oma);
-    Coefficients { c: c as f32, two_1m: two_1m as f32, neg_oma_sq: neg_oma_sq as f32 }
+    Coefficients {
+        c: c as f32,
+        two_1m: two_1m as f32,
+        neg_oma_sq: neg_oma_sq as f32,
+    }
 }
 
 fn expand_grid(range: &DecyclerBatchRange) -> Vec<DecyclerParams> {
     fn axis_usize(a: (usize, usize, usize)) -> Vec<usize> {
-        let (s, e, st) = a; if st == 0 || s == e { return vec![s]; } (s..=e).step_by(st).collect()
+        let (s, e, st) = a;
+        if st == 0 || s == e {
+            return vec![s];
+        }
+        (s..=e).step_by(st).collect()
     }
     fn axis_f64(a: (f64, f64, f64)) -> Vec<f64> {
         let (s, e, st) = a;
-        if st.abs() < 1e-12 || (s - e).abs() < 1e-12 { return vec![s]; }
+        if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+            return vec![s];
+        }
         let mut v = Vec::new();
-        let mut cur = s; while cur <= e + 1e-12 { v.push(cur); cur += st; } v
+        let mut cur = s;
+        while cur <= e + 1e-12 {
+            v.push(cur);
+            cur += st;
+        }
+        v
     }
     let ps = axis_usize(range.hp_period);
     let ks = axis_f64(range.k);
     let mut out = Vec::with_capacity(ps.len() * ks.len());
-    for &p in &ps { for &k in &ks { out.push(DecyclerParams { hp_period: Some(p), k: Some(k) }); } }
+    for &p in &ps {
+        for &k in &ks {
+            out.push(DecyclerParams {
+                hp_period: Some(p),
+                k: Some(k),
+            });
+        }
+    }
     out
 }
-

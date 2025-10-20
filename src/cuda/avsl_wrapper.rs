@@ -44,8 +44,8 @@ pub struct CudaAvsl {
 impl CudaAvsl {
     pub fn new(device_id: usize) -> Result<Self, CudaAvslError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
         let ctx = Context::new(device).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/avsl_kernel.ptx"));
@@ -66,7 +66,11 @@ impl CudaAvsl {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        Ok(Self { module, stream, _ctx: ctx })
+        Ok(Self {
+            module,
+            stream,
+            _ctx: ctx,
+        })
     }
 
     #[inline]
@@ -97,19 +101,38 @@ impl CudaAvsl {
     fn expand_grid(range: &AvslBatchRange) -> Vec<AvslParams> {
         // Keep in sync with avsl.rs expand_grid_avsl
         fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
-            if st == 0 || s == e { return vec![s]; }
+            if st == 0 || s == e {
+                return vec![s];
+            }
             (s..=e).step_by(st).collect()
         }
         fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
-            if st.abs() < 1e-12 || (s - e).abs() < 1e-12 { return vec![s]; }
-            let mut v = Vec::new(); let mut x = s; while x <= e + 1e-12 { v.push(x); x += st; }
+            if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+                return vec![s];
+            }
+            let mut v = Vec::new();
+            let mut x = s;
+            while x <= e + 1e-12 {
+                v.push(x);
+                x += st;
+            }
             v
         }
         let fs = axis_usize(range.fast_period);
         let ss = axis_usize(range.slow_period);
         let ms = axis_f64(range.multiplier);
         let mut out = Vec::with_capacity(fs.len() * ss.len() * ms.len());
-        for &f in &fs { for &s in &ss { for &m in &ms { out.push(AvslParams { fast_period: Some(f), slow_period: Some(s), multiplier: Some(m) }); } } }
+        for &f in &fs {
+            for &s in &ss {
+                for &m in &ms {
+                    out.push(AvslParams {
+                        fast_period: Some(f),
+                        slow_period: Some(s),
+                        multiplier: Some(m),
+                    });
+                }
+            }
+        }
         out
     }
 
@@ -134,12 +157,22 @@ impl CudaAvsl {
             _ => return Err(CudaAvslError::InvalidInput("all values are NaN".into())),
         };
         let combos = Self::expand_grid(sweep);
-        if combos.is_empty() { return Err(CudaAvslError::InvalidInput("no parameter combinations".into())); }
+        if combos.is_empty() {
+            return Err(CudaAvslError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         for c in &combos {
             let f = c.fast_period.unwrap_or(12);
             let s = c.slow_period.unwrap_or(26);
-            if f == 0 || s == 0 { return Err(CudaAvslError::InvalidInput("period must be >=1".into())); }
-            if len - first_valid < s { return Err(CudaAvslError::InvalidInput("insufficient valid data for slow period".into())); }
+            if f == 0 || s == 0 {
+                return Err(CudaAvslError::InvalidInput("period must be >=1".into()));
+            }
+            if len - first_valid < s {
+                return Err(CudaAvslError::InvalidInput(
+                    "insufficient valid data for slow period".into(),
+                ));
+            }
         }
         Ok((combos, first_valid, len))
     }
@@ -232,23 +265,32 @@ impl CudaAvsl {
         }
 
         // Host-side combos → arrays
-        let fast: Vec<i32> = combos.iter().map(|c| c.fast_period.unwrap() as i32).collect();
-        let slow: Vec<i32> = combos.iter().map(|c| c.slow_period.unwrap() as i32).collect();
-        let mult: Vec<f32> = combos.iter().map(|c| c.multiplier.unwrap() as f32).collect();
+        let fast: Vec<i32> = combos
+            .iter()
+            .map(|c| c.fast_period.unwrap() as i32)
+            .collect();
+        let slow: Vec<i32> = combos
+            .iter()
+            .map(|c| c.slow_period.unwrap() as i32)
+            .collect();
+        let mult: Vec<f32> = combos
+            .iter()
+            .map(|c| c.multiplier.unwrap() as f32)
+            .collect();
 
         // Async path with pinned host buffers
-        let h_close = LockedBuffer::from_slice(close_f32)
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let h_low = LockedBuffer::from_slice(low_f32)
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(volume_f32)
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let h_fast = LockedBuffer::from_slice(&fast)
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let h_slow = LockedBuffer::from_slice(&slow)
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let h_mult = LockedBuffer::from_slice(&mult)
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let h_close =
+            LockedBuffer::from_slice(close_f32).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let h_low =
+            LockedBuffer::from_slice(low_f32).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let h_vol =
+            LockedBuffer::from_slice(volume_f32).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let h_fast =
+            LockedBuffer::from_slice(&fast).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let h_slow =
+            LockedBuffer::from_slice(&slow).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let h_mult =
+            LockedBuffer::from_slice(&mult).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
 
         let mut d_close = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
             .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
@@ -267,12 +309,24 @@ impl CudaAvsl {
             .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
 
         unsafe {
-            d_close.async_copy_from(&h_close, &self.stream).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-            d_low.async_copy_from(&h_low, &self.stream).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-            d_vol.async_copy_from(&h_vol, &self.stream).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-            d_fast.async_copy_from(&h_fast, &self.stream).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-            d_slow.async_copy_from(&h_slow, &self.stream).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-            d_mult.async_copy_from(&h_mult, &self.stream).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+            d_close
+                .async_copy_from(&h_close, &self.stream)
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+            d_low
+                .async_copy_from(&h_low, &self.stream)
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+            d_vol
+                .async_copy_from(&h_vol, &self.stream)
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+            d_fast
+                .async_copy_from(&h_fast, &self.stream)
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+            d_slow
+                .async_copy_from(&h_slow, &self.stream)
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+            d_mult
+                .async_copy_from(&h_mult, &self.stream)
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
         }
 
         self.launch_batch(
@@ -292,7 +346,14 @@ impl CudaAvsl {
             .synchronize()
             .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows, cols: len }, combos))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            },
+            combos,
+        ))
     }
 
     // ----- Many-series, one param (time-major) -----
@@ -323,17 +384,27 @@ impl CudaAvsl {
             let mut fc: Option<usize> = None;
             for r in 0..rows {
                 let idx = r * cols + c;
-                if fa.is_none() && !close_tm_f32[idx].is_nan() { fa = Some(r); }
-                if fb.is_none() && !low_tm_f32[idx].is_nan() { fb = Some(r); }
-                if fc.is_none() && !vol_tm_f32[idx].is_nan() { fc = Some(r); }
-                if fa.is_some() && fb.is_some() && fc.is_some() { break; }
+                if fa.is_none() && !close_tm_f32[idx].is_nan() {
+                    fa = Some(r);
+                }
+                if fb.is_none() && !low_tm_f32[idx].is_nan() {
+                    fb = Some(r);
+                }
+                if fc.is_none() && !vol_tm_f32[idx].is_nan() {
+                    fc = Some(r);
+                }
+                if fa.is_some() && fb.is_some() && fc.is_some() {
+                    break;
+                }
             }
             let first = match (fa, fb, fc) {
                 (Some(a), Some(b), Some(c3)) => a.max(b).max(c3),
                 _ => return Err(CudaAvslError::InvalidInput("all-NaN series column".into())),
             };
             if rows - first < slow {
-                return Err(CudaAvslError::InvalidInput("insufficient valid data for slow".into()));
+                return Err(CudaAvslError::InvalidInput(
+                    "insufficient valid data for slow".into(),
+                ));
             }
             firsts[c] = first as i32;
         }
@@ -422,7 +493,8 @@ impl CudaAvsl {
         )?;
 
         // Rough VRAM check
-        let bytes = cols * rows * std::mem::size_of::<f32>() * 4 + cols * std::mem::size_of::<i32>();
+        let bytes =
+            cols * rows * std::mem::size_of::<f32>() * 4 + cols * std::mem::size_of::<i32>();
         let headroom = std::env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -433,29 +505,41 @@ impl CudaAvsl {
 
         let h_close = LockedBuffer::from_slice(close_tm_f32)
             .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let h_low = LockedBuffer::from_slice(low_tm_f32)
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(vol_tm_f32)
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let h_first = LockedBuffer::from_slice(&firsts)
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let h_low =
+            LockedBuffer::from_slice(low_tm_f32).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let h_vol =
+            LockedBuffer::from_slice(vol_tm_f32).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let h_first =
+            LockedBuffer::from_slice(&firsts).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
 
-        let mut d_close = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let mut d_low = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let mut d_vol = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let mut d_close =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let mut d_low =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let mut d_vol =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
         let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
             .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
-            .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+        let mut d_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
 
         unsafe {
-            d_close.async_copy_from(&h_close, &self.stream).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-            d_low.async_copy_from(&h_low, &self.stream).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-            d_vol.async_copy_from(&h_vol, &self.stream).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
-            d_first.async_copy_from(&h_first, &self.stream).map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+            d_close
+                .async_copy_from(&h_close, &self.stream)
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+            d_low
+                .async_copy_from(&h_low, &self.stream)
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+            d_vol
+                .async_copy_from(&h_vol, &self.stream)
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
+            d_first
+                .async_copy_from(&h_first, &self.stream)
+                .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
         }
 
         self.launch_many_series(
@@ -475,7 +559,11 @@ impl CudaAvsl {
             .synchronize()
             .map_err(|e| CudaAvslError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
 
@@ -503,19 +591,37 @@ pub mod benches {
                     }
                     impl CudaBenchState for State {
                         fn launch(&mut self) {
-                            let _ = self
-                                .cuda
-                                .avsl_batch_dev(&self.close, &self.low, &self.vol, &self.sweep);
+                            let _ = self.cuda.avsl_batch_dev(
+                                &self.close,
+                                &self.low,
+                                &self.vol,
+                                &self.sweep,
+                            );
                         }
                     }
                     let n = 100_000usize;
                     let mut close = vec![f32::NAN; n];
                     let mut low = vec![f32::NAN; n];
                     let mut vol = vec![f32::NAN; n];
-                    for i in 200..n { let x = i as f32; close[i] = (x * 0.00123).sin() + 0.0002 * x; low[i] = close[i] - 0.5 * (0.5 + (x*0.01).cos().abs()); vol[i] = (x*0.0007).cos().abs() + 0.7; }
-                    let sweep = AvslBatchRange { fast_period: (4, 28, 4), slow_period: (32, 128, 16), multiplier: (2.0, 2.0, 0.0) };
-                    Box::new(State { cuda: CudaAvsl::new(0).unwrap(), close, low, vol, sweep })
-                }
+                    for i in 200..n {
+                        let x = i as f32;
+                        close[i] = (x * 0.00123).sin() + 0.0002 * x;
+                        low[i] = close[i] - 0.5 * (0.5 + (x * 0.01).cos().abs());
+                        vol[i] = (x * 0.0007).cos().abs() + 0.7;
+                    }
+                    let sweep = AvslBatchRange {
+                        fast_period: (4, 28, 4),
+                        slow_period: (32, 128, 16),
+                        multiplier: (2.0, 2.0, 0.0),
+                    };
+                    Box::new(State {
+                        cuda: CudaAvsl::new(0).unwrap(),
+                        close,
+                        low,
+                        vol,
+                        sweep,
+                    })
+                },
             )
             .with_sample_size(20),
         );

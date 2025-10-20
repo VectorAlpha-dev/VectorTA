@@ -1,6 +1,8 @@
 // Integration tests for CUDA RSX kernels
 
-use my_project::indicators::rsx::{rsx_batch_with_kernel, rsx_with_kernel, RsxBatchRange, RsxInput, RsxParams};
+use my_project::indicators::rsx::{
+    rsx_batch_with_kernel, rsx_with_kernel, RsxBatchRange, RsxInput, RsxParams,
+};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -11,7 +13,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::oscillators::rsx_wrapper::CudaRsx;
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     let diff = (a - b).abs();
     let thresh = atol.max(rtol * a.abs().max(b.abs()));
     diff <= thresh
@@ -60,7 +64,13 @@ fn rsx_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, atol, rtol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, atol, rtol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
 
     Ok(())
@@ -90,11 +100,17 @@ fn rsx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = price_tm[t * cols + s]; }
-        let params = RsxParams { period: Some(period) };
+        for t in 0..rows {
+            series[t] = price_tm[t * cols + s];
+        }
+        let params = RsxParams {
+            period: Some(period),
+        };
         let input = RsxInput::from_slice(&series, params);
         let out = rsx_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let prices_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
@@ -112,7 +128,11 @@ fn rsx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let atol = 6e-1;
     let rtol = 1e-1;
     for idx in 0..g_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], g_tm[idx] as f64, atol, rtol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], g_tm[idx] as f64, atol, rtol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }

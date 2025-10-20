@@ -1,6 +1,8 @@
 // Integration tests for CUDA MarketEFI kernels
 
-use my_project::indicators::marketefi::{marketefi, MarketefiInput, MarketefiParams, MarketefiData};
+use my_project::indicators::marketefi::{
+    marketefi, MarketefiData, MarketefiInput, MarketefiParams,
+};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -9,7 +11,9 @@ use cust::memory::CopyDestination;
 use my_project::cuda::{cuda_available, CudaMarketefi};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -40,14 +44,23 @@ fn marketefi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
         vol[i] = (x * 0.00077).cos().abs() + 0.5;
     }
 
-    let input = MarketefiInput { data: MarketefiData::Slices { high: &high, low: &low, volume: &vol }, params: MarketefiParams };
+    let input = MarketefiInput {
+        data: MarketefiData::Slices {
+            high: &high,
+            low: &low,
+            volume: &vol,
+        },
+        params: MarketefiParams,
+    };
     let cpu = marketefi(&input)?.values;
 
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let vol_f32: Vec<f32> = vol.iter().map(|&v| v as f32).collect();
     let cuda = CudaMarketefi::new(0).expect("CudaMarketefi::new");
-    let dev = cuda.marketefi_batch_dev(&high_f32, &low_f32, &vol_f32).expect("marketefi_batch_dev");
+    let dev = cuda
+        .marketefi_batch_dev(&high_f32, &low_f32, &vol_f32)
+        .expect("marketefi_batch_dev");
 
     assert_eq!(dev.rows, 1);
     assert_eq!(dev.cols, len);
@@ -56,7 +69,13 @@ fn marketefi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
 
     let tol = 1e-5; // simple arithmetic; FP32 is fine here
     for i in 0..len {
-        assert!(approx_eq(cpu[i], host[i] as f64, tol), "mismatch at {}: cpu={} gpu={}", i, cpu[i], host[i]);
+        assert!(
+            approx_eq(cpu[i], host[i] as f64, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            i,
+            cpu[i],
+            host[i]
+        );
     }
     Ok(())
 }
@@ -89,10 +108,23 @@ fn marketefi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         let mut h = vec![f64::NAN; rows];
         let mut l = vec![f64::NAN; rows];
         let mut v = vec![f64::NAN; rows];
-        for t in 0..rows { h[t] = h_tm[t * cols + s]; l[t] = l_tm[t * cols + s]; v[t] = v_tm[t * cols + s]; }
-        let input = MarketefiInput { data: MarketefiData::Slices { high: &h, low: &l, volume: &v }, params: MarketefiParams };
+        for t in 0..rows {
+            h[t] = h_tm[t * cols + s];
+            l[t] = l_tm[t * cols + s];
+            v[t] = v_tm[t * cols + s];
+        }
+        let input = MarketefiInput {
+            data: MarketefiData::Slices {
+                high: &h,
+                low: &l,
+                volume: &v,
+            },
+            params: MarketefiParams,
+        };
         let out = marketefi(&input)?.values;
-        for t in 0..rows { cpu_tm[t * cols + s] = out[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out[t];
+        }
     }
 
     let h_tm_f32: Vec<f32> = h_tm.iter().map(|&v| v as f32).collect();
@@ -111,7 +143,11 @@ fn marketefi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     let tol = 1e-5;
     for idx in 0..host_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }

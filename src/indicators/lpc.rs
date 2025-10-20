@@ -24,10 +24,10 @@
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1840,13 +1840,17 @@ pub fn lpc_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::IntoPyArray;
-    if !cuda_is_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_is_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
     let c = close_f32.as_slice()?;
     let s = src_f32.as_slice()?;
     if h.len() != s.len() || l.len() != s.len() || c.len() != s.len() {
-        return Err(PyValueError::new_err("All arrays must have the same length"));
+        return Err(PyValueError::new_err(
+            "All arrays must have the same length",
+        ));
     }
     let sweep = LpcBatchRange {
         fixed_period: fixed_period_range,
@@ -1857,23 +1861,50 @@ pub fn lpc_cuda_batch_dev_py<'py>(
     };
     let (triplet, combos) = py.allow_threads(|| {
         let cuda = CudaLpc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.lpc_batch_dev(h, l, c, s, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.lpc_batch_dev(h, l, c, s, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let d = pyo3::types::PyDict::new(py);
-    d.set_item("filter", Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?)?;
-    d.set_item("high",   Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?)?;
-    d.set_item("low",    Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
+    d.set_item(
+        "filter",
+        Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?,
+    )?;
+    d.set_item(
+        "high",
+        Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?,
+    )?;
+    d.set_item(
+        "low",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: triplet.hist,
+            },
+        )?,
+    )?;
     d.set_item(
         "fixed_periods",
-        combos.iter().map(|p| p.fixed_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.fixed_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     d.set_item(
         "cycle_mults",
-        combos.iter().map(|p| p.cycle_mult.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.cycle_mult.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     d.set_item(
         "tr_mults",
-        combos.iter().map(|p| p.tr_mult.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.tr_mult.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     d.set_item("rows", combos.len())?;
     d.set_item("cols", s.len())?;
@@ -1894,31 +1925,59 @@ pub fn lpc_cuda_many_series_one_param_dev_py<'py>(
     tr_mult: f64,
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    if !cuda_is_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_is_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     if !cutoff_type.eq_ignore_ascii_case("fixed") {
-        return Err(PyValueError::new_err("many-series CUDA supports fixed cutoff only"));
+        return Err(PyValueError::new_err(
+            "many-series CUDA supports fixed cutoff only",
+        ));
     }
     let sh = high_tm_f32.shape();
     let sl = low_tm_f32.shape();
     let sc = close_tm_f32.shape();
     let ss = src_tm_f32.shape();
-    if sh != sl || sh != sc || sh != ss || sh.len() != 2 { return Err(PyValueError::new_err("expected matching 2D arrays [rows, cols]")); }
+    if sh != sl || sh != sc || sh != ss || sh.len() != 2 {
+        return Err(PyValueError::new_err(
+            "expected matching 2D arrays [rows, cols]",
+        ));
+    }
     let rows = sh[0];
     let cols = sh[1];
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
     let s = src_tm_f32.as_slice()?;
-    let params = LpcParams { cutoff_type: Some(cutoff_type.to_string()), fixed_period: Some(fixed_period), max_cycle_limit: Some(60), cycle_mult: Some(1.0), tr_mult: Some(tr_mult) };
+    let params = LpcParams {
+        cutoff_type: Some(cutoff_type.to_string()),
+        fixed_period: Some(fixed_period),
+        max_cycle_limit: Some(60),
+        cycle_mult: Some(1.0),
+        tr_mult: Some(tr_mult),
+    };
     let triplet = py.allow_threads(|| {
         let cuda = CudaLpc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.lpc_many_series_one_param_time_major_dev(h, l, c, s, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let d = pyo3::types::PyDict::new(py);
-    d.set_item("filter", Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?)?;
-    d.set_item("high",   Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?)?;
-    d.set_item("low",    Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
+    d.set_item(
+        "filter",
+        Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?,
+    )?;
+    d.set_item(
+        "high",
+        Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?,
+    )?;
+    d.set_item(
+        "low",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: triplet.hist,
+            },
+        )?,
+    )?;
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;
     d.set_item("fixed_period", fixed_period)?;
