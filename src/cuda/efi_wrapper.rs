@@ -15,7 +15,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -138,14 +138,19 @@ impl CudaEfi {
     ) -> Result<DeviceArrayF32, CudaEfiError> {
         let mut prepared = Self::prepare_batch_inputs(prices_f32, volumes_f32, sweep)?;
 
-        // Shared precompute across rows: build diffs with NaNs for invalid indices
-        let mut diffs = vec![f32::NAN; prepared.series_len];
-        for t in prepared.warm..prepared.series_len {
-            let pc = prices_f32[t];
-            let pp = prices_f32[t - 1];
-            let vc = volumes_f32[t];
-            if pc.is_finite() && pp.is_finite() && vc.is_finite() {
-                diffs[t] = (pc - pp) * vc;
+        // Build diffs directly into pinned host memory (faster HtoD)
+        let mut h_diffs = unsafe { LockedBuffer::<f32>::uninitialized(prepared.series_len) }
+            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+        {
+            let diffs = unsafe { h_diffs.as_mut_slice() };
+            diffs.fill(f32::NAN);
+            for t in prepared.warm..prepared.series_len {
+                let pc = prices_f32[t];
+                let pp = prices_f32[t - 1];
+                let vc = volumes_f32[t];
+                if pc.is_finite() && pp.is_finite() && vc.is_finite() {
+                    diffs[t] = (pc - pp) * vc;
+                }
             }
         }
 
@@ -162,10 +167,15 @@ impl CudaEfi {
             )));
         }
 
-        let d_diffs = unsafe {
-            DeviceBuffer::from_slice_async(&diffs, &self.stream)
+        let mut d_diffs: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(prepared.series_len, &self.stream)
                 .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
         };
+        unsafe {
+            d_diffs
+                .async_copy_from(h_diffs.as_slice(), &self.stream)
+                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+        }
         let d_periods = unsafe {
             DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream)
                 .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
@@ -335,6 +345,127 @@ impl CudaEfi {
         Ok(())
     }
 
+    /// Fast path for one price series × many params with time‑major output.
+    /// Returns DeviceArrayF32 with rows=series_len, cols=n_combos.
+    pub fn efi_batch_time_major_dev(
+        &self,
+        prices_f32: &[f32],
+        volumes_f32: &[f32],
+        sweep: &EfiBatchRange,
+    ) -> Result<DeviceArrayF32, CudaEfiError> {
+        let mut prepared = Self::prepare_batch_inputs(prices_f32, volumes_f32, sweep)?;
+        let n = prepared.series_len;
+
+        // Build diffs into pinned host buffer
+        let mut h_diffs = unsafe { LockedBuffer::<f32>::uninitialized(n) }
+            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+        {
+            let diffs = unsafe { h_diffs.as_mut_slice() };
+            diffs.fill(f32::NAN);
+            for t in prepared.warm..n {
+                let pc = prices_f32[t];
+                let pp = prices_f32[t - 1];
+                let vc = volumes_f32[t];
+                if pc.is_finite() && pp.is_finite() && vc.is_finite() {
+                    diffs[t] = (pc - pp) * vc;
+                }
+            }
+        }
+
+        // VRAM estimate
+        let params_bytes = (prepared.periods_i32.len() * std::mem::size_of::<i32>())
+            + (prepared.alphas_f32.len() * std::mem::size_of::<f32>());
+        let required = n * std::mem::size_of::<f32>() + params_bytes + n * prepared.combos.len() * std::mem::size_of::<f32>();
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
+            return Err(CudaEfiError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
+            )));
+        }
+
+        // Upload
+        let mut d_diffs: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(n, &self.stream)
+                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+        };
+        unsafe {
+            d_diffs
+                .async_copy_from(h_diffs.as_slice(), &self.stream)
+                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+        }
+        let d_periods = unsafe {
+            DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream)
+                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+        };
+        let d_alphas = unsafe {
+            DeviceBuffer::from_slice_async(&prepared.alphas_f32, &self.stream)
+                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+        };
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(n * prepared.combos.len(), &self.stream)
+                .map_err(|e| CudaEfiError::Cuda(e.to_string()))?
+        };
+
+        self.launch_batch_kernel_time_major_from_diffs(
+            &d_diffs,
+            &d_periods,
+            &d_alphas,
+            n,
+            prepared.warm,
+            prepared.combos.len(),
+            &mut d_out,
+        )?;
+
+        self.stream.synchronize().map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+
+        Ok(DeviceArrayF32 { buf: d_out, rows: n, cols: prepared.combos.len() })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_batch_kernel_time_major_from_diffs(
+        &self,
+        d_diffs: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_alphas: &DeviceBuffer<f32>,
+        series_len: usize,
+        warm: usize,
+        n_combos: usize,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaEfiError> {
+        let func = self
+            .module
+            .get_function("efi_one_series_many_params_from_diff_tm_f32")
+            .or_else(|_| self.module.get_function("efi_one_series_many_params_from_diff_rm_f32"))
+            .or_else(|_| self.module.get_function("efi_batch_from_diff_f32"))
+            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+            BatchKernelPolicy::Auto => 256,
+        };
+        let grid_x = ((n_combos + block_x as usize - 1) / block_x as usize) as u32;
+        let grid = GridSize::x(grid_x);
+        let block = BlockSize::x(block_x);
+
+        let stream = &self.stream;
+        unsafe {
+            launch!(
+                func<<<grid, block, 0, stream>>>(
+                    d_diffs.as_device_ptr(),
+                    d_periods.as_device_ptr(),
+                    d_alphas.as_device_ptr(),
+                    series_len as i32,
+                    warm as i32,
+                    n_combos as i32,
+                    d_out_tm.as_device_ptr()
+                )
+            )
+            .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
+        }
+        unsafe { (*(self as *const _ as *mut CudaEfi)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        self.maybe_log_batch_debug();
+        Ok(())
+    }
     #[allow(clippy::too_many_arguments)]
     fn launch_batch_kernel_with_diffs(
         &self,
@@ -346,16 +477,19 @@ impl CudaEfi {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEfiError> {
+        // Prefer optimized row-major kernel; fall back to legacy symbol
         let func = self
             .module
-            .get_function("efi_batch_from_diff_f32")
+            .get_function("efi_one_series_many_params_from_diff_rm_f32")
+            .or_else(|_| self.module.get_function("efi_batch_from_diff_f32"))
             .map_err(|e| CudaEfiError::Cuda(e.to_string()))?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
-            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Auto => 256,
         };
-        let grid = GridSize::x(n_combos as u32);
+        let grid_x = ((n_combos + block_x as usize - 1) / block_x as usize) as u32;
+        let grid = GridSize::x(grid_x);
         let block = BlockSize::x(block_x);
 
         let stream = &self.stream;
@@ -398,9 +532,11 @@ impl CudaEfi {
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
-            ManySeriesKernelPolicy::Auto => 128,
+            ManySeriesKernelPolicy::Auto => 256,
         };
-        let grid = GridSize::x(num_series as u32);
+        // One thread per series across grid
+        let grid_x = ((num_series + block_x as usize - 1) / block_x as usize) as u32;
+        let grid = GridSize::x(grid_x);
         let block = BlockSize::x(block_x);
 
         let stream = &self.stream;

@@ -6,7 +6,7 @@
 //! Semantics:
 //! - Warmup/writes: NaN until `warm = first_valid + long - 1`, identical to scalar AO.
 //! - NaN inputs: we honor `first_valid` and do no mid-stream masking (matches CPU path).
-//! - Accumulation: host prefix uses f64; device uses f64-derived values → f32 outputs.
+//! - Accumulation: host builds a double-single (DS) prefix in f32x2; device stays FP64-free.
 
 #![cfg(feature = "cuda")]
 
@@ -61,6 +61,36 @@ pub struct CudaAo {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+}
+
+// Host-side POD matching CUDA float2 ABI (8-byte aligned)
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct Float2 { pub x: f32, pub y: f32 }
+unsafe impl cust::memory::DeviceCopy for Float2 {}
+
+#[inline(always)]
+fn build_prefix_ds(hl2: &[f32], first_valid: usize) -> Vec<Float2> {
+    // Exclusive prefix: out[0] = {0,0}
+    let mut out = Vec::with_capacity(hl2.len() + 1);
+    out.push(Float2 { x: 0.0, y: 0.0 });
+    #[inline(always)]
+    fn two_sum(a: f32, b: f32) -> (f32, f32) {
+        let s = a + b;
+        let bb = s - a;
+        let e = (a - (s - bb)) + (b - bb);
+        (s, e)
+    }
+    let (mut hi, mut lo) = (0.0f32, 0.0f32);
+    for (i, &vv) in hl2.iter().enumerate() {
+        let v = if i >= first_valid && !vv.is_nan() { vv } else { 0.0 };
+        let (s, e1) = two_sum(hi, v);
+        let e2 = e1 + lo;
+        let (hi2, lo2) = two_sum(s, e2);
+        hi = hi2; lo = lo2;
+        out.push(Float2 { x: hi, y: lo });
+    }
+    out
 }
 
 impl CudaAo {
@@ -133,19 +163,12 @@ impl CudaAo {
             longs.push(l);
         }
 
-        // Build f64 prefix sums on host (exclusive, length=len+1)
-        let mut prefix: Vec<f64> = vec![0.0; len + 1];
-        let mut acc = 0.0f64;
-        for i in 0..len {
-            let vv = hl2[i];
-            let v = if vv.is_nan() { 0.0 } else { vv } as f64;
-            acc += v;
-            prefix[i + 1] = acc;
-        }
+        // Build DS (float2) exclusive prefix on host (FP64-free on device)
+        let prefix: Vec<Float2> = build_prefix_ds(hl2, first_valid);
 
         // VRAM estimate and headroom
         let rows = combos.len();
-        let bytes_prefix = (len + 1) * std::mem::size_of::<f64>();
+        let bytes_prefix = (len + 1) * std::mem::size_of::<Float2>();
         let bytes_periods = 2 * rows * std::mem::size_of::<i32>();
         let bytes_out_total = rows * len * std::mem::size_of::<f32>();
         let mut required = bytes_prefix + bytes_periods + bytes_out_total;
@@ -153,55 +176,49 @@ impl CudaAo {
         let fits = match mem_get_info() { Ok((free, _)) => required.saturating_add(headroom) <= free, Err(_) => true };
 
         // Device buffers
-        let d_prefix = DeviceBuffer::from_slice(&prefix).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
+        let d_prefix: DeviceBuffer<Float2> = DeviceBuffer::from_slice(&prefix)
+            .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
 
-        // If it fits, do one go; else chunk by combos
+        // Allocate one device output for all rows (avoid host bounce)
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
             .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
 
         if fits && rows <= 65_535 {
-            let d_shorts = DeviceBuffer::from_slice(&shorts).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
-            let d_longs = DeviceBuffer::from_slice(&longs).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
+            let d_shorts_full = DeviceBuffer::from_slice(&shorts).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
+            let d_longs_full  = DeviceBuffer::from_slice(&longs).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
             unsafe { (*(self as *const _ as *mut CudaAo)).last_batch = Some(BatchKernelSelected::Plain { block_x: 256 }); }
-            self.launch_batch(&d_prefix, len, first_valid, &d_shorts, &d_longs, rows, &mut d_out)?;
+            self.launch_batch_into(&d_prefix, len, first_valid, &d_shorts_full, &d_longs_full, rows, &d_out, 0)?;
             self.maybe_log_batch_debug();
             return Ok(DeviceArrayF32 { buf: d_out, rows, cols: len });
         }
 
-        // Chunking path
+        // Chunk grid.y to ≤ 65_535, writing each chunk directly into d_out
         unsafe { (*(self as *const _ as *mut CudaAo)).last_batch = Some(BatchKernelSelected::Plain { block_x: 256 }); }
         self.maybe_log_batch_debug();
         let max_grid = 65_535usize;
         let mut start = 0usize;
-        let mut host_out = vec![0f32; rows * len];
         while start < rows {
-            let remain = rows - start;
-            let chunk = remain.min(max_grid);
+            let chunk = (rows - start).min(max_grid);
             let d_shorts = DeviceBuffer::from_slice(&shorts[start..start + chunk])
                 .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
             let d_longs = DeviceBuffer::from_slice(&longs[start..start + chunk])
                 .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
-            let mut d_out_chunk: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(chunk * len) }
-                .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
-            self.launch_batch(&d_prefix, len, first_valid, &d_shorts, &d_longs, chunk, &mut d_out_chunk)?;
-            d_out_chunk
-                .copy_to(&mut host_out[start * len..start * len + chunk * len])
-                .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
+            self.launch_batch_into(&d_prefix, len, first_valid, &d_shorts, &d_longs, chunk, &d_out, start)?;
             start += chunk;
         }
-        let d_out = DeviceBuffer::from_slice(&host_out).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32 { buf: d_out, rows, cols: len })
     }
 
-    fn launch_batch(
+    fn launch_batch_into(
         &self,
-        d_prefix: &DeviceBuffer<f64>,
+        d_prefix: &DeviceBuffer<Float2>,
         len: usize,
         first_valid: usize,
         d_shorts: &DeviceBuffer<i32>,
         d_longs: &DeviceBuffer<i32>,
         n_combos: usize,
-        d_out: &mut DeviceBuffer<f32>,
+        d_out: &DeviceBuffer<f32>,
+        combo_offset: usize,
     ) -> Result<(), CudaAoError> {
         let func = self.module.get_function("ao_batch_f32").map_err(|e| CudaAoError::Cuda(e.to_string()))?;
         let block_x = self.policy.batch_block_x.unwrap_or(256);
@@ -215,7 +232,8 @@ impl CudaAo {
             let mut shorts_ptr = d_shorts.as_device_ptr().as_raw();
             let mut longs_ptr = d_longs.as_device_ptr().as_raw();
             let mut combos_i = n_combos as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let byte_off = (combo_offset * len * std::mem::size_of::<f32>()) as u64;
+            let mut out_ptr = d_out.as_device_ptr().as_raw() + byte_off;
             let args: &mut [*mut c_void] = &mut [
                 &mut prefix_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
@@ -285,7 +303,7 @@ impl CudaAo {
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAoError> {
         let func = self.module.get_function("ao_many_series_one_param_f32").map_err(|e| CudaAoError::Cuda(e.to_string()))?;
-        let block_x = self.policy.many_block_x.unwrap_or(128);
+        let block_x = self.policy.many_block_x.unwrap_or(256);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -362,7 +380,7 @@ pub mod benches {
     const PARAM_SWEEP: usize = 250; // ~250 (short,long) pairs
 
     fn bytes_one_series_many_params() -> usize {
-        let prefix_bytes = (ONE_SERIES_LEN + 1) * std::mem::size_of::<f64>();
+        let prefix_bytes = (ONE_SERIES_LEN + 1) * std::mem::size_of::<super::Float2>();
         let periods_bytes = PARAM_SWEEP * 2 * std::mem::size_of::<i32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         prefix_bytes + periods_bytes + out_bytes + 64 * 1024 * 1024

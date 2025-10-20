@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
+#include "ds_float2.cuh"
 
 // ----------------- One-series × many-params (prefix-sum based) -----------------
 
@@ -75,6 +76,97 @@ extern "C" __global__ void correl_hl_batch_f32(
                 }
             }
         }
+        out[row_off + t] = out_val;
+        t += stride;
+    }
+}
+
+// DS/FP32 variant that consumes float2 prefixes (double-single). See ds_float2.cuh.
+extern "C" __global__ void correl_hl_batch_f32ds(
+    const float2* __restrict__ ps_h,    // [len+1], dsf packed in float2
+    const float2* __restrict__ ps_h2,   // [len+1]
+    const float2* __restrict__ ps_l,    // [len+1]
+    const float2* __restrict__ ps_l2,   // [len+1]
+    const float2* __restrict__ ps_hl,   // [len+1]
+    const int*    __restrict__ ps_nan,  // [len+1] prefix of NaN counts
+    int len,
+    int first_valid,
+    const int*    __restrict__ periods, // [n_combos]
+    int n_combos,
+    float*        __restrict__ out      // [n_combos * len]
+){
+    const int combo = blockIdx.y;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    if (period <= 0) return;
+
+    const int   warm     = first_valid + period - 1;
+    const int   row_off  = combo * len;
+    const float nan_f    = __int_as_float(0x7fffffff);
+    const float inv_pf   = 1.0f / (float)period;
+
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = gridDim.x * blockDim.x;
+
+    auto rsqrt_refine = [](float x){
+        float y = rsqrtf(x);
+        y = y * (1.5f - 0.5f * x * y * y);
+        return y;
+    };
+
+    while (t < len) {
+        float out_val = nan_f;
+
+        if (t >= warm) {
+            const int end   = t + 1;
+            int       start = end - period;
+            if (start < 0) start = 0;
+
+            const int nan_count = ps_nan[end] - ps_nan[start];
+            if (nan_count == 0) {
+                // window sums via DS prefix diffs
+                float2 ah = ps_h[end];
+                float2 bh = ps_h[start];
+                float2 al = ps_l[end];
+                float2 bl = ps_l[start];
+                float2 ah2 = ps_h2[end];
+                float2 bh2 = ps_h2[start];
+                float2 al2 = ps_l2[end];
+                float2 bl2 = ps_l2[start];
+                float2 ahl = ps_hl[end];
+                float2 bhl = ps_hl[start];
+
+                dsf sum_h  = ds_sub(ds_make(ah.y, ah.x), ds_make(bh.y, bh.x));
+                dsf sum_l  = ds_sub(ds_make(al.y, al.x), ds_make(bl.y, bl.x));
+                dsf sum_h2 = ds_sub(ds_make(ah2.y, ah2.x), ds_make(bh2.y, bh2.x));
+                dsf sum_l2 = ds_sub(ds_make(al2.y, al2.x), ds_make(bl2.y, bl2.x));
+                dsf sum_hl = ds_sub(ds_make(ahl.y, ahl.x), ds_make(bhl.y, bhl.x));
+
+                // cov = sum_hl - (sum_h*sum_l)/period
+                dsf cov  = ds_sub(sum_hl, ds_scale(ds_mul(sum_h, sum_l), inv_pf));
+                // varh = sum_h2 - (sum_h*sum_h)/period; same for varl
+                dsf varh = ds_sub(sum_h2, ds_scale(ds_mul(sum_h, sum_h), inv_pf));
+                dsf varl = ds_sub(sum_l2, ds_scale(ds_mul(sum_l, sum_l), inv_pf));
+
+                float cov_f  = ds_to_f(cov);
+                float varh_f = ds_to_f(varh);
+                float varl_f = ds_to_f(varl);
+
+                if (varh_f > 0.0f && varl_f > 0.0f) {
+                    float prod = varh_f * varl_f;
+                    if (prod > 0.0f && isfinite(prod)) {
+                        float inv = rsqrt_refine(prod);
+                        out_val = cov_f * inv;
+                    } else {
+                        out_val = 0.0f;
+                    }
+                } else {
+                    out_val = 0.0f;
+                }
+            }
+        }
+
         out[row_off + t] = out_val;
         t += stride;
     }

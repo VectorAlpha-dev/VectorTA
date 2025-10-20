@@ -10,7 +10,7 @@
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::indicators::adxr::{AdxrBatchRange, AdxrParams};
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
@@ -52,7 +52,7 @@ impl CudaAdxr {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/adxr_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -76,6 +76,11 @@ impl CudaAdxr {
         } else {
             true
         }
+    }
+
+    #[inline]
+    fn round_up(x: usize, align: usize) -> usize {
+        (x + align - 1) / align * align
     }
 
     fn expand_periods(sweep: &AdxrBatchRange) -> Vec<AdxrParams> {
@@ -127,75 +132,163 @@ impl CudaAdxr {
             )));
         }
 
+        // Periods -> i32, async copy
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let out_elems = combos.len() * n;
-        let headroom = 64 * 1024 * 1024;
-        let bytes = (high_f32.len() + low_f32.len() + close_f32.len()) * 4
-            + periods_i32.len() * 4
-            + out_elems * 4;
-        if !Self::will_fit(bytes, headroom) {
-            return Err(CudaAdxrError::InvalidInput("insufficient device memory".into()));
-        }
+        let n_combos = periods_i32.len();
 
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-        let d_close = unsafe { DeviceBuffer::from_slice_async(close_f32, &self.stream) }
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
+        // Heuristic: prefer optimized kernel on large problems; otherwise use legacy batch kernel
+        const MIN_COMBOS_FOR_OPT: usize = 64;
+        const MIN_SERIES_LEN_FOR_OPT: usize = 100_000;
+        let use_opt = n_combos >= MIN_COMBOS_FOR_OPT || n >= MIN_SERIES_LEN_FOR_OPT;
+
+        if use_opt {
+            // Global ring workspace sizing (n_combos × padded period)
+            let ring_pitch = Self::round_up(max_p, 32);
+            let ring_elems = ring_pitch * n_combos;
+
+            // Memory fit check includes inputs + periods + ring + outputs
+            let headroom = 64 * 1024 * 1024;
+            let bytes = (high_f32.len() + low_f32.len() + close_f32.len()) * 4
+                + periods_i32.len() * 4
+                + ring_elems * 4
+                + (n_combos * n) * 4;
+            if !Self::will_fit(bytes, headroom) {
+                return Err(CudaAdxrError::InvalidInput("insufficient device memory".into()));
+            }
+
+            // Upload inputs (async)
+            let d_high  = unsafe { DeviceBuffer::from_slice_async(high_f32,  &self.stream) }
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let d_low   = unsafe { DeviceBuffer::from_slice_async(low_f32,   &self.stream) }
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let d_close = unsafe { DeviceBuffer::from_slice_async(close_f32, &self.stream) }
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
                 .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
 
-        // Launch kernel
-        let func = self
-            .module
-            .get_function("adxr_batch_f32")
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let mut d_ring: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(ring_elems, &self.stream) }
+                    .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let mut d_out: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(n_combos * n, &self.stream) }
+                    .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
 
-        // Ask occupancy for a suggested block size; fall back to 128
-        let (_, suggested) = func
-            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-            .unwrap_or((0, 0));
-        let block_x = if suggested > 0 { suggested } else { 128 };
+            // Optimized kernel with shared tiling
+            let mut func = self
+                .module
+                .get_function("adxr_one_series_many_params_f32_opt")
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
 
-        // Chunk over grid.y so grid.y <= 65_535
-        let n_combos = combos.len();
-        let max_grid_y = 65_535usize;
-        let mut launched = 0usize;
-        while launched < n_combos {
-            let chunk = (n_combos - launched).min(max_grid_y);
-            let grid: GridSize = (1u32, chunk as u32, 1u32).into();
+            // Hint: prefer shared memory over L1 for this kernel
+            func.set_cache_config(CacheConfig::PreferShared)
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+
+            // Dynamic shared memory for two f32 tiles of length 256
+            let shmem_bytes: usize = 2 * 256 * core::mem::size_of::<f32>();
+
+            // Occupancy-aware block size for given shmem
+            let (_min_grid, suggested) = func
+                .suggested_launch_configuration(shmem_bytes, BlockSize::xyz(0, 0, 0))
+                .unwrap_or((0, 128));
+            let mut block_x = if suggested > 0 { suggested } else { 128 } as u32;
+            if block_x > 256 { block_x = 256; }
+
+            // 1D launch: one thread per combo (period)
+            let blocks_x = ((n_combos as u32 + block_x - 1) / block_x).max(1);
+            let grid: GridSize = (blocks_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             let stream = &self.stream;
             unsafe {
-                // Offset periods and out by launched
-                let d_periods_off = d_periods.as_device_ptr().add(launched);
-                let d_out_off = d_out.as_device_ptr().add(launched * n);
                 launch!(
-                    func<<<grid, block, 0, stream>>>(
+                    func<<<grid, block, (shmem_bytes as u32), stream>>>(
                         d_high.as_device_ptr(),
                         d_low.as_device_ptr(),
                         d_close.as_device_ptr(),
-                        d_periods_off,
+                        d_periods.as_device_ptr(),
                         n as i32,
                         first as i32,
-                        chunk as i32,
-                        d_out_off
+                        n_combos as i32,
+                        d_ring.as_device_ptr(),
+                        ring_pitch as i32,
+                        d_out.as_device_ptr()
                     )
                 )
                 .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
             }
-            launched += chunk;
+
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+
+            Ok((DeviceArrayF32 { buf: d_out, rows: n_combos, cols: n }, combos))
+        } else {
+            // Legacy kernel path (no shared tiles, no global ring required)
+            let headroom = 64 * 1024 * 1024;
+            let bytes = (high_f32.len() + low_f32.len() + close_f32.len()) * 4
+                + periods_i32.len() * 4
+                + (n_combos * n) * 4;
+            if !Self::will_fit(bytes, headroom) {
+                return Err(CudaAdxrError::InvalidInput("insufficient device memory".into()));
+            }
+
+            let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let d_close = unsafe { DeviceBuffer::from_slice_async(close_f32, &self.stream) }
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let d_periods = DeviceBuffer::from_slice(&periods_i32)
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let mut d_out: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(n_combos * n, &self.stream) }
+                    .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+
+            let func = self
+                .module
+                .get_function("adxr_batch_f32")
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+
+            // Ask occupancy for a suggested block size; fall back to 128
+            let (_, suggested) = func
+                .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+                .unwrap_or((0, 0));
+            let block_x = if suggested > 0 { suggested } else { 128 } as u32;
+
+            // Chunk over grid.y so grid.y <= 65_535
+            let max_grid_y = 65_535usize;
+            let mut launched = 0usize;
+            while launched < n_combos {
+                let chunk = (n_combos - launched).min(max_grid_y);
+                let grid: GridSize = (1u32, chunk as u32, 1u32).into();
+                let block: BlockSize = (block_x, 1, 1).into();
+                let stream = &self.stream;
+                unsafe {
+                    // Offset periods and out by launched
+                    let d_periods_off = d_periods.as_device_ptr().add(launched);
+                    let d_out_off = d_out.as_device_ptr().add(launched * n);
+                    launch!(
+                        func<<<grid, block, 0, stream>>>(
+                            d_high.as_device_ptr(),
+                            d_low.as_device_ptr(),
+                            d_close.as_device_ptr(),
+                            d_periods_off,
+                            n as i32,
+                            first as i32,
+                            chunk as i32,
+                            d_out_off
+                        )
+                    )
+                    .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                }
+                launched += chunk;
+            }
+
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+
+            Ok((DeviceArrayF32 { buf: d_out, rows: n_combos, cols: n }, combos))
         }
-
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-
-        Ok((DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: n }, combos))
     }
 
     /// Many-series × one param (time-major). Returns VRAM-backed matrix with shape rows×cols.
@@ -255,29 +348,56 @@ impl CudaAdxr {
             unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
                 .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
 
-        let func = self
-            .module
-            .get_function("adxr_many_series_one_param_f32")
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+        // Try optimized time-major kernel first; fall back to legacy signature if missing
+        if let Ok(func_opt) = self.module.get_function("adxr_many_series_one_param_time_major_f32_opt") {
+            let ring_pitch = Self::round_up(period, 32);
+            let mut d_ring: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(cols * ring_pitch, &self.stream) }
+                    .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
 
-        // 1 thread per series; grid.x = cols
-        let grid: GridSize = (cols as u32, 1u32, 1u32).into();
-        let block: BlockSize = (1u32, 1u32, 1u32).into();
-        let stream = &self.stream;
-        unsafe {
-            launch!(
-                func<<<grid, block, 0, stream>>>(
-                    d_high.as_device_ptr(),
-                    d_low.as_device_ptr(),
-                    d_close.as_device_ptr(),
-                    d_first.as_device_ptr(),
-                    period as i32,
-                    cols as i32,
-                    rows as i32,
-                    d_out.as_device_ptr()
+            let grid: GridSize = (cols as u32, 1u32, 1u32).into();
+            let block: BlockSize = (1u32, 1u32, 1u32).into();
+            let stream = &self.stream;
+            unsafe {
+                launch!(
+                    func_opt<<<grid, block, 0, stream>>>(
+                        d_high.as_device_ptr(),
+                        d_low.as_device_ptr(),
+                        d_close.as_device_ptr(),
+                        d_first.as_device_ptr(),
+                        period as i32,
+                        cols as i32,
+                        rows as i32,
+                        d_ring.as_device_ptr(),
+                        ring_pitch as i32,
+                        d_out.as_device_ptr()
+                    )
                 )
-            )
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            }
+        } else {
+            let func = self
+                .module
+                .get_function("adxr_many_series_one_param_f32")
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let grid: GridSize = (cols as u32, 1u32, 1u32).into();
+            let block: BlockSize = (1u32, 1u32, 1u32).into();
+            let stream = &self.stream;
+            unsafe {
+                launch!(
+                    func<<<grid, block, 0, stream>>>(
+                        d_high.as_device_ptr(),
+                        d_low.as_device_ptr(),
+                        d_close.as_device_ptr(),
+                        d_first.as_device_ptr(),
+                        period as i32,
+                        cols as i32,
+                        rows as i32,
+                        d_out.as_device_ptr()
+                    )
+                )
+                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            }
         }
 
         self.stream

@@ -1,9 +1,6 @@
 // CUDA kernels for Volume Price Confirmation Index (VPCI)
-//
-// Math pattern: prefix-sum/rational.
-// Inputs are prefix sums of close (C), volume (V), and C*V, plus the raw
-// volume series for the rolling VPCIS numerator. Warmup/NaN semantics match
-// the scalar path: indices [0, warm) are NaN where warm = first_valid + long - 1.
+// Variant: FP64-free using double-single (float2) arithmetic for prefix sums.
+// Warmup/NaN semantics unchanged: indices [0, warm) are NaN where warm = first_valid + long - 1.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -11,6 +8,7 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include "ds_float2.cuh"
 
 #ifndef LIKELY
 #define LIKELY(x)   (__builtin_expect(!!(x), 1))
@@ -19,23 +17,57 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
+// ---- helpers ---------------------------------------------------------------
 __device__ __forceinline__ float nan_f32() { return __int_as_float(0x7fffffff); }
 
-__device__ __forceinline__ double zf64(double x) {
-    return isfinite(x) ? x : 0.0;
+// Load dsf from float2 prefix array
+__device__ __forceinline__ dsf load_dsf_f2(const float2* __restrict__ p, int idx) {
+    float2 v = p[idx];
+    return ds_make(v.x, v.y);
 }
 
-__device__ __forceinline__ double zf32d(float x) {
-    return isfinite(x) ? static_cast<double>(x) : 0.0;
+// DS / DS division with one refinement step
+__device__ __forceinline__ dsf ds_div(dsf num, dsf den) {
+    if (den.hi == 0.0f && den.lo == 0.0f) return ds_make(nan_f32(), 0.0f);
+    float q1 = num.hi / den.hi;
+    dsf t = ds_scale(den, q1);
+    dsf r = ds_sub(num, t);
+    float q2 = r.hi / den.hi;
+    // renormalize q1+q2
+    float s = q1 + q2;
+    float e = q2 - (s - q1);
+    return ds_norm(s, e);
 }
 
-// --- Batch: one series × many params ---
-// Each thread handles one parameter row (short, long) over the full series length.
+// Kahan compensated summation for rolling numerator
+__device__ __forceinline__ void kahan_add(float x, float& sum, float& c) {
+    float y = x - c;
+    float t = sum + y;
+    c = (t - sum) - y;
+    sum = t;
+}
+
+// Warp-broadcast helpers (broadcast lane 0)
+__device__ __forceinline__ float warp_bcast_f32_first(float v_any) {
+    unsigned mask = __activemask();
+    int first = __ffs(mask) - 1; // first active lane
+    return __shfl_sync(mask, v_any, first);
+}
+__device__ __forceinline__ dsf warp_bcast_dsf_first(dsf v_any) {
+    unsigned mask = __activemask();
+    int first = __ffs(mask) - 1;
+    float hi = __shfl_sync(mask, v_any.hi, first);
+    float lo = __shfl_sync(mask, v_any.lo, first);
+    return ds_make(hi, lo);
+}
+
+// ---- Batch: one series × many params --------------------------------------
+// Each thread handles one (short,long) parameter row over the full series.
 extern "C" __global__ void vpci_batch_f32(
-    const double* __restrict__ pfx_c,   // len = series_len
-    const double* __restrict__ pfx_v,   // len = series_len
-    const double* __restrict__ pfx_cv,  // len = series_len
-    const float*  __restrict__ volume,  // len = series_len
+    const float2* __restrict__ pfx_c,   // len = series_len (double-single)
+    const float2* __restrict__ pfx_v,   // len = series_len (double-single)
+    const float2* __restrict__ pfx_cv,  // len = series_len (double-single)
+    const float*  __restrict__ volume,  // len = series_len (raw volume, f32)
     const int*    __restrict__ shorts,  // len = n_rows
     const int*    __restrict__ longs,   // len = n_rows
     int series_len,
@@ -66,64 +98,92 @@ extern "C" __global__ void vpci_batch_f32(
     }
 
     const int warm = first_valid + long_p - 1;
+
     // Warmup prefix: set NaNs
     for (int i = 0; i < warm; ++i) { y_vpci[i] = nan_f32(); y_vpcis[i] = nan_f32(); }
 
-    const double inv_long  = 1.0 / (double)long_p;
-    const double inv_short = 1.0 / (double)short_p;
-    double sum_vpci_vol_short = 0.0;
+    const float inv_long  = 1.0f / (float)long_p;
+    const float inv_short = 1.0f / (float)short_p;
+
+    float sum_vpci_vol_short = 0.0f;  // rolling numerator sum
+    float sum_comp           = 0.0f;  // Kahan compensation
+
+    const int lane = threadIdx.x & 31;
 
     for (int i = warm; i < series_len; ++i) {
-        // Prefix window differences (i >= long_p and i >= short_p by construction)
         const int idx_long_prev  = i - long_p;
         const int idx_short_prev = i - short_p;
 
-        const double sc_l  = pfx_c[i]  - pfx_c[idx_long_prev];
-        const double sv_l  = pfx_v[i]  - pfx_v[idx_long_prev];
-        const double scv_l = pfx_cv[i] - pfx_cv[idx_long_prev];
-        const double sc_s  = pfx_c[i]  - pfx_c[idx_short_prev];
-        const double sv_s  = pfx_v[i]  - pfx_v[idx_short_prev];
-        const double scv_s = pfx_cv[i] - pfx_cv[idx_short_prev];
+        // Load "current" prefix values & volume once per warp via lane 0, then broadcast
+        // Per-thread loads for parity; broadcasting offers speed but can risk edge-cases
+        dsf c_cur  = load_dsf_f2(pfx_c,  i);
+        dsf v_cur  = load_dsf_f2(pfx_v,  i);
+        dsf cv_cur = load_dsf_f2(pfx_cv, i);
+        float vol_i = volume[i];
 
-        const double sma_l   = sc_l * inv_long;
-        const double sma_s   = sc_s * inv_short;
-        const double sma_v_l = sv_l * inv_long;
-        const double sma_v_s = sv_s * inv_short;
+        // Thread-specific previous prefix values
+        const dsf c_prev_l  = load_dsf_f2(pfx_c,  idx_long_prev);
+        const dsf v_prev_l  = load_dsf_f2(pfx_v,  idx_long_prev);
+        const dsf cv_prev_l = load_dsf_f2(pfx_cv, idx_long_prev);
+        const dsf c_prev_s  = load_dsf_f2(pfx_c,  idx_short_prev);
+        const dsf v_prev_s  = load_dsf_f2(pfx_v,  idx_short_prev);
+        const dsf cv_prev_s = load_dsf_f2(pfx_cv, idx_short_prev);
 
-        const double vwma_l = (sv_l != 0.0) ? (scv_l / sv_l) : NAN;
-        const double vwma_s = (sv_s != 0.0) ? (scv_s / sv_s) : NAN;
+        // Window diffs (DS)
+        const dsf sc_l  = ds_sub(c_cur,  c_prev_l);
+        const dsf sv_l  = ds_sub(v_cur,  v_prev_l);
+        const dsf scv_l = ds_sub(cv_cur, cv_prev_l);
+        const dsf sc_s  = ds_sub(c_cur,  c_prev_s);
+        const dsf sv_s  = ds_sub(v_cur,  v_prev_s);
+        const dsf scv_s = ds_sub(cv_cur, cv_prev_s);
 
-        const double vpc = vwma_l - sma_l;
-        const double vpr = (sma_s != 0.0)   ? (vwma_s / sma_s) : NAN;
-        const double vm  = (sma_v_l != 0.0) ? (sma_v_s / sma_v_l) : NAN;
+        // SMAs (DS)
+        const dsf sma_l   = ds_scale(sc_l,  inv_long);
+        const dsf sma_s   = ds_scale(sc_s,  inv_short);
+        const dsf sma_v_l = ds_scale(sv_l,  inv_long);
+        const dsf sma_v_s = ds_scale(sv_s,  inv_short);
 
-        const double vpci = vpc * vpr * vm;
-        y_vpci[i] = (float)vpci;
+        // VWMA (DS), VPC = vwma_l - sma_l (DS), VPR = vwma_s / sma_s (DS), VM = sma_v_s / sma_v_l (DS)
+        const dsf vwma_l = ds_div(scv_l, sv_l);
+        const dsf vwma_s = ds_div(scv_s, sv_s);
 
-        // Update VPCIS rolling numerator: sum(VPCI * Volume) over last `short_p`
-        sum_vpci_vol_short += (isfinite(vpci) ? vpci : 0.0) * zf32d(volume[i]);
-        if (i >= warm + short_p) {
-            const int rm_idx = i - short_p;
-            const double vpci_rm = (double)y_vpci[rm_idx];
-            sum_vpci_vol_short -= (isfinite(vpci_rm) ? vpci_rm : 0.0) * zf32d(volume[rm_idx]);
+        const dsf vpc_ds = ds_sub(vwma_l, sma_l);
+        const dsf vpr_ds = ds_div(vwma_s, sma_s);
+        const dsf vm_ds  = ds_div(sma_v_s, sma_v_l);
+
+        const float vpc = ds_to_f(vpc_ds);
+        const float vpr = ds_to_f(vpr_ds);
+        const float vm  = ds_to_f(vm_ds);
+
+        const float vpci = vpc * vpr * vm;
+
+        y_vpci[i] = vpci;
+
+        // Rolling numerator: recompute naive sum over the short window for better parity
+        float num = 0.0f;
+        const int win_start = i - short_p + 1;
+        for (int t = win_start; t <= i; ++t) {
+            const float vpci_t = y_vpci[t];
+            if (isfinite(vpci_t)) num += vpci_t * volume[t];
         }
 
-        const double denom = sma_v_s; // = SMA(Volume, short)
-        if (denom != 0.0 && isfinite(denom)) {
-            y_vpcis[i] = (float)((sum_vpci_vol_short * inv_short) / denom);
+        // Denominator = SMA(volume, short)
+        const float denom = ds_to_f(sma_v_s);
+        if (denom != 0.0f && isfinite(denom)) {
+            y_vpcis[i] = (num * inv_short) / denom;
         } else {
             y_vpcis[i] = nan_f32();
         }
     }
 }
 
-// --- Many series × one param (time-major) ---
+// ---- Many series × one param (time-major) ---------------------------------
 // Threads in X dimension index series; each thread scans time rows for its series.
 extern "C" __global__ void vpci_many_series_one_param_f32(
-    const double* __restrict__ pfx_c_tm,   // len = rows * cols (time-major)
-    const double* __restrict__ pfx_v_tm,
-    const double* __restrict__ pfx_cv_tm,
-    const float*  __restrict__ volume_tm,  // raw volume time-major
+    const float2* __restrict__ pfx_c_tm,   // len = rows * cols (time-major), double-single
+    const float2* __restrict__ pfx_v_tm,
+    const float2* __restrict__ pfx_cv_tm,
+    const float*  __restrict__ volume_tm,  // raw volume time-major (f32)
     const int*    __restrict__ first_valids, // len = cols
     int cols,
     int rows,
@@ -138,7 +198,6 @@ extern "C" __global__ void vpci_many_series_one_param_f32(
     const int first = first_valids[series];
     if (UNLIKELY(short_p <= 0 || long_p <= 0 || short_p > long_p ||
                  long_p > rows || first < 0 || first >= rows)) {
-        // Fill column with NaNs
         for (int r = 0; r < rows; ++r) {
             const int idx = r * cols + series;
             out_vpci_tm[idx]  = nan_f32();
@@ -148,57 +207,63 @@ extern "C" __global__ void vpci_many_series_one_param_f32(
     }
 
     const int warm = first + long_p - 1;
-    // Warmup prefix
     for (int r = 0; r < warm; ++r) {
         const int idx = r * cols + series;
         out_vpci_tm[idx]  = nan_f32();
         out_vpcis_tm[idx] = nan_f32();
     }
 
-    const double inv_long  = 1.0 / (double)long_p;
-    const double inv_short = 1.0 / (double)short_p;
-    double sum_vpci_vol_short = 0.0;
+    const float inv_long  = 1.0f / (float)long_p;
+    const float inv_short = 1.0f / (float)short_p;
+
+    float sum_vpci_vol_short = 0.0f;
+    float sum_comp           = 0.0f;
 
     for (int r = warm; r < rows; ++r) {
         const int idx          = r * cols + series;
         const int idx_long_pr  = (r - long_p) * cols + series;
         const int idx_short_pr = (r - short_p) * cols + series;
 
-        const double sc_l  = pfx_c_tm[idx]  - pfx_c_tm[idx_long_pr];
-        const double sv_l  = pfx_v_tm[idx]  - pfx_v_tm[idx_long_pr];
-        const double scv_l = pfx_cv_tm[idx] - pfx_cv_tm[idx_long_pr];
-        const double sc_s  = pfx_c_tm[idx]  - pfx_c_tm[idx_short_pr];
-        const double sv_s  = pfx_v_tm[idx]  - pfx_v_tm[idx_short_pr];
-        const double scv_s = pfx_cv_tm[idx] - pfx_cv_tm[idx_short_pr];
+        const dsf c_cur  = load_dsf_f2(pfx_c_tm,  idx);
+        const dsf v_cur  = load_dsf_f2(pfx_v_tm,  idx);
+        const dsf cv_cur = load_dsf_f2(pfx_cv_tm, idx);
 
-        const double sma_l   = sc_l * inv_long;
-        const double sma_s   = sc_s * inv_short;
-        const double sma_v_l = sv_l * inv_long;
-        const double sma_v_s = sv_s * inv_short;
+        const dsf sc_l  = ds_sub(c_cur,  load_dsf_f2(pfx_c_tm,  idx_long_pr));
+        const dsf sv_l  = ds_sub(v_cur,  load_dsf_f2(pfx_v_tm,  idx_long_pr));
+        const dsf scv_l = ds_sub(cv_cur, load_dsf_f2(pfx_cv_tm, idx_long_pr));
+        const dsf sc_s  = ds_sub(c_cur,  load_dsf_f2(pfx_c_tm,  idx_short_pr));
+        const dsf sv_s  = ds_sub(v_cur,  load_dsf_f2(pfx_v_tm,  idx_short_pr));
+        const dsf scv_s = ds_sub(cv_cur, load_dsf_f2(pfx_cv_tm, idx_short_pr));
 
-        const double vwma_l = (sv_l != 0.0) ? (scv_l / sv_l) : NAN;
-        const double vwma_s = (sv_s != 0.0) ? (scv_s / sv_s) : NAN;
+        const dsf sma_l   = ds_scale(sc_l,  inv_long);
+        const dsf sma_s   = ds_scale(sc_s,  inv_short);
+        const dsf sma_v_l = ds_scale(sv_l,  inv_long);
+        const dsf sma_v_s = ds_scale(sv_s,  inv_short);
 
-        const double vpc = vwma_l - sma_l;
-        const double vpr = (sma_s != 0.0)   ? (vwma_s / sma_s) : NAN;
-        const double vm  = (sma_v_l != 0.0) ? (sma_v_s / sma_v_l) : NAN;
+        const dsf vwma_l = ds_div(scv_l, sv_l);
+        const dsf vwma_s = ds_div(scv_s, sv_s);
 
-        const double vpci = vpc * vpr * vm;
-        out_vpci_tm[idx] = (float)vpci;
+        const dsf vpc_ds = ds_sub(vwma_l, sma_l);
+        const dsf vpr_ds = ds_div(vwma_s, sma_s);
+        const dsf vm_ds  = ds_div(sma_v_s, sma_v_l);
 
-        sum_vpci_vol_short += (isfinite(vpci) ? vpci : 0.0) * zf32d(volume_tm[idx]);
+        const float vpci = ds_to_f(vpc_ds) * ds_to_f(vpr_ds) * ds_to_f(vm_ds);
+        out_vpci_tm[idx] = vpci;
+
+        float contrib = isfinite(vpci) ? (vpci * volume_tm[idx]) : 0.0f;
+        kahan_add(contrib, sum_vpci_vol_short, sum_comp);
+
         if (r >= warm + short_p) {
             const int rm = (r - short_p) * cols + series;
-            const double vpci_rm = (double)out_vpci_tm[rm];
-            sum_vpci_vol_short -= (isfinite(vpci_rm) ? vpci_rm : 0.0) * zf32d(volume_tm[rm]);
+            const float vpci_rm = out_vpci_tm[rm];
+            const float rm_contrib = isfinite(vpci_rm) ? (vpci_rm * volume_tm[rm]) : 0.0f;
+            kahan_add(-rm_contrib, sum_vpci_vol_short, sum_comp);
         }
 
-        const double denom = sma_v_s;
-        if (denom != 0.0 && isfinite(denom)) {
-            out_vpcis_tm[idx] = (float)((sum_vpci_vol_short * inv_short) / denom);
-        } else {
-            out_vpcis_tm[idx] = nan_f32();
-        }
+        const float denom = ds_to_f(sma_v_s);
+        out_vpcis_tm[idx] = (denom != 0.0f && isfinite(denom))
+                          ? (sum_vpci_vol_short * inv_short) / denom
+                          : nan_f32();
     }
 }
 

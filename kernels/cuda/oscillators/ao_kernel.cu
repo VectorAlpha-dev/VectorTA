@@ -2,6 +2,10 @@
 //
 // Math: AO = SMA_short(hl2) - SMA_long(hl2)
 //
+// Optimized for Ada+ (RTX 40xx): device code is FP64-free. We use double-single (DS)
+// arithmetic built from FP32 + FMA to retain near-double precision without incurring
+// the FP64 throughput penalty on GeForce parts.
+//
 // Batch kernel (one series × many params): prefix-sum based — O(1) per output.
 // Many-series × one-param (time-major): per-series rolling sums with strided loads.
 
@@ -22,14 +26,23 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-// Batch kernel using prefix sums (double precision accumulation on host).
+// DS helpers (float2) — include from parent dir
+#include "../ds_float2.cuh"
+
+// Local loader from float2 arrays into dsf
+__device__ __forceinline__ dsf load_dsf(const float2* __restrict__ p, int idx) {
+    float2 v = p[idx];
+    return ds_make(v.x, v.y);
+}
+
+// Batch kernel using DS prefix sums (host builds prefix; device stays FP64-free).
 // Arguments:
-//  - prefix: exclusive prefix sum of hl2 in float64, length = len+1, prefix[0]=0
+//  - prefix_ds: exclusive prefix sum of hl2 packed as float2 {hi,lo}, length=len+1 (prefix[0]={0,0})
 //  - len: series length
 //  - first_valid: index of first non-NaN element in hl2
 //  - shorts, longs: arrays (n_combos) with short/long periods per row
 //  - out: row-major [n_combos][len]
-extern "C" __global__ void ao_batch_f32(const double* __restrict__ prefix,
+extern "C" __global__ void ao_batch_f32(const float2* __restrict__ prefix_ds,
                                          int len,
                                          int first_valid,
                                          const int* __restrict__ shorts,
@@ -56,8 +69,8 @@ extern "C" __global__ void ao_batch_f32(const double* __restrict__ prefix,
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
 
-    const double inv_s = 1.0 / (double)s;
-    const double inv_l = 1.0 / (double)l;
+    const float inv_s = 1.0f / (float)s;
+    const float inv_l = 1.0f / (float)l;
 
     while (t < len) {
         float out_val = AO_NAN_F;
@@ -66,10 +79,14 @@ extern "C" __global__ void ao_batch_f32(const double* __restrict__ prefix,
             int start_l = t + 1 - l;
             if (start_s < 0) start_s = 0;
             if (start_l < 0) start_l = 0;
-            const double sum_s = prefix[t + 1] - prefix[start_s];
-            const double sum_l = prefix[t + 1] - prefix[start_l];
-            const double ao = sum_s * inv_s - sum_l * inv_l;
-            out_val = (float)ao;
+            // DS differences via prefix
+            dsf head   = load_dsf(prefix_ds, t + 1);
+            dsf tail_s = load_dsf(prefix_ds, start_s);
+            dsf tail_l = load_dsf(prefix_ds, start_l);
+            dsf sum_s = ds_sub(head, tail_s);
+            dsf sum_l = ds_sub(head, tail_l);
+            dsf ao_ds = ds_sub(ds_scale(sum_s, inv_s), ds_scale(sum_l, inv_l));
+            out_val = ds_to_f(ao_ds);
         }
         out[row_off + t] = out_val;
         t += stride;
@@ -104,40 +121,59 @@ extern "C" __global__ void ao_many_series_one_param_f32(
 
     const int warm = first_valid + long_p - 1;
 
+    // If warm exceeds series_len-1, there are no valid outputs; fill NaNs and exit.
+    if (UNLIKELY(warm >= series_len)) {
+        float* o = out_tm + series;
+        for (int row = 0; row < series_len; ++row, o += num_series) *o = AO_NAN_F;
+        return;
+    }
+
     // Prefill NaNs up to warm-1
     {
         float* o = out_tm + series;
         for (int row = 0; row < warm; ++row, o += num_series) *o = AO_NAN_F;
     }
 
-    // Build initial window sums for short and long (strided by num_series)
-    double sum_s = 0.0; // double for stability
-    double sum_l = 0.0;
-    const float* ps = prices_tm + (first_valid) * (size_t)num_series + series;
-    const float* pl = ps;
+    // Build initial window sums for short and long (strided by num_series) using DS
+    dsf sum_s = ds_set(0.0f);
+    dsf sum_l = ds_set(0.0f);
+
+    const float* pl = prices_tm + (size_t)first_valid * (size_t)num_series + series;
     for (int k = 0; k < long_p; ++k) {
         const float v = *pl;
-        sum_l += (double)v;
-        if (k >= long_p - short_p) sum_s += (double)v;
+        sum_l = ds_add(sum_l, ds_set(v));
+        if (k >= long_p - short_p) sum_s = ds_add(sum_s, ds_set(v));
         pl += num_series;
     }
 
+    const float inv_s = 1.0f / (float)short_p;
+    const float inv_l = 1.0f / (float)long_p;
+
     // First AO value at warm
-    *(out_tm + (size_t)warm * num_series + series) = (float)(sum_s / (double)short_p - sum_l / (double)long_p);
+    *(out_tm + (size_t)warm * (size_t)num_series + series) =
+        ds_to_f(ds_sub(ds_scale(sum_s, inv_s), ds_scale(sum_l, inv_l)));
 
     // Rolling updates
-    const float* cur = prices_tm + ((size_t)warm + 1) * num_series + series;
-    const float* old_s = prices_tm + ((size_t)first_valid + (long_p - short_p)) * num_series + series;
-    const float* old_l = prices_tm + ((size_t)first_valid) * num_series + series;
-    float*       dst = out_tm + ((size_t)warm + 1) * num_series + series;
+    const float* cur   = prices_tm + ((size_t)warm + 1) * (size_t)num_series + series;
+    const float* old_s = prices_tm + ((size_t)first_valid + (long_p - short_p)) * (size_t)num_series + series;
+    const float* old_l = prices_tm + ((size_t)first_valid) * (size_t)num_series + series;
+    float*       dst   = out_tm   + ((size_t)warm + 1) * (size_t)num_series + series;
 
     for (int row = warm + 1; row < series_len; ++row) {
-        sum_s += (double)(*cur) - (double)(*old_s);
-        sum_l += (double)(*cur) - (double)(*old_l);
-        *dst = (float)(sum_s / (double)short_p - sum_l / (double)long_p);
-        cur += num_series;
+        const float c  = *cur;
+        const float os = *old_s;
+        const float ol = *old_l;
+
+        sum_s = ds_add(sum_s, ds_set(c));
+        sum_s = ds_sub(sum_s, ds_set(os));
+        sum_l = ds_add(sum_l, ds_set(c));
+        sum_l = ds_sub(sum_l, ds_set(ol));
+
+        *dst = ds_to_f(ds_sub(ds_scale(sum_s, inv_s), ds_scale(sum_l, inv_l)));
+
+        cur   += num_series;
         old_s += num_series;
         old_l += num_series;
-        dst += num_series;
+        dst   += num_series;
     }
 }

@@ -8,6 +8,91 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include "ds_float2.cuh"
+
+// ----------------- Helpers -----------------
+__device__ __forceinline__ float nan_f32() { return __int_as_float(0x7fffffff); }
+__device__ __forceinline__ bool nonpos_or_nan(float x) { return !(x > 0.0f); }
+
+// Load dsf from float2 prefix array (x=hi, y=lo)
+__device__ __forceinline__ dsf load_dsf_f2(const float2* __restrict__ p, int idx) {
+    float2 v = p[idx];
+    return ds_make(v.x, v.y);
+}
+
+// ----------------- One-series × many-params (prefix-sum based, DS) -----------------
+// Consumes float2 prefixes (double-single). Grid-x sweeps time; grid-y = combos.
+extern "C" __global__ void zscore_sma_prefix_f32ds(
+    const float*  __restrict__ data,             // [len]
+    const float2* __restrict__ prefix_sum,       // [len+1] DS (x=hi,y=lo)
+    const float2* __restrict__ prefix_sum_sq,    // [len+1] DS (x=hi,y=lo)
+    const int*    __restrict__ prefix_nan,       // [len+1] prefix count of NaNs
+    int len,
+    int first_valid,
+    const int*   __restrict__ periods,           // [n_combos]
+    const float* __restrict__ nbdevs,            // [n_combos]
+    int n_combos,
+    float* __restrict__ out                      // [n_combos * len]
+) {
+    const int combo = blockIdx.y;
+    if (combo >= n_combos) return;
+
+    const int   period = periods[combo];
+    const float nbdev  = nbdevs[combo];
+    if (period <= 0) return;
+
+    const int   warm       = first_valid + period - 1;
+    const int   row_offset = combo * len;
+    const float invN       = 1.0f / (float)period;
+    const float inv_nbdev  = (nbdev != 0.0f) ? (1.0f / nbdev) : 0.0f;
+
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = gridDim.x * blockDim.x;
+
+    while (t < len) {
+        float out_val = nan_f32();
+
+        if (t >= warm && nbdev != 0.0f) {
+            const int end = t + 1;
+            int start = end - period; if (start < 0) start = 0;
+            const int nan_count = prefix_nan[end] - prefix_nan[start];
+            if (nan_count == 0) {
+                // DS window sums via prefix diffs
+                const dsf s1 = ds_sub(load_dsf_f2(prefix_sum, end),    load_dsf_f2(prefix_sum, start));
+                const dsf s2 = ds_sub(load_dsf_f2(prefix_sum_sq, end), load_dsf_f2(prefix_sum_sq, start));
+                const dsf mean_ds = ds_scale(s1, invN);
+                const dsf ex2_ds  = ds_scale(s2, invN);
+                const dsf var_ds  = ds_sub(ex2_ds, ds_mul(mean_ds, mean_ds));
+                const float mean  = ds_to_f(mean_ds);
+                const float var   = ds_to_f(var_ds);
+                if (var > 0.0f && isfinite(var)) {
+                    const float sd = sqrtf(var);
+                    const float denom_inv = (sd > 0.0f) ? (inv_nbdev / sd) : 0.0f;
+                    const float x = data[t];
+                    const float z = (x - mean) * denom_inv;
+                    out_val = z;
+                }
+            }
+        }
+
+        out[row_offset + t] = out_val;
+        t += stride;
+    }
+}
+
+// Temporary: pack double prefix -> float2 (hi,lo) for DS kernels
+extern "C" __global__
+void pack_prefix_double_to_float2(const double* __restrict__ src,
+                                  float2* __restrict__ dst,
+                                  int n)
+{
+    int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= n) return;
+    double v = src[i];
+    float hi = (float)v;
+    float lo = (float)(v - (double)hi);
+    dst[i] = make_float2(hi, lo);
+}
 
 // ----------------- One-series × many-params (prefix-sum based) -----------------
 extern "C" __global__ void zscore_sma_prefix_f32(
@@ -117,13 +202,8 @@ extern "C" __global__ void zscore_many_series_one_param_f32(
     const int init_end = min(warm + 1, rows);
     for (int i = first_valid; i < init_end; ++i) {
         const float v = data_tm[i * stride + series];
-        if (isnan(v)) {
-            nan_in_win++;
-        } else {
-            const double d = (double)v;
-            s1 += d;
-            s2 += d * d;
-        }
+        if (isnan(v)) { nan_in_win++; }
+        else { const double d = (double)v; s1 += d; s2 += d * d; }
     }
 
     if (warm < rows && nan_in_win == 0) {

@@ -10,12 +10,13 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::cci::{CciBatchRange, CciParams};
-use cust::context::Context;
+use cust::context::{CacheConfig, Context, SharedMemoryConfig};
 use cust::device::Device;
 use cust::function::{BlockSize, Function, GridSize};
 use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
+use cust::sys as cu;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
@@ -41,6 +42,7 @@ pub struct CudaCci {
     stream: Stream,
     _context: Context,
     debug_batch_logged: bool,
+    smem_optin_limit: usize, // max per-block dyn shared memory (bytes), opt-in, minus reservation
 }
 
 impl CudaCci {
@@ -77,7 +79,35 @@ impl CudaCci {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
 
-        Ok(Self { module, stream, _context: context, debug_batch_logged: false })
+        let smem_optin_limit = Self::query_optin_smem_limit_bytes();
+
+        Ok(Self { module, stream, _context: context, debug_batch_logged: false, smem_optin_limit })
+    }
+
+    fn query_optin_smem_limit_bytes() -> usize {
+        unsafe {
+            let mut dev: cu::CUdevice = std::mem::zeroed();
+            if cu::cuCtxGetDevice(&mut dev) != cu::CUresult::CUDA_SUCCESS {
+                return 48 * 1024; // safe baseline
+            }
+
+            let mut optin: i32 = 0;
+            let _ = cu::cuDeviceGetAttribute(
+                &mut optin as *mut i32,
+                cu::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+                dev,
+            );
+
+            let mut def: i32 = 0;
+            let _ = cu::cuDeviceGetAttribute(
+                &mut def as *mut i32,
+                cu::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK,
+                dev,
+            );
+
+            let cap = if optin > 0 { optin as usize } else { def as usize };
+            cap.saturating_sub(1024) // leave 1 KiB per-block reservation
+        }
     }
 
     #[inline]
@@ -157,27 +187,44 @@ impl CudaCci {
         d_out: &mut DeviceBuffer<f32>,
         periods_offset: usize,
         out_offset_elems: usize,
+        dyn_smem_bytes: usize,
     ) -> Result<(), CudaCciError> {
         let mut func: Function = self
             .module
             .get_function("cci_batch_f32")
             .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
 
-        // Use CUDA-suggested block size for occupancy; override with CCI_BLOCK_X
+        // Favor shared memory over L1 when beneficial on unified L1/SMEM arch; 4-byte banks for f32
+        let _ = func.set_cache_config(CacheConfig::PreferShared);
+        let _ = func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize);
+
+        // Clamp dynamic SMEM by device's opt-in limit
+        let dyn_smem = dyn_smem_bytes.min(self.smem_optin_limit);
+
+        // Opt-in to dynamic SMEM > 48 KiB and prefer SMEM carveout
+        unsafe {
+            let raw = func.to_raw();
+            let _ = cu::cuFuncSetAttribute(
+                raw,
+                cu::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                cu::CUshared_carveout_enum::CU_SHAREDMEM_CARVEOUT_MAX_SHARED as i32,
+            );
+            let _ = cu::cuFuncSetAttribute(
+                raw,
+                cu::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                dyn_smem as i32,
+            );
+        }
+
+        // Use CUDA-suggested block size considering dynamic shared memory
         let block_x: u32 = match env::var("CCI_BLOCK_X").ok().as_deref() {
-            Some("auto") => {
+            Some("auto") | None => {
                 let (_mg, suggest) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+                    .suggested_launch_configuration(dyn_smem, BlockSize::xyz(0, 0, 0))
                     .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
                 suggest
             }
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
-            None => {
-                let (_mg, suggest) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-                    .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
-                suggest
-            }
         };
         // One block per combo (kernel uses 1 active lane per block for simplicity)
         let grid: GridSize = (n_combos as u32, 1, 1).into();
@@ -201,7 +248,7 @@ impl CudaCci {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&func, grid, block, 0, args)
+                .launch(&func, grid, block, dyn_smem as u32, args)
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
         }
         Ok(())
@@ -230,6 +277,7 @@ impl CudaCci {
         }
 
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let periods_u: Vec<usize> = periods.iter().map(|&p| p as usize).collect();
 
         if Self::use_async() {
             let h_prices = LockedBuffer::from_slice(data_f32)
@@ -261,6 +309,13 @@ impl CudaCci {
                 let n_this = std::cmp::min(max_blocks, rows - launched);
                 let periods_off = launched;
                 let out_off = launched * len;
+                // dynamic shared memory for this chunk = max(period) * sizeof(f32)
+                let max_p_this = periods_u[launched..launched + n_this]
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
+                let dyn_smem_bytes = max_p_this * std::mem::size_of::<f32>();
                 self.launch_batch_kernel(
                     &d_prices,
                     &d_periods,
@@ -270,6 +325,7 @@ impl CudaCci {
                     &mut d_out,
                     periods_off,
                     out_off,
+                    dyn_smem_bytes,
                 )?;
                 launched += n_this;
             }
@@ -291,6 +347,13 @@ impl CudaCci {
             let mut launched = 0usize;
             while launched < rows {
                 let n_this = std::cmp::min(max_blocks, rows - launched);
+                // dynamic shared memory for this chunk = max(period) * sizeof(f32)
+                let max_p_this = periods_u[launched..launched + n_this]
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
+                let dyn_smem_bytes = max_p_this * std::mem::size_of::<f32>();
                 self.launch_batch_kernel(
                     &d_prices,
                     &d_periods,
@@ -300,6 +363,7 @@ impl CudaCci {
                     &mut d_out,
                     launched,
                     launched * len,
+                    dyn_smem_bytes,
                 )?;
                 launched += n_this;
             }

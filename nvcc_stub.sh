@@ -32,6 +32,26 @@ cat > "$out" <<PTX
 .target sm_80
 .address_size 64
 
+.visible .entry ao_batch_f32(
+    .param .u64 prefix_ds,
+    .param .s32 len,
+    .param .s32 first_valid,
+    .param .u64 shorts,
+    .param .u64 longs,
+    .param .s32 n_combos,
+    .param .u64 out_ptr
+) { ret; }
+
+.visible .entry ao_many_series_one_param_f32(
+    .param .u64 prices_tm,
+    .param .u64 first_valids,
+    .param .s32 num_series,
+    .param .s32 series_len,
+    .param .s32 short_p,
+    .param .s32 long_p,
+    .param .u64 out_tm
+) { ret; }
+
 .visible .entry chande_batch_f32() { ret; }
 .visible .entry chande_many_series_one_param_f32() { ret; }
 .visible .entry atr_batch_f32() { ret; }

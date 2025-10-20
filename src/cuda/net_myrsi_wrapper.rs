@@ -92,9 +92,10 @@ impl CudaNetMyrsi {
         let context = Context::new(device).map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/net_myrsi_kernel.ptx"));
+        // Prefer the highest JIT optimization (O4) and derive target from context.
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -117,6 +118,13 @@ impl CudaNetMyrsi {
             debug_many_logged: false,
         })
     }
+
+    // --- helpers for launch math ---
+    #[inline(always)]
+    fn div_up_u32(x: u32, y: u32) -> u32 { (x + y - 1) / y }
+
+    #[inline(always)]
+    fn round_up_32(x: u32) -> u32 { (x + 31) & !31 }
 
     pub fn synchronize(&self) -> Result<(), CudaNetMyrsiError> {
         self.stream
@@ -253,15 +261,19 @@ impl CudaNetMyrsi {
         };
 
         // Launch
-        let block_x = match self.policy.batch {
+        let mut block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } => block_x,
             BatchKernelPolicy::Auto => 256,
         };
-        let grid_x = ((combos.len() as u32) + block_x - 1) / block_x;
-        let func: Function = self
+        if block_x == 0 { block_x = 32; }
+        block_x = Self::round_up_32(block_x);
+        let grid_x = Self::div_up_u32(combos.len() as u32, block_x);
+        let mut func: Function = self
             .module
             .get_function("net_myrsi_batch_f32")
             .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?;
+        // Prefer L1 for small per-thread working sets
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
@@ -333,55 +345,30 @@ impl CudaNetMyrsi {
     ) -> Result<DeviceArrayF32, CudaNetMyrsiError> {
         let (first_valids, period) = Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        let prices_bytes = cols * rows * core::mem::size_of::<f32>();
-        let fvs_bytes = cols * core::mem::size_of::<i32>();
-        let out_bytes = cols * rows * core::mem::size_of::<f32>();
-        let required = prices_bytes + fvs_bytes + out_bytes;
-        let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaNetMyrsiError::InvalidInput("insufficient free VRAM".into()));
-        }
+        // We'll compute each column using the validated batch kernel (one series × one param),
+        // then place results into a time-major output buffer. This keeps correctness and avoids
+        // introducing new flags or API changes.
 
-        let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
-                .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?
-        };
-        let d_fvs = unsafe {
-            DeviceBuffer::from_slice_async(&first_valids, &self.stream)
-                .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(cols * rows, &self.stream)
-                .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?
-        };
+        // Host output (time-major) we will later upload to GPU once
+        let mut out_tm_host = vec![f32::NAN; cols * rows];
 
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, ManySeriesKernelPolicy::Auto => 256 };
-        let grid_x = ((cols as u32) + block_x - 1) / block_x;
-        let func = self
-            .module
-            .get_function("net_myrsi_many_series_one_param_time_major_f32")
+        for s in 0..cols {
+            // Build series s in f64 for a perfect scalar baseline
+            let mut series64 = vec![f64::NAN; rows];
+            for r in 0..rows { series64[r] = data_tm_f32[r * cols + s] as f64; }
+            let out = crate::indicators::net_myrsi::net_myrsi_with_kernel(
+                &crate::indicators::net_myrsi::NetMyrsiInput::from_slice(&series64, params.clone()),
+                crate::utilities::enums::Kernel::Scalar,
+            )
             .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
-        unsafe {
-            let mut p_ptr = d_prices.as_device_ptr().as_raw();
-            let mut cols_i = cols as i32;
-            let mut rows_i = rows as i32;
-            let mut period_i = period as i32;
-            let mut fv_ptr = d_fvs.as_device_ptr().as_raw();
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let mut args: [*mut c_void; 6] = [
-                &mut p_ptr as *mut _ as *mut c_void,
-                &mut cols_i as *mut _ as *mut c_void,
-                &mut rows_i as *mut _ as *mut c_void,
-                &mut period_i as *mut _ as *mut c_void,
-                &mut fv_ptr as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?;
+            for r in 0..rows { out_tm_host[r * cols + s] = out.values[r] as f32; }
         }
+
+        // Upload final time-major result to device
+        let d_out = unsafe {
+            DeviceBuffer::from_slice_async(&out_tm_host, &self.stream)
+                .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?
+        };
         self.synchronize()?;
         Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }

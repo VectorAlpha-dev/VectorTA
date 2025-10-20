@@ -45,6 +45,7 @@ pub enum ManySeriesKernelPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
+    TimeMajor { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -293,14 +294,18 @@ impl CudaHalftrend {
             );
         }
 
-        // Flatten into row-major FP32 matrices expected by kernels
-        let mut atr_rows = vec![0f32; rows * n];
-        let mut hma_rows = vec![0f32; rows * n];
-        let mut lma_rows = vec![0f32; rows * n];
-        let mut rhi_rows = vec![0f32; rows * n];
-        let mut rlo_rows = vec![0f32; rows * n];
+        // Heuristic: prefer time-major path for larger combo counts and lengths.
+        let use_time_major = match self.batch_policy {
+            BatchKernelPolicy::Auto => (rows >= 16) && (n >= 8192),
+            BatchKernelPolicy::Plain { .. } => false,
+        };
+
+        // Build helper matrices in either row-major (legacy) or time-major (optimized) layout
+        use cust::memory::LockedBuffer;
         let mut warms = vec![0i32; rows];
         let mut chdevs = vec![0f32; rows];
+
+        // Common per-row fields
         for (row, prm) in combos.iter().enumerate() {
             let a = prm.amplitude.unwrap();
             let p = prm.atr_period.unwrap();
@@ -308,50 +313,21 @@ impl CudaHalftrend {
             chdevs[row] = ch;
             let warm = first + a.max(p) - 1;
             warms[row] = warm.min(n) as i32;
-            let base = row * n;
-            let atrv = &atr_map[&p];
-            let hmv = &hma_map[&a];
-            let lmv = &lma_map[&a];
-            let rhv = &rhi_map[&a];
-            let rlv = &rlo_map[&a];
-            for i in 0..n {
-                atr_rows[base + i] = atrv[i] as f32;
-                hma_rows[base + i] = hmv[i] as f32;
-                lma_rows[base + i] = lmv[i] as f32;
-                rhi_rows[base + i] = rhv[i] as f32;
-                rlo_rows[base + i] = rlv[i] as f32;
-            }
         }
 
-        // VRAM estimate: inputs (3*n) + 5 precompute mats (rows*n) + warms + chdevs + 6 outputs (rows*n)
-        let req = (3*n + 5*rows*n + rows + rows + 6*rows*n) * std::mem::size_of::<f32>()
-            + 64 * 1024 * 1024;
-        if !Self::mem_ok(req, 0) {
-            return Err(CudaHalftrendError::InvalidInput("insufficient device memory".into()));
-        }
-
-        // Upload
+        // Prepare device inputs and helper buffers
         let d_high = unsafe { DeviceBuffer::from_slice_async(&high[..n], &self.stream) }
             .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..n], &self.stream) }
             .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         let d_close = unsafe { DeviceBuffer::from_slice_async(&close[..n], &self.stream) }
             .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_atr = unsafe { DeviceBuffer::from_slice_async(&atr_rows, &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_hma = unsafe { DeviceBuffer::from_slice_async(&hma_rows, &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_lma = unsafe { DeviceBuffer::from_slice_async(&lma_rows, &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_rhi = unsafe { DeviceBuffer::from_slice_async(&rhi_rows, &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_rlo = unsafe { DeviceBuffer::from_slice_async(&rlo_rows, &self.stream) }
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         let d_warms = DeviceBuffer::from_slice(&warms)
             .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         let d_chdevs = DeviceBuffer::from_slice(&chdevs)
             .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
 
+        // Outputs (we keep external row-major metadata: rows x n)
         let mut d_ht: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*n, &self.stream) }
             .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         let mut d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*n, &self.stream) }
@@ -365,65 +341,210 @@ impl CudaHalftrend {
         let mut d_ss: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows*n, &self.stream) }
             .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
 
-        // Launch
-        let func = self
-            .module
-            .get_function("halftrend_batch_f32")
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let block_x = match self.batch_policy { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x.max(32) };
-        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
-            eprintln!("[halftrend] batch kernel: block_x={} rows={} len={} first_valid={}",
-                block_x, rows, n, first);
-            unsafe { (*(self as *const _ as *mut CudaHalftrend)).debug_batch_logged = true; }
-            unsafe { (*(self as *const _ as *mut CudaHalftrend)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
-        }
-        unsafe {
-            let grid: GridSize = (((rows as u32) + block_x - 1) / block_x).max(1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            let mut h = d_high.as_device_ptr().as_raw();
-            let mut l = d_low.as_device_ptr().as_raw();
-            let mut c = d_close.as_device_ptr().as_raw();
-            let mut a = d_atr.as_device_ptr().as_raw();
-            let mut hm = d_hma.as_device_ptr().as_raw();
-            let mut lm = d_lma.as_device_ptr().as_raw();
-            let mut rh = d_rhi.as_device_ptr().as_raw();
-            let mut rl = d_rlo.as_device_ptr().as_raw();
-            let mut w = d_warms.as_device_ptr().as_raw();
-            let mut cd = d_chdevs.as_device_ptr().as_raw();
-            let mut n_i = n as i32;
-            let mut r_i = rows as i32;
-            let mut oht = d_ht.as_device_ptr().as_raw();
-            let mut otr = d_tr.as_device_ptr().as_raw();
-            let mut oah = d_ah.as_device_ptr().as_raw();
-            let mut oal = d_al.as_device_ptr().as_raw();
-            let mut obs = d_bs.as_device_ptr().as_raw();
-            let mut oss = d_ss.as_device_ptr().as_raw();
-            let mut args: [*mut c_void; 17] = [
-                &mut h as *mut _ as *mut c_void,
-                &mut l as *mut _ as *mut c_void,
-                &mut c as *mut _ as *mut c_void,
-                &mut a as *mut _ as *mut c_void,
-                &mut hm as *mut _ as *mut c_void,
-                &mut lm as *mut _ as *mut c_void,
-                &mut rh as *mut _ as *mut c_void,
-                &mut rl as *mut _ as *mut c_void,
-                &mut w as *mut _ as *mut c_void,
-                &mut cd as *mut _ as *mut c_void,
-                &mut n_i as *mut _ as *mut c_void,
-                &mut r_i as *mut _ as *mut c_void,
-                &mut oht as *mut _ as *mut c_void,
-                &mut otr as *mut _ as *mut c_void,
-                &mut oah as *mut _ as *mut c_void,
-                &mut oal as *mut _ as *mut c_void,
-                &mut obs as *mut _ as *mut c_void,
-            ];
-            // append last output
-            let mut extra = [&mut oss as *mut _ as *mut c_void];
-            let mut all = Vec::with_capacity(args.len() + 1);
-            all.extend_from_slice(&args);
-            all.extend_from_slice(&extra);
-            self.stream.launch(&func, grid, block, 0, all.as_mut_slice())
+        if !use_time_major {
+            // Legacy ROW-MAJOR [rows, n] helper matrices
+            let mut atr_rows = vec![0f32; rows * n];
+            let mut hma_rows = vec![0f32; rows * n];
+            let mut lma_rows = vec![0f32; rows * n];
+            let mut rhi_rows = vec![0f32; rows * n];
+            let mut rlo_rows = vec![0f32; rows * n];
+            for (row, prm) in combos.iter().enumerate() {
+                let a = prm.amplitude.unwrap();
+                let p = prm.atr_period.unwrap();
+                let base = row * n;
+                let atrv = &atr_map[&p];
+                let hmv = &hma_map[&a];
+                let lmv = &lma_map[&a];
+                let rhv = &rhi_map[&a];
+                let rlv = &rlo_map[&a];
+                for i in 0..n {
+                    atr_rows[base + i] = atrv[i] as f32;
+                    hma_rows[base + i] = hmv[i] as f32;
+                    lma_rows[base + i] = lmv[i] as f32;
+                    rhi_rows[base + i] = rhv[i] as f32;
+                    rlo_rows[base + i] = rlv[i] as f32;
+                }
+            }
+
+            // Upload legacy helpers
+            let d_atr = unsafe { DeviceBuffer::from_slice_async(&atr_rows, &self.stream) }
                 .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let d_hma = unsafe { DeviceBuffer::from_slice_async(&hma_rows, &self.stream) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let d_lma = unsafe { DeviceBuffer::from_slice_async(&lma_rows, &self.stream) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let d_rhi = unsafe { DeviceBuffer::from_slice_async(&rhi_rows, &self.stream) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let d_rlo = unsafe { DeviceBuffer::from_slice_async(&rlo_rows, &self.stream) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+
+            // Launch row-major kernel (keeps existing ABI)
+            let func = self
+                .module
+                .get_function("halftrend_batch_f32")
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let block_x = match self.batch_policy { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x.max(32) };
+            if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
+                eprintln!("[halftrend] batch kernel (row-major): block_x={} rows={} len={} first_valid={}",
+                    block_x, rows, n, first);
+                unsafe { (*(self as *const _ as *mut CudaHalftrend)).debug_batch_logged = true; }
+            }
+            unsafe { (*(self as *const _ as *mut CudaHalftrend)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+
+            unsafe {
+                let grid: GridSize = (((rows as u32) + block_x - 1) / block_x).max(1).into();
+                let block: BlockSize = (block_x, 1, 1).into();
+                let mut h = d_high.as_device_ptr().as_raw();
+                let mut l = d_low.as_device_ptr().as_raw();
+                let mut c = d_close.as_device_ptr().as_raw();
+                let mut a = d_atr.as_device_ptr().as_raw();
+                let mut hm = d_hma.as_device_ptr().as_raw();
+                let mut lm = d_lma.as_device_ptr().as_raw();
+                let mut rh = d_rhi.as_device_ptr().as_raw();
+                let mut rl = d_rlo.as_device_ptr().as_raw();
+                let mut w = d_warms.as_device_ptr().as_raw();
+                let mut cd = d_chdevs.as_device_ptr().as_raw();
+                let mut n_i = n as i32;
+                let mut r_i = rows as i32;
+                let mut oht = d_ht.as_device_ptr().as_raw();
+                let mut otr = d_tr.as_device_ptr().as_raw();
+                let mut oah = d_ah.as_device_ptr().as_raw();
+                let mut oal = d_al.as_device_ptr().as_raw();
+                let mut obs = d_bs.as_device_ptr().as_raw();
+                let mut oss = d_ss.as_device_ptr().as_raw();
+                let mut args: [*mut c_void; 18] = [
+                    &mut h as *mut _ as *mut c_void,
+                    &mut l as *mut _ as *mut c_void,
+                    &mut c as *mut _ as *mut c_void,
+                    &mut a as *mut _ as *mut c_void,
+                    &mut hm as *mut _ as *mut c_void,
+                    &mut lm as *mut _ as *mut c_void,
+                    &mut rh as *mut _ as *mut c_void,
+                    &mut rl as *mut _ as *mut c_void,
+                    &mut w as *mut _ as *mut c_void,
+                    &mut cd as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut r_i as *mut _ as *mut c_void,
+                    &mut oht as *mut _ as *mut c_void,
+                    &mut otr as *mut _ as *mut c_void,
+                    &mut oah as *mut _ as *mut c_void,
+                    &mut oal as *mut _ as *mut c_void,
+                    &mut obs as *mut _ as *mut c_void,
+                    &mut oss as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, &mut args)
+                    .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            }
+        } else {
+            // TIME-MAJOR [n, rows] helper matrices in pinned memory
+            let len_tm = rows * n;
+            let mut atr_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let mut hma_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let mut lma_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let mut rhi_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let mut rlo_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+
+            for (row, prm) in combos.iter().enumerate() {
+                let a = prm.amplitude.unwrap();
+                let p = prm.atr_period.unwrap();
+                let atrv = &atr_map[&p];
+                let hmv = &hma_map[&a];
+                let lmv = &lma_map[&a];
+                let rhv = &rhi_map[&a];
+                let rlv = &rlo_map[&a];
+                for t in 0..n {
+                    let idx = t * rows + row;
+                    atr_tm[idx] = atrv[t] as f32;
+                    hma_tm[idx] = hmv[t] as f32;
+                    lma_tm[idx] = lmv[t] as f32;
+                    rhi_tm[idx] = rhv[t] as f32;
+                    rlo_tm[idx] = rlv[t] as f32;
+                }
+            }
+
+            // Device helpers (uninitialized + async copy from pinned host)
+            let mut d_atr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let mut d_hma: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let mut d_lma: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let mut d_rhi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let mut d_rlo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+
+            unsafe {
+                d_atr.async_copy_from(&atr_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                d_hma.async_copy_from(&hma_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                d_lma.async_copy_from(&lma_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                d_rhi.async_copy_from(&rhi_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+                d_rlo.async_copy_from(&rlo_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            }
+
+            // Launch TIME-MAJOR kernel
+            let func = self
+                .module
+                .get_function("halftrend_batch_time_major_f32")
+                .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            let block_x = 256u32;
+            if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
+                eprintln!("[halftrend] batch kernel (time-major): block_x={} rows={} len={} first_valid={}",
+                    block_x, rows, n, first);
+                unsafe { (*(self as *const _ as *mut CudaHalftrend)).debug_batch_logged = true; }
+            }
+            unsafe { (*(self as *const _ as *mut CudaHalftrend)).last_batch = Some(BatchKernelSelected::TimeMajor { block_x }); }
+
+            // Note: kernel outputs time-major [n, rows] into the same d_* buffers.
+            unsafe {
+                let grid: GridSize = (((rows as u32) + block_x - 1) / block_x).max(1).into();
+                let block: BlockSize = (block_x, 1, 1).into();
+                let mut h = d_high.as_device_ptr().as_raw();
+                let mut l = d_low.as_device_ptr().as_raw();
+                let mut c = d_close.as_device_ptr().as_raw();
+                let mut a = d_atr.as_device_ptr().as_raw();
+                let mut hm = d_hma.as_device_ptr().as_raw();
+                let mut lm = d_lma.as_device_ptr().as_raw();
+                let mut rh = d_rhi.as_device_ptr().as_raw();
+                let mut rl = d_rlo.as_device_ptr().as_raw();
+                let mut w = d_warms.as_device_ptr().as_raw();
+                let mut cd = d_chdevs.as_device_ptr().as_raw();
+                let mut n_i = n as i32;
+                let mut r_i = rows as i32;
+                let mut oht = d_ht.as_device_ptr().as_raw();
+                let mut otr = d_tr.as_device_ptr().as_raw();
+                let mut oah = d_ah.as_device_ptr().as_raw();
+                let mut oal = d_al.as_device_ptr().as_raw();
+                let mut obs = d_bs.as_device_ptr().as_raw();
+                let mut oss = d_ss.as_device_ptr().as_raw();
+                let mut args: [*mut c_void; 18] = [
+                    &mut h as *mut _ as *mut c_void,
+                    &mut l as *mut _ as *mut c_void,
+                    &mut c as *mut _ as *mut c_void,
+                    &mut a as *mut _ as *mut c_void,
+                    &mut hm as *mut _ as *mut c_void,
+                    &mut lm as *mut _ as *mut c_void,
+                    &mut rh as *mut _ as *mut c_void,
+                    &mut rl as *mut _ as *mut c_void,
+                    &mut w as *mut _ as *mut c_void,
+                    &mut cd as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut r_i as *mut _ as *mut c_void,
+                    &mut oht as *mut _ as *mut c_void,
+                    &mut otr as *mut _ as *mut c_void,
+                    &mut oah as *mut _ as *mut c_void,
+                    &mut oal as *mut _ as *mut c_void,
+                    &mut obs as *mut _ as *mut c_void,
+                    &mut oss as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, &mut args)
+                    .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            }
         }
 
         self.stream
@@ -431,6 +552,7 @@ impl CudaHalftrend {
             .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
 
         Ok(CudaHalftrendBatch {
+            // Keep external shape as [rows, n] to preserve API/tests
             halftrend: DeviceArrayF32 { buf: d_ht, rows, cols: n },
             trend: DeviceArrayF32 { buf: d_tr, rows, cols: n },
             atr_high: DeviceArrayF32 { buf: d_ah, rows, cols: n },
@@ -480,11 +602,13 @@ impl CudaHalftrend {
         for s in 0..cols { warms[s] = (firsts[s] as usize + amplitude.max(atr_period) - 1).min(rows) as i32; }
 
         // Host precompute per series (ATR + SMA + rolling extrema) and flatten back to TM
-        let mut atr_tm = vec![0f32; cols * rows];
-        let mut hma_tm = vec![0f32; cols * rows];
-        let mut lma_tm = vec![0f32; cols * rows];
-        let mut rhi_tm = vec![0f32; cols * rows];
-        let mut rlo_tm = vec![0f32; cols * rows];
+        // Use page-locked buffers to enable true async H->D copies.
+        let len_tm = cols * rows;
+        let mut atr_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let mut hma_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let mut lma_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let mut rhi_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let mut rlo_tm = unsafe { LockedBuffer::<f32>::uninitialized(len_tm) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         for s in 0..cols {
             let mut h = vec![f64::NAN; rows];
             let mut l = vec![f64::NAN; rows];
@@ -511,11 +635,19 @@ impl CudaHalftrend {
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         let d_low  = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         let d_close= unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_atr  = unsafe { DeviceBuffer::from_slice_async(&atr_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_hma  = unsafe { DeviceBuffer::from_slice_async(&hma_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_lma  = unsafe { DeviceBuffer::from_slice_async(&lma_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_rhi  = unsafe { DeviceBuffer::from_slice_async(&rhi_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let d_rlo  = unsafe { DeviceBuffer::from_slice_async(&rlo_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let mut d_atr: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let mut d_hma: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let mut d_lma: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let mut d_rhi: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        let mut d_rlo: DeviceBuffer<f32>  = unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+
+        unsafe {
+            d_atr.async_copy_from(&atr_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            d_hma.async_copy_from(&hma_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            d_lma.async_copy_from(&lma_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            d_rhi.async_copy_from(&rhi_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+            d_rlo.async_copy_from(&rlo_tm, &self.stream).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+        }
         let d_warms= DeviceBuffer::from_slice(&warms).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
 
         let mut d_ht: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols*rows, &self.stream) }.map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
@@ -604,12 +736,41 @@ impl CudaHalftrend {
         if [out_ht.len(), out_tr.len(), out_ah.len(), out_al.len(), out_bs.len(), out_ss.len()].iter().any(|&m| m != need) {
             return Err(CudaHalftrendError::InvalidInput("output slice wrong length".into()));
         }
+
+        // Copy from device
         dev.halftrend.buf.copy_to(out_ht).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         dev.trend.buf.copy_to(out_tr).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         dev.atr_high.buf.copy_to(out_ah).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         dev.atr_low.buf.copy_to(out_al).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         dev.buy.buf.copy_to(out_bs).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         dev.sell.buf.copy_to(out_ss).map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
+
+        // If the last batch used the time-major kernel, transpose back to row-major for host slices
+        let used_time_major = matches!(self.last_batch, Some(BatchKernelSelected::TimeMajor { .. }));
+        if used_time_major {
+            // Input buffers are laid out time-major [n, rows] on device; we copied raw order.
+            // Transpose to row-major [rows, n] for the host outputs.
+            let (n, r) = (cols, rows);
+            let mut tmp = vec![0f32; need];
+            // halftrend
+            tmp.copy_from_slice(out_ht);
+            for row in 0..r { for t in 0..n { out_ht[row*n + t] = tmp[t*r + row]; } }
+            // trend
+            tmp.copy_from_slice(out_tr);
+            for row in 0..r { for t in 0..n { out_tr[row*n + t] = tmp[t*r + row]; } }
+            // atr_high
+            tmp.copy_from_slice(out_ah);
+            for row in 0..r { for t in 0..n { out_ah[row*n + t] = tmp[t*r + row]; } }
+            // atr_low
+            tmp.copy_from_slice(out_al);
+            for row in 0..r { for t in 0..n { out_al[row*n + t] = tmp[t*r + row]; } }
+            // buy
+            tmp.copy_from_slice(out_bs);
+            for row in 0..r { for t in 0..n { out_bs[row*n + t] = tmp[t*r + row]; } }
+            // sell
+            tmp.copy_from_slice(out_ss);
+            for row in 0..r { for t in 0..n { out_ss[row*n + t] = tmp[t*r + row]; } }
+        }
         Ok((rows, cols, dev.combos))
     }
 }

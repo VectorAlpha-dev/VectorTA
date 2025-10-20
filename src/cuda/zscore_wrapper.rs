@@ -38,6 +38,15 @@ impl fmt::Display for CudaZscoreError {
 
 impl std::error::Error for CudaZscoreError {}
 
+// Host-side POD matching CUDA float2 layout (hi,lo) for DS prefixes
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Float2 { hi: f32, lo: f32 }
+unsafe impl cust::memory::DeviceCopy for Float2 {}
+
+#[inline(always)]
+fn pack_ds(v: f64) -> Float2 { let hi = v as f32; let lo = (v - hi as f64) as f32; Float2 { hi, lo } }
+
 #[derive(Clone, Debug)]
 struct ZscoreCombo {
     period: usize,
@@ -240,6 +249,34 @@ impl CudaZscore {
         (prefix_sum, prefix_sum_sq, prefix_nan)
     }
 
+    // Build DS (float2) prefixes directly into pinned memory
+    fn build_prefixes_ds_pinned(
+        data: &[f32],
+    ) -> Result<(LockedBuffer<Float2>, LockedBuffer<Float2>, LockedBuffer<i32>), CudaZscoreError> {
+        let n = data.len();
+        let mut ps  = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }
+            .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+        let mut ps2 = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }
+            .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+        let mut pnan = unsafe { LockedBuffer::<i32>::uninitialized(n + 1) }
+            .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+
+        ps.as_mut_slice()[0] = Float2::default();
+        ps2.as_mut_slice()[0] = Float2::default();
+        pnan.as_mut_slice()[0] = 0;
+
+        let (mut s, mut s2) = (0.0f64, 0.0f64);
+        let mut nan = 0i32;
+        for i in 0..n {
+            let v = data[i];
+            if v.is_nan() { nan += 1; ps.as_mut_slice()[i+1] = ps.as_slice()[i]; ps2.as_mut_slice()[i+1] = ps2.as_slice()[i]; }
+            else { let d = v as f64; s += d; s2 += d*d; ps.as_mut_slice()[i+1] = pack_ds(s); ps2.as_mut_slice()[i+1] = pack_ds(s2); }
+            pnan.as_mut_slice()[i+1] = nan;
+        }
+
+        Ok((ps, ps2, pnan))
+    }
+
     fn launch_batch_kernel(
         &self,
         d_data: &DeviceBuffer<f32>,
@@ -308,6 +345,69 @@ impl CudaZscore {
         Ok(())
     }
 
+    fn launch_batch_kernel_ds(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        d_prefix_sum: &DeviceBuffer<Float2>,
+        d_prefix_sum_sq: &DeviceBuffer<Float2>,
+        d_prefix_nan: &DeviceBuffer<i32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_nbdevs: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaZscoreError> {
+        let func = self
+            .module
+            .get_function("zscore_sma_prefix_f32ds")
+            .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+
+        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x.max(64) };
+        unsafe { (*(self as *const _ as *mut CudaZscore)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        self.maybe_log_batch_debug();
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+
+        for (start, chunk_len) in Self::grid_y_chunks(n_combos) {
+            let grid: GridSize = (grid_x.max(1), chunk_len as u32, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            unsafe {
+                let mut data_ptr = d_data.as_device_ptr().as_raw();
+                let mut ps_ptr   = d_prefix_sum.as_device_ptr().as_raw();
+                let mut ps2_ptr  = d_prefix_sum_sq.as_device_ptr().as_raw();
+                let mut pnan_ptr = d_prefix_nan.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut first_i = first_valid as i32;
+                let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
+                let mut nbdevs_ptr  = d_nbdevs.as_device_ptr().add(start).as_raw();
+                let mut combos_i = chunk_len as i32;
+                let out_off = start * len; let mut out_ptr = d_out.as_device_ptr().add(out_off).as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut data_ptr as *mut _ as *mut c_void,
+                    &mut ps_ptr   as *mut _ as *mut c_void,
+                    &mut ps2_ptr  as *mut _ as *mut c_void,
+                    &mut pnan_ptr as *mut _ as *mut c_void,
+                    &mut len_i    as *mut _ as *mut c_void,
+                    &mut first_i  as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut nbdevs_ptr  as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut out_ptr  as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn select_batch_impl(len: usize, combos: usize) -> bool {
+        // Heuristic: prefer DS for larger workloads to avoid FP64 throughput bottleneck
+        let work = len.saturating_mul(combos);
+        work >= 5_000_000
+    }
+
     fn run_batch_kernel(
         &self,
         data_f32: &[f32],
@@ -315,40 +415,58 @@ impl CudaZscore {
         first_valid: usize,
     ) -> Result<DeviceArrayF32, CudaZscoreError> {
         let len = data_f32.len();
-        let (prefix_sum, prefix_sum_sq, prefix_nan) = Self::build_prefixes(data_f32);
+        let use_ds = Self::select_batch_impl(len, combos.len());
 
-        let d_data =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
-        let d_prefix_sum = DeviceBuffer::from_slice(&prefix_sum)
+        let d_data = DeviceBuffer::from_slice(data_f32)
             .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
-        let d_prefix_sum_sq = DeviceBuffer::from_slice(&prefix_sum_sq)
-            .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
-        let d_prefix_nan = DeviceBuffer::from_slice(&prefix_nan)
-            .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
-
         let periods: Vec<i32> = combos.iter().map(|c| c.period as i32).collect();
         let nbdevs: Vec<f32> = combos.iter().map(|c| c.nbdev).collect();
-        let d_periods =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
-        let d_nbdevs =
-            DeviceBuffer::from_slice(&nbdevs).map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods)
+            .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+        let d_nbdevs = DeviceBuffer::from_slice(&nbdevs)
+            .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
 
         let elems = combos.len() * len;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
             .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
 
-        self.launch_batch_kernel(
-            &d_data,
-            &d_prefix_sum,
-            &d_prefix_sum_sq,
-            &d_prefix_nan,
-            &d_periods,
-            &d_nbdevs,
-            len,
-            first_valid,
-            combos.len(),
-            &mut d_out,
-        )?;
+        if use_ds {
+            let (ps, ps2, pnan) = Self::build_prefixes_ds_pinned(data_f32)?;
+            let d_ps: DeviceBuffer<Float2>  = DeviceBuffer::from_slice(ps.as_slice())
+                .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+            let d_ps2: DeviceBuffer<Float2> = DeviceBuffer::from_slice(ps2.as_slice())
+                .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+            let d_pnan: DeviceBuffer<i32>   = DeviceBuffer::from_slice(pnan.as_slice())
+                .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+
+            self.launch_batch_kernel_ds(
+                &d_data, &d_ps, &d_ps2, &d_pnan,
+                &d_periods, &d_nbdevs,
+                len, first_valid, combos.len(),
+                &mut d_out,
+            )?;
+        } else {
+            let (prefix_sum, prefix_sum_sq, prefix_nan) = Self::build_prefixes(data_f32);
+            let d_prefix_sum = DeviceBuffer::from_slice(&prefix_sum)
+                .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+            let d_prefix_sum_sq = DeviceBuffer::from_slice(&prefix_sum_sq)
+                .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+            let d_prefix_nan = DeviceBuffer::from_slice(&prefix_nan)
+                .map_err(|e| CudaZscoreError::Cuda(e.to_string()))?;
+
+            self.launch_batch_kernel(
+                &d_data,
+                &d_prefix_sum,
+                &d_prefix_sum_sq,
+                &d_prefix_nan,
+                &d_periods,
+                &d_nbdevs,
+                len,
+                first_valid,
+                combos.len(),
+                &mut d_out,
+            )?;
+        }
 
         self.stream
             .synchronize()
@@ -367,9 +485,9 @@ impl CudaZscore {
         sweep: &ZscoreBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<(usize, f32)>), CudaZscoreError> {
         let (combos, first_valid, _len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        // VRAM estimate
+        // VRAM estimate (DS prefixes use Float2 = 8 bytes)
         let len = data_f32.len();
-        let prefixes = 2 * (len + 1) * std::mem::size_of::<f64>() + (len + 1) * std::mem::size_of::<i32>();
+        let prefixes = 2 * (len + 1) * std::mem::size_of::<Float2>() + (len + 1) * std::mem::size_of::<i32>();
         let params = combos.len() * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let input_bytes = len * std::mem::size_of::<f32>();
         let out_bytes = combos.len() * len * std::mem::size_of::<f32>();
