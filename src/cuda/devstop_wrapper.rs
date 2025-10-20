@@ -53,6 +53,11 @@ pub struct CudaDevStop {
     _context: Context,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Float2 { x: f32, y: f32 }
+unsafe impl cust::memory::DeviceCopy for Float2 {}
+
 impl CudaDevStop {
     pub fn new(device_id: usize) -> Result<Self, CudaDevStopError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
@@ -92,28 +97,51 @@ impl CudaDevStop {
         match (fh, fl) { (Some(h), Some(l)) => Some(h.min(l)), _ => None }
     }
 
-    fn build_range_prefixes(high: &[f32], low: &[f32]) -> (Vec<f64>, Vec<f64>, Vec<i32>, usize) {
+    fn build_range_prefixes(high: &[f32], low: &[f32]) -> (Vec<Float2>, Vec<Float2>, Vec<i32>, usize) {
         let len = high.len().min(low.len());
         let first = Self::first_valid_hl(high, low).unwrap_or(0);
-        // r[i] is defined from (i-1,i); we accumulate prefixes directly skipping NaNs
-        let mut p1 = vec![0.0f64; len + 1];
-        let mut p2 = vec![0.0f64; len + 1];
+        // r[i] is defined from (i-1,i); we accumulate dual-f32 prefixes (hi,lo) skipping NaNs
+        let mut p1 = vec![Float2 { x: 0.0, y: 0.0 }; len + 1];
+        let mut p2 = vec![Float2 { x: 0.0, y: 0.0 }; len + 1];
         let mut pc = vec![0i32;  len + 1];
-        let mut acc1 = 0.0f64; let mut acc2 = 0.0f64; let mut accc = 0i32;
+        // dual-f32 running sums
+        let mut s1_hi = 0.0f32; let mut s1_lo = 0.0f32;
+        let mut s2_hi = 0.0f32; let mut s2_lo = 0.0f32;
+        let mut accc = 0i32;
         let mut prev_h = if first < len { high[first] } else { f32::NAN };
         let mut prev_l = if first < len { low[first]  } else { f32::NAN };
+
+        #[inline(always)]
+        fn two_sum(a: f32, b: f32) -> (f32, f32) {
+            let s = a + b; let bb = s - a; let e = (a - (s - bb)) + (b - bb); (s, e)
+        }
+        #[inline(always)]
+        fn quick_two_sum(a: f32, b: f32) -> (f32, f32) {
+            let s = a + b; let e = b - (s - a); (s, e)
+        }
+        #[inline(always)]
+        fn ds_add_host(hi: &mut f32, lo: &mut f32, x: f32) {
+            let (s, e) = two_sum(*hi, x);
+            let (hh, ll) = quick_two_sum(s, *lo + e);
+            *hi = hh; *lo = ll;
+        }
+
         for i in 0..len {
             if i >= first + 1 {
                 let h = high[i]; let l = low[i];
                 if !h.is_nan() && !l.is_nan() && !prev_h.is_nan() && !prev_l.is_nan() {
-                    let hi2 = if h > prev_h { h } else { prev_h } as f64;
-                    let lo2 = if l < prev_l { l } else { prev_l } as f64;
-                    let r = hi2 - lo2;
-                    acc1 += r; acc2 += r * r; accc += 1;
+                    let hi2 = if h > prev_h { h } else { prev_h };
+                    let lo2 = if l < prev_l { l } else { prev_l };
+                    let r = hi2 - lo2; let r2 = r * r;
+                    ds_add_host(&mut s1_hi, &mut s1_lo, r);
+                    ds_add_host(&mut s2_hi, &mut s2_lo, r2);
+                    accc += 1;
                 }
                 prev_h = h; prev_l = l;
             }
-            p1[i + 1] = acc1; p2[i + 1] = acc2; pc[i + 1] = accc;
+            p1[i + 1] = Float2 { x: s1_hi, y: s1_lo };
+            p2[i + 1] = Float2 { x: s2_hi, y: s2_lo };
+            pc[i + 1] = accc;
         }
         (p1, p2, pc, first)
     }
@@ -143,23 +171,34 @@ impl CudaDevStop {
 
         // Group combos by period to allow per-launch shared memory sizing
         let mut groups: BTreeMap<usize, Vec<f32>> = BTreeMap::new();
-        let mut meta: Vec<(usize, f32)> = Vec::with_capacity(combos_raw.len());
-        for (p, m, _dt) in combos_raw { groups.entry(p).or_default().push(m); meta.push((p, m)); }
+        for (p, m, _dt) in combos_raw { groups.entry(p).or_default().push(m); }
 
-        // Host prefixes over r (SMA-based)
+        // Host prefixes over r using dual-f32 (float2)
         let (p1, p2, pc, first_valid) = Self::build_range_prefixes(high, low);
 
-        // Upload invariant inputs
-        let d_high = DeviceBuffer::from_slice(&high[..len]).map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
-        let d_low  = DeviceBuffer::from_slice(&low[..len ]) .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
-        let d_p1   = DeviceBuffer::from_slice(&p1)        .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
-        let d_p2   = DeviceBuffer::from_slice(&p2)        .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
-        let d_pc   = DeviceBuffer::from_slice(&pc)        .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
+        // Upload invariant inputs (async copy on NON_BLOCKING stream)
+        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
+        let mut d_low : DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
+        let mut d_p1  : DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized(p1.len()) }
+            .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
+        let mut d_p2  : DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized(p2.len()) }
+            .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
+        let mut d_pc  : DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(pc.len()) }
+            .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
+        unsafe {
+            d_high.async_copy_from(&high[..len], &self.stream).map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
+            d_low .async_copy_from(&low [..len], &self.stream).map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
+            d_p1  .async_copy_from(&p1, &self.stream).map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
+            d_p2  .async_copy_from(&p2, &self.stream).map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
+            d_pc  .async_copy_from(&pc, &self.stream).map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
+        }
 
         // Final output buffer (rows = total combos, cols = len). VRAM check with headroom.
-        let total_rows = meta.len();
+        let total_rows: usize = groups.values().map(|v| v.len()).sum();
         let bytes_inputs = (high.len() + low.len()) * std::mem::size_of::<f32>()
-            + (p1.len() + p2.len()) * std::mem::size_of::<f64>()
+            + (p1.len() + p2.len()) * (2 * std::mem::size_of::<f32>())
             + pc.len() * std::mem::size_of::<i32>();
         let bytes_out = total_rows * len * std::mem::size_of::<f32>();
         if let Ok((free, _total)) = mem_get_info() {
@@ -180,19 +219,23 @@ impl CudaDevStop {
             .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
 
         let mut out_row_base = 0usize;
+        let mut meta_launch_order: Vec<(usize, f32)> = Vec::with_capacity(total_rows);
         for (period, mults_host) in groups.into_iter() {
             if period == 0 || period > len { return Err(CudaDevStopError::InvalidInput(format!("invalid period {}", period))); }
             let n = mults_host.len();
             let d_mults = DeviceBuffer::from_slice(&mults_host)
                 .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
 
+            // Append to meta in the exact launch order (per-period group)
+            for &m in &mults_host { meta_launch_order.push((period, m)); }
+
             // grid.x = n combos, one block per combo; block.x parallelizes NaN init
-            let block_x: u32 = 128;
+            let block_x: u32 = 64;
             let grid_x: u32 = (n as u32).max(1);
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
 
-            // shared mem size: period*(sizeof(float) + sizeof(int))
+            // shared mem size: matches kernel (base_ring[f32] + dq_idx[i32])
             let shmem_bytes = (period * (std::mem::size_of::<f32>() + std::mem::size_of::<i32>())) as u32;
 
             unsafe {
@@ -232,7 +275,7 @@ impl CudaDevStop {
 
         self.stream.synchronize().map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows: total_rows, cols: len }, meta))
+        Ok((DeviceArrayF32 { buf: d_out, rows: total_rows, cols: len }, meta_launch_order))
     }
 
     pub fn devstop_many_series_one_param_time_major_dev(
@@ -274,7 +317,8 @@ impl CudaDevStop {
             .map_err(|e| CudaDevStopError::Cuda(e.to_string()))?;
 
         let grid: GridSize = ((cols as u32).max(1), 1, 1).into();
-        let block: BlockSize = (128, 1, 1).into();
+        let block: BlockSize = (64, 1, 1).into();
+        // matches kernel: r_ring[f32], base_ring[f32], dq_idx[i32]
         let shmem_bytes = (period * (2 * std::mem::size_of::<f32>() + std::mem::size_of::<i32>())) as u32;
 
         unsafe {

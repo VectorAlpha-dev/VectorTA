@@ -111,6 +111,15 @@ impl CudaPfe {
         n_rows.min(65_000).max(1)
     }
 
+    #[inline]
+    fn clone_fill_head_with_first_valid(data: &[f32], first_valid: usize) -> Vec<f32> {
+        if first_valid == 0 { return data.to_vec(); }
+        let mut v = data.to_vec();
+        let seed = v[first_valid];
+        for i in 0..=first_valid { v[i] = seed; }
+        v
+    }
+
     pub fn pfe_batch_dev(
         &self,
         data_f32: &[f32],
@@ -137,7 +146,115 @@ impl CudaPfe {
             }
         }
 
-        // Precompute shared prefix of short-leg steps on host (batch reuse)
+        // Fast path: device-built steps + dual-FP32 prefix + many-params kernel
+        if let (Ok(func_steps), Ok(func_pref), Ok(func_main)) = (
+            self.module.get_function("pfe_build_steps_f32"),
+            self.module.get_function("pfe_build_prefix_float2_serial"),
+            self.module.get_function("pfe_many_params_prefix_f32"),
+        ) {
+            // Fill the head to avoid NaN in prefix; zeros out head steps in differences.
+            let data_filled = Self::clone_fill_head_with_first_valid(data_f32, first_valid);
+
+            // Device inputs
+            let d_data = DeviceBuffer::from_slice(&data_filled)
+                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
+            let smooths: Vec<i32> = combos.iter().map(|c| c.smoothing).collect();
+            let d_periods = DeviceBuffer::from_slice(&periods)
+                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            let d_smooths = DeviceBuffer::from_slice(&smooths)
+                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+
+            // 1) steps[t] in parallel
+            let mut d_steps: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            let block_x: u32 = 256;
+            let grid_x: u32 = (((len as u32) + block_x - 1) / block_x).max(1);
+            let grid_1d: GridSize = (grid_x, 1, 1).into();
+            let block_1d: BlockSize = (block_x, 1, 1).into();
+            unsafe {
+                let mut data_ptr = d_data.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut steps_ptr = d_steps.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut data_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut steps_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func_steps, grid_1d, block_1d, 0, args)
+                    .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            }
+
+            // 2) dual-FP32 prefix (serial)
+            let mut d_pref_hi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            let mut d_pref_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut steps_ptr = d_steps.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut hi_ptr = d_pref_hi.as_device_ptr().as_raw();
+                let mut lo_ptr = d_pref_lo.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut steps_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut hi_ptr as *mut _ as *mut c_void,
+                    &mut lo_ptr as *mut _ as *mut c_void,
+                ];
+                let grid_one: GridSize = (1u32, 1u32, 1u32).into();
+                let block_one: BlockSize = (1u32, 1u32, 1u32).into();
+                self.stream
+                    .launch(&func_pref, grid_one, block_one, 0, args)
+                    .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            }
+            drop(d_steps);
+
+            // 3) outputs
+            let total_out = combos.len() * len;
+            let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }
+                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+
+            // 4) main many-params kernel
+            let block_x: u32 = 256;
+            let grid_x: u32 = (((combos.len() as u32) + block_x - 1) / block_x).max(1);
+            let grid_np: GridSize = (grid_x, 1, 1).into();
+            let block_np: BlockSize = (block_x, 1, 1).into();
+            unsafe {
+                let mut data_ptr = d_data.as_device_ptr().as_raw();
+                let mut hi_ptr = d_pref_hi.as_device_ptr().as_raw();
+                let mut lo_ptr = d_pref_lo.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut fv_i = first_valid as i32;
+                let mut per_ptr = d_periods.as_device_ptr().as_raw();
+                let mut sm_ptr = d_smooths.as_device_ptr().as_raw();
+                let mut ncomb_i = combos.len() as i32;
+                let mut out_ptr = d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut data_ptr as *mut _ as *mut c_void,
+                    &mut hi_ptr as *mut _ as *mut c_void,
+                    &mut lo_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut per_ptr as *mut _ as *mut c_void,
+                    &mut sm_ptr as *mut _ as *mut c_void,
+                    &mut ncomb_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func_main, grid_np, block_np, 0, args)
+                    .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+            }
+
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
+
+            return Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len });
+        }
+
+        // Fallback: existing prefix/rolling pathways
+        // Precompute shared prefix on host for the legacy prefix kernel
         let mut prefix = vec![0.0f64; len];
         for i in 1..len {
             let d = (data_f32[i] as f64) - (data_f32[i - 1] as f64);
@@ -156,7 +273,6 @@ impl CudaPfe {
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }
             .map_err(|e| CudaPfeError::Cuda(e.to_string()))?;
 
-        // Prefer prefix-based kernel for batch parity; fallback to rolling if missing
         if let Ok(func) = self.module.get_function("pfe_batch_prefix_f32") {
             let block_x: u32 = 256;
             let grid_x: u32 = (((combos.len() as u32) + block_x - 1) / block_x).max(1);

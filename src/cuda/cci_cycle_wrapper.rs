@@ -12,7 +12,7 @@ use crate::indicators::cci_cycle::{
     CciCycleBatchRange, CciCycleParams,
 };
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -43,6 +43,8 @@ pub struct CudaCciCycle {
     module: Module,
     stream: Stream,
     _context: Context,
+    sm_count: i32,
+    max_grid_x: i32,
 }
 
 impl CudaCciCycle {
@@ -53,9 +55,10 @@ impl CudaCciCycle {
         let context = Context::new(device).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cci_cycle_kernel.ptx"));
+        // Prefer the most optimized JIT level (O4) and derive target from the current context.
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -64,11 +67,23 @@ impl CudaCciCycle {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
 
-        Ok(Self { module, stream, _context: context })
+        // Cache device attributes for smarter launches
+        let sm_count = device
+            .get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        let max_grid_x = device
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+
+        Ok(Self { module, stream, _context: context, sm_count, max_grid_x })
     }
 
     fn will_fit(required_bytes: usize, headroom: usize) -> bool {
-        if let Ok((free, _total)) = mem_get_info() { required_bytes.saturating_add(headroom) <= free } else { true }
+        if let Ok((free, _total)) = mem_get_info() {
+            let dyn_headroom = (free as f64 * 0.05) as usize; // keep ~5% free
+            let keep = dyn_headroom.max(headroom);
+            required_bytes.saturating_add(keep) <= free
+        } else { true }
     }
 
     pub fn cci_cycle_batch_dev(
@@ -89,17 +104,31 @@ impl CudaCciCycle {
             return Err(CudaCciCycleError::InvalidInput("insufficient VRAM for batch".into()));
         }
 
-        let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_f32, &self.stream)
-                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
-        };
+        // Pinned (page-locked) host buffers for real async DMA
+        let h_prices = LockedBuffer::from_slice(data_f32).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
         let lengths: Vec<i32> = combos.iter().map(|p| p.length.unwrap_or(0) as i32).collect();
         let factors: Vec<f32> = combos.iter().map(|p| p.factor.unwrap_or(0.5) as f32).collect();
-        let d_lengths = DeviceBuffer::from_slice(&lengths).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        let d_factors = DeviceBuffer::from_slice(&factors).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(rows * series_len).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+        let h_lengths = LockedBuffer::from_slice(&lengths).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        let h_factors = LockedBuffer::from_slice(&factors).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+
+        let d_prices = unsafe {
+            DeviceBuffer::from_slice_async(&h_prices, &self.stream)
+                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
         };
+        let d_lengths = unsafe {
+            DeviceBuffer::from_slice_async(&h_lengths, &self.stream)
+                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+        };
+        let d_factors = unsafe {
+            DeviceBuffer::from_slice_async(&h_factors, &self.stream)
+                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+        };
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(rows * series_len, &self.stream)
+                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+        };
+
+        // Note: Kernel writes leading NaNs and all subsequent outputs; no extra memset needed here.
 
         self.launch_batch_kernel(
             &d_prices,
@@ -131,9 +160,12 @@ impl CudaCciCycle {
             .get_function("cci_cycle_batch_f32")
             .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
 
-        // 1D grid over rows
+        // 1D grid over rows: keep several blocks per SM; respect MaxGridDimX
         let block: BlockSize = (256, 1, 1).into();
-        let grid_x = ((n_combos + 255) / 256).min(65_535) as u32;
+        let needed_blocks = ((n_combos + 255) / 256) as u32;
+        let min_blocks = (self.sm_count as u32).saturating_mul(16);
+        let max_grid_x = self.max_grid_x as u32;
+        let grid_x = needed_blocks.max(min_blocks).min(max_grid_x);
         let grid: GridSize = (grid_x, 1, 1).into();
 
         unsafe {
@@ -194,15 +226,22 @@ impl CudaCciCycle {
             return Err(CudaCciCycleError::InvalidInput("insufficient VRAM for many-series".into()));
         }
 
-        // Upload
+        // Upload via pinned host buffers
+        let h_prices = LockedBuffer::from_slice(data_tm_f32).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        let h_firsts = LockedBuffer::from_slice(&first_valids).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
         let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
+            DeviceBuffer::from_slice_async(&h_prices, &self.stream)
                 .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
         };
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(cols * rows).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+        let d_first = unsafe {
+            DeviceBuffer::from_slice_async(&h_firsts, &self.stream)
+                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
         };
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(cols * rows, &self.stream)
+                .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+        };
+        // Note: Kernel covers all writes; memset omitted.
 
         // Launch
         let func = self

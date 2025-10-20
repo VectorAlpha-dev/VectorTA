@@ -14,12 +14,11 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::adosc::{AdoscBatchRange, AdoscParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
+use cust::memory::{DeviceBuffer, LockedBuffer, AsyncCopyDestination, CopyDestination, mem_get_info};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
-use cust::memory::mem_get_info;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
@@ -53,6 +52,30 @@ pub struct CudaAdosc {
 }
 
 impl CudaAdosc {
+    #[inline]
+    fn div_up(&self, n: usize, d: usize) -> u32 { ((n + d - 1) / d) as u32 }
+    #[inline]
+    fn default_block_x_for_batch(&self) -> u32 {
+        match self.policy.batch {
+            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+        }
+    }
+    #[inline]
+    fn default_block_x_for_many(&self) -> u32 {
+        match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
+        }
+    }
+    #[inline]
+    fn device_max_grid_x(&self) -> Result<u32, CudaAdoscError> {
+        let dev = Device::get_device(0).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        Ok(
+            dev.get_attribute(DeviceAttribute::MaxGridDimX)
+                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))? as u32,
+        )
+    }
     pub fn new(device_id: usize) -> Result<Self, CudaAdoscError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
         let device = Device::get_device(device_id as u32)
@@ -62,13 +85,10 @@ impl CudaAdosc {
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/adosc_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = Module::from_ptx(ptx, jit_opts).or_else(|_| {
-            Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                .or_else(|_| Module::from_ptx(ptx, &[]))
-        })
-        .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, jit_opts)
+            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
 
@@ -116,19 +136,19 @@ impl CudaAdosc {
             return Err(CudaAdoscError::InvalidInput("no parameter combos".into()));
         }
 
-        // Copy inputs
-        let d_high = DeviceBuffer::from_slice(high)
+        // Async H2D copies
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low)
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close)
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_volume = DeviceBuffer::from_slice(volume)
+        let d_volume = unsafe { DeviceBuffer::from_slice_async(volume, &self.stream) }
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
 
-        // Precompute ADL on device
+        // Precompute ADL on device (enqueued)
         let mut d_adl: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len)
+            DeviceBuffer::uninitialized_async(len, &self.stream)
                 .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
         };
         self.launch_adl(&d_high, &d_low, &d_close, &d_volume, len, &mut d_adl)?;
@@ -141,93 +161,121 @@ impl CudaAdosc {
             let lp = prm.long_period.unwrap_or(10) as i32;
             if sp <= 0 || lp <= 0 || sp >= lp {
                 return Err(CudaAdoscError::InvalidInput(format!(
-                    "invalid params: short={} long={}",
-                    sp, lp
+                    "invalid params: short={} long={}", sp, lp
                 )));
             }
             shorts.push(sp);
             longs.push(lp);
         }
-        let d_shorts = DeviceBuffer::from_slice(&shorts)
+        let d_shorts = unsafe { DeviceBuffer::from_slice_async(&shorts, &self.stream) }
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_longs = DeviceBuffer::from_slice(&longs)
+        let d_longs = unsafe { DeviceBuffer::from_slice_async(&longs, &self.stream) }
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
 
-        // Estimate VRAM and chunk launches if needed
+        // Memory sizing
         let (rows, cols) = (combos.len(), len);
         let bytes_inputs = 4 * cols * std::mem::size_of::<f32>();
         let bytes_adl = cols * std::mem::size_of::<f32>();
         let bytes_periods = 2 * rows * std::mem::size_of::<i32>();
         let bytes_out_total = rows * cols * std::mem::size_of::<f32>();
-        let mut required = bytes_inputs + bytes_adl + bytes_periods + bytes_out_total;
-        // Leave ~64MB headroom by default
         let headroom = 64usize * 1024 * 1024;
-        let fits = match mem_get_info() {
-            Ok((free, _)) => required.saturating_add(headroom) <= free,
+
+        let fits_all = match mem_get_info() {
+            Ok((free, _)) => {
+                let required = bytes_inputs + bytes_adl + bytes_periods + bytes_out_total;
+                required.saturating_add(headroom) <= free
+            }
             Err(_) => true,
         };
 
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(rows * cols)
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
-        };
-
-        if fits {
+        if fits_all {
+            let mut d_out: DeviceBuffer<f32> = unsafe {
+                DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
+                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+            };
             unsafe {
                 (*(self as *const _ as *mut CudaAdosc)).last_batch =
-                    Some(BatchKernelSelected::Plain { block_x: 1 });
+                    Some(BatchKernelSelected::Plain { block_x: self.default_block_x_for_batch() });
             }
             self.launch_batch_from_adl(&d_adl, &d_shorts, &d_longs, cols, rows, &mut d_out)?;
             self.maybe_log_batch_debug();
-        } else {
-            // Chunk by combos to fit VRAM and grid limits (<= 65_535)
-            unsafe {
-                (*(self as *const _ as *mut CudaAdosc)).last_batch =
-                    Some(BatchKernelSelected::Plain { block_x: 1 });
-            }
-            self.maybe_log_batch_debug();
-            let max_grid = 65_535usize;
-            let mut start = 0usize;
-            let mut host_out = vec![0f32; rows * cols];
-            while start < rows {
-                let remain = rows - start;
-                let chunk = remain.min(max_grid);
-                let mut d_out_chunk: DeviceBuffer<f32> = unsafe {
-                    DeviceBuffer::uninitialized(chunk * cols)
-                        .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
-                };
-                let shorts_off = DeviceBuffer::from_slice(&shorts[start..start + chunk])
-                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-                let longs_off = DeviceBuffer::from_slice(&longs[start..start + chunk])
-                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-                self.launch_batch_from_adl(
-                    &d_adl,
-                    &shorts_off,
-                    &longs_off,
-                    cols,
-                    chunk,
-                    &mut d_out_chunk,
-                )?;
-                let base = start * cols;
-                d_out_chunk
-                    .copy_to(&mut host_out[base..base + chunk * cols])
-                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-                start += chunk;
-            }
-            let d_out = DeviceBuffer::from_slice(&host_out)
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
             return Ok(DeviceArrayF32 { buf: d_out, rows, cols });
         }
 
-        // Unreachable; both branches return
-        // but keep a fallback to satisfy type checker in some editors
-        // (Rust compiler sees returns above).
-        #[allow(unreachable_code)]
-        {
-            let d_out = DeviceBuffer::from_slice(&vec![0f32; rows * cols])
+        // Try keeping a full device output and fill by chunks
+        let can_hold_whole_output = match mem_get_info() {
+            Ok((free, _)) => {
+                let static_now = bytes_inputs + bytes_adl + headroom;
+                static_now.saturating_add(bytes_out_total) <= free
+            }
+            Err(_) => false,
+        };
+        let max_grid = self.device_max_grid_x().unwrap_or(65_535) as usize;
+
+        if can_hold_whole_output {
+            let mut d_out_full: DeviceBuffer<f32> = unsafe {
+                DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
+                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+            };
+            let mut start = 0usize;
+            while start < rows {
+                let remain = rows - start;
+                let chunk = remain.min(max_grid);
+                let d_shorts_off = unsafe {
+                    DeviceBuffer::from_slice_async(&shorts[start..start + chunk], &self.stream)
+                        .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+                };
+                let d_longs_off = unsafe {
+                    DeviceBuffer::from_slice_async(&longs[start..start + chunk], &self.stream)
+                        .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+                };
+                let mut d_out_chunk: DeviceBuffer<f32> = unsafe {
+                    DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)
+                        .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+                };
+                self.launch_batch_from_adl(&d_adl, &d_shorts_off, &d_longs_off, cols, chunk, &mut d_out_chunk)?;
+                let base = start * cols;
+                let mut dst_slice = d_out_full.index(base..base + chunk * cols);
+                unsafe {
+                    dst_slice.async_copy_from(&d_out_chunk, &self.stream)
+                }
                 .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-            Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+                start += chunk;
+            }
+            return Ok(DeviceArrayF32 { buf: d_out_full, rows, cols });
         }
+
+        // Last resort: pinned host assembly, then single async H2D
+        let mut host_out = unsafe { LockedBuffer::<f32>::uninitialized(rows * cols) }
+            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let mut start = 0usize;
+        while start < rows {
+            let remain = rows - start;
+            let chunk = remain.min(max_grid);
+            let d_shorts_off = unsafe {
+                DeviceBuffer::from_slice_async(&shorts[start..start + chunk], &self.stream)
+                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+            };
+            let d_longs_off = unsafe {
+                DeviceBuffer::from_slice_async(&longs[start..start + chunk], &self.stream)
+                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+            };
+            let mut d_out_chunk: DeviceBuffer<f32> = unsafe {
+                DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)
+                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+            };
+            self.launch_batch_from_adl(&d_adl, &d_shorts_off, &d_longs_off, cols, chunk, &mut d_out_chunk)?;
+            let base = start * cols;
+            unsafe {
+                d_out_chunk.async_copy_to(&mut host_out[base..base + chunk * cols], &self.stream)
+            }
+            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            start += chunk;
+        }
+        self.stream.synchronize().map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_out = unsafe { DeviceBuffer::from_slice_async(&host_out, &self.stream) }
+            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 
     /// Many-series × one-param (time-major). Returns a (rows x cols) device matrix
@@ -261,17 +309,17 @@ impl CudaAdosc {
             ));
         }
 
-        let d_high = DeviceBuffer::from_slice(high_tm)
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_tm)
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm)
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_volume = DeviceBuffer::from_slice(volume_tm)
+        let d_volume = unsafe { DeviceBuffer::from_slice_async(volume_tm, &self.stream) }
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
 
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len)
+            DeviceBuffer::uninitialized_async(len, &self.stream)
                 .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
         };
         self.launch_many_series_one_param(
@@ -318,9 +366,7 @@ impl CudaAdosc {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))
+        Ok(())
     }
 
     fn launch_batch_from_adl(
@@ -339,9 +385,19 @@ impl CudaAdosc {
             .module
             .get_function("adosc_batch_from_adl_f32")
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        // One combo per block; single thread inside performs the scan
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        // Throughput mapping: many threads grid‑stride over combos
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+            BatchKernelPolicy::Auto => 256,
+        };
+        let max_grid = self.device_max_grid_x().unwrap_or(65_535);
+        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1).min(max_grid), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        unsafe {
+            (*(self as *const _ as *mut CudaAdosc)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         unsafe {
             let mut adl = d_adl.as_device_ptr().as_raw();
             let mut sp = d_shorts.as_device_ptr().as_raw();
@@ -361,9 +417,7 @@ impl CudaAdosc {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -388,8 +442,19 @@ impl CudaAdosc {
             .module
             .get_function("adosc_many_series_one_param_f32")
             .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let grid: GridSize = (cols as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        // Throughput mapping: threads grid‑stride over series
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
+            ManySeriesKernelPolicy::Auto => 256,
+        };
+        let max_grid = self.device_max_grid_x().unwrap_or(65_535);
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1).min(max_grid), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        unsafe {
+            (*(self as *const _ as *mut CudaAdosc)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         unsafe {
             let mut h = d_high_tm.as_device_ptr().as_raw();
             let mut l = d_low_tm.as_device_ptr().as_raw();
@@ -415,9 +480,7 @@ impl CudaAdosc {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))
+        Ok(())
     }
 }
 

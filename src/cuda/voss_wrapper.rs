@@ -13,11 +13,11 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::voss::{expand_grid_voss, VossBatchRange, VossParams};
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
-use cust::module::{Module, ModuleJitOption, OptLevel};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::module::{Module, ModuleJitOption};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
@@ -82,7 +82,7 @@ impl CudaVoss {
             ptx,
             &[
                 ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
+                // Keep CUDA default JIT optimization (O4); no explicit override.
             ],
         )
         .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -91,6 +91,13 @@ impl CudaVoss {
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaVossError::Cuda(e.to_string()))?;
+        // Prefer L1 cache for both kernels (no shared memory used by these).
+        if let Ok(mut f) = module.get_function("voss_batch_f32") {
+            let _ = f.set_cache_config(CacheConfig::PreferL1);
+        }
+        if let Ok(mut f) = module.get_function("voss_many_series_one_param_time_major_f32") {
+            let _ = f.set_cache_config(CacheConfig::PreferL1);
+        }
 
         Ok(Self { module, stream, _context: context, policy: CudaVossPolicy::default() })
     }
@@ -138,18 +145,25 @@ impl CudaVoss {
         }
 
         let rows = combos.len();
-        // VRAM estimate: input + params + outputs (2 arrays) + headroom
-        let bytes = len * 4
-            + rows * (std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>())
+        // VRAM estimate (inputs uploaded as f64) + params + outputs + headroom
+        let bytes = len * 8
+            + rows * (std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f64>())
             + 2 * rows * len * 4
             + Self::headroom_bytes();
         if !Self::will_fit(bytes, 0) {
             return Err(CudaVossError::InvalidInput("insufficient device memory for voss batch".into()));
         }
 
-        // H2D
-        let data_f64: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
-        let d_prices = DeviceBuffer::from_slice(&data_f64).map_err(|e| CudaVossError::Cuda(e.to_string()))?;
+        // H2D (prices): page-locked host buffer + async copy on our NON_BLOCKING stream
+        let mut h_prices = unsafe { LockedBuffer::<f64>::uninitialized(len) }
+            .map_err(|e| CudaVossError::Cuda(e.to_string()))?;
+        for (dst, &src) in h_prices.as_mut_slice().iter_mut().zip(data_f32.iter()) {
+            *dst = src as f64;
+        }
+        let mut d_prices: DeviceBuffer<f64> = unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }
+            .map_err(|e| CudaVossError::Cuda(e.to_string()))?;
+        unsafe { d_prices.async_copy_from(h_prices.as_slice(), &self.stream) }
+            .map_err(|e| CudaVossError::Cuda(e.to_string()))?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap_or(20) as i32).collect();
         let predicts: Vec<i32> = combos.iter().map(|c| c.predict.unwrap_or(3) as i32).collect();
         let bws: Vec<f64> = combos.iter().map(|c| c.bandwidth.unwrap_or(0.25)).collect();
@@ -164,7 +178,8 @@ impl CudaVoss {
 
         // Launch with grid.y chunking
         let func = self.module.get_function("voss_batch_f32").map_err(|e| CudaVossError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.batch { BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x, _ => 128 };
+        // Only threadIdx.x==0 performs the scan; default block.x=1 avoids stranding lanes.
+        let block_x = match self.policy.batch { BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x, _ => 1 };
         const MAX_GRID_Y: usize = 65_535;
         let mut start_row = 0usize;
         while start_row < rows {
@@ -221,24 +236,31 @@ impl CudaVoss {
         let b = params.bandwidth.unwrap_or(0.25);
         if p == 0 || !b.is_finite() || b <= 0.0 || b > 1.0 { return Err(CudaVossError::InvalidInput("invalid params".into())); }
 
-        // Per-series first-valid indices
+        // Per-series first-valid indices (walk column with +cols stride)
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
+            let mut idx = s;
             for t in 0..rows {
-                let idx = t * cols + s;
-                if !data_tm_f32[idx].is_nan() { first_valids[s] = t as i32; break; }
+                let v = data_tm_f32[idx];
+                if !v.is_nan() { first_valids[s] = t as i32; break; }
+                idx += cols;
             }
         }
 
-        // VRAM estimate
-        let bytes = elems * 4 + cols * 4 + 2 * elems * 4 + Self::headroom_bytes();
+        // VRAM estimate (inputs uploaded as f64)
+        let bytes = elems * 8 + cols * 4 + 2 * elems * 4 + Self::headroom_bytes();
         if !Self::will_fit(bytes, 0) {
             return Err(CudaVossError::InvalidInput("insufficient device memory for voss many-series".into()));
         }
 
-        // H2D
-        let data_tm_f64: Vec<f64> = data_tm_f32.iter().map(|&v| v as f64).collect();
-        let d_data = DeviceBuffer::from_slice(&data_tm_f64).map_err(|e| CudaVossError::Cuda(e.to_string()))?;
+        // H2D (large input): page-locked host buffer + async copy
+        let mut h_data = unsafe { LockedBuffer::<f64>::uninitialized(elems) }
+            .map_err(|e| CudaVossError::Cuda(e.to_string()))?;
+        for (dst, &src) in h_data.as_mut_slice().iter_mut().zip(data_tm_f32.iter()) { *dst = src as f64; }
+        let mut d_data: DeviceBuffer<f64> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+            .map_err(|e| CudaVossError::Cuda(e.to_string()))?;
+        unsafe { d_data.async_copy_from(h_data.as_slice(), &self.stream) }
+            .map_err(|e| CudaVossError::Cuda(e.to_string()))?;
         let d_fv = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaVossError::Cuda(e.to_string()))?;
         let mut d_voss: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaVossError::Cuda(e.to_string()))?;
@@ -252,7 +274,7 @@ impl CudaVoss {
 
         let (block_x, block_y) = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x, block_y } if block_x > 0 && block_y > 0 => (block_x, block_y),
-            _ => (128, 4),
+            _ => (1, u32::min(64, cols as u32)),
         };
         let grid: GridSize = (1, ((cols as u32) + block_y - 1) / block_y, 1).into();
         let block: BlockSize = (block_x, block_y, 1).into();
@@ -298,14 +320,17 @@ pub mod benches {
     const MANY_SERIES_ROWS: usize = 1_000_000;
 
     fn bytes_batch(rows: usize) -> usize {
-        let in_bytes = ONE_SERIES_LEN * 4;
-        let params = rows * (4 + 4 + 4);
-        let outs = 2 * rows * ONE_SERIES_LEN * 4;
+        let in_bytes = ONE_SERIES_LEN * 8;               // f64 upload
+        let params   = rows * (4 + 4 + 8);               // i32, i32, f64
+        let outs     = 2 * rows * ONE_SERIES_LEN * 4;    // two f32 outputs
         in_bytes + params + outs + 64 * 1024 * 1024
     }
     fn bytes_many_series() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_ROWS;
-        elems * 4 + MANY_SERIES_COLS * 4 + 2 * elems * 4 + 64 * 1024 * 1024
+        elems * 8                                    // f64 upload
+            + MANY_SERIES_COLS * 4                   // i32 first_valids
+            + 2 * elems * 4                          // two f32 outputs
+            + 64 * 1024 * 1024
     }
 
     struct VossBatchState { cuda: CudaVoss, data: Vec<f32>, sweep: VossBatchRange }

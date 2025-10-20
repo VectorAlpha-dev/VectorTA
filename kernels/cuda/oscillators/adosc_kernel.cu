@@ -17,79 +17,110 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
+// --- Small helpers (header-local) --------------------------------------------
+
+struct KahanF32 {
+    float sum;
+    float c;
+};
+
+__device__ __forceinline__ void kahan_add(KahanF32& s, float x) {
+    // Neumaier form: stable and cheap
+    float y = x - s.c;
+    float t = s.sum + y;
+    s.c = (t - s.sum) - y;
+    s.sum = t;
+}
+
+// mfm = ((close-low) - (high-close)) / (high-low)
+// Use the original algebra to match CPU/scalar numerics more closely.
+__device__ __forceinline__ float mfm_from_hlc(float h, float l, float c) {
+    const float hl = h - l;
+    if (hl == 0.0f) return 0.0f;
+    const float num = (c - l) - (h - c);
+    return num / hl;
+}
+
+// -----------------------------------------------------------------------------
 // Build ADL: adl[t] = adl[t-1] + mfm(t) * volume(t)
+// - Sequential by nature, but use compensated summation to avoid drift.
+// -----------------------------------------------------------------------------
 extern "C" __global__ void adosc_adl_f32(const float* __restrict__ high,
-                                          const float* __restrict__ low,
-                                          const float* __restrict__ close,
-                                          const float* __restrict__ volume,
-                                          int series_len,
-                                          float* __restrict__ adl_out) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) {
-        return; // single thread does the sequential scan
-    }
+                                         const float* __restrict__ low,
+                                         const float* __restrict__ close,
+                                         const float* __restrict__ volume,
+                                         int series_len,
+                                         float* __restrict__ adl_out)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;   // single-thread scan is fine here
     if (series_len <= 0) return;
 
-    const float h0 = high[0];
-    const float l0 = low[0];
-    const float c0 = close[0];
-    const float v0 = volume[0];
-    const float hl0 = h0 - l0;
-    const float mfm0 = (hl0 != 0.0f) ? (((c0 - l0) - (h0 - c0)) / hl0) : 0.0f;
-    float sum_ad = mfm0 * v0;
-    adl_out[0] = sum_ad;
+    // t = 0 bootstrap
+    const float mfm0 = mfm_from_hlc(high[0], low[0], close[0]);
+    KahanF32 acc { mfm0 * volume[0], 0.0f };
+    adl_out[0] = acc.sum;
 
+    // t = 1..N-1
     for (int i = 1; i < series_len; ++i) {
-        const float h = high[i];
-        const float l = low[i];
-        const float c = close[i];
-        const float v = volume[i];
-        const float hl = h - l;
-        const float mfm = (hl != 0.0f) ? (((c - l) - (h - c)) / hl) : 0.0f;
-        const float mfv = mfm * v;
-        sum_ad += mfv;
-        adl_out[i] = sum_ad;
+        const float mfv = mfm_from_hlc(high[i], low[i], close[i]) * volume[i];
+        kahan_add(acc, mfv);
+        adl_out[i] = acc.sum;
     }
 }
 
-// Batch over many (short,long) pairs using a precomputed ADL.
-// Each block handles one pair and scans time sequentially.
+// -----------------------------------------------------------------------------
+// One price series × many (short,long) pairs from precomputed ADL.
+// - Primary, optimized path: one *thread* per parameter pair.
+// - Threads advance time in lock-step; each warp broadcasts adl[i] implicitly.
+// - Leaves rows untouched for invalid (sp,lp) to match your current semantics.
+// -----------------------------------------------------------------------------
 extern "C" __global__ void adosc_batch_from_adl_f32(const float* __restrict__ adl,
-                                                     const int* __restrict__ short_periods,
-                                                     const int* __restrict__ long_periods,
-                                                     int series_len,
-                                                     int n_combos,
-                                                     float* __restrict__ out) {
-    const int combo = blockIdx.x;
-    if (combo >= n_combos) return;
-    if (threadIdx.x != 0) return; // single-thread per block does the scan
+                                                    const int*   __restrict__ short_periods,
+                                                    const int*   __restrict__ long_periods,
+                                                    int series_len,
+                                                    int n_combos,
+                                                    float* __restrict__ out)
+{
+    if (series_len <= 0) return;
 
-    const int sp = short_periods[combo];
-    const int lp = long_periods[combo];
-    if (sp <= 0 || lp <= 0 || sp >= lp) {
-        // Leave row as zeros; semantics mirror scalar safeguards (no warmup NaNs).
-        return;
-    }
-    const float a_s = 2.0f / (float)(sp + 1);
-    const float a_l = 2.0f / (float)(lp + 1);
-    const float oms = 1.0f - a_s;
-    const float oml = 1.0f - a_l;
+    const int tid          = blockIdx.x * blockDim.x + threadIdx.x;
+    const int totalThreads = gridDim.x * blockDim.x;
 
-    const int base = combo * series_len;
-    // i = 0 bootstrap
-    float s_ema = adl[0];
-    float l_ema = adl[0];
-    out[base + 0] = s_ema - l_ema; // 0.0f
-    // i = 1..N-1
-    for (int i = 1; i < series_len; ++i) {
-        const float x = adl[i];
-        s_ema = a_s * x + oms * s_ema;
-        l_ema = a_l * x + oml * l_ema;
-        out[base + i] = s_ema - l_ema;
+    // Grid-stride over parameter rows
+    for (int combo = tid; combo < n_combos; combo += totalThreads) {
+        const int sp = short_periods[combo];
+        const int lp = long_periods[combo];
+        if (sp <= 0 || lp <= 0 || sp >= lp) {
+            // Semantics: leave row as-is (typically pre-zeroed by caller)
+            continue;
+        }
+
+        const float a_s = 2.0f / (float)(sp + 1);
+        const float a_l = 2.0f / (float)(lp + 1);
+        const float oms = 1.0f - a_s;
+        const float oml = 1.0f - a_l;
+
+        const int   base  = combo * series_len;
+        float s_ema = adl[0];
+        float l_ema = adl[0];
+        out[base + 0] = 0.0f;                 // short==long at t=0
+
+        // time loop (broadcasted loads within a warp are a single transaction on cc>=2.0)
+        // Using fmaf improves accuracy and throughput.
+        for (int i = 1; i < series_len; ++i) {
+            const float x = adl[i];
+            s_ema = fmaf(a_s, x, oms * s_ema);
+            l_ema = fmaf(a_l, x, oml * l_ema);
+            out[base + i] = s_ema - l_ema;
+        }
     }
 }
 
-// Many-series × one-param (time-major inputs/outputs)
-// Layout: [rows][cols] with time-major (index = t*cols + s)
+// -----------------------------------------------------------------------------
+// Many series × one (short,long) pair (time-major layout).
+// - Threads are mapped to series with a grid-stride loop.
+// - ADL is built per-series with Kahan; EMA uses FMA.
+// -----------------------------------------------------------------------------
 extern "C" __global__ void adosc_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -99,48 +130,38 @@ extern "C" __global__ void adosc_many_series_one_param_f32(
     int rows,    // length per series (time)
     int short_p,
     int long_p,
-    float* __restrict__ out_tm) {
-    const int s = blockIdx.x;
-    if (s >= cols) return;
-    if (threadIdx.x != 0) return;
-
-    if (short_p <= 0 || long_p <= 0 || short_p >= long_p) {
-        // do nothing; outputs remain unspecified by caller if not zeroed
-        return;
-    }
+    float* __restrict__ out_tm)
+{
+    if (short_p <= 0 || long_p <= 0 || short_p >= long_p) return;
+    if (rows <= 0 || cols <= 0) return;
 
     const float a_s = 2.0f / (float)(short_p + 1);
     const float a_l = 2.0f / (float)(long_p + 1);
     const float oms = 1.0f - a_s;
     const float oml = 1.0f - a_l;
 
-    // Build ADL on the fly for this series and compute EMAs
-    int idx0 = 0 * cols + s;
-    float h0 = high_tm[idx0];
-    float l0 = low_tm[idx0];
-    float c0 = close_tm[idx0];
-    float v0 = volume_tm[idx0];
-    float hl0 = h0 - l0;
-    float mfm0 = (hl0 != 0.0f) ? (((c0 - l0) - (h0 - c0)) / hl0) : 0.0f;
-    float sum_ad = mfm0 * v0;
-    float s_ema = sum_ad;
-    float l_ema = sum_ad;
-    out_tm[idx0] = s_ema - l_ema; // 0.0f
+    const int tid          = blockIdx.x * blockDim.x + threadIdx.x;
+    const int totalThreads = gridDim.x * blockDim.x;
 
-    for (int t = 1; t < rows; ++t) {
-        const int idx = t * cols + s;
-        const float h = high_tm[idx];
-        const float l = low_tm[idx];
-        const float c = close_tm[idx];
-        const float v = volume_tm[idx];
-        const float hl = h - l;
-        const float mfm = (hl != 0.0f) ? (((c - l) - (h - c)) / hl) : 0.0f;
-        const float mfv = mfm * v;
-        sum_ad += mfv;
-        const float x = sum_ad;
-        s_ema = a_s * x + oms * s_ema;
-        l_ema = a_l * x + oml * l_ema;
-        out_tm[idx] = s_ema - l_ema;
+    // Grid-stride over series
+    for (int s = tid; s < cols; s += totalThreads) {
+        int idx0 = /* t=0 */ 0 * cols + s;
+        const float mfm0 = mfm_from_hlc(high_tm[idx0], low_tm[idx0], close_tm[idx0]);
+        KahanF32 acc { mfm0 * volume_tm[idx0], 0.0f };
+
+        float s_ema = acc.sum;
+        float l_ema = acc.sum;
+        out_tm[idx0] = 0.0f;  // short==long at t=0
+
+        for (int t = 1; t < rows; ++t) {
+            const int idx = t * cols + s;
+            const float mfv = mfm_from_hlc(high_tm[idx], low_tm[idx], close_tm[idx]) * volume_tm[idx];
+            kahan_add(acc, mfv);
+            const float x = acc.sum;
+            s_ema = fmaf(a_s, x, oms * s_ema);
+            l_ema = fmaf(a_l, x, oml * l_ema);
+            out_tm[idx] = s_ema - l_ema;
+        }
     }
 }
 

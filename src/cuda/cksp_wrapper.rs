@@ -17,6 +17,7 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::cksp::{CkspBatchRange, CkspParams};
 use cust::context::Context;
 use cust::device::Device;
+use cust::device::DeviceAttribute;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -78,6 +79,7 @@ pub struct CudaCksp {
     stream: Stream,
     _context: Context,
     policy: CudaCkspPolicy,
+    device_id: u32,
 }
 
 impl CudaCksp {
@@ -97,7 +99,7 @@ impl CudaCksp {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        Ok(Self { module, stream, _context: context, policy: CudaCkspPolicy::default() })
+        Ok(Self { module, stream, _context: context, policy: CudaCkspPolicy::default(), device_id: device_id as u32 })
     }
 
     pub fn new_with_policy(device_id: usize, policy: CudaCkspPolicy) -> Result<Self, CudaCkspError> {
@@ -134,21 +136,20 @@ impl CudaCksp {
         close: &[f32],
         sweep: &CkspBatchRange,
     ) -> Result<(DeviceArrayF32Pair, Vec<CkspParams>), CudaCkspError> {
-        if high.len() == 0 || low.len() != high.len() || close.len() != high.len() {
+        if high.is_empty() || low.len() != high.len() || close.len() != high.len() {
             return Err(CudaCkspError::InvalidInput(
                 "inputs must be non-empty and same length".into(),
             ));
         }
         let len = close.len();
-        let first_valid = close
-            .iter()
-            .position(|v| v.is_finite())
+        let first_valid = first_valid_hlc(high, low, close)
             .ok_or_else(|| CudaCkspError::InvalidInput("all values are NaN".into()))?;
 
         let combos = expand_cksp_combos(sweep);
         if combos.is_empty() {
             return Err(CudaCkspError::InvalidInput("no parameter combinations".into()));
         }
+
         // Param sanity and gather host vectors
         let mut p_i32 = Vec::with_capacity(combos.len());
         let mut x_f32 = Vec::with_capacity(combos.len());
@@ -172,33 +173,70 @@ impl CudaCksp {
             p_i32.push(p as i32);
             q_i32.push(q as i32);
             x_f32.push(x);
-            if q > max_q { max_q = q; }
+            max_q = max_q.max(q);
         }
 
-        // VRAM check (inputs + params + outputs)
+        // Dynamic shared memory requirement per CTA
+        let cap_max = (max_q + 1) as usize;
+        let shmem_bytes = 4 * cap_max * std::mem::size_of::<i32>()
+            + 2 * cap_max * std::mem::size_of::<f32>();
+
+        // Check device limit (no opt-in here)
+        let dev = Device::get_device(self.device_id).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let max_shmem = dev
+            .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)
+            .map_err(|e| CudaCkspError::Cuda(e.to_string()))? as usize;
+        if shmem_bytes > max_shmem {
+            return Err(CudaCkspError::InvalidInput(format!(
+                "q too large for device dynamic shared memory: needs {} bytes (> {} bytes)",
+                shmem_bytes, max_shmem
+            )));
+        }
+
+        // VRAM check (inputs + params + outputs + optional preTR buffer)
         let in_bytes = 3 * len * std::mem::size_of::<f32>();
         let params_bytes = combos.len() * (2 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let out_bytes = 2 * combos.len() * len * std::mem::size_of::<f32>();
-        let required = in_bytes + params_bytes + out_bytes;
+        let use_pretr = combos.len() >= 2;
+        let extra_tr_bytes = if use_pretr { len * std::mem::size_of::<f32>() } else { 0 };
+        let required = in_bytes + params_bytes + out_bytes + extra_tr_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaCkspError::InvalidInput(
                 "insufficient device memory for cksp batch".into(),
             ));
         }
 
-        // H2D
-        let d_high = DeviceBuffer::from_slice(high).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_p = DeviceBuffer::from_slice(&p_i32).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_x = DeviceBuffer::from_slice(&x_f32).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_q = DeviceBuffer::from_slice(&q_i32).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        // H2D (async)
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }
+            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }
+            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }
+            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let d_p = unsafe { DeviceBuffer::from_slice_async(&p_i32, &self.stream) }
+            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let d_x = unsafe { DeviceBuffer::from_slice_async(&x_f32, &self.stream) }
+            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let d_q = unsafe { DeviceBuffer::from_slice_async(&q_i32, &self.stream) }
+            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
 
         let elems = combos.len() * len;
-        let mut d_long: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let mut d_short: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let mut d_long: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let mut d_short: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+
+        // Optional precompute TR once per series
+        let mut d_tr_opt: Option<DeviceBuffer<f32>> = None;
+        if use_pretr {
+            let mut d_tr = unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }
+                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+            self.launch_tr_kernel(&d_high, &d_low, &d_close, len as i32, first_valid as i32, &mut d_tr)?;
+            d_tr_opt = Some(d_tr);
+        }
+
         // grid.y chunking to respect 65_535
         let rows = combos.len();
         let y_limit = 65_535usize;
@@ -209,6 +247,7 @@ impl CudaCksp {
                 &d_high,
                 &d_low,
                 &d_close,
+                d_tr_opt.as_ref(),
                 len as i32,
                 first_valid as i32,
                 &d_p,
@@ -219,6 +258,7 @@ impl CudaCksp {
                 (max_q + 1) as i32,
                 &mut d_long,
                 &mut d_short,
+                shmem_bytes as u32,
             )?;
             start += count;
         }
@@ -242,6 +282,7 @@ impl CudaCksp {
         d_high: &DeviceBuffer<f32>,
         d_low: &DeviceBuffer<f32>,
         d_close: &DeviceBuffer<f32>,
+        d_tr_opt: Option<&DeviceBuffer<f32>>,
         series_len: i32,
         first_valid: i32,
         d_p: &DeviceBuffer<i32>,
@@ -252,14 +293,17 @@ impl CudaCksp {
         cap_max: i32,
         d_long: &mut DeviceBuffer<f32>,
         d_short: &mut DeviceBuffer<f32>,
+        shmem_bytes: u32,
     ) -> Result<(), CudaCkspError> {
         if series_len <= 0 || n_rows == 0 || cap_max <= 1 {
             return Err(CudaCkspError::InvalidInput("invalid launch dims".into()));
         }
-        let func = self
-            .module
-            .get_function("cksp_batch_f32")
-            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let (func_name, pass_tr) = if let Some(dtr) = d_tr_opt {
+            ("cksp_batch_f32_pretr", Some(dtr))
+        } else {
+            ("cksp_batch_f32", None)
+        };
+        let func = self.module.get_function(func_name).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256u32,
@@ -281,27 +325,52 @@ impl CudaCksp {
             let mut cm = cap_max;
             let mut ol = d_long.as_device_ptr().add(start_row * (series_len as usize)).as_raw();
             let mut os = d_short.as_device_ptr().add(start_row * (series_len as usize)).as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut hp as *mut _ as *mut c_void,
-                &mut lp as *mut _ as *mut c_void,
-                &mut cp as *mut _ as *mut c_void,
-                &mut sl as *mut _ as *mut c_void,
-                &mut fv as *mut _ as *mut c_void,
-                &mut pp as *mut _ as *mut c_void,
-                &mut xp as *mut _ as *mut c_void,
-                &mut qp as *mut _ as *mut c_void,
-                &mut nc as *mut _ as *mut c_void,
-                &mut cm as *mut _ as *mut c_void,
-                &mut ol as *mut _ as *mut c_void,
-                &mut os as *mut _ as *mut c_void,
-            ];
-            // Dynamic shared memory needed for deques (cap_max per array)
-            let shmem: u32 = ((4 * cap_max as usize * std::mem::size_of::<i32>())
-                + (2 * cap_max as usize * std::mem::size_of::<f32>()))
-                .try_into()
-                .unwrap();
+            // Prepare args for either kernel signature
+            // cksp_batch_f32:        (high, low, close, series_len, first_valid, p_list, x_list, q_list, n_combos, cap_max, out_long, out_short)
+            // cksp_batch_f32_pretr:  (high, low, close, tr,    series_len, first_valid, p_list, x_list, q_list, n_combos, cap_max, out_long, out_short)
+
+            // 12 or 13 pointers depending on kernel
+            let mut args_storage: [*mut c_void; 13] = [std::ptr::null_mut(); 13];
+            let args: &mut [*mut c_void] = if let Some(dtr) = pass_tr {
+                let mut tp = dtr.as_device_ptr().as_raw();
+                let filled: &mut [*mut c_void] = &mut [
+                    &mut hp as *mut _ as *mut c_void,
+                    &mut lp as *mut _ as *mut c_void,
+                    &mut cp as *mut _ as *mut c_void,
+                    &mut tp as *mut _ as *mut c_void,
+                    &mut sl as *mut _ as *mut c_void,
+                    &mut fv as *mut _ as *mut c_void,
+                    &mut pp as *mut _ as *mut c_void,
+                    &mut xp as *mut _ as *mut c_void,
+                    &mut qp as *mut _ as *mut c_void,
+                    &mut nc as *mut _ as *mut c_void,
+                    &mut cm as *mut _ as *mut c_void,
+                    &mut ol as *mut _ as *mut c_void,
+                    &mut os as *mut _ as *mut c_void,
+                ];
+                args_storage[..13].copy_from_slice(filled);
+                &mut args_storage[..13]
+            } else {
+                let filled: &mut [*mut c_void] = &mut [
+                    &mut hp as *mut _ as *mut c_void,
+                    &mut lp as *mut _ as *mut c_void,
+                    &mut cp as *mut _ as *mut c_void,
+                    &mut sl as *mut _ as *mut c_void,
+                    &mut fv as *mut _ as *mut c_void,
+                    &mut pp as *mut _ as *mut c_void,
+                    &mut xp as *mut _ as *mut c_void,
+                    &mut qp as *mut _ as *mut c_void,
+                    &mut nc as *mut _ as *mut c_void,
+                    &mut cm as *mut _ as *mut c_void,
+                    &mut ol as *mut _ as *mut c_void,
+                    &mut os as *mut _ as *mut c_void,
+                ];
+                args_storage[..12].copy_from_slice(filled);
+                &mut args_storage[..12]
+            };
+
             self.stream
-                .launch(&func, grid, block, shmem, args)
+                .launch(&func, grid, block, shmem_bytes, args)
                 .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
         }
         Ok(())
@@ -350,14 +419,20 @@ impl CudaCksp {
             return Err(CudaCkspError::InvalidInput("insufficient device memory".into()));
         }
 
-        let d_high = DeviceBuffer::from_slice(high_tm).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_tm).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let mut d_long: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * cols) }
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }
             .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
-        let mut d_short: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * cols) }
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }
             .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }
+            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
+            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let mut d_long: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * cols, &self.stream) }
+                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        let mut d_short: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * cols, &self.stream) }
+                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
             &d_high,
@@ -404,8 +479,18 @@ impl CudaCksp {
             .module
             .get_function("cksp_many_series_one_param_f32")
             .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+
+        // dyn-SMEM identical to batch layout
+        let shmem_usize = (4 * cap_max as usize * std::mem::size_of::<i32>())
+            + (2 * cap_max as usize * std::mem::size_of::<f32>());
+        let shmem: u32 = shmem_usize.try_into().unwrap_or(u32::MAX);
+
+        // Launch advisor: prefer CUDA's suggestion, but allow explicit override
+        let (_grid_hint, advised_block) = func
+            .suggested_launch_configuration(shmem_usize, (1024u32, 1u32, 1u32).into())
+            .unwrap_or((0, 256));
         let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 256u32,
+            ManySeriesKernelPolicy::Auto => advised_block.max(64).min(1024),
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(1024),
         };
         let grid: GridSize = (num_series as u32, 1, 1).into();
@@ -438,11 +523,64 @@ impl CudaCksp {
                 &mut ol as *mut _ as *mut c_void,
                 &mut os as *mut _ as *mut c_void,
             ];
-            let shmem_usize = (4 * cap_max as usize * std::mem::size_of::<i32>())
-                + (2 * cap_max as usize * std::mem::size_of::<f32>());
-            let shmem: u32 = shmem_usize.try_into().unwrap_or(u32::MAX);
             self.stream
                 .launch(&func, grid, block, shmem, args)
+                .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+// --- helpers ---
+#[inline]
+fn first_valid_hlc(high: &[f32], low: &[f32], close: &[f32]) -> Option<usize> {
+    let n = close.len().min(high.len()).min(low.len());
+    for i in 0..n {
+        if high[i].is_finite() && low[i].is_finite() && close[i].is_finite() {
+            return Some(i);
+        }
+    }
+    None
+}
+
+impl CudaCksp {
+    fn launch_tr_kernel(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        series_len: i32,
+        first_valid: i32,
+        d_tr: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaCkspError> {
+        let func = self
+            .module
+            .get_function("tr_from_hlc_f32")
+            .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
+
+        // Parallel grid for TR precompute
+        let block_x = 256u32;
+        let grid_x = ((series_len.max(0) as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let mut hp = d_high.as_device_ptr().as_raw();
+            let mut lp = d_low.as_device_ptr().as_raw();
+            let mut cp = d_close.as_device_ptr().as_raw();
+            let mut sl = series_len;
+            let mut fv = first_valid;
+            let mut tp = d_tr.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut hp as *mut _ as *mut c_void,
+                &mut lp as *mut _ as *mut c_void,
+                &mut cp as *mut _ as *mut c_void,
+                &mut sl as *mut _ as *mut c_void,
+                &mut fv as *mut _ as *mut c_void,
+                &mut tp as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
         }
         Ok(())

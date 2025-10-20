@@ -16,9 +16,9 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::medium_ad::MediumAdBatchRange;
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
-use cust::function::{BlockSize, GridSize};
+use cust::function::{BlockSize, GridSize, Function};
 use cust::launch;
 use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -64,18 +64,22 @@ impl CudaMediumAd {
         let ctx = Context::new(device).map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/medium_ad_kernel.ptx"));
-        let jit = &[
-            ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
-        ];
-        let module = Module::from_ptx(ptx, jit)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+        // DetermineTargetFromContext lets the driver JIT for the active GPU; default JIT level is O4.
+        let module = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
             .or_else(|_| Module::from_ptx(ptx, &[]))
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
         Ok(Self { module, stream, _ctx: ctx })
+    }
+
+    #[inline]
+    fn pick_block_x_from_occupancy(func: &Function) -> u32 {
+        match func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0)) {
+            Ok((suggested, _min_grid)) => suggested.clamp(64, 256),
+            Err(_) => 128,
+        }
     }
 
     #[inline]
@@ -110,8 +114,8 @@ impl CudaMediumAd {
         let len = data_f32.len();
         let first_valid = data_f32
             .iter()
-            .position(|v| !v.is_nan())
-            .ok_or_else(|| CudaMediumAdError::InvalidInput("all NaN".into()))?;
+            .position(|v| v.is_finite())
+            .ok_or_else(|| CudaMediumAdError::InvalidInput("all NaN/INF".into()))?;
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
             return Err(CudaMediumAdError::InvalidInput("no parameter combinations".into()));
@@ -150,16 +154,18 @@ impl CudaMediumAd {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMediumAdError> {
-        let func = self
+        let mut func = self
             .module
             .get_function("medium_ad_batch_f32")
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = 256;
+        // Prefer L1 cache and pick launch size via occupancy
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+        let block_x: u32 = Self::pick_block_x_from_occupancy(&func);
         let grid_x = ((len as u32) + block_x - 1) / block_x;
 
         // Chunk grid.y to avoid launch limits and large VRAM spikes
-        let max_y = 65_000usize;
+        const max_y: usize = 65_535;
         let chunk_rows = n_combos.min(max_y).max(1);
         let mut launched = 0usize;
         while launched < n_combos {
@@ -228,7 +234,14 @@ impl CudaMediumAd {
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods)
+        // Pinned host memory + async copy for the smaller params vector too
+        let h_periods = LockedBuffer::from_slice(&periods)
+            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        let mut d_periods = unsafe {
+            DeviceBuffer::<i32>::uninitialized_async(periods.len(), &self.stream)
+        }
+        .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        unsafe { d_periods.async_copy_from(&h_periods, &self.stream) }
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
         let mut d_out = unsafe {
@@ -290,7 +303,7 @@ impl CudaMediumAd {
             let mut fv = rows as i32;
             for t in 0..rows {
                 let v = data_tm_f32[t * cols + s];
-                if !v.is_nan() {
+                if v.is_finite() {
                     fv = t as i32;
                     break;
                 }
@@ -309,12 +322,13 @@ impl CudaMediumAd {
         d_first_valids: &DeviceBuffer<i32>,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMediumAdError> {
-        let func = self
+        let mut func = self
             .module
             .get_function("medium_ad_many_series_one_param_f32")
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = 128;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+        let block_x: u32 = Self::pick_block_x_from_occupancy(&func);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
