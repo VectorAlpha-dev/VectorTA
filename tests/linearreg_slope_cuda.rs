@@ -37,8 +37,14 @@ fn compare_rows(cpu: &[f64], gpu: &[f64], periods: &[usize], len: usize, first_v
             let expected = cpu[idx];
             let actual = gpu[idx];
             if col < warm {
-                assert!(expected.is_nan(), "CPU warmup NaN missing at row {row_idx} col {col}");
-                assert!(actual.is_nan(), "CUDA warmup mismatch at row {row_idx} col {col}");
+                assert!(
+                    expected.is_nan(),
+                    "CPU warmup NaN missing at row {row_idx} col {col}"
+                );
+                assert!(
+                    actual.is_nan(),
+                    "CUDA warmup mismatch at row {row_idx} col {col}"
+                );
             } else {
                 let diff = (expected - actual).abs();
                 let tol = 3.0e-3 + expected.abs() * 8.0e-4; // slope tolerances
@@ -65,11 +71,7 @@ fn linearreg_slope_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
     let sweep = LinearRegSlopeBatchRange { period: (8, 36, 4) };
 
     let cpu = linearreg_slope_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
-    let periods: Vec<usize> = cpu
-        .combos
-        .iter()
-        .map(|p| p.period.unwrap())
-        .collect();
+    let periods: Vec<usize> = cpu.combos.iter().map(|p| p.period.unwrap()).collect();
 
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let cuda = CudaLinearregSlope::new(0).expect("CudaLinearregSlope::new");
@@ -91,7 +93,8 @@ fn linearreg_slope_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
 
 #[cfg(feature = "cuda")]
 #[test]
-fn linearreg_slope_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+fn linearreg_slope_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
+{
     if !cuda_available() {
         eprintln!(
             "[linearreg_slope_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
@@ -120,7 +123,9 @@ fn linearreg_slope_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
         for row in 0..rows {
             series[row] = data_tm[row * cols + col];
         }
-        let out = LinearRegSlopeBuilder::new().period(period).apply_slice(&series)?;
+        let out = LinearRegSlopeBuilder::new()
+            .period(period)
+            .apply_slice(&series)?;
         for row in 0..rows {
             cpu_tm[row * cols + col] = out.values[row];
         }
@@ -159,4 +164,3 @@ fn linearreg_slope_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
 
     Ok(())
 }
-

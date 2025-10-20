@@ -42,10 +42,10 @@ use std::convert::AsRef;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-#[cfg(feature = "python")]
-use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -1112,7 +1112,9 @@ pub fn fosc_cuda_batch_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_f32.as_slice()?;
-    let sweep = FoscBatchRange { period: period_range };
+    let sweep = FoscBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaFosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.fosc_batch_dev(slice_in, &sweep)
@@ -1140,7 +1142,9 @@ pub fn fosc_cuda_many_series_one_param_dev_py(
     let flat_in: &[f32] = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = FoscParams { period: Some(period) };
+    let params = FoscParams {
+        period: Some(period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaFosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.fosc_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)

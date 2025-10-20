@@ -5,15 +5,21 @@
 //   warm = first_valid + (2*period - 1)
 // Values prior to warm are NaN.
 //
-// Implementation notes:
-// - Per-combo sequential time scan (EMA recurrence) per block.
-// - Two-pass approach: first compute EMA(H-L) across time into the output row,
-//   then convert in-place to CVI by differencing with the EMA lag of `period`.
-// - FP32 with FMA for update; outputs are FP32.
+// Implementation notes (optimized):
+// - One-series × many-params path: one thread per combo (grid-stride).
+// - Two-pass approach: compute EMA(H-L) into the output row, then convert
+//   right-to-left (descending t) in-place to CVI to avoid hazards.
+// - FP32 with FMA for EMA update; outputs are FP32.
 
 #include <cuda_runtime.h>
 #include <math.h>
 
+////////////////////////////////////////////////////////////////////////////////
+// Helper: integer ceil-div
+__device__ __forceinline__ int ceil_div(int a, int b) { return (a + b - 1) / b; }
+
+////////////////////////////////////////////////////////////////////////////////
+// One price series × many parameter combos (row-major out: combo-major)
 extern "C" __global__
 void cvi_batch_f32(const float* __restrict__ high,
                    const float* __restrict__ low,
@@ -25,39 +31,42 @@ void cvi_batch_f32(const float* __restrict__ high,
                    int n_combos,
                    float* __restrict__ out)
 {
-    const int combo = blockIdx.x;
-    if (combo >= n_combos) return;
+    if (series_len <= 0 || n_combos <= 0) return;
+    if (first_valid < 0 || first_valid >= series_len) return;
 
-    const int   period = periods[combo];
-    const float alpha  = alphas[combo];
-    const int   warm   = warm_indices[combo];
-    if (period <= 0 || first_valid < 0 || warm >= series_len) return;
+    const int total_threads = blockDim.x * gridDim.x;
+    int combo = blockIdx.x * blockDim.x + threadIdx.x;
 
-    const int base = combo * series_len;
+    for (; combo < n_combos; combo += total_threads) {
+        const int   period = periods[combo];
+        const float alpha  = alphas[combo];
+        const int   warm   = warm_indices[combo];
+        if (period <= 0 || warm >= series_len) continue;
 
-    // Initialize entire row to NaN cooperatively
-    for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
-        out[base + idx] = NAN;
-    }
-    __syncthreads();
+        const int base = combo * series_len;
 
-    if (threadIdx.x != 0) return;
+        // Pass 1: EMA(H-L) into out[base + t]
+        float y = high[first_valid] - low[first_valid];
+        out[base + first_valid] = y;
 
-    // First pass: compute EMA(H-L) into out[base + t]
-    float y = high[first_valid] - low[first_valid];
-    out[base + first_valid] = y;
-    for (int t = first_valid + 1; t < series_len; ++t) {
-        const float r = high[t] - low[t];
-        // y += (r - y) * alpha (fused)
-        y = __fmaf_rn(r - y, alpha, y);
-        out[base + t] = y;
-    }
+        // Sequential EMA scan across time (FMA for accuracy/perf)
+        for (int t = first_valid + 1; t < series_len; ++t) {
+            const float r = high[t] - low[t];
+            y = __fmaf_rn((r - y), alpha, y);
+            out[base + t] = y;
+        }
 
-    // Second pass: convert EMA to CVI in-place
-    for (int t = warm; t < series_len; ++t) {
-        const float curr = out[base + t];
-        const float old  = out[base + (t - period)];
-        out[base + t] = 100.0f * (curr - old) / old;
+        // Pass 2: convert EMA -> CVI in-place, descending to avoid hazard
+        for (int t = series_len - 1; t >= warm; --t) {
+            const float curr = out[base + t];
+            const float old  = out[base + (t - period)];
+            out[base + t] = 100.0f * (curr - old) / old;
+        }
+
+        // Final: mark pre-warm as NaN
+        for (int t = 0; t < warm; ++t) {
+            out[base + t] = NAN;
+        }
     }
 }
 
@@ -72,35 +81,40 @@ void cvi_batch_from_range_f32(const float* __restrict__ range,
                               int n_combos,
                               float* __restrict__ out)
 {
-    const int combo = blockIdx.x;
-    if (combo >= n_combos) return;
+    if (series_len <= 0 || n_combos <= 0) return;
+    if (first_valid < 0 || first_valid >= series_len) return;
 
-    const int   period = periods[combo];
-    const float alpha  = alphas[combo];
-    const int   warm   = warm_indices[combo];
-    if (period <= 0 || first_valid < 0 || warm >= series_len) return;
+    const int total_threads = blockDim.x * gridDim.x;
+    int combo = blockIdx.x * blockDim.x + threadIdx.x;
 
-    const int base = combo * series_len;
+    for (; combo < n_combos; combo += total_threads) {
+        const int   period = periods[combo];
+        const float alpha  = alphas[combo];
+        const int   warm   = warm_indices[combo];
+        if (period <= 0 || warm >= series_len) continue;
 
-    // Initialize entire row to NaN cooperatively
-    for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
-        out[base + idx] = NAN;
-    }
-    __syncthreads();
+        const int base = combo * series_len;
 
-    if (threadIdx.x != 0) return;
+        // Pass 1: EMA(range) into out[base + t]
+        float y = range[first_valid];
+        out[base + first_valid] = y;
+        for (int t = first_valid + 1; t < series_len; ++t) {
+            const float r = range[t];
+            y = __fmaf_rn((r - y), alpha, y);
+            out[base + t] = y;
+        }
 
-    float y = range[first_valid];
-    out[base + first_valid] = y;
-    for (int t = first_valid + 1; t < series_len; ++t) {
-        const float r = range[t];
-        y = __fmaf_rn(r - y, alpha, y);
-        out[base + t] = y;
-    }
-    for (int t = warm; t < series_len; ++t) {
-        const float curr = out[base + t];
-        const float old  = out[base + (t - period)];
-        out[base + t] = 100.0f * (curr - old) / old;
+        // Pass 2: convert EMA -> CVI in-place, descending
+        for (int t = series_len - 1; t >= warm; --t) {
+            const float curr = out[base + t];
+            const float old  = out[base + (t - period)];
+            out[base + t] = 100.0f * (curr - old) / old;
+        }
+
+        // Final: pre-warm = NaN
+        for (int t = 0; t < warm; ++t) {
+            out[base + t] = NAN;
+        }
     }
 }
 
@@ -117,35 +131,61 @@ void cvi_many_series_one_param_f32(const float* __restrict__ high_tm,
                                    float* __restrict__ out_tm)
 {
     if (period <= 0 || num_series <= 0 || series_len <= 0) return;
-    const int s = blockIdx.x * blockDim.x + threadIdx.x;
-    if (s >= num_series) return;
 
     const int stride = num_series;
-    const int fv = first_valids[s];
 
-    // Clear column to NaN
-    for (int t = 0; t < series_len; ++t) {
-        out_tm[t * stride + s] = NAN;
+    // grid-stride over series
+    for (int s = blockIdx.x * blockDim.x + threadIdx.x;
+         s < num_series;
+         s += blockDim.x * gridDim.x)
+    {
+        const int fv = first_valids[s];
+        if (fv < 0 || fv >= series_len) {
+            continue;
+        }
+
+        const int warm = fv + (2 * period - 1);
+        if (warm >= series_len) {
+            continue;
+        }
+
+        // Pass 1: EMA(range) into out_tm
+        float y = high_tm[fv * stride + s] - low_tm[fv * stride + s];
+        out_tm[fv * stride + s] = y;
+
+        for (int t = fv + 1; t < series_len; ++t) {
+            const float r = high_tm[t * stride + s] - low_tm[t * stride + s];
+            y = __fmaf_rn((r - y), alpha, y);
+            out_tm[t * stride + s] = y;
+        }
+
+        // Pass 2: convert EMA -> CVI in-place, descending
+        for (int t = series_len - 1; t >= warm; --t) {
+            const float curr = out_tm[t * stride + s];
+            const float old  = out_tm[(t - period) * stride + s];
+            out_tm[t * stride + s] = 100.0f * (curr - old) / old;
+        }
+
+        // Final: pre-warm = NaN
+        for (int t = 0; t < warm; ++t) {
+            out_tm[t * stride + s] = NAN;
+        }
     }
-    if (fv < 0 || fv >= series_len) return;
+}
 
-    const int warm = fv + (2 * period - 1);
-    if (warm >= series_len) return;
-
-    // First pass: EMA into out_tm
-    float y = high_tm[fv * stride + s] - low_tm[fv * stride + s];
-    out_tm[fv * stride + s] = y;
-    for (int t = fv + 1; t < series_len; ++t) {
-        const float r = high_tm[t * stride + s] - low_tm[t * stride + s];
-        y = __fmaf_rn(r - y, alpha, y);
-        out_tm[t * stride + s] = y;
-    }
-
-    // Second pass: convert to CVI in-place
-    for (int t = warm; t < series_len; ++t) {
-        const float curr = out_tm[t * stride + s];
-        const float old  = out_tm[(t - period) * stride + s];
-        out_tm[t * stride + s] = 100.0f * (curr - old) / old;
+////////////////////////////////////////////////////////////////////////////////
+// Optional helper: compute range once when running many combos on one series.
+extern "C" __global__
+void range_from_high_low_f32(const float* __restrict__ high,
+                             const float* __restrict__ low,
+                             int series_len,
+                             float* __restrict__ range)
+{
+    for (int t = blockIdx.x * blockDim.x + threadIdx.x;
+         t < series_len;
+         t += blockDim.x * gridDim.x)
+    {
+        range[t] = high[t] - low[t];
     }
 }
 

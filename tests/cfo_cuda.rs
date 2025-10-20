@@ -13,7 +13,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::oscillators::cfo_wrapper::CudaCfo;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -39,24 +41,35 @@ fn cfo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         let x = i as f64;
         price[i] = (x * 0.00123).sin() + 0.00011 * x;
     }
-    let sweep = CfoBatchRange { period: (8, 8 + 63, 1), scalar: (100.0, 100.0, 0.0) };
+    let sweep = CfoBatchRange {
+        period: (8, 8 + 63, 1),
+        scalar: (100.0, 100.0, 0.0),
+    };
 
     let cpu = cfo_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
 
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaCfo::new(0).expect("CudaCfo::new");
-    let dev = cuda.cfo_batch_dev(&price_f32, &sweep).expect("cfo_batch_dev");
+    let dev = cuda
+        .cfo_batch_dev(&price_f32, &sweep)
+        .expect("cfo_batch_dev");
     assert_eq!(cpu.rows, dev.rows);
     assert_eq!(cpu.cols, dev.cols);
 
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4; // FP32 kernel vs FP64 CPU
+    let tol = 3e-3; // FP32 GPU vs FP64 CPU (prefix path rounding)
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "batch mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "batch mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -86,17 +99,32 @@ fn cfo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
-        for t in 0..rows { p[t] = data_tm[t * cols + s]; }
-        let params = CfoParams { period: Some(period), scalar: Some(scalar) };
+        for t in 0..rows {
+            p[t] = data_tm[t * cols + s];
+        }
+        let params = CfoParams {
+            period: Some(period),
+            scalar: Some(scalar),
+        };
         let input = CfoInput::from_slice(&p, params);
         let out = cfo_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaCfo::new(0).expect("CudaCfo::new");
     let dev = cuda
-        .cfo_many_series_one_param_time_major_dev(&data_tm_f32, cols, rows, &CfoParams { period: Some(period), scalar: Some(scalar) })
+        .cfo_many_series_one_param_time_major_dev(
+            &data_tm_f32,
+            cols,
+            rows,
+            &CfoParams {
+                period: Some(period),
+                scalar: Some(scalar),
+            },
+        )
         .expect("cfo_many_series_one_param_time_major_dev");
     assert_eq!(dev.rows, rows);
     assert_eq!(dev.cols, cols);
@@ -104,10 +132,13 @@ fn cfo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4;
+    let tol = 3e-3;
     for idx in 0..host.len() {
-        assert!(approx_eq(cpu_tm[idx], host[idx] as f64, tol), "many-series mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], host[idx] as f64, tol),
+            "many-series mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }
-

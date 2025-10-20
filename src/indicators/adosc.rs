@@ -47,9 +47,9 @@ use rayon::prelude::*;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaAdosc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[derive(Debug, Clone)]
 pub enum AdoscData<'a> {
@@ -2105,8 +2105,7 @@ pub fn adosc_cuda_batch_dev_py(
     };
     let inner = py.allow_threads(|| {
         let cuda = CudaAdosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .adosc_batch_dev(high_slice, low_slice, close_slice, volume_slice, &sweep)
+        cuda.adosc_batch_dev(high_slice, low_slice, close_slice, volume_slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
@@ -2147,18 +2146,17 @@ pub fn adosc_cuda_many_series_one_param_dev_py(
     }
     let inner = py.allow_threads(|| {
         let cuda = CudaAdosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .adosc_many_series_one_param_time_major_dev(
-                high_slice,
-                low_slice,
-                close_slice,
-                volume_slice,
-                cols,
-                rows,
-                short_period,
-                long_period,
-            )
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.adosc_many_series_one_param_time_major_dev(
+            high_slice,
+            low_slice,
+            close_slice,
+            volume_slice,
+            cols,
+            rows,
+            short_period,
+            long_period,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

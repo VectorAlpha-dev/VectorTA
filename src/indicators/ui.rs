@@ -1505,10 +1505,14 @@ pub fn ui_cuda_batch_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_f32.as_slice()?;
-    let sweep = UiBatchRange { period: period_range, scalar: scalar_range };
+    let sweep = UiBatchRange {
+        period: period_range,
+        scalar: scalar_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaUi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ui_batch_dev(slice_in, &sweep).map(|(arr, _)| arr)
+        cuda.ui_batch_dev(slice_in, &sweep)
+            .map(|(arr, _)| arr)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
@@ -1532,7 +1536,10 @@ pub fn ui_cuda_many_series_one_param_dev_py(
     let flat_in: &[f32] = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = UiParams { period: Some(period), scalar: Some(scalar) };
+    let params = UiParams {
+        period: Some(period),
+        scalar: Some(scalar),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaUi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.ui_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)

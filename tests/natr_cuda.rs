@@ -68,7 +68,8 @@ fn natr_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu_host = vec![0f32; gpu.len()];
     gpu.buf.copy_to(&mut gpu_host)?;
 
-    let atol = 5e-3; let rtol = 1e-7;
+    let atol = 5e-3;
+    let rtol = 1e-7;
     for idx in 0..(cpu.rows * cpu.cols) {
         assert!(
             approx_eq(cpu.values[idx], gpu_host[idx] as f64, atol, rtol),
@@ -86,9 +87,7 @@ fn natr_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn natr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[natr_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[natr_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -119,12 +118,16 @@ fn natr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             l[t] = low_tm[t * cols + s];
             c[t] = close_tm[t * cols + s];
         }
-        let out = my_project::indicators::natr::natr(&my_project::indicators::natr::NatrInput::from_slices(
-            &h,
-            &l,
-            &c,
-            my_project::indicators::natr::NatrParams { period: Some(period) },
-        ))?;
+        let out = my_project::indicators::natr::natr(
+            &my_project::indicators::natr::NatrInput::from_slices(
+                &h,
+                &l,
+                &c,
+                my_project::indicators::natr::NatrParams {
+                    period: Some(period),
+                },
+            ),
+        )?;
         for t in 0..rows {
             cpu_tm[t * cols + s] = out.values[t];
         }
@@ -143,7 +146,8 @@ fn natr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let mut g = vec![0f32; gpu_tm.len()];
     gpu_tm.buf.copy_to(&mut g)?;
 
-    let atol = 5e-3; let rtol = 1e-7;
+    let atol = 5e-3;
+    let rtol = 1e-7;
     for idx in 0..(cols * rows) {
         assert!(
             approx_eq(cpu_tm[idx], g[idx] as f64, atol, rtol),

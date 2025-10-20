@@ -1,6 +1,6 @@
 // Integration tests for CUDA VAR kernels (variance with nbdev scaling)
 
-use my_project::indicators::var::{var_batch_with_kernel, VarBatchRange, VarParams, VarBuilder};
+use my_project::indicators::var::{var_batch_with_kernel, VarBatchRange, VarBuilder, VarParams};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -43,12 +43,17 @@ fn var_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         data[i] = base + 0.0011 * ((i % 11) as f64 - 5.0);
     }
 
-    let sweep = VarBatchRange { period: (10, 40, 10), nbdev: (1.0, 2.0, 1.0) };
+    let sweep = VarBatchRange {
+        period: (10, 40, 10),
+        nbdev: (1.0, 2.0, 1.0),
+    };
     let cpu = var_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
 
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let cuda = CudaVar::new(0).expect("CudaVar::new");
-    let (dev_arr, combos) = cuda.var_batch_dev(&data_f32, &sweep).expect("var_cuda_batch_dev");
+    let (dev_arr, combos) = cuda
+        .var_batch_dev(&data_f32, &sweep)
+        .expect("var_cuda_batch_dev");
 
     assert_eq!(dev_arr.rows, cpu.rows);
     assert_eq!(dev_arr.cols, cpu.cols);
@@ -93,19 +98,26 @@ fn var_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
     let period = 14usize;
     let nbdev = 1.5f64;
-    let params = VarParams { period: Some(period), nbdev: Some(nbdev) };
+    let params = VarParams {
+        period: Some(period),
+        nbdev: Some(nbdev),
+    };
 
     // CPU reference per column
     let mut cpu = vec![f32::NAN; rows * cols];
     for s in 0..cols {
         let mut col = vec![f64::NAN; rows];
-        for t in 0..rows { col[t] = data_tm[t * cols + s]; }
+        for t in 0..rows {
+            col[t] = data_tm[t * cols + s];
+        }
         let out = VarBuilder::new()
             .period(period)
             .nbdev(nbdev)
             .apply_slice(&col)?
             .values;
-        for t in 0..rows { cpu[t * cols + s] = out[t] as f32; }
+        for t in 0..rows {
+            cpu[t * cols + s] = out[t] as f32;
+        }
     }
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();

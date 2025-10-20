@@ -24,6 +24,12 @@
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaReverseRsi;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -32,12 +38,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::CudaReverseRsi;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
 
 // Feature-gated imports for WASM bindings
 #[cfg(feature = "wasm")]
@@ -1549,16 +1549,29 @@ pub fn reverse_rsi_cuda_batch_dev_py<'py>(
     rsi_level_range: (f64, f64, f64),
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice_in = data_f32.as_slice()?;
-    let sweep = ReverseRsiBatchRange { rsi_length_range, rsi_level_range };
+    let sweep = ReverseRsiBatchRange {
+        rsi_length_range,
+        rsi_level_range,
+    };
     let (inner, combos) = py.allow_threads(|| {
-        let cuda = CudaReverseRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.reverse_rsi_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaReverseRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.reverse_rsi_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    let lens: Vec<u64> = combos.iter().map(|c| c.rsi_length.unwrap_or(14) as u64).collect();
-    let lvls: Vec<f64> = combos.iter().map(|c| c.rsi_level.unwrap_or(50.0) as f64).collect();
+    let lens: Vec<u64> = combos
+        .iter()
+        .map(|c| c.rsi_length.unwrap_or(14) as u64)
+        .collect();
+    let lvls: Vec<f64> = combos
+        .iter()
+        .map(|c| c.rsi_level.unwrap_or(50.0) as f64)
+        .collect();
     dict.set_item("rsi_lengths", lens.into_pyarray(py))?;
     dict.set_item("rsi_levels", lvls.into_pyarray(py))?;
     Ok((DeviceArrayF32Py { inner }, dict))
@@ -1576,13 +1589,18 @@ pub fn reverse_rsi_cuda_many_series_one_param_dev_py<'py>(
     rsi_level: f64,
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice_in = data_tm_f32.as_slice()?;
-    let params = ReverseRsiParams { rsi_length: Some(rsi_length), rsi_level: Some(rsi_level) };
+    let params = ReverseRsiParams {
+        rsi_length: Some(rsi_length),
+        rsi_level: Some(rsi_level),
+    };
     let inner = py.allow_threads(|| {
-        let cuda = CudaReverseRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .reverse_rsi_many_series_one_param_time_major_dev(slice_in, cols, rows, &params)
+        let cuda =
+            CudaReverseRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.reverse_rsi_many_series_one_param_time_major_dev(slice_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })

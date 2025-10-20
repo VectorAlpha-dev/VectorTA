@@ -1637,20 +1637,20 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1779,7 +1779,9 @@ pub fn dpo_cuda_batch_dev_py<'py>(
     }
 
     let slice_in = data_f32.as_slice()?;
-    let sweep = DpoBatchRange { period: period_range };
+    let sweep = DpoBatchRange {
+        period: period_range,
+    };
 
     // Build combos on host for metadata; GPU computes values
     let combos = expand_grid(&sweep);
@@ -1823,7 +1825,9 @@ pub fn dpo_cuda_many_series_one_param_dev_py<'py>(
     let rows = shape[0];
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
-    let params = DpoParams { period: Some(period) };
+    let params = DpoParams {
+        period: Some(period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = crate::cuda::oscillators::dpo_wrapper::CudaDpo::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;

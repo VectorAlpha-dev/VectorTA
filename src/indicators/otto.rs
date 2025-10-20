@@ -24,6 +24,8 @@
 //!   mirrors the scalar path after warmup (slow*fast + 10).
 //! - Memory: Uses standard Vec; MA selection remains dynamic; no unsafe in scalar.
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -32,8 +34,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -2252,15 +2252,17 @@ pub fn otto_cuda_batch_dev_py(
         correcting_constant: correcting_constant_range,
         ma_types,
     };
-    let (hott, lott) = py
-        .allow_threads(|| {
-            let cuda = crate::cuda::moving_averages::CudaOtto::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.otto_batch_dev(slice, &sweep)
-                .map(|(h, l, _)| (h, l))
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
-    Ok((DeviceArrayF32Py { inner: hott }, DeviceArrayF32Py { inner: lott }))
+    let (hott, lott) = py.allow_threads(|| {
+        let cuda = crate::cuda::moving_averages::CudaOtto::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.otto_batch_dev(slice, &sweep)
+            .map(|(h, l, _)| (h, l))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((
+        DeviceArrayF32Py { inner: hott },
+        DeviceArrayF32Py { inner: lott },
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2292,16 +2294,17 @@ pub fn otto_cuda_many_series_one_param_dev_py(
         correcting_constant: Some(correcting_constant),
         ma_type: Some("VAR".to_string()),
     };
-    let (hott, lott) = py
-        .allow_threads(|| {
-            let cuda = crate::cuda::moving_averages::CudaOtto::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.otto_many_series_one_param_time_major_dev(prices, cols, rows, &params)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
-    Ok((DeviceArrayF32Py { inner: hott }, DeviceArrayF32Py { inner: lott }))
+    let (hott, lott) = py.allow_threads(|| {
+        let cuda = crate::cuda::moving_averages::CudaOtto::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.otto_many_series_one_param_time_major_dev(prices, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((
+        DeviceArrayF32Py { inner: hott },
+        DeviceArrayF32Py { inner: lott },
+    ))
 }
-
 
 // ============= TESTS =============
 

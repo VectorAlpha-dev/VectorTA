@@ -1857,15 +1857,19 @@ pub fn eri_cuda_batch_dev_py(
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
     let s = source_f32.as_slice()?;
-    let sweep = EriBatchRange { period: period_range, ma_type: ma_type.to_string() };
-    let ((bull, bear), _combos) = py
-        .allow_threads(|| {
-            let cuda = CudaEri::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda
-                .eri_batch_dev(h, l, s, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
-    Ok((DeviceArrayF32Py { inner: bull }, DeviceArrayF32Py { inner: bear }))
+    let sweep = EriBatchRange {
+        period: period_range,
+        ma_type: ma_type.to_string(),
+    };
+    let ((bull, bear), _combos) = py.allow_threads(|| {
+        let cuda = CudaEri::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.eri_batch_dev(h, l, s, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((
+        DeviceArrayF32Py { inner: bull },
+        DeviceArrayF32Py { inner: bear },
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1889,14 +1893,15 @@ pub fn eri_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let s = source_tm_f32.as_slice()?;
-    let (bull, bear) = py
-        .allow_threads(|| {
-            let cuda = CudaEri::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda
-                .eri_many_series_one_param_time_major_dev(h, l, s, cols, rows, period, ma_type)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
-    Ok((DeviceArrayF32Py { inner: bull }, DeviceArrayF32Py { inner: bear }))
+    let (bull, bear) = py.allow_threads(|| {
+        let cuda = CudaEri::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.eri_many_series_one_param_time_major_dev(h, l, s, cols, rows, period, ma_type)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok((
+        DeviceArrayF32Py { inner: bull },
+        DeviceArrayF32Py { inner: bear },
+    ))
 }
 
 #[cfg(feature = "wasm")]

@@ -33,6 +33,10 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaTrix;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -43,10 +47,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaTrix;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1133,7 +1133,9 @@ pub fn trix_cuda_batch_dev_py<'py>(
     }
 
     let slice_in = data_f32.as_slice()?;
-    let sweep = TrixBatchRange { period: period_range };
+    let sweep = TrixBatchRange {
+        period: period_range,
+    };
 
     let inner = py.allow_threads(|| {
         let cuda = CudaTrix::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1144,10 +1146,14 @@ pub fn trix_cuda_batch_dev_py<'py>(
     let dict = PyDict::new(py);
     let (start, end, step) = period_range;
     let mut periods: Vec<u64> = Vec::new();
-    if step == 0 { periods.push(start as u64); }
-    else {
+    if step == 0 {
+        periods.push(start as u64);
+    } else {
         let mut p = start;
-        while p <= end { periods.push(p as u64); p = p.saturating_add(step); }
+        while p <= end {
+            periods.push(p as u64);
+            p = p.saturating_add(step);
+        }
     }
     dict.set_item("periods", periods.into_pyarray(py))?;
 

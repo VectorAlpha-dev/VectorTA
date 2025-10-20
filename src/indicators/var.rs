@@ -829,7 +829,9 @@ fn expand_grid(r: &VarBatchRange) -> Vec<VarParams> {
 }
 
 #[inline(always)]
-pub fn var_expand_grid(r: &VarBatchRange) -> Vec<VarParams> { expand_grid(r) }
+pub fn var_expand_grid(r: &VarBatchRange) -> Vec<VarParams> {
+    expand_grid(r)
+}
 
 // -- Batch Inner
 
@@ -2154,7 +2156,11 @@ pub fn var_cuda_batch_dev_py(
     let slice_in = data_f32.as_slice()?;
     let sweep = VarBatchRange {
         period: period_range,
-        nbdev: (nbdev_range.0 as f64, nbdev_range.1 as f64, nbdev_range.2 as f64),
+        nbdev: (
+            nbdev_range.0 as f64,
+            nbdev_range.1 as f64,
+            nbdev_range.2 as f64,
+        ),
     };
     let inner = py.allow_threads(|| {
         let cuda = CudaVar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2181,7 +2187,10 @@ pub fn var_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_tm = data_tm_f32.as_slice()?;
-    let params = VarParams { period: Some(period), nbdev: Some(nbdev) };
+    let params = VarParams {
+        period: Some(period),
+        nbdev: Some(nbdev),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaVar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.var_many_series_one_param_time_major_dev(slice_tm, cols, rows, &params)

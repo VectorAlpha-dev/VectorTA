@@ -3206,7 +3206,6 @@ use numpy::PyReadonlyArray1;
 use pyo3::{pyfunction, PyResult, Python};
 #[cfg(all(feature = "python", feature = "cuda"))]
 // PyValueError already imported above under `#[cfg(feature = "python")]`.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "bollinger_bands_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, devup_range, devdn_range, device_id=0))]
@@ -3230,8 +3229,8 @@ pub fn bollinger_bands_cuda_batch_dev_py(
         devtype: (0, 0, 0),
     };
     let (up, mid, lo) = py.allow_threads(|| {
-        let cuda = CudaBollingerBands::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaBollingerBands::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.bollinger_bands_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -3260,8 +3259,8 @@ pub fn bollinger_bands_cuda_many_series_one_param_dev_py(
     }
     let tm = prices_tm_f32.as_slice()?;
     let (up, mid, lo) = py.allow_threads(|| {
-        let cuda = CudaBollingerBands::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaBollingerBands::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.bollinger_bands_many_series_one_param_time_major_dev(
             tm, cols, rows, period, devup, devdn,
         )

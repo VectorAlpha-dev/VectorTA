@@ -34,6 +34,8 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -44,8 +46,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1470,7 +1470,9 @@ pub fn kaufmanstop_cuda_batch_dev_py(
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
     if h.len() != l.len() {
-        return Err(PyValueError::new_err("High and low arrays must have same length"));
+        return Err(PyValueError::new_err(
+            "High and low arrays must have same length",
+        ));
     }
     let sweep = KaufmanstopBatchRange {
         period: period_range,
@@ -1479,8 +1481,8 @@ pub fn kaufmanstop_cuda_batch_dev_py(
         ma_type: (ma_type.to_string(), ma_type.to_string(), 0.0),
     };
     let inner = py.allow_threads(|| {
-        let cuda = CudaKaufmanstop::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaKaufmanstop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, _combos) = cuda
             .kaufmanstop_batch_dev(h, l, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1502,9 +1504,9 @@ pub fn kaufmanstop_cuda_many_series_one_param_dev_py(
     ma_type: &str,
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    use numpy::PyUntypedArrayMethods;
     use crate::cuda::cuda_available;
     use crate::cuda::CudaKaufmanstop;
+    use numpy::PyUntypedArrayMethods;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1522,10 +1524,9 @@ pub fn kaufmanstop_cuda_many_series_one_param_dev_py(
         ma_type: Some(ma_type.to_string()),
     };
     let inner = py.allow_threads(|| {
-        let cuda = CudaKaufmanstop::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .kaufmanstop_many_series_one_param_time_major_dev(h, l, cols, rows, &params)
+        let cuda =
+            CudaKaufmanstop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.kaufmanstop_many_series_one_param_time_major_dev(h, l, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })

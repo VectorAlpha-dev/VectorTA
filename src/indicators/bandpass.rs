@@ -37,10 +37,10 @@
 //!   - Add alloc_with_nan_prefix for single indicator calculations
 //!   - Consider SIMD for normalization and smoothing stages
 
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -53,11 +53,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use crate::indicators::highpass::{highpass, HighPassError, HighPassInput, HighPassParams};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::bandpass_wrapper::CudaBandpass;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+use crate::indicators::highpass::{highpass, HighPassError, HighPassInput, HighPassParams};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
@@ -2778,24 +2778,55 @@ pub fn bandpass_cuda_batch_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = close_f32.as_slice()?;
-    let sweep = BandPassBatchRange { period: period_range, bandwidth: bandwidth_range };
-    let (outputs, combos) = py
-        .allow_threads(|| {
-            let cuda = CudaBandpass::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.bandpass_batch_dev(slice, &sweep)
-                .map(|r| (r.outputs, r.combos))
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let sweep = BandPassBatchRange {
+        period: period_range,
+        bandwidth: bandwidth_range,
+    };
+    let (outputs, combos) = py.allow_threads(|| {
+        let cuda =
+            CudaBandpass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.bandpass_batch_dev(slice, &sweep)
+            .map(|r| (r.outputs, r.combos))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
 
     let d = PyDict::new(py);
-    d.set_item("bp", Py::new(py, DeviceArrayF32Py { inner: outputs.first })?)?;
+    d.set_item(
+        "bp",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: outputs.first,
+            },
+        )?,
+    )?;
     d.set_item(
         "bp_normalized",
-        Py::new(py, DeviceArrayF32Py { inner: outputs.second })?,
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: outputs.second,
+            },
+        )?,
     )?;
-    d.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: outputs.third })?)?;
-    d.set_item("trigger", Py::new(py, DeviceArrayF32Py { inner: outputs.fourth })?)?;
+    d.set_item(
+        "signal",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: outputs.third,
+            },
+        )?,
+    )?;
+    d.set_item(
+        "trigger",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: outputs.fourth,
+            },
+        )?,
+    )?;
 
     let periods: Vec<usize> = combos.iter().map(|p| p.period.unwrap()).collect();
     let bands: Vec<f64> = combos.iter().map(|p| p.bandwidth.unwrap()).collect();
@@ -2820,28 +2851,61 @@ pub fn bandpass_cuda_many_series_one_param_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let shape = data_tm_f32.shape();
-    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array")); }
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array"));
+    }
     let rows = shape[0];
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
-    let params = BandPassParams { period: Some(period), bandwidth: Some(bandwidth) };
+    let params = BandPassParams {
+        period: Some(period),
+        bandwidth: Some(bandwidth),
+    };
 
-    let outputs = py
-        .allow_threads(|| {
-            let cuda = CudaBandpass::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.bandpass_many_series_one_param_time_major_dev(flat, cols, rows, &params)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let outputs = py.allow_threads(|| {
+        let cuda =
+            CudaBandpass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.bandpass_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
 
     let d = PyDict::new(py);
-    d.set_item("bp", Py::new(py, DeviceArrayF32Py { inner: outputs.first })?)?;
+    d.set_item(
+        "bp",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: outputs.first,
+            },
+        )?,
+    )?;
     d.set_item(
         "bp_normalized",
-        Py::new(py, DeviceArrayF32Py { inner: outputs.second })?,
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: outputs.second,
+            },
+        )?,
     )?;
-    d.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: outputs.third })?)?;
-    d.set_item("trigger", Py::new(py, DeviceArrayF32Py { inner: outputs.fourth })?)?;
+    d.set_item(
+        "signal",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: outputs.third,
+            },
+        )?,
+    )?;
+    d.set_item(
+        "trigger",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: outputs.fourth,
+            },
+        )?,
+    )?;
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;
     d.set_item("period", period)?;

@@ -1588,13 +1588,13 @@ pub fn aso_batch_py<'py>(
 
 // ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::CudaAso;
+use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::oscillators::CudaAso;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "aso_cuda_batch_dev")]
@@ -1609,17 +1609,29 @@ pub fn aso_cuda_batch_dev_py(
     mode_range: (usize, usize, usize),
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
-    let o = open.as_slice()?; let h = high.as_slice()?; let l = low.as_slice()?; let c = close.as_slice()?;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let o = open.as_slice()?;
+    let h = high.as_slice()?;
+    let l = low.as_slice()?;
+    let c = close.as_slice()?;
     if o.len() == 0 || h.len() != o.len() || l.len() != o.len() || c.len() != o.len() {
         return Err(PyValueError::new_err("mismatched input lengths"));
     }
-    let sweep = AsoBatchRange { period: period_range, mode: mode_range };
+    let sweep = AsoBatchRange {
+        period: period_range,
+        mode: mode_range,
+    };
     let (bulls, bears): (DeviceArrayF32, DeviceArrayF32) = py.allow_threads(|| {
         let cuda = CudaAso::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.aso_batch_dev(o, h, l, c, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.aso_batch_dev(o, h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: bulls }, DeviceArrayF32Py { inner: bears }))
+    Ok((
+        DeviceArrayF32Py { inner: bulls },
+        DeviceArrayF32Py { inner: bears },
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1637,18 +1649,28 @@ pub fn aso_cuda_many_series_one_param_dev_py(
     mode: usize,
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
-    let o = open_tm.as_slice()?; let h = high_tm.as_slice()?; let l = low_tm.as_slice()?; let c = close_tm.as_slice()?;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let o = open_tm.as_slice()?;
+    let h = high_tm.as_slice()?;
+    let l = low_tm.as_slice()?;
+    let c = close_tm.as_slice()?;
     if cols * rows != o.len() || h.len() != o.len() || l.len() != o.len() || c.len() != o.len() {
         return Err(PyValueError::new_err("mismatched input sizes"));
     }
-    if mode > 2 { return Err(PyValueError::new_err("invalid mode")); }
+    if mode > 2 {
+        return Err(PyValueError::new_err("invalid mode"));
+    }
     let (bulls, bears) = py.allow_threads(|| {
         let cuda = CudaAso::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.aso_many_series_one_param_time_major_dev(o, h, l, c, cols, rows, period, mode)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: bulls }, DeviceArrayF32Py { inner: bears }))
+    Ok((
+        DeviceArrayF32Py { inner: bulls },
+        DeviceArrayF32Py { inner: bears },
+    ))
 }
 
 #[cfg(feature = "python")]

@@ -1,13 +1,14 @@
 use my_project::indicators::ttm_trend::{
-    ttm_trend_batch_with_kernel, TtmTrendBatchRange, TtmTrendBatchBuilder, TtmTrendParams, TtmTrendInput, ttm_trend_with_kernel
+    ttm_trend_batch_with_kernel, ttm_trend_with_kernel, TtmTrendBatchBuilder, TtmTrendBatchRange,
+    TtmTrendInput, TtmTrendParams,
 };
 use my_project::utilities::data_loader::Candles;
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaTtmTrend};
-#[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
+#[cfg(feature = "cuda")]
+use my_project::cuda::{cuda_available, CudaTtmTrend};
 
 fn make_series(len: usize) -> (Vec<f64>, Vec<f64>) {
     let mut src = vec![f64::NAN; len];
@@ -41,7 +42,11 @@ fn ttm_trend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
 
     // CPU baseline (bool -> f32 mapping)
     let cpu = ttm_trend_batch_with_kernel(&src, &cls, &sweep, Kernel::ScalarBatch)?;
-    let cpu_f32: Vec<f32> = cpu.values.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect();
+    let cpu_f32: Vec<f32> = cpu
+        .values
+        .iter()
+        .map(|&b| if b { 1.0 } else { 0.0 })
+        .collect();
 
     // GPU
     let src_f32: Vec<f32> = src.iter().map(|&v| v as f32).collect();
@@ -97,19 +102,39 @@ fn ttm_trend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
     for s in 0..cols {
         let mut src = vec![f64::NAN; rows];
         let mut cls = vec![f64::NAN; rows];
-        for t in 0..rows { src[t] = src_tm[t * cols + s]; cls[t] = cls_tm[t * cols + s]; }
-        let input = TtmTrendInput::from_slices(&src, &cls, TtmTrendParams { period: Some(period) });
+        for t in 0..rows {
+            src[t] = src_tm[t * cols + s];
+            cls[t] = cls_tm[t * cols + s];
+        }
+        let input = TtmTrendInput::from_slices(
+            &src,
+            &cls,
+            TtmTrendParams {
+                period: Some(period),
+            },
+        );
         let out = ttm_trend_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_bool_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_bool_tm[t * cols + s] = out.values[t];
+        }
     }
-    let cpu_f32_tm: Vec<f32> = cpu_bool_tm.iter().map(|&b| if b { 1.0 } else { 0.0 }).collect();
+    let cpu_f32_tm: Vec<f32> = cpu_bool_tm
+        .iter()
+        .map(|&b| if b { 1.0 } else { 0.0 })
+        .collect();
 
     // GPU
     let src_tm_f32: Vec<f32> = src_tm.iter().map(|&v| v as f32).collect();
     let cls_tm_f32: Vec<f32> = cls_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaTtmTrend::new(0).expect("CudaTtmTrend::new");
     let dev = cuda
-        .ttm_trend_many_series_one_param_time_major_dev(&src_tm_f32, &cls_tm_f32, cols, rows, period)
+        .ttm_trend_many_series_one_param_time_major_dev(
+            &src_tm_f32,
+            &cls_tm_f32,
+            cols,
+            rows,
+            period,
+        )
         .expect("cuda ttm_trend many-series");
 
     assert_eq!(dev.rows, rows);

@@ -45,9 +45,9 @@ use std::error::Error;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::pfe_wrapper::CudaPfe;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 impl<'a> AsRef<[f64]> for PfeInput<'a> {
     #[inline(always)]
@@ -1327,10 +1327,14 @@ pub fn pfe_cuda_batch_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data.as_slice()?;
-    let sweep = PfeBatchRange { period: period_range, smoothing: smoothing_range };
+    let sweep = PfeBatchRange {
+        period: period_range,
+        smoothing: smoothing_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaPfe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.pfe_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.pfe_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

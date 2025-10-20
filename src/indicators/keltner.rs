@@ -51,9 +51,9 @@ use thiserror::Error;
 
 // CUDA Python interop types for device arrays
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::keltner_wrapper::CudaKeltner;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 // Input & data types
 
@@ -2726,7 +2726,9 @@ pub fn keltner_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
     let c = close_f32.as_slice()?;
@@ -2734,14 +2736,24 @@ pub fn keltner_cuda_batch_dev_py<'py>(
     if !(h.len() == l.len() && l.len() == c.len() && c.len() == s.len()) {
         return Err(PyValueError::new_err("input length mismatch"));
     }
-    let sweep = KeltnerBatchRange { period: period_range, multiplier: multiplier_range };
+    let sweep = KeltnerBatchRange {
+        period: period_range,
+        multiplier: multiplier_range,
+    };
     let (up, mid, low, rows, cols) = py.allow_threads(|| {
         let cuda = CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let res = cuda.keltner_batch_dev(h, l, c, s, &sweep, ma_type)
+        let res = cuda
+            .keltner_batch_dev(h, l, c, s, &sweep, ma_type)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let rows = res.outputs.upper.rows;
         let cols = res.outputs.upper.cols;
-        Ok::<_, PyErr>((res.outputs.upper, res.outputs.middle, res.outputs.lower, rows, cols))
+        Ok::<_, PyErr>((
+            res.outputs.upper,
+            res.outputs.middle,
+            res.outputs.lower,
+            rows,
+            cols,
+        ))
     })?;
     let dict = PyDict::new(py);
     dict.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: up })?)?;
@@ -2769,22 +2781,34 @@ pub fn keltner_cuda_many_series_one_param_dev_py(
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let ht = high_tm_f32.as_slice()?;
     let lt = low_tm_f32.as_slice()?;
     let ct = close_tm_f32.as_slice()?;
     let st = source_tm_f32.as_slice()?;
-    let expected = cols.checked_mul(rows).ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
-    if ht.len() != expected || lt.len() != expected || ct.len() != expected || st.len() != expected {
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if ht.len() != expected || lt.len() != expected || ct.len() != expected || st.len() != expected
+    {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
     let (up, mid, low) = py.allow_threads(|| {
         let cuda = CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let trip = cuda.keltner_many_series_one_param_time_major_dev(ht, lt, ct, st, cols, rows, period, multiplier, ma_type)
+        let trip = cuda
+            .keltner_many_series_one_param_time_major_dev(
+                ht, lt, ct, st, cols, rows, period, multiplier, ma_type,
+            )
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((trip.upper, trip.middle, trip.lower))
     })?;
-    Ok((DeviceArrayF32Py { inner: up }, DeviceArrayF32Py { inner: mid }, DeviceArrayF32Py { inner: low }))
+    Ok((
+        DeviceArrayF32Py { inner: up },
+        DeviceArrayF32Py { inner: mid },
+        DeviceArrayF32Py { inner: low },
+    ))
 }
 
 // WASM bindings

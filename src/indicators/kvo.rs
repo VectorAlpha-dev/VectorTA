@@ -42,10 +42,10 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-#[cfg(feature = "python")]
-use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -2134,7 +2134,10 @@ pub fn kvo_cuda_batch_dev_py<'py>(
         return Err(PyValueError::new_err("inputs must have equal length"));
     }
 
-    let sweep = KvoBatchRange { short_period: short_range, long_period: long_range };
+    let sweep = KvoBatchRange {
+        short_period: short_range,
+        long_period: long_range,
+    };
     let (inner, combos) = py.allow_threads(|| {
         let cuda = CudaKvo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.kvo_batch_dev(h, l, c, v, &sweep)
@@ -2195,13 +2198,15 @@ pub fn kvo_cuda_many_series_one_param_dev_py<'py>(
         return Err(PyValueError::new_err("cols*rows must equal data length"));
     }
 
-    let params = KvoParams { short_period: Some(short_period), long_period: Some(long_period) };
-    let inner = py
-        .allow_threads(|| {
-            let cuda = CudaKvo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.kvo_many_series_one_param_time_major_dev(h, l, c, v, cols, rows, &params)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let params = KvoParams {
+        short_period: Some(short_period),
+        long_period: Some(long_period),
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaKvo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.kvo_many_series_one_param_time_major_dev(h, l, c, v, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
 
     Ok(DeviceArrayF32Py { inner })
 }

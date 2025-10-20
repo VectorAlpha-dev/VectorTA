@@ -58,7 +58,10 @@ pub struct CudaAlligatorPolicy {
 }
 impl Default for CudaAlligatorPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -68,8 +71,14 @@ pub struct DeviceArrayF32Trio {
     pub lips: DeviceArrayF32,
 }
 impl DeviceArrayF32Trio {
-    #[inline] pub fn rows(&self) -> usize { self.jaw.rows }
-    #[inline] pub fn cols(&self) -> usize { self.jaw.cols }
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.jaw.rows
+    }
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.jaw.cols
+    }
 }
 
 pub struct CudaAlligatorBatchResult {
@@ -100,11 +109,20 @@ impl CudaAlligator {
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
-        Ok(Self { module, stream, _context: context, policy: CudaAlligatorPolicy::default() })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy: CudaAlligatorPolicy::default(),
+        })
     }
 
-    pub fn set_policy(&mut self, policy: CudaAlligatorPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaAlligatorPolicy { &self.policy }
+    pub fn set_policy(&mut self, policy: CudaAlligatorPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaAlligatorPolicy {
+        &self.policy
+    }
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -120,7 +138,9 @@ impl CudaAlligator {
 
         // Local grid expansion (usize axes)
         fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-            if step == 0 || start == end { return vec![start]; }
+            if step == 0 || start == end {
+                return vec![start];
+            }
             (start..=end).step_by(step).collect()
         }
         let jp_v = axis(sweep.jaw_period);
@@ -132,28 +152,51 @@ impl CudaAlligator {
         let mut combos = Vec::with_capacity(
             jp_v.len() * jo_v.len() * tp_v.len() * to_v.len() * lp_v.len() * lo_v.len(),
         );
-        for &jp in &jp_v { for &jo in &jo_v { for &tp in &tp_v { for &to in &to_v { for &lp in &lp_v { for &lo in &lo_v {
-            combos.push(AlligatorParams {
-                jaw_period: Some(jp), jaw_offset: Some(jo),
-                teeth_period: Some(tp), teeth_offset: Some(to),
-                lips_period: Some(lp), lips_offset: Some(lo),
-            });
-        }}}}}}
+        for &jp in &jp_v {
+            for &jo in &jo_v {
+                for &tp in &tp_v {
+                    for &to in &to_v {
+                        for &lp in &lp_v {
+                            for &lo in &lo_v {
+                                combos.push(AlligatorParams {
+                                    jaw_period: Some(jp),
+                                    jaw_offset: Some(jo),
+                                    teeth_period: Some(tp),
+                                    teeth_offset: Some(to),
+                                    lips_period: Some(lp),
+                                    lips_offset: Some(lo),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if combos.is_empty() {
-            return Err(CudaAlligatorError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaAlligatorError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         let len = data_f32.len();
         for c in &combos {
             let pj = c.jaw_period.unwrap();
             let pt = c.teeth_period.unwrap();
             let pl = c.lips_period.unwrap();
-            if pj == 0 || pt == 0 || pl == 0 { return Err(CudaAlligatorError::InvalidInput("period must be > 0".into())); }
+            if pj == 0 || pt == 0 || pl == 0 {
+                return Err(CudaAlligatorError::InvalidInput(
+                    "period must be > 0".into(),
+                ));
+            }
             if pj > len || pt > len || pl > len {
-                return Err(CudaAlligatorError::InvalidInput("period exceeds data length".into()));
+                return Err(CudaAlligatorError::InvalidInput(
+                    "period exceeds data length".into(),
+                ));
             }
             let need = pj.max(pt).max(pl);
             if len - first_valid < need {
-                return Err(CudaAlligatorError::InvalidInput("not enough valid data".into()));
+                return Err(CudaAlligatorError::InvalidInput(
+                    "not enough valid data".into(),
+                ));
             }
         }
         Ok((combos, first_valid, len))
@@ -175,15 +218,22 @@ impl CudaAlligator {
         d_teeth: &mut DeviceBuffer<f32>,
         d_lips: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAlligatorError> {
-        if len == 0 || n == 0 { return Err(CudaAlligatorError::InvalidInput("empty geometry".into())); }
+        if len == 0 || n == 0 {
+            return Err(CudaAlligatorError::InvalidInput("empty geometry".into()));
+        }
         if first_valid > i32::MAX as usize || len > i32::MAX as usize || n > i32::MAX as usize {
-            return Err(CudaAlligatorError::InvalidInput("geometry exceeds i32::MAX".into()));
+            return Err(CudaAlligatorError::InvalidInput(
+                "geometry exceeds i32::MAX".into(),
+            ));
         }
         let mut func = self
             .module
             .get_function("alligator_batch_f32")
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x, _ => 128 };
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
+            _ => 128,
+        };
         let grid_x = ((n as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -246,12 +296,30 @@ impl CudaAlligator {
             }
         }
 
-        let jaw_p: Vec<i32> = combos.iter().map(|c| c.jaw_period.unwrap() as i32).collect();
-        let jaw_o: Vec<i32> = combos.iter().map(|c| c.jaw_offset.unwrap() as i32).collect();
-        let tee_p: Vec<i32> = combos.iter().map(|c| c.teeth_period.unwrap() as i32).collect();
-        let tee_o: Vec<i32> = combos.iter().map(|c| c.teeth_offset.unwrap() as i32).collect();
-        let lip_p: Vec<i32> = combos.iter().map(|c| c.lips_period.unwrap() as i32).collect();
-        let lip_o: Vec<i32> = combos.iter().map(|c| c.lips_offset.unwrap() as i32).collect();
+        let jaw_p: Vec<i32> = combos
+            .iter()
+            .map(|c| c.jaw_period.unwrap() as i32)
+            .collect();
+        let jaw_o: Vec<i32> = combos
+            .iter()
+            .map(|c| c.jaw_offset.unwrap() as i32)
+            .collect();
+        let tee_p: Vec<i32> = combos
+            .iter()
+            .map(|c| c.teeth_period.unwrap() as i32)
+            .collect();
+        let tee_o: Vec<i32> = combos
+            .iter()
+            .map(|c| c.teeth_offset.unwrap() as i32)
+            .collect();
+        let lip_p: Vec<i32> = combos
+            .iter()
+            .map(|c| c.lips_period.unwrap() as i32)
+            .collect();
+        let lip_o: Vec<i32> = combos
+            .iter()
+            .map(|c| c.lips_offset.unwrap() as i32)
+            .collect();
 
         let d_prices = DeviceBuffer::from_slice(data_f32)
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
@@ -276,17 +344,40 @@ impl CudaAlligator {
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
-            &d_prices, &d_jp, &d_jo, &d_tp, &d_to, &d_lp, &d_lo, first, len, n, &mut d_jaw,
-            &mut d_teeth, &mut d_lips,
+            &d_prices,
+            &d_jp,
+            &d_jo,
+            &d_tp,
+            &d_to,
+            &d_lp,
+            &d_lo,
+            first,
+            len,
+            n,
+            &mut d_jaw,
+            &mut d_teeth,
+            &mut d_lips,
         )?;
         self.stream
             .synchronize()
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
 
         let outputs = DeviceArrayF32Trio {
-            jaw: DeviceArrayF32 { buf: d_jaw, rows: n, cols: len },
-            teeth: DeviceArrayF32 { buf: d_teeth, rows: n, cols: len },
-            lips: DeviceArrayF32 { buf: d_lips, rows: n, cols: len },
+            jaw: DeviceArrayF32 {
+                buf: d_jaw,
+                rows: n,
+                cols: len,
+            },
+            teeth: DeviceArrayF32 {
+                buf: d_teeth,
+                rows: n,
+                cols: len,
+            },
+            lips: DeviceArrayF32 {
+                buf: d_lips,
+                rows: n,
+                cols: len,
+            },
         };
         Ok(CudaAlligatorBatchResult { outputs, combos })
     }
@@ -301,14 +392,19 @@ impl CudaAlligator {
             return Err(CudaAlligatorError::InvalidInput("invalid cols/rows".into()));
         }
         if data_tm_f32.len() != cols * rows {
-            return Err(CudaAlligatorError::InvalidInput("data length != cols*rows".into()));
+            return Err(CudaAlligatorError::InvalidInput(
+                "data length != cols*rows".into(),
+            ));
         }
         let mut first_valids = vec![0i32; cols];
         for j in 0..cols {
             let mut first = rows as i32;
             for t in 0..rows {
                 let v = data_tm_f32[t * cols + j];
-                if !v.is_nan() { first = t as i32; break; }
+                if !v.is_nan() {
+                    first = t as i32;
+                    break;
+                }
             }
             first_valids[j] = first.min(rows as i32 - 1).max(0);
         }
@@ -319,7 +415,9 @@ impl CudaAlligator {
         let lp = params.lips_period.unwrap_or(5);
         let lo = params.lips_offset.unwrap_or(3);
         if jp == 0 || tp == 0 || lp == 0 {
-            return Err(CudaAlligatorError::InvalidInput("period must be > 0".into()));
+            return Err(CudaAlligatorError::InvalidInput(
+                "period must be > 0".into(),
+            ));
         }
         Ok((first_valids, jp, jo, tp, to, lp, lo))
     }
@@ -344,16 +442,23 @@ impl CudaAlligator {
             .module
             .get_function("alligator_many_series_one_param_f32")
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x, _ => 128 };
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
+            _ => 128,
+        };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
             let mut p_prices = d_prices_tm.as_device_ptr().as_raw();
-            let mut jp_i = jp as i32; let mut jo_i = jo as i32;
-            let mut tp_i = tp as i32; let mut to_i = to as i32;
-            let mut lp_i = lp as i32; let mut lo_i = lo as i32;
-            let mut cols_i = cols as i32; let mut rows_i = rows as i32;
+            let mut jp_i = jp as i32;
+            let mut jo_i = jo as i32;
+            let mut tp_i = tp as i32;
+            let mut to_i = to as i32;
+            let mut lp_i = lp as i32;
+            let mut lo_i = lo as i32;
+            let mut cols_i = cols as i32;
+            let mut rows_i = rows as i32;
             let mut p_first = d_first_valids.as_device_ptr().as_raw();
             let mut p_out_j = d_jaw_tm.as_device_ptr().as_raw();
             let mut p_out_t = d_teeth_tm.as_device_ptr().as_raw();
@@ -394,25 +499,49 @@ impl CudaAlligator {
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
-        let mut d_jaw_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
+        let mut d_jaw_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }
+                .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
         let mut d_teeth_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
         let mut d_lips_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
-            &d_prices_tm, jp, jo, tp, to, lp, lo, cols, rows, &d_first_valids, &mut d_jaw_tm,
-            &mut d_teeth_tm, &mut d_lips_tm,
+            &d_prices_tm,
+            jp,
+            jo,
+            tp,
+            to,
+            lp,
+            lo,
+            cols,
+            rows,
+            &d_first_valids,
+            &mut d_jaw_tm,
+            &mut d_teeth_tm,
+            &mut d_lips_tm,
         )?;
         self.stream
             .synchronize()
             .map_err(|e| CudaAlligatorError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32Trio {
-            jaw: DeviceArrayF32 { buf: d_jaw_tm, rows, cols },
-            teeth: DeviceArrayF32 { buf: d_teeth_tm, rows, cols },
-            lips: DeviceArrayF32 { buf: d_lips_tm, rows, cols },
+            jaw: DeviceArrayF32 {
+                buf: d_jaw_tm,
+                rows,
+                cols,
+            },
+            teeth: DeviceArrayF32 {
+                buf: d_teeth_tm,
+                rows,
+                cols,
+            },
+            lips: DeviceArrayF32 {
+                buf: d_lips_tm,
+                rows,
+                cols,
+            },
         })
     }
 }
@@ -428,20 +557,32 @@ pub mod benches {
     }
     impl CudaBenchState for AlligatorBatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.alligator_batch_dev(&self.data, &self.sweep).unwrap();
+            let _ = self
+                .cuda
+                .alligator_batch_dev(&self.data, &self.sweep)
+                .unwrap();
         }
     }
 
     fn prep_alligator_batch() -> AlligatorBatchState {
         let mut cuda = CudaAlligator::new(0).expect("cuda alligator");
-        cuda.set_policy(CudaAlligatorPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto });
+        cuda.set_policy(CudaAlligatorPolicy {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        });
         let len = 60_000usize;
         let mut data = vec![f32::NAN; len];
-        for i in 12..len { let x = i as f32; data[i] = (x * 0.0013).sin() + 0.0002 * x; }
+        for i in 12..len {
+            let x = i as f32;
+            data[i] = (x * 0.0013).sin() + 0.0002 * x;
+        }
         let sweep = AlligatorBatchRange {
-            jaw_period: (10, 34, 8), jaw_offset: (3, 8, 1),
-            teeth_period: (6, 21, 5), teeth_offset: (2, 6, 1),
-            lips_period: (3, 13, 5), lips_offset: (1, 4, 1),
+            jaw_period: (10, 34, 8),
+            jaw_offset: (3, 8, 1),
+            teeth_period: (6, 21, 5),
+            teeth_offset: (2, 6, 1),
+            lips_period: (3, 13, 5),
+            lips_offset: (1, 4, 1),
         };
         AlligatorBatchState { cuda, data, sweep }
     }
@@ -458,7 +599,10 @@ pub mod benches {
             let _ = self
                 .cuda
                 .alligator_many_series_one_param_time_major_dev(
-                    &self.data_tm, self.cols, self.rows, &self.params,
+                    &self.data_tm,
+                    self.cols,
+                    self.rows,
+                    &self.params,
                 )
                 .unwrap();
         }
@@ -466,13 +610,28 @@ pub mod benches {
 
     fn prep_alligator_many_series() -> AlligatorManySeriesState {
         let mut cuda = CudaAlligator::new(0).expect("cuda alligator");
-        cuda.set_policy(CudaAlligatorPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::OneD { block_x: 256 } });
+        cuda.set_policy(CudaAlligatorPolicy {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::OneD { block_x: 256 },
+        });
         let cols = 256usize;
         let rows = 1_000_000usize / cols * cols; // ensure multiple of cols
         let mut data_tm = vec![f32::NAN; cols * rows];
-        for t in 8..rows { for j in 0..cols { let idx = t * cols + j; let x = (t as f32) + (j as f32) * 0.07; data_tm[idx] = (x * 0.0021).cos() + 0.0006 * x; } }
+        for t in 8..rows {
+            for j in 0..cols {
+                let idx = t * cols + j;
+                let x = (t as f32) + (j as f32) * 0.07;
+                data_tm[idx] = (x * 0.0021).cos() + 0.0006 * x;
+            }
+        }
         let params = AlligatorParams::default();
-        AlligatorManySeriesState { cuda, data_tm, cols, rows, params }
+        AlligatorManySeriesState {
+            cuda,
+            data_tm,
+            cols,
+            rows,
+            params,
+        }
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

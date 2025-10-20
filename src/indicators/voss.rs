@@ -19,10 +19,10 @@
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1356,15 +1356,22 @@ pub fn voss_cuda_batch_dev_py<'py>(
     predict: (usize, usize, usize),
     bandwidth: (f64, f64, f64),
     device_id: usize,
-)
--> PyResult<Bound<'py, PyDict>> {
+) -> PyResult<Bound<'py, PyDict>> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice_in = data_f32.as_slice()?;
-    let sweep = VossBatchRange { period, predict, bandwidth };
+    let sweep = VossBatchRange {
+        period,
+        predict,
+        bandwidth,
+    };
     let (voss_dev, filt_dev, combos) = py.allow_threads(|| {
-        let cuda = crate::cuda::CudaVoss::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.voss_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda = crate::cuda::CudaVoss::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.voss_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
     dict.set_item("voss", Py::new(py, DeviceArrayF32Py { inner: voss_dev })?)?;
@@ -1372,9 +1379,30 @@ pub fn voss_cuda_batch_dev_py<'py>(
     dict.set_item("rows", combos.len())?;
     dict.set_item("cols", slice_in.len())?;
     use numpy::IntoPyArray;
-    dict.set_item("periods", combos.iter().map(|c| c.period.unwrap_or(20) as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("predicts", combos.iter().map(|c| c.predict.unwrap_or(3) as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("bandwidths", combos.iter().map(|c| c.bandwidth.unwrap_or(0.25)).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|c| c.period.unwrap_or(20) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "predicts",
+        combos
+            .iter()
+            .map(|c| c.predict.unwrap_or(3) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "bandwidths",
+        combos
+            .iter()
+            .map(|c| c.bandwidth.unwrap_or(0.25))
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     Ok(dict)
 }
 
@@ -1390,17 +1418,27 @@ pub fn voss_cuda_many_series_one_param_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
     let flat = data_tm_f32.as_slice()?;
-    let params = VossParams { period: Some(period), predict: Some(predict), bandwidth: Some(bandwidth) };
+    let params = VossParams {
+        period: Some(period),
+        predict: Some(predict),
+        bandwidth: Some(bandwidth),
+    };
     let (voss_dev, filt_dev) = py.allow_threads(|| {
-        let cuda = crate::cuda::CudaVoss::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = crate::cuda::CudaVoss::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.voss_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: voss_dev }, DeviceArrayF32Py { inner: filt_dev }))
+    Ok((
+        DeviceArrayF32Py { inner: voss_dev },
+        DeviceArrayF32Py { inner: filt_dev },
+    ))
 }
 
 #[cfg(test)]

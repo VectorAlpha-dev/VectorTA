@@ -2119,10 +2119,10 @@ mod tests {
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -2684,22 +2684,49 @@ pub fn donchian_cuda_batch_dev_py<'py>(
     low_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-)-> PyResult<Bound<'py, PyDict>> {
+) -> PyResult<Bound<'py, PyDict>> {
     use numpy::IntoPyArray;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
-    let sweep = DonchianBatchRange { period: period_range };
+    let sweep = DonchianBatchRange {
+        period: period_range,
+    };
     let (triplet, combos) = py.allow_threads(|| {
-        let cuda = CudaDonchian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.donchian_batch_dev(h, l, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaDonchian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.donchian_batch_dev(h, l, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let d = PyDict::new(py);
-    d.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?)?;
-    d.set_item("middle", Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?)?;
-    d.set_item("lower", Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
-    d.set_item("periods", combos.iter().map(|p| p.period.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+    d.set_item(
+        "upper",
+        Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?,
+    )?;
+    d.set_item(
+        "middle",
+        Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?,
+    )?;
+    d.set_item(
+        "lower",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: triplet.hist,
+            },
+        )?,
+    )?;
+    d.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     d.set_item("rows", combos.len())?;
     d.set_item("cols", h.len())?;
     Ok(d)
@@ -2715,25 +2742,46 @@ pub fn donchian_cuda_many_series_one_param_dev_py<'py>(
     period: usize,
     device_id: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let shape = high_tm_f32.shape();
     if shape.len() != 2 || low_tm_f32.shape() != shape {
-        return Err(PyValueError::new_err("expected matching 2D arrays [rows, cols]"));
+        return Err(PyValueError::new_err(
+            "expected matching 2D arrays [rows, cols]",
+        ));
     }
     let rows = shape[0];
     let cols = shape[1];
     let high_tm = high_tm_f32.as_slice()?;
-    let low_tm  = low_tm_f32.as_slice()?;
-    let params = DonchianParams { period: Some(period) };
+    let low_tm = low_tm_f32.as_slice()?;
+    let params = DonchianParams {
+        period: Some(period),
+    };
     let triplet = py.allow_threads(|| {
-        let cuda = CudaDonchian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaDonchian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.donchian_many_series_one_param_time_major_dev(high_tm, low_tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let d = PyDict::new(py);
-    d.set_item("upper", Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?)?;
-    d.set_item("middle", Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?)?;
-    d.set_item("lower", Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
+    d.set_item(
+        "upper",
+        Py::new(py, DeviceArrayF32Py { inner: triplet.wt1 })?,
+    )?;
+    d.set_item(
+        "middle",
+        Py::new(py, DeviceArrayF32Py { inner: triplet.wt2 })?,
+    )?;
+    d.set_item(
+        "lower",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: triplet.hist,
+            },
+        )?,
+    )?;
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;
     d.set_item("period", period)?;

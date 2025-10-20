@@ -13,7 +13,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::CudaVosc;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -35,8 +37,14 @@ fn vosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let len = 32_768usize;
     let mut volume = vec![f64::NAN; len];
-    for i in 7..len { let x = i as f64; volume[i] = (x * 0.0013).cos() + 0.02 * (x * 0.0021).sin(); }
-    let sweep = VoscBatchRange { short_period: (2, 50, 3), long_period: (10, 120, 5) };
+    for i in 7..len {
+        let x = i as f64;
+        volume[i] = (x * 0.0013).cos() + 0.02 * (x * 0.0021).sin();
+    }
+    let sweep = VoscBatchRange {
+        short_period: (2, 50, 3),
+        long_period: (10, 120, 5),
+    };
 
     let cpu = vosc_batch_with_kernel(&volume, &sweep, Kernel::ScalarBatch)?;
 
@@ -76,17 +84,34 @@ fn vosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let cols = 16usize; // series
     let rows = 8192usize; // time
     let mut vol_tm = vec![f64::NAN; cols * rows];
-    for s in 0..cols { for t in (s+3)..rows { let idx = t * cols + s; let x = (t as f64) + (s as f64) * 0.1; vol_tm[idx] = (x * 0.0017).cos() + 0.03 * (x * 0.0037).sin(); } }
-    let params = VoscParams { short_period: Some(5), long_period: Some(34) };
+    for s in 0..cols {
+        for t in (s + 3)..rows {
+            let idx = t * cols + s;
+            let x = (t as f64) + (s as f64) * 0.1;
+            vol_tm[idx] = (x * 0.0017).cos() + 0.03 * (x * 0.0037).sin();
+        }
+    }
+    let params = VoscParams {
+        short_period: Some(5),
+        long_period: Some(34),
+    };
 
     // CPU reference per series
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut v = vec![f64::NAN; rows];
-        for t in 0..rows { let idx = t * cols + s; v[t] = (vol_tm[idx] as f32) as f64; }
-        let input = VoscInput { data: VoscData::Slice(&v), params: params.clone() };
+        for t in 0..rows {
+            let idx = t * cols + s;
+            v[t] = (vol_tm[idx] as f32) as f64;
+        }
+        let input = VoscInput {
+            data: VoscData::Slice(&v),
+            params: params.clone(),
+        };
         let out = vosc_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let vol_tm_f32: Vec<f32> = vol_tm.iter().map(|&v| v as f32).collect();
@@ -102,7 +127,11 @@ fn vosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let tol = 5e-3;
     for idx in 0..host_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }

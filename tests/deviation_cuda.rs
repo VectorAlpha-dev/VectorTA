@@ -40,10 +40,15 @@ fn deviation_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
         let x = i as f64;
         let base = (x * 0.00041).sin() - (x * 0.00017).cos();
         data[i] = base + 0.0013 * ((i % 9) as f64 - 4.0);
-        if i % 257 == 0 { data[i] = f64::NAN; }
+        if i % 257 == 0 {
+            data[i] = f64::NAN;
+        }
     }
 
-    let sweep = DeviationBatchRange { period: (10, 40, 10), devtype: (0, 0, 0) };
+    let sweep = DeviationBatchRange {
+        period: (10, 40, 10),
+        devtype: (0, 0, 0),
+    };
     let cpu = deviation_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
 
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
@@ -91,23 +96,32 @@ fn deviation_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         for t in (s + 3)..rows {
             let x = t as f64 + (s as f64) * 0.1;
             data_tm[t * cols + s] = (x * 0.0031).cos() + 0.0007 * x;
-            if t % 211 == 0 { data_tm[t * cols + s] = f64::NAN; }
+            if t % 211 == 0 {
+                data_tm[t * cols + s] = f64::NAN;
+            }
         }
     }
     let period = 14usize;
-    let params = DeviationParams { period: Some(period), devtype: Some(0) };
+    let params = DeviationParams {
+        period: Some(period),
+        devtype: Some(0),
+    };
 
     // CPU reference per column
     let mut cpu = vec![f32::NAN; rows * cols];
     for s in 0..cols {
         let mut col = vec![f64::NAN; rows];
-        for t in 0..rows { col[t] = data_tm[t * cols + s]; }
+        for t in 0..rows {
+            col[t] = data_tm[t * cols + s];
+        }
         let out = DeviationBuilder::default()
             .period(period)
             .devtype(0)
             .apply_slice(&col)?
             .values;
-        for t in 0..rows { cpu[t * cols + s] = out[t] as f32; }
+        for t in 0..rows {
+            cpu[t * cols + s] = out[t] as f32;
+        }
     }
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
@@ -133,4 +147,3 @@ fn deviation_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
     }
     Ok(())
 }
-

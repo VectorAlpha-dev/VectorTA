@@ -14,7 +14,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::CudaCorrelHl;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -37,10 +39,11 @@ fn correl_hl_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     let len = 32768usize;
     let mut high = vec![f64::NAN; len];
     let mut low = vec![f64::NAN; len];
-    for i in 8..len { // leave NaNs at the start
+    for i in 8..len {
+        // leave NaNs at the start
         let x = i as f64;
         high[i] = (x * 0.00123).sin() + 0.0001 * x;
-        low[i]  = (x * 0.00079).cos() + 0.00005 * x;
+        low[i] = (x * 0.00079).cos() + 0.00005 * x;
     }
     let sweep = CorrelHlBatchRange { period: (9, 64, 1) };
 
@@ -68,7 +71,13 @@ fn correl_hl_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
 
     Ok(())
@@ -78,21 +87,20 @@ fn correl_hl_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
 #[test]
 fn correl_hl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[correl_hl_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[correl_hl_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
     let cols = 8usize; // num_series
     let rows = 4096usize; // series_len
     let mut high_tm = vec![f64::NAN; rows * cols];
-    let mut low_tm  = vec![f64::NAN; rows * cols];
+    let mut low_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {
-        for t in (s)..rows { // stagger first_valid per series
+        for t in (s)..rows {
+            // stagger first_valid per series
             let x = (t as f64) + (s as f64) * 0.5;
             high_tm[t * cols + s] = (x * 0.0021).sin() + 0.0002 * x;
-            low_tm[t * cols + s]  = (x * 0.0017).cos() + 0.0001 * x;
+            low_tm[t * cols + s] = (x * 0.0017).cos() + 0.0001 * x;
         }
     }
 
@@ -107,8 +115,13 @@ fn correl_hl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
             h[t] = high_tm[t * cols + s];
             l[t] = low_tm[t * cols + s];
         }
-        let params = CorrelHlParams { period: Some(period) };
-        let input = CorrelHlInput { data: CorrelHlData::Slices { high: &h, low: &l }, params };
+        let params = CorrelHlParams {
+            period: Some(period),
+        };
+        let input = CorrelHlInput {
+            data: CorrelHlData::Slices { high: &h, low: &l },
+            params,
+        };
         let out = correl_hl_with_kernel(&input, Kernel::Scalar)?;
         for t in 0..rows {
             cpu_tm[t * cols + s] = out.values[t];
@@ -121,7 +134,11 @@ fn correl_hl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
     let cuda = CudaCorrelHl::new(0).expect("CudaCorrelHl::new");
     let dev_tm = cuda
         .correl_hl_many_series_one_param_time_major_dev(
-            &high_tm_f32, &low_tm_f32, cols, rows, period,
+            &high_tm_f32,
+            &low_tm_f32,
+            cols,
+            rows,
+            period,
         )
         .expect("correl_hl_many_series_one_param_time_major_dev");
 
@@ -132,7 +149,11 @@ fn correl_hl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     let tol = 5e-3;
     for idx in 0..g_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
 
     Ok(())

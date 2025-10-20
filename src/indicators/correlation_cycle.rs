@@ -2561,9 +2561,14 @@ pub fn correlation_cycle_cuda_batch_dev_py(
 )> {
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaCorrelationCycle;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice_in = data_f32.as_slice()?;
-    let sweep = CorrelationCycleBatchRange { period: period_range, threshold: threshold_range };
+    let sweep = CorrelationCycleBatchRange {
+        period: period_range,
+        threshold: threshold_range,
+    };
     let quad = py.allow_threads(|| {
         let mut cuda = CudaCorrelationCycle::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2593,16 +2598,23 @@ pub fn correlation_cycle_cuda_many_series_one_param_dev_py(
     crate::indicators::moving_averages::alma::DeviceArrayF32Py,
     crate::indicators::moving_averages::alma::DeviceArrayF32Py,
 )> {
-    use numpy::PyUntypedArrayMethods;
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaCorrelationCycle;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    use numpy::PyUntypedArrayMethods;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let shape = data_tm_f32.shape();
-    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array")); }
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array"));
+    }
     let rows = shape[0];
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
-    let params = CorrelationCycleParams { period: Some(period), threshold: Some(threshold) };
+    let params = CorrelationCycleParams {
+        period: Some(period),
+        threshold: Some(threshold),
+    };
     let quad = py.allow_threads(|| {
         let mut cuda = CudaCorrelationCycle::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;

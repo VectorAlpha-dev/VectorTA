@@ -1,7 +1,7 @@
 #![cfg(feature = "cuda")]
 
-use my_project::cuda::cuda_available;
 use cust::memory::CopyDestination;
+use my_project::cuda::cuda_available;
 use my_project::cuda::oscillators::CudaStoch;
 use my_project::indicators::stoch::{
     stoch_batch_with_kernel, stoch_with_kernel, StochBatchRange, StochInput, StochParams,
@@ -126,7 +126,9 @@ fn stoch_cuda_many_series_time_major_matches_cpu() {
     };
     let cuda = CudaStoch::new(0).expect("cuda stoch");
     let (k_tm, d_tm) = cuda
-        .stoch_many_series_one_param_time_major_dev(&high_tm, &low_tm, &close_tm, cols, rows, &params)
+        .stoch_many_series_one_param_time_major_dev(
+            &high_tm, &low_tm, &close_tm, cols, rows, &params,
+        )
         .expect("stoch many-series dev");
     let mut k_gpu = vec![0f32; cols * rows];
     let mut d_gpu = vec![0f32; cols * rows];
@@ -158,10 +160,24 @@ fn stoch_cuda_many_series_time_major_matches_cpu() {
             let k_v = k_gpu[r * cols + s];
             let d_v = d_gpu[r * cols + s];
             if k_ref.is_finite() && k_v.is_finite() {
-                assert!((k_ref - k_v).abs() <= 1e-3, "K col{} row{}: {} vs {}", s, r, k_v, k_ref);
+                assert!(
+                    (k_ref - k_v).abs() <= 1e-3,
+                    "K col{} row{}: {} vs {}",
+                    s,
+                    r,
+                    k_v,
+                    k_ref
+                );
             }
             if d_ref.is_finite() && d_v.is_finite() {
-                assert!((d_ref - d_v).abs() <= 1e-3, "D col{} row{}: {} vs {}", s, r, d_v, d_ref);
+                assert!(
+                    (d_ref - d_v).abs() <= 1e-3,
+                    "D col{} row{}: {} vs {}",
+                    s,
+                    r,
+                    d_v,
+                    d_ref
+                );
             }
         }
     }

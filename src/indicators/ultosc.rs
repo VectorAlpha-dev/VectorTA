@@ -2226,7 +2226,9 @@ pub fn ultosc_cuda_batch_dev_py(
     use crate::cuda::oscillators::CudaUltosc;
     use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
     let close_slice = close.as_slice()?;
@@ -2263,14 +2265,25 @@ pub fn ultosc_cuda_many_series_one_param_dev_py(
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::CudaUltosc;
     use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_tm.as_slice()?;
     let l = low_tm.as_slice()?;
     let c = close_tm.as_slice()?;
     let inner = py.allow_threads(|| {
         let cuda = CudaUltosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ultosc_many_series_one_param_time_major_dev(h, l, c, cols, rows, timeperiod1, timeperiod2, timeperiod3)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.ultosc_many_series_one_param_time_major_dev(
+            h,
+            l,
+            c,
+            cols,
+            rows,
+            timeperiod1,
+            timeperiod2,
+            timeperiod3,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

@@ -1,6 +1,8 @@
 // Integration tests for CUDA WILLR kernels
 
-use my_project::indicators::willr::{WillrBatchBuilder, WillrBatchRange, WillrBuilder, WillrInput, WillrParams, willr_with_kernel};
+use my_project::indicators::willr::{
+    willr_with_kernel, WillrBatchBuilder, WillrBatchRange, WillrBuilder, WillrInput, WillrParams,
+};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -91,9 +93,7 @@ fn willr_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn willr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[willr_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[willr_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -128,7 +128,9 @@ fn willr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
             l[t] = low_tm[idx];
             c[t] = close_tm[idx];
         }
-        let params = WillrParams { period: Some(period) };
+        let params = WillrParams {
+            period: Some(period),
+        };
         let input = WillrInput::from_slices(&h, &l, &c, params);
         let out = willr_with_kernel(&input, Kernel::Scalar)?.values;
         for t in 0..rows {
@@ -143,12 +145,7 @@ fn willr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     let cuda = CudaWillr::new(0).expect("CudaWillr::new");
     let dev = cuda
         .willr_many_series_one_param_time_major_dev(
-            &high_f32,
-            &low_f32,
-            &close_f32,
-            cols,
-            rows,
-            period,
+            &high_f32, &low_f32, &close_f32, cols, rows, period,
         )
         .expect("willr many-series dev");
 
@@ -161,7 +158,13 @@ fn willr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     for idx in 0..host.len() {
         let g = host[idx] as f64;
         let s = cpu_tm[idx];
-        assert!(approx_eq(s, g, tol), "mismatch at {}: cpu={} gpu={}", idx, s, g);
+        assert!(
+            approx_eq(s, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            s,
+            g
+        );
     }
     Ok(())
 }

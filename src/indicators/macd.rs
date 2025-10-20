@@ -1938,8 +1938,8 @@ pub fn macd_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use crate::cuda::cuda_available;
-    use crate::cuda::oscillators::CudaMacd;
     use crate::cuda::oscillators::macd_wrapper::DeviceMacdTriplet;
+    use crate::cuda::oscillators::CudaMacd;
     use numpy::IntoPyArray;
     use pyo3::types::PyList;
 
@@ -1947,7 +1947,9 @@ pub fn macd_cuda_batch_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     if !ma_type.eq_ignore_ascii_case("ema") {
-        return Err(PyValueError::new_err("macd_cuda: only ma_type=\"ema\" is supported on CUDA"));
+        return Err(PyValueError::new_err(
+            "macd_cuda: only ma_type=\"ema\" is supported on CUDA",
+        ));
     }
     let slice = data_f32.as_slice()?;
     let sweep = MacdBatchRange {
@@ -1965,13 +1967,40 @@ pub fn macd_cuda_batch_dev_py<'py>(
 
     let DeviceMacdTriplet { macd, signal, hist } = outputs;
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("macd", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: macd })?)?;
-    dict.set_item("signal", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: signal })?)?;
-    dict.set_item("hist", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: hist })?)?;
+    dict.set_item(
+        "macd",
+        Py::new(
+            py,
+            super::moving_averages::alma::DeviceArrayF32Py { inner: macd },
+        )?,
+    )?;
+    dict.set_item(
+        "signal",
+        Py::new(
+            py,
+            super::moving_averages::alma::DeviceArrayF32Py { inner: signal },
+        )?,
+    )?;
+    dict.set_item(
+        "hist",
+        Py::new(
+            py,
+            super::moving_averages::alma::DeviceArrayF32Py { inner: hist },
+        )?,
+    )?;
 
-    let fasts: Vec<u64> = combos.iter().map(|p| p.fast_period.unwrap() as u64).collect();
-    let slows: Vec<u64> = combos.iter().map(|p| p.slow_period.unwrap() as u64).collect();
-    let signals: Vec<u64> = combos.iter().map(|p| p.signal_period.unwrap() as u64).collect();
+    let fasts: Vec<u64> = combos
+        .iter()
+        .map(|p| p.fast_period.unwrap() as u64)
+        .collect();
+    let slows: Vec<u64> = combos
+        .iter()
+        .map(|p| p.slow_period.unwrap() as u64)
+        .collect();
+    let signals: Vec<u64> = combos
+        .iter()
+        .map(|p| p.signal_period.unwrap() as u64)
+        .collect();
     let ma_types = PyList::new(py, vec![ma_type; combos.len()])?;
     dict.set_item("fast_periods", fasts.into_pyarray(py))?;
     dict.set_item("slow_periods", slows.into_pyarray(py))?;
@@ -1995,18 +2024,22 @@ pub fn macd_cuda_many_series_one_param_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use crate::cuda::cuda_available;
-    use crate::cuda::oscillators::CudaMacd;
     use crate::cuda::oscillators::macd_wrapper::DeviceMacdTriplet;
+    use crate::cuda::oscillators::CudaMacd;
     use numpy::PyUntypedArrayMethods;
 
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
     if !ma_type.eq_ignore_ascii_case("ema") {
-        return Err(PyValueError::new_err("macd_cuda: only ma_type=\"ema\" is supported on CUDA"));
+        return Err(PyValueError::new_err(
+            "macd_cuda: only ma_type=\"ema\" is supported on CUDA",
+        ));
     }
     let shape = data_tm_f32.shape();
-    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array")); }
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array"));
+    }
     let rows = shape[0];
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
@@ -2022,9 +2055,27 @@ pub fn macd_cuda_many_series_one_param_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("macd", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: macd })?)?;
-    dict.set_item("signal", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: signal })?)?;
-    dict.set_item("hist", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: hist })?)?;
+    dict.set_item(
+        "macd",
+        Py::new(
+            py,
+            super::moving_averages::alma::DeviceArrayF32Py { inner: macd },
+        )?,
+    )?;
+    dict.set_item(
+        "signal",
+        Py::new(
+            py,
+            super::moving_averages::alma::DeviceArrayF32Py { inner: signal },
+        )?,
+    )?;
+    dict.set_item(
+        "hist",
+        Py::new(
+            py,
+            super::moving_averages::alma::DeviceArrayF32Py { inner: hist },
+        )?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("fast_period", fast_period)?;

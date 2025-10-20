@@ -127,22 +127,24 @@ impl CudaAd {
         let len = Self::validate_hlcv(high, low, close, volume)?;
 
         // Pinned host buffers for async HtoD copies
-        let h_high = LockedBuffer::from_slice(high).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_high =
+            LockedBuffer::from_slice(high).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
         let h_low = LockedBuffer::from_slice(low).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
         let h_close =
             LockedBuffer::from_slice(close).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(volume).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_vol =
+            LockedBuffer::from_slice(volume).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
 
-        let mut d_high: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_low: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_close: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_vol: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_vol: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
 
         // Async copies on the stream
         unsafe {
@@ -225,7 +227,9 @@ impl CudaAd {
         rows: usize,
     ) -> Result<DeviceArrayF32, CudaAdError> {
         if cols == 0 || rows == 0 {
-            return Err(CudaAdError::InvalidInput("cols and rows must be > 0".into()));
+            return Err(CudaAdError::InvalidInput(
+                "cols and rows must be > 0".into(),
+            ));
         }
         let elems = cols
             .checked_mul(rows)
@@ -241,21 +245,24 @@ impl CudaAd {
         }
 
         // Pinned host + async copies
-        let h_high = LockedBuffer::from_slice(high_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let h_low = LockedBuffer::from_slice(low_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_high =
+            LockedBuffer::from_slice(high_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_low =
+            LockedBuffer::from_slice(low_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
         let h_close =
             LockedBuffer::from_slice(close_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(volume_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_high: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_low: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_close: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_vol: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let h_vol =
+            LockedBuffer::from_slice(volume_tm).map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_vol: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaAdError::Cuda(e.to_string()))?;
 
         unsafe {
             d_high
@@ -279,8 +286,8 @@ impl CudaAd {
 
         Ok(DeviceArrayF32 {
             buf: d_out,
-            rows,       // time-major rows
-            cols,       // number of series
+            rows, // time-major rows
+            cols, // number of series
         })
     }
 }
@@ -315,7 +322,9 @@ pub mod benches {
         let mut vol = vec![0.0f32; close.len()];
         for i in 0..close.len() {
             let v = close[i];
-            if v.is_nan() { continue; }
+            if v.is_nan() {
+                continue;
+            }
             let x = i as f32 * 0.0021;
             let off = (0.0033 * x.cos()).abs() + 0.12;
             high[i] = v + off;
@@ -344,7 +353,13 @@ pub mod benches {
         let cuda = CudaAd::new(0).expect("cuda ad");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low, vol) = synth_hlcv_from_close(&close);
-        Box::new(OneSeriesState { cuda, high, low, close, vol })
+        Box::new(OneSeriesState {
+            cuda,
+            high,
+            low,
+            close,
+            vol,
+        })
     }
 
     struct ManyState {
@@ -390,20 +405,22 @@ pub mod benches {
                 vol_tm[idx] = ((x * 1.13).cos().abs() + 0.85) * 1200.0;
             }
         }
-        Box::new(ManyState { cuda, high_tm, low_tm, close_tm: prices_tm, vol_tm, cols, rows })
+        Box::new(ManyState {
+            cuda,
+            high_tm,
+            low_tm,
+            close_tm: prices_tm,
+            vol_tm,
+            cols,
+            rows,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new(
-                "ad",
-                "one_series",
-                "ad_cuda_series",
-                "1m",
-                prep_one_series,
-            )
-            .with_sample_size(10)
-            .with_mem_required(bytes_one_series()),
+            CudaBenchScenario::new("ad", "one_series", "ad_cuda_series", "1m", prep_one_series)
+                .with_sample_size(10)
+                .with_mem_required(bytes_one_series()),
             CudaBenchScenario::new(
                 "ad",
                 "many_series_one_param",

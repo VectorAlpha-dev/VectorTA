@@ -51,11 +51,11 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::DeviceArrayF32;
+use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaCoraWave;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
+use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
@@ -1840,26 +1840,55 @@ pub fn cora_wave_cuda_batch_dev_py<'py>(
     r_multi_range: (f64, f64, f64),
     smooth: bool,
     device_id: usize,
-)-> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice_in = data_f32.as_slice()?;
-    let sweep = CoraWaveBatchRange { period: period_range, r_multi: r_multi_range, smooth };
+    let sweep = CoraWaveBatchRange {
+        period: period_range,
+        r_multi: r_multi_range,
+        smooth,
+    };
 
     // Mirror expand_grid for returning combo metadata
     fn combos_for_py(sweep: &CoraWaveBatchRange) -> Vec<CoraWaveParams> {
         let (ps, pe, pt) = sweep.period;
-        let periods: Vec<usize> = if pt == 0 || ps == pe { vec![ps] } else { (ps..=pe).step_by(pt).collect() };
+        let periods: Vec<usize> = if pt == 0 || ps == pe {
+            vec![ps]
+        } else {
+            (ps..=pe).step_by(pt).collect()
+        };
         let (ms, me, mt) = sweep.r_multi;
         let mut mults: Vec<f64> = vec![];
-        if mt.abs() < 1e-12 || (ms - me).abs() < 1e-12 { mults.push(ms); } else { let mut x = ms; while x <= me + 1e-12 { mults.push(x); x += mt; } }
+        if mt.abs() < 1e-12 || (ms - me).abs() < 1e-12 {
+            mults.push(ms);
+        } else {
+            let mut x = ms;
+            while x <= me + 1e-12 {
+                mults.push(x);
+                x += mt;
+            }
+        }
         let mut out = Vec::with_capacity(periods.len() * mults.len());
-        for &p in &periods { for &m in &mults { out.push(CoraWaveParams{ period: Some(p), r_multi: Some(m), smooth: Some(sweep.smooth) }); } }
+        for &p in &periods {
+            for &m in &mults {
+                out.push(CoraWaveParams {
+                    period: Some(p),
+                    r_multi: Some(m),
+                    smooth: Some(sweep.smooth),
+                });
+            }
+        }
         out
     }
 
     let (inner, combos) = py.allow_threads(|| {
-        let cuda = CudaCoraWave::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let out = cuda.cora_wave_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaCoraWave::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let out = cuda
+            .cora_wave_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<(DeviceArrayF32, Vec<CoraWaveParams>), PyErr>((out, combos_for_py(&sweep)))
     })?;
 
@@ -1886,11 +1915,18 @@ pub fn cora_wave_cuda_many_series_one_param_dev_py<'py>(
     smooth: bool,
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice = data_tm_f32.as_slice()?;
-    let params = CoraWaveParams { period: Some(period), r_multi: Some(r_multi), smooth: Some(smooth) };
+    let params = CoraWaveParams {
+        period: Some(period),
+        r_multi: Some(r_multi),
+        smooth: Some(smooth),
+    };
     let inner = py.allow_threads(|| {
-        let cuda = CudaCoraWave::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaCoraWave::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.cora_wave_multi_series_one_param_time_major_dev(slice, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

@@ -11,7 +11,9 @@
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::cuda::moving_averages::ma_selector::{CudaMaData, CudaMaSelector, CudaMaSelectorError};
-use crate::indicators::kaufmanstop::{expand_grid_wrapper, KaufmanstopBatchRange, KaufmanstopParams};
+use crate::indicators::kaufmanstop::{
+    expand_grid_wrapper, KaufmanstopBatchRange, KaufmanstopParams,
+};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, Function, GridSize};
@@ -59,16 +61,23 @@ pub struct CudaKaufmanstopPolicy {
 
 impl Default for CudaKaufmanstopPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 impl Default for BatchKernelPolicy {
-    fn default() -> Self { BatchKernelPolicy::Auto }
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
 }
 
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self { ManySeriesKernelPolicy::Auto }
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
 }
 
 pub struct CudaKaufmanstop {
@@ -82,9 +91,10 @@ pub struct CudaKaufmanstop {
 impl CudaKaufmanstop {
     pub fn new(device_id: usize) -> Result<Self, CudaKaufmanstopError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+        let context =
+            Context::new(device).map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kaufmanstop_kernel.ptx"));
         let jit_opts = &[
@@ -99,13 +109,22 @@ impl CudaKaufmanstop {
                     .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?,
             },
         };
-        let stream =
-            Stream::new(StreamFlags::NON_BLOCKING, None).map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
+            .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
 
-        Ok(Self { module, stream, _context: context, policy: CudaKaufmanstopPolicy::default(), device_id: device_id as u32 })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy: CudaKaufmanstopPolicy::default(),
+            device_id: device_id as u32,
+        })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaKaufmanstopPolicy) -> Result<Self, CudaKaufmanstopError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaKaufmanstopPolicy,
+    ) -> Result<Self, CudaKaufmanstopError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
@@ -132,7 +151,11 @@ impl CudaKaufmanstop {
         if !Self::mem_check_enabled() {
             return true;
         }
-        if let Ok((free, _)) = mem_get_info() { bytes.saturating_add(headroom) <= free } else { true }
+        if let Ok((free, _)) = mem_get_info() {
+            bytes.saturating_add(headroom) <= free
+        } else {
+            true
+        }
     }
 
     // -------------- Batch: one series × many params --------------
@@ -142,22 +165,30 @@ impl CudaKaufmanstop {
         low: &[f32],
         sweep: &KaufmanstopBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<KaufmanstopParams>), CudaKaufmanstopError> {
+        // Validate inputs
         if high.is_empty() || low.is_empty() || high.len() != low.len() {
-            return Err(CudaKaufmanstopError::InvalidInput("high/low must be same non-zero length".into()));
+            return Err(CudaKaufmanstopError::InvalidInput(
+                "high/low must be same non-zero length".into(),
+            ));
         }
         let len = high.len();
+
+        // First valid index (both high & low finite) — matches scalar
         let first = high
             .iter()
             .zip(low.iter())
             .position(|(&h, &l)| !h.is_nan() && !l.is_nan())
             .ok_or_else(|| CudaKaufmanstopError::InvalidInput("all values are NaN".into()))?;
 
+        // Expand parameter sweep
         let combos = expand_grid_wrapper(sweep);
         if combos.is_empty() {
-            return Err(CudaKaufmanstopError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaKaufmanstopError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
 
-        // Validate rows and warmup
+        // Validate periods
         for prm in &combos {
             let p = prm.period.unwrap_or(0);
             if p == 0 || p > len {
@@ -170,102 +201,263 @@ impl CudaKaufmanstop {
             }
         }
 
-        // VRAM estimate: inputs + outputs (MA rows are streamed per-row via selector)
-        let in_bytes = 2 * len * std::mem::size_of::<f32>();
-        let out_bytes = combos.len() * len * std::mem::size_of::<f32>();
+        // VRAM check: base + full output must fit (MA slab is tiled)
         let head = Self::headroom_bytes();
-        if !Self::will_fit(in_bytes + out_bytes, head) {
+        let base_bytes = 2 * len * std::mem::size_of::<f32>();
+        let out_bytes = combos.len() * len * std::mem::size_of::<f32>();
+        if !Self::will_fit(base_bytes + out_bytes, head) {
             return Err(CudaKaufmanstopError::InvalidInput(
                 "insufficient device memory for kaufmanstop batch".into(),
             ));
         }
 
-        // H2D for base series and output buffer
-        let d_high = DeviceBuffer::from_slice(high).map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low).map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+        // Upload base series once
+        let d_high = DeviceBuffer::from_slice(high)
+            .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+        let d_low = DeviceBuffer::from_slice(low)
+            .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(combos.len() * len) }
             .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
 
-        // Build range (high - low) with NaN handling on host as in scalar path
+        // Build range (high - low) with NaN propagation on host
         let mut range = vec![f32::NAN; len];
         for i in first..len {
-            let h = high[i];
-            let l = low[i];
+            let (h, l) = (high[i], low[i]);
             range[i] = if h.is_nan() || l.is_nan() { f32::NAN } else { h - l };
         }
 
-        // Prepare kernel function once
-        let mut axpy_fn: Function = self
+        // Main kernel (one series → many params)
+        let mut ks_many_params_fn: Function = self
             .module
-            .get_function("kaufmanstop_axpy_row_f32")
+            .get_function("kaufmanstop_one_series_many_params_time_major_f32")
             .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
 
-        // Block sizing
-        let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => {
-                let (_min_grid, suggested) = axpy_fn
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-                    .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
-                suggested.max(128).min(512)
-            }
-            BatchKernelPolicy::Plain { block_x } => block_x.max(64).min(1024),
+        // Robust default block geometry
+        let bx_default: u32 = match ks_many_params_fn
+            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+        {
+            Ok((_min_grid, suggested)) => suggested.max(128).min(512),
+            Err(_) => 256,
         };
-        let grid_x = ((len as u32) + block_x - 1) / block_x;
-        let block: BlockSize = (block_x, 1, 1).into();
-        let grid_base: GridSize = (grid_x.max(1), 1, 1).into();
+        let prefer_by = |tile_params: usize| -> u32 {
+            if tile_params >= 8 {
+                8
+            } else if tile_params >= 4 {
+                4
+            } else {
+                1
+            }
+        };
 
+        // Determine a safe param tile size so the MA slab fits with headroom
+        let per_param_bytes = len * std::mem::size_of::<f32>();
+        let free = mem_get_info().ok().map(|(free, _)| free).unwrap_or(usize::MAX);
+        let mut max_tile_params = if free > head + base_bytes + out_bytes {
+            ((free - head - base_bytes - out_bytes) / per_param_bytes).max(1)
+        } else {
+            1
+        };
+        max_tile_params = max_tile_params.min(combos.len()).max(1);
+
+        // Selector for MA(range)
         let selector = CudaMaSelector::new(self.device_id as usize);
-        for (row, prm) in combos.iter().enumerate() {
-            let period = prm.period.unwrap();
-            let mult = prm.mult.unwrap() as f32;
-            let is_long = prm
+
+        // Process params in contiguous tiles, additionally splitting by direction to keep
+        // base_is_low uniform per launch (kernel expects a single base selector).
+        let mut p0 = 0usize;
+        while p0 < combos.len() {
+            // Establish direction for this sub-tile
+            let dir_long = combos[p0]
                 .direction
                 .as_deref()
                 .unwrap_or("long")
                 .eq_ignore_ascii_case("long");
-            let signed_mult = if is_long { -mult } else { mult };
-            let base_is_low = if is_long { 1i32 } else { 0i32 };
-            let warm = (first + period - 1) as i32;
-            let ma_type = prm.ma_type.as_deref().unwrap_or("sma");
 
-            // Compute MA(range) on device using the selector (single-period)
-            let ma_dev = selector
-                .ma_to_device(ma_type, CudaMaData::SliceF32(&range), period)
-                .map_err(|e| CudaKaufmanstopError::Cuda(format!("ma_to_device: {}", e)))?;
-            debug_assert_eq!(ma_dev.rows, 1);
-            debug_assert_eq!(ma_dev.cols, len);
+            // Extend tile with same direction (contiguous segment)
+            let mut p1 = p0;
+            let mut taken = 0usize;
+            while p1 < combos.len() && taken < max_tile_params {
+                let same_dir = combos[p1]
+                    .direction
+                    .as_deref()
+                    .unwrap_or("long")
+                    .eq_ignore_ascii_case(if dir_long { "long" } else { "short" });
+                if !same_dir {
+                    break;
+                }
+                p1 += 1;
+                taken += 1;
+            }
+            let tile = &combos[p0..p1];
+            let tile_n = tile.len();
 
-            // Launch per-row AXPY into row slice of d_out
+            // Prepare warm indices and multipliers for this tile
+            let mut warm_ps = Vec::<i32>::with_capacity(tile_n);
+            let mut signed_mults = Vec::<f32>::with_capacity(tile_n);
+            for prm in tile.iter() {
+                let period = prm.period.unwrap();
+                let mult = prm.mult.unwrap() as f32;
+                warm_ps.push((first + period - 1) as i32);
+                signed_mults.push(if dir_long { -mult } else { mult });
+            }
+            let d_warm = DeviceBuffer::from_slice(&warm_ps)
+                .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+            let d_signed = DeviceBuffer::from_slice(&signed_mults)
+                .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+
+            // Allocate MA slab for the tile: [tile_n * len], time-major per param
+            let mut d_ma_tile = unsafe { DeviceBuffer::<f32>::uninitialized(tile_n * len) }
+                .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+
+            // Stage MA rows into a single pinned host slab, then upload once.
+            let mut h_ma_tile = unsafe {
+                LockedBuffer::<f32>::uninitialized(tile_n * len)
+                    .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?
+            };
+            let mut keep_alive: Vec<DeviceArrayF32> = Vec::with_capacity(tile_n);
+            for (j, prm) in tile.iter().enumerate() {
+                let period = prm.period.unwrap();
+                let ma_type = prm.ma_type.as_deref().unwrap_or("sma");
+                let ma_dev = selector
+                    .ma_to_device(ma_type, CudaMaData::SliceF32(&range), period)
+                    .map_err(|e| CudaKaufmanstopError::Cuda(format!("ma_to_device: {}", e)))?;
+                debug_assert_eq!(ma_dev.rows, 1);
+                debug_assert_eq!(ma_dev.cols, len);
+
+                // Destination host slice for param j
+                let offset = j * len;
+                let slice = &mut h_ma_tile.as_mut_slice()[offset..offset + len];
+                unsafe {
+                    ma_dev
+                        .buf
+                        .async_copy_to(slice, &self.stream)
+                        .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+                }
+                keep_alive.push(ma_dev);
+            }
+            // Ensure D2H fills complete before uploading to device, then free sources
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+            drop(keep_alive);
             unsafe {
+                d_ma_tile
+                    .async_copy_from(&h_ma_tile, &self.stream)
+                    .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+            }
+
+            // Launch the tile kernel
+            let bx = bx_default;
+            let by = prefer_by(tile_n);
+            let grid = GridSize::xyz(
+                ((len as u32) + bx - 1) / bx,
+                ((tile_n as u32) + by - 1) / by,
+                1,
+            );
+            let block = BlockSize::xyz(bx, by, 1);
+            let shmem = (bx as usize) * std::mem::size_of::<f32>();
+
+            let out_offset = p0 * len;
+            let launch_res = unsafe {
                 let mut hp = d_high.as_device_ptr().as_raw();
                 let mut lp = d_low.as_device_ptr().as_raw();
-                let mut mp = ma_dev.buf.as_device_ptr().as_raw();
-                let mut n = len as i32;
-                let mut sm = signed_mult;
-                let mut w = warm;
-                let mut bil = base_is_low;
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .add(row * len)
-                    .as_raw();
+                let mut mp = d_ma_tile.as_device_ptr().as_raw();
+                let mut wp = d_warm.as_device_ptr().as_raw();
+                let mut sp = d_signed.as_device_ptr().as_raw();
+                let mut rows_i = len as i32;
+                let mut params_i = tile_n as i32;
+                let mut bil = if dir_long { 1i32 } else { 0i32 };
+                let mut out_ptr = d_out.as_device_ptr().add(out_offset).as_raw();
 
                 let args: &mut [*mut c_void] = &mut [
                     &mut hp as *mut _ as *mut c_void,
                     &mut lp as *mut _ as *mut c_void,
                     &mut mp as *mut _ as *mut c_void,
-                    &mut n as *mut _ as *mut c_void,
-                    &mut sm as *mut _ as *mut c_void,
-                    &mut w as *mut _ as *mut c_void,
+                    &mut wp as *mut _ as *mut c_void,
+                    &mut sp as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut params_i as *mut _ as *mut c_void,
                     &mut bil as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
 
-                self.stream
-                    .launch(&axpy_fn, grid_base, block, 0, args)
+                self.stream.launch(&ks_many_params_fn, grid, block, shmem as u32, args)
+            };
+
+            if let Err(_e) = launch_res {
+                // Fallback: per-parameter AXPY row kernel (preserves correctness)
+                let mut axpy_fn: Function = self
+                    .module
+                    .get_function("kaufmanstop_axpy_row_f32")
                     .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+                let block_x: u32 = match self.policy.batch {
+                    BatchKernelPolicy::Auto => {
+                        let (_min_grid, suggested) = axpy_fn
+                            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+                            .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+                        suggested.max(128).min(512)
+                    }
+                    BatchKernelPolicy::Plain { block_x } => block_x.max(64).min(1024),
+                };
+                let grid_x = ((len as u32) + block_x - 1) / block_x;
+                let grid_base: GridSize = (grid_x.max(1), 1, 1).into();
+                let block_base: BlockSize = (block_x, 1, 1).into();
+
+                for (j, prm) in tile.iter().enumerate() {
+                    let period = prm.period.unwrap();
+                    let mult = prm.mult.unwrap() as f32;
+                    let is_long = prm
+                        .direction
+                        .as_deref()
+                        .unwrap_or("long")
+                        .eq_ignore_ascii_case("long");
+                    let signed_mult = if is_long { -mult } else { mult };
+                    let base_is_low = if is_long { 1i32 } else { 0i32 };
+                    let warm = (first + period - 1) as i32;
+                    let ma_type = prm.ma_type.as_deref().unwrap_or("sma");
+
+                    let ma_dev = selector
+                        .ma_to_device(ma_type, CudaMaData::SliceF32(&range), period)
+                        .map_err(|e| CudaKaufmanstopError::Cuda(format!("ma_to_device: {}", e)))?;
+
+                    unsafe {
+                        let mut hp = d_high.as_device_ptr().as_raw();
+                        let mut lp = d_low.as_device_ptr().as_raw();
+                        let mut mp = ma_dev.buf.as_device_ptr().as_raw();
+                        let mut n = len as i32;
+                        let mut sm = signed_mult;
+                        let mut w = warm;
+                        let mut bil = base_is_low;
+                        let mut out_ptr = d_out
+                            .as_device_ptr()
+                            .add((p0 + j) * len)
+                            .as_raw();
+
+                        let args: &mut [*mut c_void] = &mut [
+                            &mut hp as *mut _ as *mut c_void,
+                            &mut lp as *mut _ as *mut c_void,
+                            &mut mp as *mut _ as *mut c_void,
+                            &mut n as *mut _ as *mut c_void,
+                            &mut sm as *mut _ as *mut c_void,
+                            &mut w as *mut _ as *mut c_void,
+                            &mut bil as *mut _ as *mut c_void,
+                            &mut out_ptr as *mut _ as *mut c_void,
+                        ];
+                        self.stream
+                            .launch(&axpy_fn, grid_base, block_base, 0, args)
+                            .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+                    }
+                    // Keep conservative ordering to avoid lifetime hazards
+                    self.stream
+                        .synchronize()
+                        .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+                }
             }
+
+            p0 = p1;
         }
 
+        // Ensure all tiles are complete
         self.stream
             .synchronize()
             .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
@@ -312,7 +504,9 @@ impl CudaKaufmanstop {
                     break;
                 }
             }
-            let fv = fv.ok_or_else(|| CudaKaufmanstopError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv = fv.ok_or_else(|| {
+                CudaKaufmanstopError::InvalidInput(format!("series {} all NaN", s))
+            })?;
             if rows - fv < period {
                 return Err(CudaKaufmanstopError::InvalidInput(format!(
                     "series {} insufficient data for period {} (tail = {})",
@@ -329,7 +523,11 @@ impl CudaKaufmanstop {
         for idx in 0..(cols * rows) {
             let h = high_tm[idx];
             let l = low_tm[idx];
-            range_tm[idx] = if h.is_nan() || l.is_nan() { f32::NAN } else { h - l };
+            range_tm[idx] = if h.is_nan() || l.is_nan() {
+                f32::NAN
+            } else {
+                h - l
+            };
         }
 
         // Compute MA(range) on device. For now, use the selector in single-parameter
@@ -339,8 +537,10 @@ impl CudaKaufmanstop {
         // However, to reduce kernel launches, if ma_type == "sma", use the SMA wrapper's
         // native many-series path.
         let total = cols * rows;
-        let mut d_high = DeviceBuffer::from_slice(high_tm).map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
-        let mut d_low = DeviceBuffer::from_slice(low_tm).map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+        let mut d_high = DeviceBuffer::from_slice(high_tm)
+            .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+        let mut d_low = DeviceBuffer::from_slice(low_tm)
+            .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(total) }
@@ -352,7 +552,9 @@ impl CudaKaufmanstop {
             use crate::indicators::moving_averages::sma::SmaParams as SParams;
             let sma = CudaSma::new(self.device_id as usize)
                 .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
-            let sparams = SParams { period: Some(period) };
+            let sparams = SParams {
+                period: Some(period),
+            };
             let ma_dev = sma
                 .sma_multi_series_one_param_time_major_dev(&range_tm, cols, rows, &sparams)
                 .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
@@ -405,8 +607,7 @@ impl CudaKaufmanstop {
                 }
             }
             // Upload the filled time-major MA matrix
-            d_ma
-                .copy_from(&range_tm)
+            d_ma.copy_from(&range_tm)
                 .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
             d_ma
         };
@@ -416,6 +617,7 @@ impl CudaKaufmanstop {
             .module
             .get_function("kaufmanstop_many_series_one_param_time_major_f32")
             .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
+        // 2‑D grid: x=series tiles, y=time tiles (avoids per‑element div/mod)
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => {
                 let (_min_grid, suggested) = func
@@ -425,10 +627,12 @@ impl CudaKaufmanstop {
             }
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(1024),
         };
-        let total_i = (cols * rows) as u32;
-        let grid_x = (total_i + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let block_y: u32 = 1; // keep y simple; kernel strides by gridDim.y over time
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let time_tile: u32 = 256;
+        let grid_y = ((rows as u32) + time_tile - 1) / time_tile;
+        let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+        let block: BlockSize = (block_x, block_y, 1).into();
 
         unsafe {
             let mut hp = d_high.as_device_ptr().as_raw();
@@ -462,7 +666,11 @@ impl CudaKaufmanstop {
             .synchronize()
             .map_err(|e| CudaKaufmanstopError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
 
@@ -512,7 +720,12 @@ pub mod benches {
             direction: ("long".to_string(), "long".to_string(), 0.0),
             ma_type: ("sma".to_string(), "sma".to_string(), 0.0),
         };
-        Box::new(KaufmanstopBatchState { cuda, high, low, sweep })
+        Box::new(KaufmanstopBatchState {
+            cuda,
+            high,
+            low,
+            sweep,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

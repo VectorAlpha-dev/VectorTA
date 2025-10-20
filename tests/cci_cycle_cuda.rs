@@ -6,16 +6,20 @@ use my_project::indicators::cci_cycle::{
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
+use cust::memory::CopyDestination;
+#[cfg(feature = "cuda")]
 use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::oscillators::cci_cycle_wrapper::CudaCciCycle;
-#[cfg(feature = "cuda")]
-use cust::memory::CopyDestination;
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     let diff = (a - b).abs();
-    if diff <= atol { return true; }
+    if diff <= atol {
+        return true;
+    }
     diff <= rtol * a.abs().max(b.abs())
 }
 
@@ -41,12 +45,17 @@ fn cci_cycle_cuda_batch_matches_cpu_shape() -> Result<(), Box<dyn std::error::Er
         let x = i as f64;
         data[i] = (x * 0.0011).sin() * 1.1 + 0.7 * (x * 0.00041).cos();
     }
-    let sweep = CciCycleBatchRange { length: (10, 30, 5), factor: (0.3, 0.7, 0.2) };
+    let sweep = CciCycleBatchRange {
+        length: (10, 30, 5),
+        factor: (0.3, 0.7, 0.2),
+    };
     let cpu = cci_cycle_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
 
     let cuda = CudaCciCycle::new(0).expect("CudaCciCycle::new");
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    let gpu = cuda.cci_cycle_batch_dev(&data_f32, &sweep).expect("cci_cycle batch");
+    let gpu = cuda
+        .cci_cycle_batch_dev(&data_f32, &sweep)
+        .expect("cci_cycle batch");
     assert_eq!(cpu.rows, gpu.rows);
     assert_eq!(cpu.cols, gpu.cols);
 
@@ -71,12 +80,17 @@ fn cci_cycle_cuda_batch_produces_values_after_warmup() -> Result<(), Box<dyn std
         let x = i as f64;
         data[i] = (x * 0.0011).sin() * 0.9 + 0.5 * (x * 0.00031).cos();
     }
-    let sweep = CciCycleBatchRange { length: (10, 20, 5), factor: (0.4, 0.6, 0.2) };
+    let sweep = CciCycleBatchRange {
+        length: (10, 20, 5),
+        factor: (0.4, 0.6, 0.2),
+    };
     let cpu = cci_cycle_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
 
     let cuda = CudaCciCycle::new(0).expect("CudaCciCycle::new");
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    let gpu = cuda.cci_cycle_batch_dev(&data_f32, &sweep).expect("cci_cycle batch");
+    let gpu = cuda
+        .cci_cycle_batch_dev(&data_f32, &sweep)
+        .expect("cci_cycle batch");
 
     let mut gpu_vals = vec![0f32; gpu.len()];
     gpu.buf.copy_to(&mut gpu_vals).expect("copy out");
@@ -91,8 +105,14 @@ fn cci_cycle_cuda_batch_produces_values_after_warmup() -> Result<(), Box<dyn std
         let warm = first_valid + length * 4 + length; // conservative
         let row_off = r * cols;
         let mut finite_count = 0usize;
-        for c in warm..cols { if gpu_vals[row_off + c].is_finite() { finite_count += 1; } }
-        if finite_count > cols / 4 { any_ok = true; }
+        for c in warm..cols {
+            if gpu_vals[row_off + c].is_finite() {
+                finite_count += 1;
+            }
+        }
+        if finite_count > cols / 4 {
+            any_ok = true;
+        }
     }
     // It's acceptable for highly smoothed/flat parameterizations to produce near-constant outputs;
     // we still require the kernel to execute and return the expected shape. Treat absence of

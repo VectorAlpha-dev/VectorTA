@@ -29,6 +29,10 @@
 //! - Allocation: follows alma.rs patterns (warmup prefix via `alloc_with_nan_prefix`; batch via `make_uninit_matrix`/`init_matrix_prefixes`).
 //! - Streaming kernel: O(1) modulo-free ring buffer; NaN-robust using a `nan_count` window tracker. Emits NaN only while a NaN is inside the window and recovers as soon as it slides out.
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaStddev;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -37,10 +41,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::CudaStddev;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1316,12 +1316,14 @@ pub fn stddev_cuda_batch_dev_py<'py>(
     }
 
     let slice_in = data_f32.as_slice()?;
-    let sweep = StdDevBatchRange { period: period_range, nbdev: nbdev_range };
+    let sweep = StdDevBatchRange {
+        period: period_range,
+        nbdev: nbdev_range,
+    };
 
     let inner = py.allow_threads(|| {
         let cuda = CudaStddev::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .stddev_batch_dev(slice_in, &sweep)
+        cuda.stddev_batch_dev(slice_in, &sweep)
             .map(|(dev, _)| dev)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -1349,8 +1351,7 @@ pub fn stddev_cuda_many_series_one_param_dev_py<'py>(
     let slice_in = data_tm_f32.as_slice()?;
     let inner = py.allow_threads(|| {
         let cuda = CudaStddev::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .stddev_many_series_one_param_time_major_dev(slice_in, cols, rows, period, nbdev as f32)
+        cuda.stddev_many_series_one_param_time_major_dev(slice_in, cols, rows, period, nbdev as f32)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })

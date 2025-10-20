@@ -47,6 +47,8 @@ use std::convert::AsRef;
 use std::mem::ManuallyDrop;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -57,8 +59,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -2339,7 +2339,10 @@ pub fn chande_cuda_batch_dev_py(
         return Err(PyValueError::new_err("mismatched input lengths"));
     }
 
-    let sweep = ChandeBatchRange { period: period_range, mult: mult_range };
+    let sweep = ChandeBatchRange {
+        period: period_range,
+        mult: mult_range,
+    };
 
     let inner = py.allow_threads(|| {
         let cuda = CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2375,15 +2378,27 @@ pub fn chande_cuda_many_series_one_param_dev_py(
     let high_slice = high_tm.as_slice()?;
     let low_slice = low_tm.as_slice()?;
     let close_slice = close_tm.as_slice()?;
-    let expected = cols.checked_mul(rows).ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
-    if high_slice.len() != expected || low_slice.len() != expected || close_slice.len() != expected {
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if high_slice.len() != expected || low_slice.len() != expected || close_slice.len() != expected
+    {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
 
     let inner = py.allow_threads(|| {
         let cuda = CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.chande_many_series_one_param_time_major_dev(high_slice, low_slice, close_slice, cols, rows, period, mult, direction)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.chande_many_series_one_param_time_major_dev(
+            high_slice,
+            low_slice,
+            close_slice,
+            cols,
+            rows,
+            period,
+            mult,
+            direction,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     Ok(DeviceArrayF32Py { inner })

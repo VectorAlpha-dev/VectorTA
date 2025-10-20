@@ -1,11 +1,49 @@
-// CUDA kernels for Coppock Curve (sum of two ROCs smoothed by WMA/SMA)
+// CUDA kernels for Coppock Curve (sum of two ROCs smoothed by WMA)
 //
-// Semantics:
+// Semantics (unchanged):
 // - Warmup = first_valid + max(short,long) + (ma_period - 1)
 // - Before warmup: write NaN
 // - Inputs may contain NaN; any NaN in the active window yields NaN at output
-// - Accumulation done in float; adequate for default ranges and parity with other CUDA paths
+// - Accumulation done in float, with compensated summation to reduce drift
 
+#ifndef CUDA_COPPOCK_F32_H_
+#define CUDA_COPPOCK_F32_H_
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+
+#define XNAN __int_as_float(0x7fffffff)
+
+// --- Small helpers ---------------------------------------------------------
+
+__device__ __forceinline__ bool any_nan3(float a, float b, float c) {
+    // Use bitwise OR to avoid short-circuit divergence
+    return __isnanf(a) | __isnanf(b) | __isnanf(c);
+}
+
+__device__ __forceinline__ float roc_sum_times100(float c, float inv_s, float inv_l) {
+    // v = 100*((c/ps - 1) + (c/pl - 1)) = (c*(1/ps + 1/pl) - 2) * 100
+    // Use FMA to reduce rounding and latency
+    float inv_sum = inv_s + inv_l;
+    return fmaf(c, inv_sum, -2.0f) * 100.0f;
+}
+
+// Kahan–Neumaier compensated add: returns updated (sum, comp)
+__device__ __forceinline__ void comp_add(float x, float &sum, float &comp) {
+    float t = sum + x;
+    if (fabsf(sum) >= fabsf(x)) comp += (sum - t) + x;
+    else                       comp += (x   - t) + sum;
+    sum = t;
+}
+
+__device__ __forceinline__ void comp_sub(float x, float &sum, float &comp) {
+    // subtraction as add of (-x)
+    comp_add(-x, sum, comp);
+}
+
+// --- Kernel 1: One price series × many parameter combos --------------------
+// One thread processes one parameter row sequentially across time.
+// out is row-major [n_combos * len], row stride = len.
 extern "C" __global__ void coppock_batch_f32(
     const float* __restrict__ price, // [len]
     const float* __restrict__ inv,   // [len] precomputed 1/price
@@ -18,10 +56,8 @@ extern "C" __global__ void coppock_batch_f32(
     float* __restrict__ out              // [n_combos * len] row-major
 )
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x; // time index
-    int row = blockIdx.y;                           // parameter row
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= n_combos) return;
-    if (i >= len) return;
 
     const int s = shorts[row];
     const int l = longs[row];
@@ -29,79 +65,260 @@ extern "C" __global__ void coppock_batch_f32(
     const int largest = s > l ? s : l;
     const int warm = first_valid + largest + (m - 1);
 
-    float* row_out = out + row * (size_t)len;
-    if (i < warm) { row_out[i] = __int_as_float(0x7fffffff); return; } // NaN
+    float* row_out = out + (size_t)row * (size_t)len;
 
-    // Weighted Moving Average (default for Coppock). We implement WMA and SMA via the same kernel.
-    // Denominator for WMA
+    // pre-warm: NaNs
+    const int pre = warm < len ? warm : len;
+    for (int t = 0; t < pre; ++t) row_out[t] = XNAN;
+    if (warm >= len) return;
+
+    // denominator for WMA with weights 1..m
     const float denom_w = 0.5f * (float)m * (float)(m + 1);
 
-    // Compute WMA of sum_roc over window [i-m+1 .. i]
-    float weighted = 0.0f;
-    float sum = 0.0f; // for SMA
-    bool has_nan = false;
+    // --- Build initial window [warm-m+1 .. warm]
+    float sum = 0.0f, sum_c = 0.0f;     // compensated sum
+    float wsum = 0.0f, wsum_c = 0.0f;   // compensated weighted sum
+    int bad_count = 0;
+
     int w = 1;
-    const int start = i - m + 1;
-    for (int j = start; j <= i; ++j, ++w) {
-        // sum_roc(j) = 100*((c/s - 1) + (c/l - 1))
-        int js = j - s;
-        int jl = j - l;
-        // j is guaranteed >= first_valid + largest here (since i >= warm), so js,jl in-range
-        float c = price[j];
-        float ps = price[js];
-        float pl = price[jl];
-        // Propagate NaN semantics like CPU: any NaN in window -> NaN output
-        if (__isnanf(c) || __isnanf(ps) || __isnanf(pl)) { has_nan = true; break; }
-        float v = (c * (inv[js] + inv[jl]) - 2.0f) * 100.0f;
-        weighted += v * (float)w;
-        sum += v;
+    const int start = warm - m + 1;
+    for (int j = start; j <= warm; ++j, ++w) {
+        const int js = j - s;
+        const int jl = j - l;
+
+        // Check NaNs via price path (parity with original semantics)
+        const float c  = price[j];
+        const float ps = price[js];
+        const float pl = price[jl];
+
+        const bool invalid = any_nan3(c, ps, pl);
+        if (invalid) { ++bad_count; continue; }
+
+        const float v = roc_sum_times100(c, inv[js], inv[jl]);
+
+        // Compensated accumulation
+        comp_add(v, sum, sum_c);
+        comp_add(v * (float)w, wsum, wsum_c);
     }
 
-    // Default Coppock is WMA; we emit WMA here. If has_nan, write NaN.
-    row_out[i] = has_nan ? __int_as_float(0x7fffffff) : (weighted / denom_w);
+    if (bad_count > 0) {
+        row_out[warm] = XNAN;
+    } else {
+        // Apply compensation once when using the value
+        const float sum_eff  = sum + sum_c;
+        const float wsum_eff = wsum + wsum_c;
+        (void)sum_eff; // sum_eff kept for clarity; not directly used here
+        row_out[warm] = wsum_eff / denom_w;
+    }
+
+    // Track whether our rolling state is valid (i.e., no NaNs in last window)
+    bool state_valid = (bad_count == 0);
+
+    // --- Slide the window forward t = warm+1 .. len-1
+    for (int t = warm + 1; t < len; ++t) {
+        // New sample entering at j = t
+        const int jn  = t;
+        const int jns = jn - s;
+        const int jnl = jn - l;
+        const float cn  = price[jn];
+        const float pns = price[jns];
+        const float pnl = price[jnl];
+        const bool inv_new = any_nan3(cn, pns, pnl);
+
+        float v_new = 0.0f; // only defined if inv_new==false
+        if (!inv_new) v_new = roc_sum_times100(cn, inv[jns], inv[jnl]);
+
+        // Old sample leaving at j = t - m
+        const int jo  = t - m;
+        const int jos = jo - s;
+        const int jol = jo - l;
+        const float co  = price[jo];
+        const float pos = price[jos];
+        const float pol = price[jol];
+        const bool inv_old = any_nan3(co, pos, pol);
+
+        float v_old = 0.0f;
+        if (!inv_old) v_old = roc_sum_times100(co, inv[jos], inv[jol]);
+
+        // Update NaN count
+        bad_count += (int)inv_new - (int)inv_old;
+
+        if (bad_count == 0) {
+            if (!state_valid) {
+                // Rebuild sums exactly for this clean window: [t-m+1 .. t]
+                sum = 0.0f; sum_c = 0.0f;
+                wsum = 0.0f; wsum_c = 0.0f;
+                int ww = 1;
+                const int rst = t - m + 1;
+                for (int j = rst; j <= t; ++j, ++ww) {
+                    const int js2 = j - s;
+                    const int jl2 = j - l;
+                    const float c2  = price[j];
+                    const float ps2 = price[js2];
+                    const float pl2 = price[jl2];
+                    (void)ps2; (void)pl2; // accessed only for parity reads in invalid path above
+                    // We know this window has no NaNs
+                    const float v2 = roc_sum_times100(c2, inv[js2], inv[jl2]);
+                    comp_add(v2, sum, sum_c);
+                    comp_add(v2 * (float)ww, wsum, wsum_c);
+                }
+                state_valid = true;
+            } else {
+                // O(1) sliding update for WMA with weights 1..m:
+                // wsum_t = wsum_{t-1} + m*v_new - sum_{t-1}
+                const float sum_prev = sum + sum_c; // use compensated value
+                // Update wsum using compensation: + m*v_new - sum_prev
+                comp_add((float)m * v_new, wsum, wsum_c);
+                comp_sub(sum_prev,            wsum, wsum_c);
+                // Update sum: sum += v_new - v_old
+                comp_add(v_new, sum, sum_c);
+                comp_sub(v_old, sum, sum_c);
+            }
+            const float wsum_eff = wsum + wsum_c;
+            row_out[t] = wsum_eff / denom_w;
+        } else {
+            row_out[t] = XNAN;
+            state_valid = false;
+        }
+    }
 }
 
-// Many-series × one-param (time-major): each thread processes a series sequentially across time.
+// --- Kernel 2: Many series × one param (time-major) ------------------------
+// One thread processes one series sequentially across time.
+// price_tm and inv_tm are time-major: t*cols + s
 extern "C" __global__ void coppock_many_series_one_param_f32(
-    const float* __restrict__ price_tm, // [rows * cols], time-major: t*cols + s
-    const float* __restrict__ inv_tm,   // [rows * cols], 1/price_tm
+    const float* __restrict__ price_tm,   // [rows * cols], time-major: t*cols + s
+    const float* __restrict__ inv_tm,     // [rows * cols], 1/price_tm
     const int* __restrict__ first_valids, // [cols]
     int cols, int rows,
     int short_p, int long_p, int ma_period,
-    float* __restrict__ out_tm // [rows * cols]
+    float* __restrict__ out_tm            // [rows * cols], time-major
 )
 {
-    int s = blockIdx.x * blockDim.x + threadIdx.x; // series index
+    int s = blockIdx.x * blockDim.x + threadIdx.x; // series index (column)
     if (s >= cols) return;
 
     const int first_valid = first_valids[s];
     const int largest = short_p > long_p ? short_p : long_p;
-    const int warm = first_valid + largest + (ma_period - 1);
-    const float denom_w = 0.5f * (float)ma_period * (float)(ma_period + 1);
+    const int m = ma_period;
+    const int warm = first_valid + largest + (m - 1);
+    const float denom_w = 0.5f * (float)m * (float)(m + 1);
 
-    // leading NaNs
-    for (int t = 0; t < rows; ++t) {
+    // pre-warm NaNs
+    const int pre = warm < rows ? warm : rows;
+    for (int t = 0; t < pre; ++t) {
+        out_tm[(size_t)t * (size_t)cols + s] = XNAN;
+    }
+    if (warm >= rows) return;
+
+    // Build initial window
+    float sum = 0.0f, sum_c = 0.0f;
+    float wsum = 0.0f, wsum_c = 0.0f;
+    int bad_count = 0;
+
+    int w = 1;
+    const int start = warm - m + 1;
+    for (int j = start; j <= warm; ++j, ++w) {
+        const int js = j - short_p;
+        const int jl = j - long_p;
+
+        const size_t idxj  = (size_t)j  * (size_t)cols + s;
+        const size_t idxjs = (size_t)js * (size_t)cols + s;
+        const size_t idxjl = (size_t)jl * (size_t)cols + s;
+
+        const float c  = price_tm[idxj];
+        const float ps = price_tm[idxjs];
+        const float pl = price_tm[idxjl];
+
+        const bool invalid = any_nan3(c, ps, pl);
+        if (invalid) { ++bad_count; continue; }
+
+        const float v = roc_sum_times100(c, inv_tm[idxjs], inv_tm[idxjl]);
+        comp_add(v, sum, sum_c);
+        comp_add(v * (float)w, wsum, wsum_c);
+    }
+
+    {
+        float* dst = out_tm + (size_t)warm * (size_t)cols + s;
+        if (bad_count > 0) *dst = XNAN;
+        else               *dst = (wsum + wsum_c) / denom_w;
+    }
+
+    bool state_valid = (bad_count == 0);
+
+    // Slide forward
+    for (int t = warm + 1; t < rows; ++t) {
+        // new entering j = t
+        const int jn = t;
+        const int jns = jn - short_p;
+        const int jnl = jn - long_p;
+
+        const size_t idxjn  = (size_t)jn  * (size_t)cols + s;
+        const size_t idxjns = (size_t)jns * (size_t)cols + s;
+        const size_t idxjnl = (size_t)jnl * (size_t)cols + s;
+
+        const float cn  = price_tm[idxjn];
+        const float pns = price_tm[idxjns];
+        const float pnl = price_tm[idxjnl];
+        const bool inv_new = any_nan3(cn, pns, pnl);
+
+        float v_new = 0.0f;
+        if (!inv_new) v_new = roc_sum_times100(cn, inv_tm[idxjns], inv_tm[idxjnl]);
+
+        // old leaving j = t - m
+        const int jo = t - m;
+        const int jos = jo - short_p;
+        const int jol = jo - long_p;
+
+        const size_t idxjo  = (size_t)jo  * (size_t)cols + s;
+        const size_t idxjos = (size_t)jos * (size_t)cols + s;
+        const size_t idxjol = (size_t)jol * (size_t)cols + s;
+
+        const float co  = price_tm[idxjo];
+        const float pos = price_tm[idxjos];
+        const float pol = price_tm[idxjol];
+        const bool inv_old = any_nan3(co, pos, pol);
+
+        float v_old = 0.0f;
+        if (!inv_old) v_old = roc_sum_times100(co, inv_tm[idxjos], inv_tm[idxjol]);
+
+        bad_count += (int)inv_new - (int)inv_old;
+
         float* dst = out_tm + (size_t)t * (size_t)cols + s;
-        if (t < warm) { *dst = __int_as_float(0x7fffffff); continue; }
+        if (bad_count == 0) {
+            if (!state_valid) {
+                // Rebuild exactly on first clean window
+                sum = 0.0f; sum_c = 0.0f;
+                wsum = 0.0f; wsum_c = 0.0f;
+                int ww = 1;
+                const int rst = t - m + 1;
+                for (int j = rst; j <= t; ++j, ++ww) {
+                    const int js2 = j - short_p;
+                    const int jl2 = j - long_p;
 
-        // WMA window over sum_roc
-        bool has_nan = false;
-        float weighted = 0.0f;
-        int w = 1;
-        const int start = t - ma_period + 1;
-        for (int j = start; j <= t; ++j, ++w) {
-            const int js = j - short_p;
-            const int jl = j - long_p;
-            const size_t idxj  = (size_t)j  * (size_t)cols + s;
-            const size_t idxjs = (size_t)js * (size_t)cols + s;
-            const size_t idxjl = (size_t)jl * (size_t)cols + s;
-            const float c  = price_tm[idxj];
-            const float ps = price_tm[idxjs];
-            const float pl = price_tm[idxjl];
-            if (__isnanf(c) || __isnanf(ps) || __isnanf(pl)) { has_nan = true; break; }
-            float v = (c * (inv_tm[idxjs] + inv_tm[idxjl]) - 2.0f) * 100.0f;
-            weighted += v * (float)w;
+                    const size_t idxj2  = (size_t)j   * (size_t)cols + s;
+                    const size_t idxjs2 = (size_t)js2 * (size_t)cols + s;
+                    const size_t idxjl2 = (size_t)jl2 * (size_t)cols + s;
+
+                    const float c2  = price_tm[idxj2];
+                    const float v2  = roc_sum_times100(c2, inv_tm[idxjs2], inv_tm[idxjl2]);
+                    comp_add(v2, sum, sum_c);
+                    comp_add(v2 * (float)ww, wsum, wsum_c);
+                }
+                state_valid = true;
+            } else {
+                const float sum_prev = sum + sum_c;
+                comp_add((float)m * v_new, wsum, wsum_c);
+                comp_sub(sum_prev,            wsum, wsum_c);
+                comp_add(v_new, sum, sum_c);
+                comp_sub(v_old, sum, sum_c);
+            }
+            *dst = (wsum + wsum_c) / denom_w;
+        } else {
+            *dst = XNAN;
+            state_valid = false;
         }
-        *dst = has_nan ? __int_as_float(0x7fffffff) : (weighted / denom_w);
     }
 }
+
+#endif // CUDA_COPPOCK_F32_H_

@@ -3601,7 +3601,6 @@ use crate::cuda::{cuda_available, CudaKdj};
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
 // PyReadonlyArray1 and PyValueError already imported earlier in this module.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "kdj_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, fast_k_range, slow_k_range, slow_k_ma_range, slow_d_range, slow_d_ma_range, device_id=0))]
@@ -3617,14 +3616,29 @@ pub fn kdj_cuda_batch_dev_py(
     slow_d_ma_range: (String, String, String),
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
-    let h = high_f32.as_slice()?; let l = low_f32.as_slice()?; let c = close_f32.as_slice()?;
-    let sweep = KdjBatchRange { fast_k_period: fast_k_range, slow_k_period: slow_k_range, slow_k_ma_type: slow_k_ma_range, slow_d_period: slow_d_range, slow_d_ma_type: slow_d_ma_range };
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_f32.as_slice()?;
+    let l = low_f32.as_slice()?;
+    let c = close_f32.as_slice()?;
+    let sweep = KdjBatchRange {
+        fast_k_period: fast_k_range,
+        slow_k_period: slow_k_range,
+        slow_k_ma_type: slow_k_ma_range,
+        slow_d_period: slow_d_range,
+        slow_d_ma_type: slow_d_ma_range,
+    };
     let (k, d, j) = py.allow_threads(|| {
         let cuda = CudaKdj::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.kdj_batch_dev(h, l, c, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.kdj_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: k }, DeviceArrayF32Py { inner: d }, DeviceArrayF32Py { inner: j }))
+    Ok((
+        DeviceArrayF32Py { inner: k },
+        DeviceArrayF32Py { inner: d },
+        DeviceArrayF32Py { inner: j },
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3644,15 +3658,29 @@ pub fn kdj_cuda_many_series_one_param_dev_py(
     slow_d_ma: String,
     device_id: usize,
 ) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
-    let htm = high_tm_f32.as_slice()?; let ltm = low_tm_f32.as_slice()?; let ctm = close_tm_f32.as_slice()?;
-    let params = KdjParams { fast_k_period: Some(fast_k), slow_k_period: Some(slow_k), slow_k_ma_type: Some(slow_k_ma), slow_d_period: Some(slow_d), slow_d_ma_type: Some(slow_d_ma) };
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let htm = high_tm_f32.as_slice()?;
+    let ltm = low_tm_f32.as_slice()?;
+    let ctm = close_tm_f32.as_slice()?;
+    let params = KdjParams {
+        fast_k_period: Some(fast_k),
+        slow_k_period: Some(slow_k),
+        slow_k_ma_type: Some(slow_k_ma),
+        slow_d_period: Some(slow_d),
+        slow_d_ma_type: Some(slow_d_ma),
+    };
     let (k, d, j) = py.allow_threads(|| {
         let cuda = CudaKdj::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.kdj_many_series_one_param_time_major_dev(htm, ltm, ctm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: k }, DeviceArrayF32Py { inner: d }, DeviceArrayF32Py { inner: j }))
+    Ok((
+        DeviceArrayF32Py { inner: k },
+        DeviceArrayF32Py { inner: d },
+        DeviceArrayF32Py { inner: j },
+    ))
 }
 
 // ========== WASM Bindings ==========

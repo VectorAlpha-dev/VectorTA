@@ -19,10 +19,10 @@
 //! - Batch: Uses shared per-bar precompute (±DM/TR) across rows to reduce redundant work; warmup prefixes preserved.
 //! - Memory: Uses `alloc_with_nan_prefix`, `make_uninit_matrix`, `init_matrix_prefixes` for zero-copy/warmup handling.
 
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -2383,17 +2383,20 @@ pub fn di_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::IntoPyArray;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
     let c = close_f32.as_slice()?;
-    let sweep = DiBatchRange { period: period_range };
-    let (plus_dev, minus_dev, combos) = py
-        .allow_threads(|| {
-            let cuda = CudaDi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.di_batch_dev(h, l, c, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let sweep = DiBatchRange {
+        period: period_range,
+    };
+    let (plus_dev, minus_dev, combos) = py.allow_threads(|| {
+        let cuda = CudaDi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.di_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("plus", Py::new(py, DeviceArrayF32Py { inner: plus_dev })?)?;
     dict.set_item("minus", Py::new(py, DeviceArrayF32Py { inner: minus_dev })?)?;
@@ -2421,12 +2424,16 @@ pub fn di_cuda_many_series_one_param_dev_py<'py>(
     period: usize,
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h_shape = high_tm_f32.shape();
     let l_shape = low_tm_f32.shape();
     let c_shape = close_tm_f32.shape();
     if h_shape != l_shape || l_shape != c_shape || h_shape.len() != 2 {
-        return Err(PyValueError::new_err("expected three 2D arrays of same shape"));
+        return Err(PyValueError::new_err(
+            "expected three 2D arrays of same shape",
+        ));
     }
     let rows = h_shape[0];
     let cols = h_shape[1];
@@ -2440,7 +2447,10 @@ pub fn di_cuda_many_series_one_param_dev_py<'py>(
     })?;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("plus", Py::new(py, DeviceArrayF32Py { inner: pair.plus })?)?;
-    dict.set_item("minus", Py::new(py, DeviceArrayF32Py { inner: pair.minus })?)?;
+    dict.set_item(
+        "minus",
+        Py::new(py, DeviceArrayF32Py { inner: pair.minus })?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("period", period)?;

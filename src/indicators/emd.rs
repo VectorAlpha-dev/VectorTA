@@ -33,6 +33,10 @@
 //! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all three outputs (lines 339-341, 444-446)
 //! - **Batch operations**: ✅ Implemented with parallel processing support
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaEmd, CudaEmdBatchResult, DeviceArrayF32Triple};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -57,10 +61,6 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::{cuda_available, CudaEmd, CudaEmdBatchResult, DeviceArrayF32Triple};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 impl<'a> AsRef<[f64]> for EmdInput<'a> {
     #[inline(always)]
@@ -2962,15 +2962,27 @@ pub fn emd_cuda_batch_dev_py<'py>(
     if hi.len() != lo.len() {
         return Err(PyValueError::new_err("high and low must have same length"));
     }
-    let sweep = EmdBatchRange { period: period_range, delta: delta_range, fraction: fraction_range };
+    let sweep = EmdBatchRange {
+        period: period_range,
+        delta: delta_range,
+        fraction: fraction_range,
+    };
     let CudaEmdBatchResult { outputs, combos } = py.allow_threads(|| {
         let cuda = CudaEmd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.emd_batch_dev(hi, lo, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.emd_batch_dev(hi, lo, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    let DeviceArrayF32Triple { upper, middle, lower } = outputs;
+    let DeviceArrayF32Triple {
+        upper,
+        middle,
+        lower,
+    } = outputs;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("upperband", Py::new(py, DeviceArrayF32Py { inner: upper })?)?;
-    dict.set_item("middleband", Py::new(py, DeviceArrayF32Py { inner: middle })?)?;
+    dict.set_item(
+        "middleband",
+        Py::new(py, DeviceArrayF32Py { inner: middle })?,
+    )?;
     dict.set_item("lowerband", Py::new(py, DeviceArrayF32Py { inner: lower })?)?;
     // Flatten parameters
     let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
@@ -2996,9 +3008,13 @@ pub fn emd_cuda_many_series_one_param_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::PyUntypedArrayMethods;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let shape = data_tm_f32.shape();
-    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array")); }
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array"));
+    }
     let rows = shape[0];
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
@@ -3009,21 +3025,36 @@ pub fn emd_cuda_many_series_one_param_dev_py<'py>(
         let mut fv: Option<i32> = None;
         for t in 0..rows {
             let v = flat[t * cols + s];
-            if v.is_finite() { fv = Some(t as i32); break; }
+            if v.is_finite() {
+                fv = Some(t as i32);
+                break;
+            }
         }
-        first_valids[s] = fv.ok_or_else(|| PyValueError::new_err(format!("series {} has no finite values", s)))?;
+        first_valids[s] =
+            fv.ok_or_else(|| PyValueError::new_err(format!("series {} has no finite values", s)))?;
     }
 
-    let params = EmdParams { period: Some(period), delta: Some(delta), fraction: Some(fraction) };
+    let params = EmdParams {
+        period: Some(period),
+        delta: Some(delta),
+        fraction: Some(fraction),
+    };
     let outputs = py.allow_threads(|| {
         let cuda = CudaEmd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.emd_many_series_one_param_time_major_dev(flat, cols, rows, &params, &first_valids)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    let DeviceArrayF32Triple { upper, middle, lower } = outputs;
+    let DeviceArrayF32Triple {
+        upper,
+        middle,
+        lower,
+    } = outputs;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("upperband", Py::new(py, DeviceArrayF32Py { inner: upper })?)?;
-    dict.set_item("middleband", Py::new(py, DeviceArrayF32Py { inner: middle })?)?;
+    dict.set_item(
+        "middleband",
+        Py::new(py, DeviceArrayF32Py { inner: middle })?,
+    )?;
     dict.set_item("lowerband", Py::new(py, DeviceArrayF32Py { inner: lower })?)?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;

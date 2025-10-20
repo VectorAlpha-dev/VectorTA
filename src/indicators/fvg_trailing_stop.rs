@@ -2164,15 +2164,27 @@ pub fn fvg_trailing_stop_cuda_batch_dev_py(
     smoothing_range: (usize, usize, usize),
     reset_toggle: (bool, bool),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+)> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let (h, l, c) = (high.as_slice()?, low.as_slice()?, close.as_slice()?);
-    let sweep = FvgTsBatchRange { lookback: lookback_range, smoothing: smoothing_range, reset_on_cross: reset_toggle };
+    let sweep = FvgTsBatchRange {
+        lookback: lookback_range,
+        smoothing: smoothing_range,
+        reset_on_cross: reset_toggle,
+    };
     let (u, lwr, uts, lts) = py.allow_threads(|| {
         let cuda = crate::cuda::fvg_trailing_stop_wrapper::CudaFvgTs::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let batch = cuda.fvg_ts_batch_dev(h, l, c, &sweep)
+        let batch = cuda
+            .fvg_ts_batch_dev(h, l, c, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((batch.upper, batch.lower, batch.upper_ts, batch.lower_ts))
     })?;
@@ -2198,12 +2210,31 @@ pub fn fvg_trailing_stop_cuda_many_series_one_param_dev_py(
     smoothing_length: usize,
     reset_on_cross: bool,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+    DeviceArrayF32Py,
+)> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
-    let (h, l, c) = (high_tm.as_slice()?, low_tm.as_slice()?, close_tm.as_slice()?);
-    if h.len()!=l.len() || h.len()!=c.len() || h.len()!=cols*rows { return Err(PyValueError::new_err("time-major arrays must match cols*rows")); }
-    let params = FvgTrailingStopParams { unmitigated_fvg_lookback: Some(unmitigated_fvg_lookback), smoothing_length: Some(smoothing_length), reset_on_cross: Some(reset_on_cross) };
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let (h, l, c) = (
+        high_tm.as_slice()?,
+        low_tm.as_slice()?,
+        close_tm.as_slice()?,
+    );
+    if h.len() != l.len() || h.len() != c.len() || h.len() != cols * rows {
+        return Err(PyValueError::new_err(
+            "time-major arrays must match cols*rows",
+        ));
+    }
+    let params = FvgTrailingStopParams {
+        unmitigated_fvg_lookback: Some(unmitigated_fvg_lookback),
+        smoothing_length: Some(smoothing_length),
+        reset_on_cross: Some(reset_on_cross),
+    };
     let (u, lw, uts, lts) = py.allow_threads(|| {
         let cuda = crate::cuda::fvg_trailing_stop_wrapper::CudaFvgTs::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;

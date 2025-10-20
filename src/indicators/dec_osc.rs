@@ -1891,13 +1891,15 @@ pub fn dec_osc_cuda_batch_dev_py(
     }
     let slice_in = data.as_slice()?;
     let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
-    let sweep = DecOscBatchRange { hp_period: hp_period_range, k: k_range };
-    let inner = py
-        .allow_threads(|| {
-            let cuda = CudaDecOsc::new(0).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.dec_osc_batch_dev(&data_f32, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let sweep = DecOscBatchRange {
+        hp_period: hp_period_range,
+        k: k_range,
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaDecOsc::new(0).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.dec_osc_batch_dev(&data_f32, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     Ok(DeviceArrayF32Py { inner })
 }
 
@@ -1917,16 +1919,20 @@ pub fn dec_osc_cuda_many_series_one_param_dev_py(
     }
     let slice = data_tm.as_slice()?;
     if slice.len() != cols * rows {
-        return Err(PyValueError::new_err("time-major array length != cols*rows"));
+        return Err(PyValueError::new_err(
+            "time-major array length != cols*rows",
+        ));
     }
     let data_f32: Vec<f32> = slice.iter().map(|&v| v as f32).collect();
-    let params = DecOscParams { hp_period: Some(hp_period), k: Some(k) };
-    let inner = py
-        .allow_threads(|| {
-            let cuda = CudaDecOsc::new(0).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.dec_osc_many_series_one_param_time_major_dev(&data_f32, cols, rows, &params)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let params = DecOscParams {
+        hp_period: Some(hp_period),
+        k: Some(k),
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaDecOsc::new(0).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.dec_osc_many_series_one_param_time_major_dev(&data_f32, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     Ok(DeviceArrayF32Py { inner })
 }
 

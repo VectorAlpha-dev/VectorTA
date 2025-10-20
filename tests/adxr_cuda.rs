@@ -1,6 +1,8 @@
 // Integration tests for CUDA ADXR kernels
 
-use my_project::indicators::adxr::{adxr_batch_slice, adxr_with_kernel, AdxrBatchRange, AdxrInput, AdxrParams};
+use my_project::indicators::adxr::{
+    adxr_batch_slice, adxr_with_kernel, AdxrBatchRange, AdxrInput, AdxrParams,
+};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -70,7 +72,13 @@ fn adxr_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
 
     Ok(())
@@ -115,7 +123,9 @@ fn adxr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             l[t] = low_tm[t * cols + s];
             c[t] = close_tm[t * cols + s];
         }
-        let params = AdxrParams { period: Some(period) };
+        let params = AdxrParams {
+            period: Some(period),
+        };
         let input = AdxrInput::from_slices(&h, &l, &c, params);
         let out = adxr_with_kernel(&input, Kernel::Scalar)?;
         for t in 0..rows {
@@ -146,7 +156,11 @@ fn adxr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     dev.buf.copy_to(&mut host)?;
     let tol = 5e-2;
     for idx in 0..host.len() {
-        assert!(approx_eq(cpu_tm[idx], host[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], host[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
 
     Ok(())

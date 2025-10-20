@@ -3,8 +3,7 @@
 use my_project::utilities::enums::Kernel;
 
 use my_project::indicators::aroon::{
-    aroon_batch_with_kernel, aroon_with_kernel, AroonBatchRange, AroonInput, AroonParams,
-    AroonData,
+    aroon_batch_with_kernel, aroon_with_kernel, AroonBatchRange, AroonData, AroonInput, AroonParams,
 };
 
 #[cfg(feature = "cuda")]
@@ -15,14 +14,18 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::CudaAroon;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
 #[test]
 fn cuda_feature_off_noop() {
     #[cfg(not(feature = "cuda"))]
-    { assert!(true); }
+    {
+        assert!(true);
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -47,7 +50,9 @@ fn aroon_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let hf32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let lf32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let cuda = CudaAroon::new(0).expect("CudaAroon::new");
-    let out = cuda.aroon_batch_dev(&hf32, &lf32, &sweep).expect("aroon_batch_dev");
+    let out = cuda
+        .aroon_batch_dev(&hf32, &lf32, &sweep)
+        .expect("aroon_batch_dev");
 
     assert_eq!(cpu.rows, out.outputs.rows());
     assert_eq!(cpu.cols, out.outputs.cols());
@@ -59,8 +64,16 @@ fn aroon_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let tol = 5e-4;
     for idx in 0..(cpu.rows * cpu.cols) {
-        assert!(approx_eq(cpu.up[idx], up_host[idx] as f64, tol), "up mismatch at {}", idx);
-        assert!(approx_eq(cpu.down[idx], dn_host[idx] as f64, tol), "down mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu.up[idx], up_host[idx] as f64, tol),
+            "up mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu.down[idx], dn_host[idx] as f64, tol),
+            "down mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }
@@ -96,10 +109,18 @@ fn aroon_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
             h[t] = high_tm[t * cols + s];
             l[t] = low_tm[t * cols + s];
         }
-        let params = AroonParams { length: Some(length) };
-        let input = AroonInput { data: AroonData::SlicesHL { high: &h, low: &l }, params };
+        let params = AroonParams {
+            length: Some(length),
+        };
+        let input = AroonInput {
+            data: AroonData::SlicesHL { high: &h, low: &l },
+            params,
+        };
         let out = aroon_with_kernel(&input, Kernel::Scalar).expect("cpu aroon");
-        for t in 0..rows { up_cpu[t * cols + s] = out.aroon_up[t]; dn_cpu[t * cols + s] = out.aroon_down[t]; }
+        for t in 0..rows {
+            up_cpu[t * cols + s] = out.aroon_up[t];
+            dn_cpu[t * cols + s] = out.aroon_down[t];
+        }
     }
 
     let hf32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
@@ -116,9 +137,16 @@ fn aroon_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     dev.second.buf.copy_to(&mut dn_g)?;
     let tol = 1e-4;
     for idx in 0..up_g.len() {
-        assert!(approx_eq(up_cpu[idx], up_g[idx] as f64, tol), "up mismatch at {}", idx);
-        assert!(approx_eq(dn_cpu[idx], dn_g[idx] as f64, tol), "down mismatch at {}", idx);
+        assert!(
+            approx_eq(up_cpu[idx], up_g[idx] as f64, tol),
+            "up mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(dn_cpu[idx], dn_g[idx] as f64, tol),
+            "down mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }
-

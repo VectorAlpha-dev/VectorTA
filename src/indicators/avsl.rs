@@ -2264,27 +2264,46 @@ pub fn avsl_cuda_batch_dev_py<'py>(
     use crate::cuda::cuda_available;
     use numpy::IntoPyArray;
     use pyo3::types::PyDict;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let close = close_f32.as_slice()?;
     let low = low_f32.as_slice()?;
     let vol = volume_f32.as_slice()?;
-    let sweep = AvslBatchRange { fast_period: fast_range, slow_period: slow_range, multiplier: mult_range };
+    let sweep = AvslBatchRange {
+        fast_period: fast_range,
+        slow_period: slow_range,
+        multiplier: mult_range,
+    };
     let (inner, combos) = py.allow_threads(|| {
         let cuda = CudaAvsl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.avsl_batch_dev(close, low, vol, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.avsl_batch_dev(close, low, vol, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
     dict.set_item(
         "fast_periods",
-        combos.iter().map(|p| p.fast_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.fast_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     dict.set_item(
         "slow_periods",
-        combos.iter().map(|p| p.slow_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.slow_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     dict.set_item(
         "multipliers",
-        combos.iter().map(|p| p.multiplier.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.multiplier.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     Ok((DeviceArrayF32Py { inner }, dict))
 }
@@ -2305,11 +2324,17 @@ pub fn avsl_cuda_many_series_one_param_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let c = close_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let v = volume_tm_f32.as_slice()?;
-    let params = AvslParams { fast_period: Some(fast_period), slow_period: Some(slow_period), multiplier: Some(multiplier) };
+    let params = AvslParams {
+        fast_period: Some(fast_period),
+        slow_period: Some(slow_period),
+        multiplier: Some(multiplier),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaAvsl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.avsl_many_series_one_param_time_major_dev(c, l, v, cols, rows, &params)

@@ -51,9 +51,9 @@ use thiserror::Error;
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaMeanAd;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 impl<'a> AsRef<[f64]> for MeanAdInput<'a> {
     #[inline(always)]
@@ -1672,7 +1672,9 @@ pub fn mean_ad_cuda_batch_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_f32.as_slice()?;
-    let sweep = MeanAdBatchRange { period: period_range };
+    let sweep = MeanAdBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaMeanAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.mean_ad_batch_dev(slice_in, &sweep)
@@ -1696,7 +1698,9 @@ pub fn mean_ad_cuda_many_series_one_param_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_tm_f32.as_slice()?;
-    let params = MeanAdParams { period: Some(period) };
+    let params = MeanAdParams {
+        period: Some(period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaMeanAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.mean_ad_many_series_one_param_time_major_dev(slice_in, cols, rows, &params)

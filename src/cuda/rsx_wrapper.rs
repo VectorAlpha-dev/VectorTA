@@ -68,11 +68,18 @@ impl CudaRsx {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
 
-        Ok(Self { module, stream, _context: context, policy: CudaRsxPolicy::default() })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy: CudaRsxPolicy::default(),
+        })
     }
 
     #[inline]
-    pub fn set_policy(&mut self, p: CudaRsxPolicy) { self.policy = p; }
+    pub fn set_policy(&mut self, p: CudaRsxPolicy) {
+        self.policy = p;
+    }
 
     // ---------- Batch (one series × many params) ----------
     pub fn rsx_batch_dev(
@@ -106,15 +113,26 @@ impl CudaRsx {
 
         let d_prices =
             DeviceBuffer::from_slice(prices_f32).map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
-        let d_periods =
-            DeviceBuffer::from_slice(&periods_i32).map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)
+            .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(len * n_combos)
                 .map_err(|e| CudaRsxError::Cuda(e.to_string()))?
         };
 
-        self.launch_batch(&d_prices, &d_periods, len, first_valid, n_combos, &mut d_out)?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
+        self.launch_batch(
+            &d_prices,
+            &d_periods,
+            len,
+            first_valid,
+            n_combos,
+            &mut d_out,
+        )?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: len,
+        })
     }
 
     fn launch_batch(
@@ -126,7 +144,9 @@ impl CudaRsx {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaRsxError> {
-        if n_combos == 0 { return Ok(()); }
+        if n_combos == 0 {
+            return Ok(());
+        }
         let func = self
             .module
             .get_function("rsx_batch_f32")
@@ -188,7 +208,9 @@ impl CudaRsx {
             .checked_mul(rows)
             .ok_or_else(|| CudaRsxError::InvalidInput("rows*cols overflow".into()))?;
         if prices_tm_f32.len() != expected {
-            return Err(CudaRsxError::InvalidInput("time-major length mismatch".into()));
+            return Err(CudaRsxError::InvalidInput(
+                "time-major length mismatch".into(),
+            ));
         }
         if period == 0 {
             return Err(CudaRsxError::InvalidInput("period must be > 0".into()));
@@ -200,7 +222,10 @@ impl CudaRsx {
             let mut fv = -1i32;
             for t in 0..rows {
                 let v = prices_tm_f32[t * cols + s];
-                if !v.is_nan() { fv = t as i32; break; }
+                if !v.is_nan() {
+                    fv = t as i32;
+                    break;
+                }
             }
             if fv < 0 {
                 return Err(CudaRsxError::InvalidInput(format!("series {} all NaN", s)));
@@ -211,7 +236,8 @@ impl CudaRsx {
         // VRAM estimate
         if let Ok((free, _)) = mem_get_info() {
             let n = expected;
-            let bytes = (2 * n) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>()
+            let bytes = (2 * n) * std::mem::size_of::<f32>()
+                + cols * std::mem::size_of::<i32>()
                 + 64 * 1024 * 1024;
             if bytes > free {
                 return Err(CudaRsxError::InvalidInput(
@@ -220,16 +246,20 @@ impl CudaRsx {
             }
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices_tm_f32).map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
-        let d_first =
-            DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices_tm_f32)
+            .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(expected).map_err(|e| CudaRsxError::Cuda(e.to_string()))?
         };
 
         self.launch_many_series(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     fn launch_many_series(
@@ -286,7 +316,9 @@ impl CudaRsx {
         let (start, end, step) = sweep.period;
         let mut combos = Vec::new();
         if step == 0 || start == end {
-            combos.push(RsxParams { period: Some(start) });
+            combos.push(RsxParams {
+                period: Some(start),
+            });
         } else {
             let mut v = start;
             while v <= end {
@@ -301,7 +333,11 @@ impl CudaRsx {
         let first_valid = (0..len)
             .find(|&i| !prices[i].is_nan())
             .ok_or_else(|| CudaRsxError::InvalidInput("all values NaN".into()))?;
-        let max_p = combos.iter().map(|c| c.period.unwrap_or(0)).max().unwrap_or(0);
+        let max_p = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
         if max_p == 0 {
             return Err(CudaRsxError::InvalidInput("period must be > 0".into()));
         }
@@ -346,19 +382,30 @@ pub mod benches {
     }
     impl CudaBenchState for RsxBatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.rsx_batch_dev(&self.prices, &self.sweep).expect("rsx batch");
+            let _ = self
+                .cuda
+                .rsx_batch_dev(&self.prices, &self.sweep)
+                .expect("rsx batch");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaRsx::new(0).expect("cuda rsx");
         let mut prices = gen_series(ONE_SERIES_LEN);
-        for i in 0..8 { prices[i] = f32::NAN; }
+        for i in 0..8 {
+            prices[i] = f32::NAN;
+        }
         for i in 8..ONE_SERIES_LEN {
             let x = i as f32 * 0.0019;
             prices[i] += 0.0005 * x.sin();
         }
-        let sweep = RsxBatchRange { period: (2, 1 + PARAM_SWEEP, 1) };
-        Box::new(RsxBatchState { cuda, prices, sweep })
+        let sweep = RsxBatchRange {
+            period: (2, 1 + PARAM_SWEEP, 1),
+        };
+        Box::new(RsxBatchState {
+            cuda,
+            prices,
+            sweep,
+        })
     }
 
     struct RsxManyState {
@@ -385,7 +432,10 @@ pub mod benches {
                 prices[idx] = base[idx] + 0.05 * x.sin();
             }
         }
-        Box::new(RsxManyState { cuda, prices_tm: prices })
+        Box::new(RsxManyState {
+            cuda,
+            prices_tm: prices,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -411,4 +461,3 @@ pub mod benches {
         ]
     }
 }
-

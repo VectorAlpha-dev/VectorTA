@@ -26,6 +26,14 @@
 //! - Streaming update: O(1) – maintains ADX history buffer and running smoothed values.
 //! - Memory: output uses `alloc_with_nan_prefix`; scalar kernel avoids O(N) temporaries by using a small ADX ring buffer.
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaAdxr;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -34,14 +42,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::CudaAdxr;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::PyUntypedArrayMethods;
 
 // Note: AVec<f64> already implements Send since f64 is Send
 // No wrapper types needed
@@ -2278,15 +2278,16 @@ pub fn adxr_cuda_batch_dev_py<'py>(
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
     let c = close_f32.as_slice()?;
-    let sweep = AdxrBatchRange { period: period_range };
-    let inner = py
-        .allow_threads(|| {
-            let cuda = CudaAdxr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let (dev, _combos) = cuda
-                .adxr_batch_dev(h, l, c, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, PyErr>(dev)
-        })?;
+    let sweep = AdxrBatchRange {
+        period: period_range,
+    };
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAdxr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (dev, _combos) = cuda
+            .adxr_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>(dev)
+    })?;
     Ok(DeviceArrayF32Py { inner })
 }
 
@@ -2313,13 +2314,11 @@ pub fn adxr_cuda_many_series_one_param_dev_py<'py>(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let inner = py
-        .allow_threads(|| {
-            let cuda = CudaAdxr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda
-                .adxr_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let inner = py.allow_threads(|| {
+        let cuda = CudaAdxr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.adxr_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     Ok(DeviceArrayF32Py { inner })
 }
 

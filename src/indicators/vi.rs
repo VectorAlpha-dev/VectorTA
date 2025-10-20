@@ -2677,9 +2677,9 @@ impl BatchToScalar for Kernel {
 
 // ================== CUDA Python Bindings (Device outputs) ==================
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::vi_wrapper::CudaVi;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::vi_wrapper::CudaVi;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
@@ -2695,17 +2695,22 @@ pub fn vi_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::IntoPyArray;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
     let c = close_f32.as_slice()?;
     if h.len() != l.len() || h.len() != c.len() {
         return Err(PyValueError::new_err("Input data length mismatch"));
     }
-    let sweep = ViBatchRange { period: period_range };
+    let sweep = ViBatchRange {
+        period: period_range,
+    };
     let (pair, combos) = py.allow_threads(|| {
         let cuda = CudaVi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vi_batch_dev(h, l, c, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.vi_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
     dict.set_item("plus", Py::new(py, DeviceArrayF32Py { inner: pair.a })?)?;
@@ -2735,22 +2740,29 @@ pub fn vi_cuda_many_series_one_param_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::PyUntypedArrayMethods;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let shape = high_tm_f32.shape();
-    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array for high")); }
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array for high"));
+    }
     if low_tm_f32.shape() != shape || close_tm_f32.shape() != shape {
-        return Err(PyValueError::new_err("input arrays must share the same shape"));
+        return Err(PyValueError::new_err(
+            "input arrays must share the same shape",
+        ));
     }
     let rows = shape[0];
     let cols = shape[1];
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let params = ViParams { period: Some(period) };
+    let params = ViParams {
+        period: Some(period),
+    };
     let pair = py.allow_threads(|| {
         let cuda = CudaVi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .vi_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
+        cuda.vi_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);

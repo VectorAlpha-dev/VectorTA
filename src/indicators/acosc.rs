@@ -689,6 +689,12 @@ impl AcoscBuilder {
     }
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaAcosc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -697,12 +703,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::CudaAcosc;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -881,9 +881,13 @@ pub fn acosc_cuda_batch_dev_py(
     let l = low_f32.as_slice()?;
     let pair = py.allow_threads(|| {
         let cuda = CudaAcosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.acosc_batch_dev(h, l).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.acosc_batch_dev(h, l)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: pair.osc }, DeviceArrayF32Py { inner: pair.change }))
+    Ok((
+        DeviceArrayF32Py { inner: pair.osc },
+        DeviceArrayF32Py { inner: pair.change },
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -913,7 +917,10 @@ pub fn acosc_cuda_many_series_one_param_dev_py(
         cuda.acosc_many_series_one_param_time_major_dev(h, l, cols, rows)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok((DeviceArrayF32Py { inner: pair.osc }, DeviceArrayF32Py { inner: pair.change }))
+    Ok((
+        DeviceArrayF32Py { inner: pair.osc },
+        DeviceArrayF32Py { inner: pair.change },
+    ))
 }
 
 #[cfg(feature = "wasm")]

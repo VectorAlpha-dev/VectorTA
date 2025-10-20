@@ -46,6 +46,8 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -56,8 +58,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -3518,12 +3518,22 @@ pub fn damiani_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice_in = data_f32.as_slice()?;
-    let sweep = DamianiVolatmeterBatchRange { vis_atr: vis_atr_range, vis_std: vis_std_range, sed_atr: sed_atr_range, sed_std: sed_std_range, threshold: threshold_range };
+    let sweep = DamianiVolatmeterBatchRange {
+        vis_atr: vis_atr_range,
+        vis_std: vis_std_range,
+        sed_atr: sed_atr_range,
+        sed_std: sed_std_range,
+        threshold: threshold_range,
+    };
     let inner = py.allow_threads(|| {
-        let cuda = crate::cuda::CudaDamianiVolatmeter::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let (arr, _combos) = cuda.damiani_volatmeter_batch_dev(slice_in, &sweep)
+        let cuda = crate::cuda::CudaDamianiVolatmeter::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (arr, _combos) = cuda
+            .damiani_volatmeter_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, pyo3::PyErr>(arr)
     })?;
@@ -3549,11 +3559,22 @@ pub fn damiani_cuda_many_series_one_param_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
-    let h = high_tm_f32.as_slice()?; let l = low_tm_f32.as_slice()?; let c = close_tm_f32.as_slice()?;
-    let params = DamianiVolatmeterParams { vis_atr: Some(vis_atr), vis_std: Some(vis_std), sed_atr: Some(sed_atr), sed_std: Some(sed_std), threshold: Some(threshold) };
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let h = high_tm_f32.as_slice()?;
+    let l = low_tm_f32.as_slice()?;
+    let c = close_tm_f32.as_slice()?;
+    let params = DamianiVolatmeterParams {
+        vis_atr: Some(vis_atr),
+        vis_std: Some(vis_std),
+        sed_atr: Some(sed_atr),
+        sed_std: Some(sed_std),
+        threshold: Some(threshold),
+    };
     let inner = py.allow_threads(|| {
-        let cuda = crate::cuda::CudaDamianiVolatmeter::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = crate::cuda::CudaDamianiVolatmeter::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.damiani_volatmeter_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

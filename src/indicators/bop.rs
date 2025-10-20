@@ -59,9 +59,9 @@ use core::arch::x86_64::*;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaBop;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[derive(Debug, Clone)]
 pub enum BopData<'a> {
@@ -1764,7 +1764,6 @@ pub fn bop_cuda_batch_dev_py(
     low: numpy::PyReadonlyArray1<'_, f32>,
     close: numpy::PyReadonlyArray1<'_, f32>,
     device_id: usize,
-    
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
@@ -1783,8 +1782,7 @@ pub fn bop_cuda_batch_dev_py(
     }
     let inner = py.allow_threads(|| {
         let cuda = CudaBop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .bop_batch_dev(open_slice, high_slice, low_slice, close_slice)
+        cuda.bop_batch_dev(open_slice, high_slice, low_slice, close_slice)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
@@ -1823,16 +1821,15 @@ pub fn bop_cuda_many_series_one_param_dev_py(
     }
     let inner = py.allow_threads(|| {
         let cuda = CudaBop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .bop_many_series_one_param_time_major_dev(
-                open_slice,
-                high_slice,
-                low_slice,
-                close_slice,
-                cols,
-                rows,
-            )
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.bop_many_series_one_param_time_major_dev(
+            open_slice,
+            high_slice,
+            low_slice,
+            close_slice,
+            cols,
+            rows,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

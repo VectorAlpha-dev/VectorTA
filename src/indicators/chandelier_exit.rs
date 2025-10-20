@@ -59,11 +59,11 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[cfg(feature = "cuda")]
+use crate::cuda::{CudaCeError, CudaChandelierExit};
 use crate::indicators::atr::{atr_with_kernel, AtrInput, AtrParams};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(feature = "cuda")]
-use crate::cuda::{CudaChandelierExit, CudaCeError};
 
 impl<'a> AsRef<[f64]> for ChandelierExitInput<'a> {
     #[inline(always)]
@@ -2220,24 +2220,42 @@ pub fn chandelier_exit_cuda_batch_dev_py<'py>(
     let l = low_f32.as_slice()?;
     let c = close_f32.as_slice()?;
 
-    let sweep = CeBatchRange { period: period_range, mult: mult_range, use_close: (use_close, use_close, false) };
+    let sweep = CeBatchRange {
+        period: period_range,
+        mult: mult_range,
+        use_close: (use_close, use_close, false),
+    };
     let (inner, combos) = py.allow_threads(|| {
-        let cuda = CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.chandelier_exit_batch_dev(h, l, c, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.chandelier_exit_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let d = PyDict::new(py);
     d.set_item(
         "periods",
-        combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     d.set_item(
         "mults",
-        combos.iter().map(|p| p.mult.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.mult.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     d.set_item(
         "use_close",
-        combos.iter().map(|p| p.use_close.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.use_close.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     Ok((DeviceArrayF32Py { inner }, d))
 }
@@ -2265,9 +2283,19 @@ pub fn chandelier_exit_cuda_many_series_one_param_dev_py<'py>(
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
     let inner = py.allow_threads(|| {
-        let cuda = CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.chandelier_exit_many_series_one_param_time_major_dev(h, l, c, cols, rows, period, mult as f32, use_close)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.chandelier_exit_many_series_one_param_time_major_dev(
+            h,
+            l,
+            c,
+            cols,
+            rows,
+            period,
+            mult as f32,
+            use_close,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

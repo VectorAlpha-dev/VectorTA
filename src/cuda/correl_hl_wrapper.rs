@@ -41,14 +41,18 @@ impl std::error::Error for CudaCorrelHlError {}
 pub enum BatchKernelPolicy {
     #[default]
     Auto,
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
-    OneD { block_x: u32 },
+    OneD {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -58,10 +62,14 @@ pub struct CudaCorrelHlPolicy {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaCorrelHl {
     module: Module,
@@ -108,10 +116,18 @@ impl CudaCorrelHl {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaCorrelHlPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaCorrelHlPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaCorrelHlPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaCorrelHlPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -121,26 +137,36 @@ impl CudaCorrelHl {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] correl_hl batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaCorrelHl)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaCorrelHl)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -149,25 +175,33 @@ impl CudaCorrelHl {
     fn maybe_log_many_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] correl_hl many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaCorrelHl)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaCorrelHl)).debug_many_logged = true;
+                }
             }
         }
     }
 
     fn expand_grid(range: &CorrelHlBatchRange) -> Vec<CorrelHlParams> {
         fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-            if step == 0 || start == end { return vec![start]; }
+            if step == 0 || start == end {
+                return vec![start];
+            }
             (start..=end).step_by(step).collect()
         }
         let periods = axis_usize(range.period);
         let mut v = Vec::with_capacity(periods.len());
-        for &p in &periods { v.push(CorrelHlParams { period: Some(p) }); }
+        for &p in &periods {
+            v.push(CorrelHlParams { period: Some(p) });
+        }
         v
     }
 
@@ -176,47 +210,75 @@ impl CudaCorrelHl {
         low: &[f32],
         sweep: &CorrelHlBatchRange,
     ) -> Result<(Vec<CorrelHlParams>, usize, usize), CudaCorrelHlError> {
-        if high.len() != low.len() { return Err(CudaCorrelHlError::InvalidInput("length mismatch".into())); }
-        if high.is_empty() { return Err(CudaCorrelHlError::InvalidInput("empty input".into())); }
+        if high.len() != low.len() {
+            return Err(CudaCorrelHlError::InvalidInput("length mismatch".into()));
+        }
+        if high.is_empty() {
+            return Err(CudaCorrelHlError::InvalidInput("empty input".into()));
+        }
         let len = high.len();
         let first_valid = high
             .iter()
             .zip(low.iter())
-            .position(|(h,l)| !h.is_nan() && !l.is_nan())
+            .position(|(h, l)| !h.is_nan() && !l.is_nan())
             .ok_or_else(|| CudaCorrelHlError::InvalidInput("all values are NaN".into()))?;
 
         let combos = Self::expand_grid(sweep);
-        if combos.is_empty() { return Err(CudaCorrelHlError::InvalidInput("no parameter combinations".into())); }
+        if combos.is_empty() {
+            return Err(CudaCorrelHlError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         for c in &combos {
             let p = c.period.unwrap_or(0);
-            if p == 0 { return Err(CudaCorrelHlError::InvalidInput("period must be > 0".into())); }
-            if p > len { return Err(CudaCorrelHlError::InvalidInput("period exceeds data length".into())); }
-            if len - first_valid < p { return Err(CudaCorrelHlError::InvalidInput("not enough valid data".into())); }
+            if p == 0 {
+                return Err(CudaCorrelHlError::InvalidInput("period must be > 0".into()));
+            }
+            if p > len {
+                return Err(CudaCorrelHlError::InvalidInput(
+                    "period exceeds data length".into(),
+                ));
+            }
+            if len - first_valid < p {
+                return Err(CudaCorrelHlError::InvalidInput(
+                    "not enough valid data".into(),
+                ));
+            }
         }
         Ok((combos, first_valid, len))
     }
 
-    fn build_prefixes(high: &[f32], low: &[f32]) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<i32>) {
+    fn build_prefixes(
+        high: &[f32],
+        low: &[f32],
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<i32>) {
         let n = high.len();
-        let mut ps_h  = vec![0.0f64; n+1];
-        let mut ps_h2 = vec![0.0f64; n+1];
-        let mut ps_l  = vec![0.0f64; n+1];
-        let mut ps_l2 = vec![0.0f64; n+1];
-        let mut ps_hl = vec![0.0f64; n+1];
-        let mut ps_nan = vec![0i32; n+1];
+        let mut ps_h = vec![0.0f64; n + 1];
+        let mut ps_h2 = vec![0.0f64; n + 1];
+        let mut ps_l = vec![0.0f64; n + 1];
+        let mut ps_l2 = vec![0.0f64; n + 1];
+        let mut ps_hl = vec![0.0f64; n + 1];
+        let mut ps_nan = vec![0i32; n + 1];
         for i in 0..n {
             let h = high[i];
             let l = low[i];
             let (ph, ph2, pl, pl2, phl) = (ps_h[i], ps_h2[i], ps_l[i], ps_l2[i], ps_hl[i]);
             if h.is_nan() || l.is_nan() {
-                ps_h[i+1] = ph;   ps_h2[i+1] = ph2;
-                ps_l[i+1] = pl;   ps_l2[i+1] = pl2;
-                ps_hl[i+1] = phl; ps_nan[i+1] = ps_nan[i] + 1;
+                ps_h[i + 1] = ph;
+                ps_h2[i + 1] = ph2;
+                ps_l[i + 1] = pl;
+                ps_l2[i + 1] = pl2;
+                ps_hl[i + 1] = phl;
+                ps_nan[i + 1] = ps_nan[i] + 1;
             } else {
-                let hd = h as f64; let ld = l as f64;
-                ps_h[i+1] = ph + hd;       ps_h2[i+1] = ph2 + hd*hd;
-                ps_l[i+1] = pl + ld;       ps_l2[i+1] = pl2 + ld*ld;
-                ps_hl[i+1] = phl + hd*ld;  ps_nan[i+1] = ps_nan[i];
+                let hd = h as f64;
+                let ld = l as f64;
+                ps_h[i + 1] = ph + hd;
+                ps_h2[i + 1] = ph2 + hd * hd;
+                ps_l[i + 1] = pl + ld;
+                ps_l2[i + 1] = pl2 + ld * ld;
+                ps_hl[i + 1] = phl + hd * ld;
+                ps_nan[i + 1] = ps_nan[i];
             }
         }
         (ps_h, ps_h2, ps_l, ps_l2, ps_hl, ps_nan)
@@ -248,7 +310,10 @@ impl CudaCorrelHl {
         let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
         let grid_base: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        unsafe { (*(self as *const _ as *mut CudaCorrelHl)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaCorrelHl)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
 
         // Chunk grid.y to <= 65_535
         let mut launched = 0usize;
@@ -264,10 +329,13 @@ impl CudaCorrelHl {
                 let mut ps_nan = d_ps_nan.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
-                let mut periods = (d_periods.as_device_ptr().as_raw() + (launched as u64) * std::mem::size_of::<i32>() as u64) as u64;
+                let mut periods = (d_periods.as_device_ptr().as_raw()
+                    + (launched as u64) * std::mem::size_of::<i32>() as u64)
+                    as u64;
                 let mut n_chunk = chunk as i32;
                 let mut out_ptr = (d_out.as_device_ptr().as_raw()
-                    + (launched as u64) * (len as u64) * std::mem::size_of::<f32>() as u64) as u64;
+                    + (launched as u64) * (len as u64) * std::mem::size_of::<f32>() as u64)
+                    as u64;
 
                 let args: &mut [*mut c_void] = &mut [
                     &mut ps_h as *mut _ as *mut c_void,
@@ -357,7 +425,14 @@ impl CudaCorrelHl {
             .synchronize()
             .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len }, combos))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
+            combos,
+        ))
     }
 
     pub fn correl_hl_many_series_one_param_time_major_dev(
@@ -374,7 +449,9 @@ impl CudaCorrelHl {
         if high_tm_f32.len() != rows * cols {
             return Err(CudaCorrelHlError::InvalidInput("shape mismatch".into()));
         }
-        if period == 0 || period > rows { return Err(CudaCorrelHlError::InvalidInput("invalid period".into())); }
+        if period == 0 || period > rows {
+            return Err(CudaCorrelHlError::InvalidInput("invalid period".into()));
+        }
 
         // Compute per-series first_valid index
         let mut first_valids = vec![0i32; cols];
@@ -383,7 +460,10 @@ impl CudaCorrelHl {
             for t in 0..rows {
                 let h = high_tm_f32[t * cols + s];
                 let l = low_tm_f32[t * cols + s];
-                if !h.is_nan() && !l.is_nan() { fv = t as i32; break; }
+                if !h.is_nan() && !l.is_nan() {
+                    fv = t as i32;
+                    break;
+                }
             }
             first_valids[s] = fv;
         }
@@ -412,7 +492,10 @@ impl CudaCorrelHl {
         let grid_x: u32 = cols as u32;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        unsafe { (*(self as *const _ as *mut CudaCorrelHl)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaCorrelHl)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         unsafe {
             let mut high_ptr = d_high.as_device_ptr().as_raw();
             let mut low_ptr = d_low.as_device_ptr().as_raw();
@@ -439,7 +522,11 @@ impl CudaCorrelHl {
             .synchronize()
             .map_err(|e| CudaCorrelHlError::Cuda(e.to_string()))?;
         self.maybe_log_many_debug();
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
 
@@ -482,10 +569,22 @@ pub mod benches {
         let mut high = gen_series(ONE_SERIES_LEN);
         let mut low = vec![0.0f32; ONE_SERIES_LEN];
         // Make low a shifted/scaled version with some NaNs early
-        for i in 0..ONE_SERIES_LEN { low[i] = 0.6 * high[i] + 0.2 * (i as f32).sin(); }
-        for i in 0..16 { high[i] = f32::NAN; low[i] = f32::NAN; }
-        let sweep = CorrelHlBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) };
-        Box::new(CorrelHlBatchState { cuda, high, low, sweep })
+        for i in 0..ONE_SERIES_LEN {
+            low[i] = 0.6 * high[i] + 0.2 * (i as f32).sin();
+        }
+        for i in 0..16 {
+            high[i] = f32::NAN;
+            low[i] = f32::NAN;
+        }
+        let sweep = CorrelHlBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        Box::new(CorrelHlBatchState {
+            cuda,
+            high,
+            low,
+            sweep,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

@@ -44,9 +44,13 @@ pub struct DeviceNwePair {
 
 impl DeviceNwePair {
     #[inline]
-    pub fn rows(&self) -> usize { self.upper.rows }
+    pub fn rows(&self) -> usize {
+        self.upper.rows
+    }
     #[inline]
-    pub fn cols(&self) -> usize { self.upper.cols }
+    pub fn cols(&self) -> usize {
+        self.upper.cols
+    }
 }
 
 pub struct CudaNwe {
@@ -58,10 +62,13 @@ pub struct CudaNwe {
 impl CudaNwe {
     pub fn new(device_id: usize) -> Result<Self, CudaNweError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let ptx = include_str!(concat!(env!("OUT_DIR"), "/nadaraya_watson_envelope_kernel.ptx"));
+        let ptx = include_str!(concat!(
+            env!("OUT_DIR"),
+            "/nadaraya_watson_envelope_kernel.ptx"
+        ));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -70,17 +77,26 @@ impl CudaNwe {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaNweError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaNweError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        Ok(Self { module, stream, _context: context })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+        })
     }
 
     fn will_fit(required: usize, headroom: usize) -> bool {
-        if let Ok((free, _)) = mem_get_info() { required.saturating_add(headroom) <= free } else { true }
+        if let Ok((free, _)) = mem_get_info() {
+            required.saturating_add(headroom) <= free
+        } else {
+            true
+        }
     }
 
     fn expand_grid(r: &NweBatchRange) -> Vec<NweParams> {
@@ -92,22 +108,38 @@ impl CudaNwe {
             bw.push(r.bandwidth.0);
         } else {
             let mut v = r.bandwidth.0;
-            while v <= r.bandwidth.1 + 1e-12 { bw.push(v); v += r.bandwidth.2.max(1e-12); }
+            while v <= r.bandwidth.1 + 1e-12 {
+                bw.push(v);
+                v += r.bandwidth.2.max(1e-12);
+            }
         }
         // multiplier
         if (r.multiplier.2.abs() < 1e-12) || (r.multiplier.0 == r.multiplier.1) {
             m.push(r.multiplier.0);
         } else {
             let mut v = r.multiplier.0;
-            while v <= r.multiplier.1 + 1e-12 { m.push(v); v += r.multiplier.2.max(1e-12); }
+            while v <= r.multiplier.1 + 1e-12 {
+                m.push(v);
+                v += r.multiplier.2.max(1e-12);
+            }
         }
         // lookback
         let step_lb = r.lookback.2.max(1);
-        for v in (r.lookback.0..=r.lookback.1).step_by(step_lb) { lb.push(v); }
-        let mut out = Vec::with_capacity(bw.len()*m.len()*lb.len());
-        for &b in &bw { for &mm in &m { for &l in &lb {
-            out.push(NweParams { bandwidth: Some(b), multiplier: Some(mm), lookback: Some(l) });
-        }}}
+        for v in (r.lookback.0..=r.lookback.1).step_by(step_lb) {
+            lb.push(v);
+        }
+        let mut out = Vec::with_capacity(bw.len() * m.len() * lb.len());
+        for &b in &bw {
+            for &mm in &m {
+                for &l in &lb {
+                    out.push(NweParams {
+                        bandwidth: Some(b),
+                        multiplier: Some(mm),
+                        lookback: Some(l),
+                    });
+                }
+            }
+        }
         out
     }
 
@@ -115,20 +147,39 @@ impl CudaNwe {
         let mut w = Vec::with_capacity(lookback);
         let mut den = 0.0f64;
         for k in 0..lookback {
-            let wk = (-(k as f64)*(k as f64) / (2.0*bandwidth*bandwidth)).exp();
+            let wk = (-(k as f64) * (k as f64) / (2.0 * bandwidth * bandwidth)).exp();
             w.push(wk as f32);
             den += wk;
         }
-        let inv_den = if den != 0.0 { 1.0f32/(den as f32) } else { 0.0f32 };
-        for x in &mut w { *x *= inv_den; }
+        let inv_den = if den != 0.0 {
+            1.0f32 / (den as f32)
+        } else {
+            0.0f32
+        };
+        for x in &mut w {
+            *x *= inv_den;
+        }
         (w, lookback)
     }
 
     fn prepare_batch_inputs(
         prices: &[f32],
         sweep: &NweBatchRange,
-    ) -> Result<(Vec<NweParams>, usize, usize, Vec<i32>, Vec<f32>, Vec<f32>, usize), CudaNweError> {
-        if prices.is_empty() { return Err(CudaNweError::InvalidInput("empty series".into())); }
+    ) -> Result<
+        (
+            Vec<NweParams>,
+            usize,
+            usize,
+            Vec<i32>,
+            Vec<f32>,
+            Vec<f32>,
+            usize,
+        ),
+        CudaNweError,
+    > {
+        if prices.is_empty() {
+            return Err(CudaNweError::InvalidInput("empty series".into()));
+        }
         let len = prices.len();
         let first_valid = prices
             .iter()
@@ -137,7 +188,9 @@ impl CudaNwe {
 
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaNweError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaNweError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
 
         let mut lookbacks = Vec::with_capacity(combos.len());
@@ -145,10 +198,14 @@ impl CudaNwe {
         let mut max_lb = 1usize;
         for prm in &combos {
             let lb = prm.lookback.unwrap_or(500);
-            if lb == 0 { return Err(CudaNweError::InvalidInput("lookback must be > 0".into())); }
+            if lb == 0 {
+                return Err(CudaNweError::InvalidInput("lookback must be > 0".into()));
+            }
             if len - first_valid < lb {
                 return Err(CudaNweError::InvalidInput(format!(
-                    "not enough valid data: needed >= {}, valid = {}", lb, len - first_valid
+                    "not enough valid data: needed >= {}, valid = {}",
+                    lb,
+                    len - first_valid
                 )));
             }
             lookbacks.push(lb as i32);
@@ -164,7 +221,15 @@ impl CudaNwe {
             weights_flat[base..base + lb].copy_from_slice(&row_w);
         }
 
-        Ok((combos, first_valid, len, lookbacks, multipliers, weights_flat, max_lb))
+        Ok((
+            combos,
+            first_valid,
+            len,
+            lookbacks,
+            multipliers,
+            weights_flat,
+            max_lb,
+        ))
     }
 
     pub fn nwe_batch_dev(
@@ -183,13 +248,19 @@ impl CudaNwe {
             + n * std::mem::size_of::<f32>()
             + 2 * n * len * std::mem::size_of::<f32>();
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaNweError::InvalidInput("insufficient device memory".into()));
+            return Err(CudaNweError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
         }
 
-        let d_prices = DeviceBuffer::from_slice(prices).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let d_weights = DeviceBuffer::from_slice(&weights_flat).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let d_looks = DeviceBuffer::from_slice(&lookbacks).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let d_mults = DeviceBuffer::from_slice(&multipliers).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(prices).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let d_weights = DeviceBuffer::from_slice(&weights_flat)
+            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let d_looks =
+            DeviceBuffer::from_slice(&lookbacks).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let d_mults = DeviceBuffer::from_slice(&multipliers)
+            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
         let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n * len) }
             .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
         let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n * len) }
@@ -237,8 +308,16 @@ impl CudaNwe {
             .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
 
         let pair = DeviceNwePair {
-            upper: DeviceArrayF32 { buf: d_upper, rows: n, cols: len },
-            lower: DeviceArrayF32 { buf: d_lower, rows: n, cols: len },
+            upper: DeviceArrayF32 {
+                buf: d_upper,
+                rows: n,
+                cols: len,
+            },
+            lower: DeviceArrayF32 {
+                buf: d_lower,
+                rows: n,
+                cols: len,
+            },
         };
         Ok((pair, combos))
     }
@@ -250,18 +329,32 @@ impl CudaNwe {
         rows: usize,
         params: &NweParams,
     ) -> Result<DeviceNwePair, CudaNweError> {
-        if cols == 0 || rows == 0 { return Err(CudaNweError::InvalidInput("empty matrix".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaNweError::InvalidInput("empty matrix".into()));
+        }
         if data_tm.len() != cols * rows {
-            return Err(CudaNweError::InvalidInput("matrix shape mismatch (time-major)".into()));
+            return Err(CudaNweError::InvalidInput(
+                "matrix shape mismatch (time-major)".into(),
+            ));
         }
         let bandwidth = params.bandwidth.unwrap_or(8.0);
         let lookback = params.lookback.unwrap_or(500);
         let multiplier = params.multiplier.unwrap_or(3.0) as f32;
-        if lookback == 0 { return Err(CudaNweError::InvalidInput("lookback must be > 0".into())); }
+        if lookback == 0 {
+            return Err(CudaNweError::InvalidInput("lookback must be > 0".into()));
+        }
 
         // first_valid per series
         let mut first_valids = vec![rows as i32; cols];
-        for s in 0..cols { for t in 0..rows { let v = data_tm[t*cols + s]; if !v.is_nan() { first_valids[s] = t as i32; break; } } }
+        for s in 0..cols {
+            for t in 0..rows {
+                let v = data_tm[t * cols + s];
+                if !v.is_nan() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
         // weights pre-scaled
         let (w_row, _l) = Self::compute_weights_row(bandwidth, lookback);
 
@@ -270,12 +363,17 @@ impl CudaNwe {
             + first_valids.len() * std::mem::size_of::<i32>()
             + 2 * data_tm.len() * std::mem::size_of::<f32>();
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaNweError::InvalidInput("insufficient device memory".into()));
+            return Err(CudaNweError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_tm).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let d_weights = DeviceBuffer::from_slice(&w_row).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(data_tm).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let d_weights =
+            DeviceBuffer::from_slice(&w_row).map_err(|e| CudaNweError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
         let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
         let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
@@ -319,8 +417,16 @@ impl CudaNwe {
             .map_err(|e| CudaNweError::Cuda(e.to_string()))?;
 
         Ok(DeviceNwePair {
-            upper: DeviceArrayF32 { buf: d_upper, rows, cols },
-            lower: DeviceArrayF32 { buf: d_lower, rows, cols },
+            upper: DeviceArrayF32 {
+                buf: d_upper,
+                rows,
+                cols,
+            },
+            lower: DeviceArrayF32 {
+                buf: d_lower,
+                rows,
+                cols,
+            },
         })
     }
 }
@@ -329,8 +435,8 @@ impl CudaNwe {
 #[cfg(feature = "cuda")]
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_SERIES_COLS: usize = 256;
@@ -338,31 +444,86 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         // Batch
-        struct BatchState { cuda: CudaNwe, price: Vec<f32>, sweep: NweBatchRange }
-        impl CudaBenchState for BatchState { fn launch(&mut self) { let _ = self.cuda.nwe_batch_dev(&self.price, &self.sweep); } }
+        struct BatchState {
+            cuda: CudaNwe,
+            price: Vec<f32>,
+            sweep: NweBatchRange,
+        }
+        impl CudaBenchState for BatchState {
+            fn launch(&mut self) {
+                let _ = self.cuda.nwe_batch_dev(&self.price, &self.sweep);
+            }
+        }
         let prep_batch = || {
             let cuda = CudaNwe::new(0).expect("cuda");
             let price = gen_series(ONE_SERIES_LEN);
-            let sweep = NweBatchRange { bandwidth: (6.0, 12.0, 2.0), multiplier: (2.0, 3.0, 0.5), lookback: (128, 512, 64) };
+            let sweep = NweBatchRange {
+                bandwidth: (6.0, 12.0, 2.0),
+                multiplier: (2.0, 3.0, 0.5),
+                lookback: (128, 512, 64),
+            };
             Box::new(BatchState { cuda, price, sweep }) as Box<dyn CudaBenchState>
         };
         // Many-series
-        struct ManyState { cuda: CudaNwe, data_tm: Vec<f32>, cols: usize, rows: usize, params: NweParams }
-        impl CudaBenchState for ManyState { fn launch(&mut self) { let _ = self.cuda.nwe_many_series_one_param_time_major_dev(&self.data_tm, self.cols, self.rows, &self.params); } }
+        struct ManyState {
+            cuda: CudaNwe,
+            data_tm: Vec<f32>,
+            cols: usize,
+            rows: usize,
+            params: NweParams,
+        }
+        impl CudaBenchState for ManyState {
+            fn launch(&mut self) {
+                let _ = self.cuda.nwe_many_series_one_param_time_major_dev(
+                    &self.data_tm,
+                    self.cols,
+                    self.rows,
+                    &self.params,
+                );
+            }
+        }
         let prep_many = || {
             let cuda = CudaNwe::new(0).expect("cuda");
-            let cols = MANY_SERIES_COLS; let rows = MANY_SERIES_LEN; let data_tm = gen_time_major_prices(cols, rows);
-            let params = NweParams { bandwidth: Some(8.0), multiplier: Some(3.0), lookback: Some(256) };
-            Box::new(ManyState { cuda, data_tm, cols, rows, params }) as Box<dyn CudaBenchState>
+            let cols = MANY_SERIES_COLS;
+            let rows = MANY_SERIES_LEN;
+            let data_tm = gen_time_major_prices(cols, rows);
+            let params = NweParams {
+                bandwidth: Some(8.0),
+                multiplier: Some(3.0),
+                lookback: Some(256),
+            };
+            Box::new(ManyState {
+                cuda,
+                data_tm,
+                cols,
+                rows,
+                params,
+            }) as Box<dyn CudaBenchState>
         };
-        let bytes_batch = ONE_SERIES_LEN * std::mem::size_of::<f32>() + (ONE_SERIES_LEN * 256) * std::mem::size_of::<f32>() + 64*1024*1024;
-        let bytes_many = MANY_SERIES_COLS * MANY_SERIES_LEN * 3 * std::mem::size_of::<f32>() + 64*1024*1024;
+        let bytes_batch = ONE_SERIES_LEN * std::mem::size_of::<f32>()
+            + (ONE_SERIES_LEN * 256) * std::mem::size_of::<f32>()
+            + 64 * 1024 * 1024;
+        let bytes_many =
+            MANY_SERIES_COLS * MANY_SERIES_LEN * 3 * std::mem::size_of::<f32>() + 64 * 1024 * 1024;
         vec![
-            CudaBenchScenario::new("nwe", "one_series_many_params", "nwe_cuda_batch_dev", "1m_x_grid", prep_batch)
-                .with_sample_size(10).with_mem_required(bytes_batch),
-            CudaBenchScenario::new("nwe", "many_series_one_param", "nwe_cuda_many_series_one_param", "256x1m", prep_many)
-                .with_sample_size(5).with_mem_required(bytes_many),
+            CudaBenchScenario::new(
+                "nwe",
+                "one_series_many_params",
+                "nwe_cuda_batch_dev",
+                "1m_x_grid",
+                prep_batch,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_batch),
+            CudaBenchScenario::new(
+                "nwe",
+                "many_series_one_param",
+                "nwe_cuda_many_series_one_param",
+                "256x1m",
+                prep_many,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many),
         ]
     }
 }
-

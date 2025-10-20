@@ -62,9 +62,7 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::moving_averages::ehlers_pma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::pma_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::moving_averages::linreg_wrapper::benches::bench_profiles());
-    v.extend(
-        my_project::cuda::moving_averages::linearreg_slope_wrapper::benches::bench_profiles(),
-    );
+    v.extend(my_project::cuda::moving_averages::linearreg_slope_wrapper::benches::bench_profiles());
     v.extend(
         my_project::cuda::moving_averages::linearreg_intercept_wrapper::benches::bench_profiles(),
     );
@@ -131,7 +129,9 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::mass_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::oscillators::lrsi_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::kaufmanstop_wrapper::benches::bench_profiles());
-    v.extend(my_project::cuda::moving_averages::correlation_cycle_wrapper::benches::bench_profiles());
+    v.extend(
+        my_project::cuda::moving_averages::correlation_cycle_wrapper::benches::bench_profiles(),
+    );
     v.extend(my_project::cuda::moving_averages::otto_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::oscillators::cg_wrapper::benches::bench_profiles());
     // Oscillators

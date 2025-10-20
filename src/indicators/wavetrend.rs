@@ -3549,9 +3549,21 @@ pub fn wavetrend_cuda_batch_dev_py<'py>(
     let (a0, a1, astep) = average_length_range;
     let (m0, m1, mstep) = ma_length_range;
     let (f0, f1, fstep) = factor_range;
-    let channel_axis: Vec<usize> = if cstep == 0 { vec![c0] } else { (c0..=c1).step_by(cstep).collect() };
-    let average_axis: Vec<usize> = if astep == 0 { vec![a0] } else { (a0..=a1).step_by(astep).collect() };
-    let ma_axis: Vec<usize> = if mstep == 0 { vec![m0] } else { (m0..=m1).step_by(mstep).collect() };
+    let channel_axis: Vec<usize> = if cstep == 0 {
+        vec![c0]
+    } else {
+        (c0..=c1).step_by(cstep).collect()
+    };
+    let average_axis: Vec<usize> = if astep == 0 {
+        vec![a0]
+    } else {
+        (a0..=a1).step_by(astep).collect()
+    };
+    let ma_axis: Vec<usize> = if mstep == 0 {
+        vec![m0]
+    } else {
+        (m0..=m1).step_by(mstep).collect()
+    };
     let mut factor_axis: Vec<f64> = Vec::new();
     if fstep.abs() < f64::EPSILON || (f0 - f1).abs() < f64::EPSILON {
         factor_axis.push(f0);
@@ -3605,8 +3617,8 @@ pub fn wavetrend_cuda_many_series_one_param_dev_py<'py>(
     };
 
     let (wt1, wt2, wt_diff) = py.allow_threads(|| {
-        let cuda = CudaWavetrend::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaWavetrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.wavetrend_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

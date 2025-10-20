@@ -1,6 +1,6 @@
 // Integration tests for CUDA ACOSC kernels
 
-use my_project::indicators::acosc::{acosc_with_kernel, AcoscInput, AcoscParams, AcoscData};
+use my_project::indicators::acosc::{acosc_with_kernel, AcoscData, AcoscInput, AcoscParams};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -45,14 +45,22 @@ fn acosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // CPU reference
-    let input = AcoscInput { data: AcoscData::Slices { high: &high, low: &low }, params: AcoscParams::default() };
+    let input = AcoscInput {
+        data: AcoscData::Slices {
+            high: &high,
+            low: &low,
+        },
+        params: AcoscParams::default(),
+    };
     let cpu = acosc_with_kernel(&input, Kernel::Scalar)?;
 
     // GPU
     let cuda = CudaAcosc::new(0).expect("CudaAcosc::new");
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
-    let pair = cuda.acosc_batch_dev(&high_f32, &low_f32).expect("acosc batch");
+    let pair = cuda
+        .acosc_batch_dev(&high_f32, &low_f32)
+        .expect("acosc batch");
 
     assert_eq!(pair.rows(), 1);
     assert_eq!(pair.cols(), series_len);
@@ -68,8 +76,20 @@ fn acosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         let cpu_c = cpu.change[i];
         let gpu_o = osc_host[i] as f64;
         let gpu_c = chg_host[i] as f64;
-        assert!(approx_eq(cpu_o, gpu_o, tol), "osc mismatch at {}: {} vs {}", i, cpu_o, gpu_o);
-        assert!(approx_eq(cpu_c, gpu_c, tol), "change mismatch at {}: {} vs {}", i, cpu_c, gpu_c);
+        assert!(
+            approx_eq(cpu_o, gpu_o, tol),
+            "osc mismatch at {}: {} vs {}",
+            i,
+            cpu_o,
+            gpu_o
+        );
+        assert!(
+            approx_eq(cpu_c, gpu_c, tol),
+            "change mismatch at {}: {} vs {}",
+            i,
+            cpu_c,
+            gpu_c
+        );
     }
 
     Ok(())
@@ -124,15 +144,30 @@ fn acosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
             high[t] = high_tm[idx] as f64;
             low[t] = low_tm[idx] as f64;
         }
-        let input = AcoscInput { data: AcoscData::Slices { high: &high, low: &low }, params: AcoscParams::default() };
+        let input = AcoscInput {
+            data: AcoscData::Slices {
+                high: &high,
+                low: &low,
+            },
+            params: AcoscParams::default(),
+        };
         let cpu = acosc_with_kernel(&input, Kernel::Scalar)?;
         for t in 0..series_len {
             let idx = t * num_series + s;
-            assert!(approx_eq(cpu.osc[t], osc_host[idx] as f64, tol), "series {} osc[{}]", s, t);
-            assert!(approx_eq(cpu.change[t], chg_host[idx] as f64, tol), "series {} change[{}]", s, t);
+            assert!(
+                approx_eq(cpu.osc[t], osc_host[idx] as f64, tol),
+                "series {} osc[{}]",
+                s,
+                t
+            );
+            assert!(
+                approx_eq(cpu.change[t], chg_host[idx] as f64, tol),
+                "series {} change[{}]",
+                s,
+                t
+            );
         }
     }
 
     Ok(())
 }
-

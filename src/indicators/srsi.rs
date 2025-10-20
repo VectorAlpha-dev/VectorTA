@@ -1568,22 +1568,70 @@ pub fn srsi_cuda_batch_dev_py<'py>(
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::CudaSrsi;
     use numpy::IntoPyArray;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice = data_f32.as_slice()?;
-    let sweep = SrsiBatchRange { rsi_period: rsi_range, stoch_period: stoch_range, k: k_range, d: d_range };
+    let sweep = SrsiBatchRange {
+        rsi_period: rsi_range,
+        stoch_period: stoch_range,
+        k: k_range,
+        d: d_range,
+    };
     let (pair, combos) = py.allow_threads(|| {
         let cuda = CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.srsi_batch_dev(slice, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.srsi_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("k", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: pair.k })?)?;
-    dict.set_item("d", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: pair.d })?)?;
+    dict.set_item(
+        "k",
+        Py::new(
+            py,
+            super::moving_averages::alma::DeviceArrayF32Py { inner: pair.k },
+        )?,
+    )?;
+    dict.set_item(
+        "d",
+        Py::new(
+            py,
+            super::moving_averages::alma::DeviceArrayF32Py { inner: pair.d },
+        )?,
+    )?;
     dict.set_item("rows", combos.len())?;
     dict.set_item("cols", slice.len())?;
-    dict.set_item("rsi_periods", combos.iter().map(|p| p.rsi_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("stoch_periods", combos.iter().map(|p| p.stoch_period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("k_periods", combos.iter().map(|p| p.k.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("d_periods", combos.iter().map(|p| p.d.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item(
+        "rsi_periods",
+        combos
+            .iter()
+            .map(|p| p.rsi_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "stoch_periods",
+        combos
+            .iter()
+            .map(|p| p.stoch_period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "k_periods",
+        combos
+            .iter()
+            .map(|p| p.k.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "d_periods",
+        combos
+            .iter()
+            .map(|p| p.d.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     Ok(dict)
 }
 
@@ -1602,23 +1650,49 @@ pub fn srsi_cuda_many_series_one_param_dev_py<'py>(
     use crate::cuda::cuda_available;
     use crate::cuda::oscillators::CudaSrsi;
     use numpy::PyUntypedArrayMethods;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let shape = data_tm_f32.shape();
-    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array")); }
-    let rows = shape[0]; let cols = shape[1];
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array"));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
-    let params = SrsiParams { rsi_period: Some(rsi_period), stoch_period: Some(stoch_period), k: Some(k), d: Some(d), source: None };
+    let params = SrsiParams {
+        rsi_period: Some(rsi_period),
+        stoch_period: Some(stoch_period),
+        k: Some(k),
+        d: Some(d),
+        source: None,
+    };
     let pair = py.allow_threads(|| {
         let cuda = CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.srsi_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("k", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: pair.k })?)?;
-    dict.set_item("d", Py::new(py, super::moving_averages::alma::DeviceArrayF32Py { inner: pair.d })?)?;
-    dict.set_item("rows", rows)?; dict.set_item("cols", cols)?;
-    dict.set_item("rsi_period", rsi_period)?; dict.set_item("stoch_period", stoch_period)?;
-    dict.set_item("k_period", k)?; dict.set_item("d_period", d)?;
+    dict.set_item(
+        "k",
+        Py::new(
+            py,
+            super::moving_averages::alma::DeviceArrayF32Py { inner: pair.k },
+        )?,
+    )?;
+    dict.set_item(
+        "d",
+        Py::new(
+            py,
+            super::moving_averages::alma::DeviceArrayF32Py { inner: pair.d },
+        )?,
+    )?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    dict.set_item("rsi_period", rsi_period)?;
+    dict.set_item("stoch_period", stoch_period)?;
+    dict.set_item("k_period", k)?;
+    dict.set_item("d_period", d)?;
     Ok(dict)
 }
 

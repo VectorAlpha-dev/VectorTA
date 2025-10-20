@@ -20,6 +20,7 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
+#include <stdint.h>
 
 extern "C" __global__
 void minmax_batch_f32(const float* __restrict__ high,
@@ -183,3 +184,273 @@ void minmax_many_series_one_param_time_major_f32(const float* __restrict__ high_
     }
 }
 
+
+// -----------------------------------------------------------------------------
+// Optimized "one series – many params" path via Sparse Tables (RMQ) + parallel
+// forward-fill. These are additive kernels and keep original ones intact.
+// -----------------------------------------------------------------------------
+
+#ifndef WARP_SIZE
+#define WARP_SIZE 32
+#endif
+
+// ------------------------ Utilities ------------------------
+static __device__ __forceinline__ int ilog2_floor_u32(unsigned int x) {
+    // precondition: x > 0
+    return 31 - __clz(x);
+}
+
+static __device__ __forceinline__ float fminf2(float a, float b) { return fminf(a, b); }
+static __device__ __forceinline__ float fmaxf2(float a, float b) { return fmaxf(a, b); }
+static __device__ __forceinline__ uint8_t min_u8(uint8_t a, uint8_t b) { return a < b ? a : b; }
+
+// RMQ query helpers over Sparse Tables laid out as [level][idx], with level stride = series_len.
+static __device__ __forceinline__
+float rmq_min_f32(const float* __restrict__ st, int series_len, int l, int r) {
+    unsigned int span = (unsigned int)(r - l + 1);
+    int k = ilog2_floor_u32(span);
+    int offset = k * series_len;
+    const float a = st[offset + l];
+    const int r0 = r - (1 << k) + 1;
+    const float b = st[offset + r0];
+    return fminf2(a, b);
+}
+
+static __device__ __forceinline__
+float rmq_max_f32(const float* __restrict__ st, int series_len, int l, int r) {
+    unsigned int span = (unsigned int)(r - l + 1);
+    int k = ilog2_floor_u32(span);
+    int offset = k * series_len;
+    const float a = st[offset + l];
+    const int r0 = r - (1 << k) + 1;
+    const float b = st[offset + r0];
+    return fmaxf2(a, b);
+}
+
+static __device__ __forceinline__
+uint8_t rmq_min_u8(const uint8_t* __restrict__ st, int series_len, int l, int r) {
+    unsigned int span = (unsigned int)(r - l + 1);
+    int k = ilog2_floor_u32(span);
+    int offset = k * series_len;
+    const uint8_t a = st[offset + l];
+    const int r0 = r - (1 << k) + 1;
+    const uint8_t b = st[offset + r0];
+    return min_u8(a, b);
+}
+
+// ------------------------ Sparse-table build ------------------------
+// Level 0 init for both min/max and validity (low/high separately)
+extern "C" __global__
+void st_init_level0_minmax_valid_f32(const float* __restrict__ low,
+                                     const float* __restrict__ high,
+                                     int series_len,
+                                     float* __restrict__ low_min_st,
+                                     float* __restrict__ high_max_st,
+                                     uint8_t* __restrict__ valid_low_st,
+                                     uint8_t* __restrict__ valid_high_st) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= series_len) return;
+
+    const float cl = low[i];
+    const float ch = high[i];
+    const bool fl = isfinite(cl);
+    const bool fh = isfinite(ch);
+
+    // Level 0 at offset 0
+    low_min_st[i]  = fl ? cl : CUDART_INF_F;
+    high_max_st[i] = fh ? ch : -CUDART_INF_F;
+    valid_low_st[i]  = fl ? 1u : 0u;
+    valid_high_st[i] = fh ? 1u : 0u;
+}
+
+// Build level k >= 1 from k-1 for all arrays in one pass
+extern "C" __global__
+void st_build_level_k_minmax_valid_f32(int series_len,
+                                       int k, // >=1
+                                       float* __restrict__ low_min_st,
+                                       float* __restrict__ high_max_st,
+                                       uint8_t* __restrict__ valid_low_st,
+                                       uint8_t* __restrict__ valid_high_st) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int half = 1 << (k - 1);
+    const int span = 1 << k;
+    if (i > series_len - span) return; // only compute valid starting positions
+
+    const int prev = (k - 1) * series_len;
+
+    const float aL = low_min_st[prev + i];
+    const float bL = low_min_st[prev + i + half];
+    low_min_st[k * series_len + i] = fminf2(aL, bL);
+
+    const float aH = high_max_st[prev + i];
+    const float bH = high_max_st[prev + i + half];
+    high_max_st[k * series_len + i] = fmaxf2(aH, bH);
+
+    const uint8_t avL = valid_low_st[prev + i];
+    const uint8_t bvL = valid_low_st[prev + i + half];
+    valid_low_st[k * series_len + i] = min_u8(avL, bvL);
+
+    const uint8_t avH = valid_high_st[prev + i];
+    const uint8_t bvH = valid_high_st[prev + i + half];
+    valid_high_st[k * series_len + i] = min_u8(avH, bvH);
+}
+
+// ------------------------ O(1) query compute (many params) ------------------------
+extern "C" __global__
+void minmax_batch_rmq_f32(const float* __restrict__ high,
+                          const float* __restrict__ low,
+                          int series_len,
+                          int first_valid,
+                          const int* __restrict__ orders,
+                          int n_combos,
+                          const float* __restrict__ low_min_st,
+                          const float* __restrict__ high_max_st,
+                          const uint8_t* __restrict__ valid_low_st,
+                          const uint8_t* __restrict__ valid_high_st,
+                          float* __restrict__ out_is_min,
+                          float* __restrict__ out_is_max) {
+    if (series_len <= 0) return;
+    const int row = blockIdx.y; // one row per param
+    if (row >= n_combos) return;
+
+    const int k = orders[row];
+    const int base = row * series_len;
+
+    if (k <= 0) {
+        // still ensure outputs are NaN deterministically
+        for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < series_len; t += blockDim.x * gridDim.x) {
+            out_is_min[base + t] = CUDART_NAN_F;
+            out_is_max[base + t] = CUDART_NAN_F;
+        }
+        return;
+    }
+
+    const int fv = (first_valid < 0 ? 0 : first_valid);
+    for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < series_len; t += blockDim.x * gridDim.x) {
+        // Default outputs to NaN; overwrite if an extrema is found
+        out_is_min[base + t] = CUDART_NAN_F;
+        out_is_max[base + t] = CUDART_NAN_F;
+        if (t < fv) continue;
+        const bool inb = (t >= k) && (t + k < series_len);
+        if (!inb) continue;
+
+        const float cl = low[t];
+        const float ch = high[t];
+        if (!(isfinite(cl) && isfinite(ch))) continue;
+
+        // LOW min
+        uint8_t left_ok_low  = rmq_min_u8(valid_low_st,  series_len, t - k, t - 1);
+        uint8_t right_ok_low = rmq_min_u8(valid_low_st,  series_len, t + 1, t + k);
+        if (left_ok_low && right_ok_low) {
+            float lmin = rmq_min_f32(low_min_st, series_len, t - k, t - 1);
+            float rmin = rmq_min_f32(low_min_st, series_len, t + 1, t + k);
+            if (cl < lmin && cl < rmin) {
+                out_is_min[base + t] = cl;
+            }
+        }
+
+        // HIGH max
+        uint8_t left_ok_high  = rmq_min_u8(valid_high_st, series_len, t - k, t - 1);
+        uint8_t right_ok_high = rmq_min_u8(valid_high_st, series_len, t + 1, t + k);
+        if (left_ok_high && right_ok_high) {
+            float lmax = rmq_max_f32(high_max_st, series_len, t - k, t - 1);
+            float rmax = rmq_max_f32(high_max_st, series_len, t + 1, t + k);
+            if (ch > lmax && ch > rmax) {
+                out_is_max[base + t] = ch;
+            }
+        }
+    }
+}
+
+// ------------------------ Parallel forward-fill (two streams) ------------------------
+static __device__ __forceinline__ float combine_last_finite(float a, float b) {
+    return isfinite(b) ? b : a;
+}
+
+static __device__ __forceinline__ float warp_scan_last(float x, unsigned mask) {
+    #pragma unroll
+    for (int offset = 1; offset < WARP_SIZE; offset <<= 1) {
+        float y = __shfl_up_sync(mask, x, offset);
+        if ((threadIdx.x & (WARP_SIZE - 1)) >= offset) {
+            x = combine_last_finite(y, x);
+        }
+    }
+    return x;
+}
+
+extern "C" __global__
+void forward_fill_two_streams_f32(const float* __restrict__ in_is_min,
+                                  const float* __restrict__ in_is_max,
+                                  int series_len,
+                                  int n_rows,
+                                  float* __restrict__ out_last_min,
+                                  float* __restrict__ out_last_max) {
+    const int row = blockIdx.x;
+    if (row >= n_rows) return;
+
+    const int base = row * series_len;
+    const unsigned full_mask = 0xffffffffu;
+    __shared__ float warp_totals_min[WARP_SIZE]; // up to 32 warps
+    __shared__ float warp_totals_max[WARP_SIZE];
+
+    float carry_min = CUDART_NAN_F;
+    float carry_max = CUDART_NAN_F;
+
+    for (int t0 = 0; t0 < series_len; t0 += blockDim.x) {
+        const int t = t0 + threadIdx.x;
+        float xm = (t < series_len) ? in_is_min[base + t] : CUDART_NAN_F;
+        float xM = (t < series_len) ? in_is_max[base + t] : CUDART_NAN_F;
+
+        float pm = warp_scan_last(xm, full_mask);
+        float pM = warp_scan_last(xM, full_mask);
+
+        const int lane = threadIdx.x & (WARP_SIZE - 1);
+        const int wid  = threadIdx.x >> 5;
+
+        if (lane == WARP_SIZE - 1) {
+            warp_totals_min[wid] = pm;
+            warp_totals_max[wid] = pM;
+        }
+        __syncthreads();
+
+        if (wid == 0) {
+            const int nwarps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
+            float vmin = (threadIdx.x < nwarps) ? warp_totals_min[lane] : CUDART_NAN_F;
+            float vmax = (threadIdx.x < nwarps) ? warp_totals_max[lane] : CUDART_NAN_F;
+            vmin = warp_scan_last(vmin, full_mask);
+            vmax = warp_scan_last(vmax, full_mask);
+            if (lane < nwarps) {
+                warp_totals_min[lane] = vmin;
+                warp_totals_max[lane] = vmax;
+            }
+        }
+        __syncthreads();
+
+        if (wid > 0) {
+            float warp_prefix_min = warp_totals_min[wid - 1];
+            float warp_prefix_max = warp_totals_max[wid - 1];
+            pm = combine_last_finite(warp_prefix_min, pm);
+            pM = combine_last_finite(warp_prefix_max, pM);
+        }
+
+        pm = combine_last_finite(carry_min, pm);
+        pM = combine_last_finite(carry_max, pM);
+
+        if (t < series_len) {
+            out_last_min[base + t] = pm;
+            out_last_max[base + t] = pM;
+        }
+
+        __syncthreads();
+        if (threadIdx.x == blockDim.x - 1 || (t == series_len - 1)) {
+            warp_totals_min[0] = pm;
+            warp_totals_max[0] = pM;
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            carry_min = warp_totals_min[0];
+            carry_max = warp_totals_max[0];
+        }
+        __syncthreads();
+    }
+}

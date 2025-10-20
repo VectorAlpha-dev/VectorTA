@@ -3690,18 +3690,54 @@ pub fn rvi_cuda_batch_dev_py<'py>(
 ) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
     use crate::cuda::cuda_available;
     use numpy::{IntoPyArray, PyArrayMethods};
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let d = data_f32.as_slice()?;
-    let sweep = RviBatchRange { period: period_range, ma_len: ma_len_range, matype: matype_range, devtype: devtype_range };
+    let sweep = RviBatchRange {
+        period: period_range,
+        ma_len: ma_len_range,
+        matype: matype_range,
+        devtype: devtype_range,
+    };
     let (inner, combos) = py.allow_threads(|| {
         let cuda = CudaRvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.rvi_batch_dev(d, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.rvi_batch_dev(d, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("periods", combos.iter().map(|p| p.period.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("ma_lens", combos.iter().map(|p| p.ma_len.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("matypes", combos.iter().map(|p| p.matype.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
-    dict.set_item("devtypes", combos.iter().map(|p| p.devtype.unwrap() as u64).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item(
+        "periods",
+        combos
+            .iter()
+            .map(|p| p.period.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "ma_lens",
+        combos
+            .iter()
+            .map(|p| p.ma_len.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "matypes",
+        combos
+            .iter()
+            .map(|p| p.matype.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
+    dict.set_item(
+        "devtypes",
+        combos
+            .iter()
+            .map(|p| p.devtype.unwrap() as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     Ok((DeviceArrayF32Py { inner }, dict))
 }
 
@@ -3720,9 +3756,16 @@ pub fn rvi_cuda_many_series_one_param_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let tm = data_tm_f32.as_slice()?;
-    let params = RviParams { period: Some(period), ma_len: Some(ma_len), matype: Some(matype), devtype: Some(devtype) };
+    let params = RviParams {
+        period: Some(period),
+        ma_len: Some(ma_len),
+        matype: Some(matype),
+        devtype: Some(devtype),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaRvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.rvi_many_series_one_param_time_major_dev(tm, cols, rows, &params)

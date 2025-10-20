@@ -66,6 +66,12 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::deviation_wrapper::CudaDeviation;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -74,12 +80,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::deviation_wrapper::CudaDeviation;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::cuda_available;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -3553,9 +3553,13 @@ pub fn deviation_cuda_batch_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_f32.as_slice()?;
-    let sweep = DeviationBatchRange { period: period_range, devtype: devtype_range };
+    let sweep = DeviationBatchRange {
+        period: period_range,
+        devtype: devtype_range,
+    };
     let (inner, combos) = py.allow_threads(|| {
-        let cuda = CudaDeviation::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaDeviation::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.deviation_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -3583,12 +3587,18 @@ pub fn deviation_cuda_many_series_one_param_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     if devtype != 0 {
-        return Err(PyValueError::new_err("unsupported devtype for CUDA (only 0=stddev)"));
+        return Err(PyValueError::new_err(
+            "unsupported devtype for CUDA (only 0=stddev)",
+        ));
     }
     let slice_tm = data_tm_f32.as_slice()?;
-    let params = DeviationParams { period: Some(period), devtype: Some(devtype) };
+    let params = DeviationParams {
+        period: Some(period),
+        devtype: Some(devtype),
+    };
     let inner = py.allow_threads(|| {
-        let cuda = CudaDeviation::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaDeviation::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.deviation_many_series_one_param_time_major_dev(slice_tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

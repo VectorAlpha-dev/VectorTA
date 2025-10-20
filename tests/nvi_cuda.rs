@@ -60,7 +60,13 @@ fn nvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for i in 0..len {
         let g = host[i] as f64;
         let c = cpu[i];
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", i, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            i,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -69,9 +75,7 @@ fn nvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn nvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[nvi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[nvi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -117,7 +121,13 @@ fn nvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     for idx in 0..host.len() {
         let g = host[idx] as f64;
         let c = cpu_tm[idx];
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }

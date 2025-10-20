@@ -128,8 +128,9 @@ impl CudaSwma {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaSwmaError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaSwmaError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -310,7 +311,9 @@ impl CudaSwma {
 
     #[inline]
     fn upload_const_weights(&self, period: usize, weights: &[f32]) -> Result<(), CudaSwmaError> {
-        if !self.has_const_weights { return Ok(()); }
+        if !self.has_const_weights {
+            return Ok(());
+        }
         if period > self.max_period_const {
             return Err(CudaSwmaError::InvalidInput(format!(
                 "period {} exceeds SWMA_MAX_PERIOD {} compiled in kernel",

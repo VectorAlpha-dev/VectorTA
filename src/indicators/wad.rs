@@ -1493,7 +1493,9 @@ pub fn wad_cuda_batch_dev_py(
     close_f32: PyReadonlyArray1<'_, f32>,
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let high = high_f32.as_slice()?;
     let low = low_f32.as_slice()?;
     let close = close_f32.as_slice()?;
@@ -1516,7 +1518,9 @@ pub fn wad_cuda_many_series_one_param_dev_py(
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
     use numpy::PyUntypedArrayMethods;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let rows = high_tm_f32.shape()[0];
     let cols = high_tm_f32.shape()[1];
     if low_tm_f32.shape() != [rows, cols] || close_tm_f32.shape() != [rows, cols] {

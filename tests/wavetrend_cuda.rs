@@ -10,7 +10,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::wavetrend::CudaWavetrend;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -34,14 +36,24 @@ fn wavetrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
 
     let len = 8192usize;
     let mut data = vec![f64::NAN; len];
-    for i in 8..len { let x = i as f64; data[i] = (x * 0.00137).sin() + 0.00029 * x; }
-    let sweep = WavetrendBatchRange { channel_length: (6, 20, 7), average_length: (9, 21, 6), ma_length: (3, 5, 1), factor: (0.015, 0.015, 0.0) };
+    for i in 8..len {
+        let x = i as f64;
+        data[i] = (x * 0.00137).sin() + 0.00029 * x;
+    }
+    let sweep = WavetrendBatchRange {
+        channel_length: (6, 20, 7),
+        average_length: (9, 21, 6),
+        ma_length: (3, 5, 1),
+        factor: (0.015, 0.015, 0.0),
+    };
 
     let cpu = wavetrend_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
 
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let cuda = CudaWavetrend::new(0).expect("CudaWavetrend::new");
-    let dev = cuda.wavetrend_batch_dev(&data_f32, &sweep).expect("wavetrend_batch_dev");
+    let dev = cuda
+        .wavetrend_batch_dev(&data_f32, &sweep)
+        .expect("wavetrend_batch_dev");
 
     assert_eq!(dev.combos.len(), cpu.rows);
     assert_eq!(dev.wt1.rows, cpu.rows);
@@ -59,16 +71,31 @@ fn wavetrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     dev.wt_diff.buf.copy_to(&mut diff_g)?;
 
     // Compare via RMSE over finite pairs to allow small FP32 drift accumulation.
-    let mut n1 = 0usize; let mut sse1 = 0.0f64;
-    let mut n2 = 0usize; let mut sse2 = 0.0f64;
-    let mut n3 = 0usize; let mut sse3 = 0.0f64;
+    let mut n1 = 0usize;
+    let mut sse1 = 0.0f64;
+    let mut n2 = 0usize;
+    let mut sse2 = 0.0f64;
+    let mut n3 = 0usize;
+    let mut sse3 = 0.0f64;
     for idx in 0..(cpu.rows * cpu.cols) {
-        let c1 = cpu.wt1[idx]; let g1 = wt1_g[idx] as f64;
-        if c1.is_finite() && g1.is_finite() { n1 += 1; sse1 += (c1 - g1) * (c1 - g1); }
-        let c2 = cpu.wt2[idx]; let g2 = wt2_g[idx] as f64;
-        if c2.is_finite() && g2.is_finite() { n2 += 1; sse2 += (c2 - g2) * (c2 - g2); }
-        let c3 = cpu.wt_diff[idx]; let g3 = diff_g[idx] as f64;
-        if c3.is_finite() && g3.is_finite() { n3 += 1; sse3 += (c3 - g3) * (c3 - g3); }
+        let c1 = cpu.wt1[idx];
+        let g1 = wt1_g[idx] as f64;
+        if c1.is_finite() && g1.is_finite() {
+            n1 += 1;
+            sse1 += (c1 - g1) * (c1 - g1);
+        }
+        let c2 = cpu.wt2[idx];
+        let g2 = wt2_g[idx] as f64;
+        if c2.is_finite() && g2.is_finite() {
+            n2 += 1;
+            sse2 += (c2 - g2) * (c2 - g2);
+        }
+        let c3 = cpu.wt_diff[idx];
+        let g3 = diff_g[idx] as f64;
+        if c3.is_finite() && g3.is_finite() {
+            n3 += 1;
+            sse3 += (c3 - g3) * (c3 - g3);
+        }
     }
     let rmse1 = (sse1 / (n1.max(1) as f64)).sqrt();
     let rmse2 = (sse2 / (n2.max(1) as f64)).sqrt();
@@ -87,18 +114,26 @@ fn wavetrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    use my_project::indicators::wavetrend::{wavetrend_with_kernel, WavetrendInput, WavetrendParams, WavetrendData};
+    use my_project::indicators::wavetrend::{
+        wavetrend_with_kernel, WavetrendData, WavetrendInput, WavetrendParams,
+    };
 
     let cols = 16usize; // series
     let rows = 4096usize; // time
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
-        for t in (8 + s)..rows { // stagger valid starts
+        for t in (8 + s)..rows {
+            // stagger valid starts
             let x = t as f64 + (s as f64) * 0.13;
             tm[t * cols + s] = (x * 0.0023).cos() + 0.00037 * x;
         }
     }
-    let params = WavetrendParams { channel_length: Some(10), average_length: Some(21), ma_length: Some(4), factor: Some(0.015) };
+    let params = WavetrendParams {
+        channel_length: Some(10),
+        average_length: Some(21),
+        ma_length: Some(4),
+        factor: Some(0.015),
+    };
 
     // CPU baseline per series
     let mut wt1_cpu_tm = vec![f64::NAN; cols * rows];
@@ -106,8 +141,13 @@ fn wavetrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
     let mut diff_cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = tm[t * cols + s]; }
-        let input = WavetrendInput { data: WavetrendData::Slice(&series), params: params.clone() };
+        for t in 0..rows {
+            series[t] = tm[t * cols + s];
+        }
+        let input = WavetrendInput {
+            data: WavetrendData::Slice(&series),
+            params: params.clone(),
+        };
         let out = wavetrend_with_kernel(&input, Kernel::Scalar)?;
         for t in 0..rows {
             wt1_cpu_tm[t * cols + s] = out.wt1[t];
@@ -138,9 +178,21 @@ fn wavetrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     let tol = 5e-2;
     for idx in 0..wt1_g.len() {
-        assert!(approx_eq(wt1_cpu_tm[idx], wt1_g[idx] as f64, tol), "wt1 mismatch at {}", idx);
-        assert!(approx_eq(wt2_cpu_tm[idx], wt2_g[idx] as f64, tol), "wt2 mismatch at {}", idx);
-        assert!(approx_eq(diff_cpu_tm[idx], diff_g[idx] as f64, tol), "wt_diff mismatch at {}", idx);
+        assert!(
+            approx_eq(wt1_cpu_tm[idx], wt1_g[idx] as f64, tol),
+            "wt1 mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(wt2_cpu_tm[idx], wt2_g[idx] as f64, tol),
+            "wt2 mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(diff_cpu_tm[idx], diff_g[idx] as f64, tol),
+            "wt_diff mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }

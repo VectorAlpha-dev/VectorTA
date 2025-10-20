@@ -54,9 +54,13 @@ pub struct DeviceArrayF32Quad {
 
 impl DeviceArrayF32Quad {
     #[inline]
-    pub fn rows(&self) -> usize { self.first.rows }
+    pub fn rows(&self) -> usize {
+        self.first.rows
+    }
     #[inline]
-    pub fn cols(&self) -> usize { self.first.cols }
+    pub fn cols(&self) -> usize {
+        self.first.cols
+    }
 }
 
 pub struct CudaBandpassBatchResult {
@@ -68,14 +72,18 @@ pub struct CudaBandpassBatchResult {
 pub enum BatchKernelPolicy {
     #[default]
     Auto,
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
-    OneD { block_x: u32 },
+    OneD {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -85,10 +93,14 @@ pub struct CudaBandpassPolicy {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected { OneD { block_x: u32 } }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 pub struct CudaBandpass {
     module: Module,
@@ -138,13 +150,17 @@ impl CudaBandpass {
     fn maybe_log_batch_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] bandpass batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaBandpass)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaBandpass)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -153,13 +169,17 @@ impl CudaBandpass {
     fn maybe_log_many_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] bandpass many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaBandpass)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaBandpass)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -172,31 +192,51 @@ impl CudaBandpass {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     fn expand_grid(range: &BandPassBatchRange) -> Vec<BandPassParams> {
         fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-            if step == 0 || start == end { return vec![start]; }
+            if step == 0 || start == end {
+                return vec![start];
+            }
             (start..=end).step_by(step).collect()
         }
         fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-            if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return vec![start]; }
+            if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+                return vec![start];
+            }
             let mut out = Vec::new();
             let mut x = start;
-            while x <= end + 1e-12 { out.push(x); x += step; }
+            while x <= end + 1e-12 {
+                out.push(x);
+                x += step;
+            }
             out
         }
         let periods = axis_usize(range.period);
         let bands = axis_f64(range.bandwidth);
         let mut v = Vec::with_capacity(periods.len() * bands.len());
-        for &p in &periods { for &b in &bands { v.push(BandPassParams { period: Some(p), bandwidth: Some(b) }); } }
+        for &p in &periods {
+            for &b in &bands {
+                v.push(BandPassParams {
+                    period: Some(p),
+                    bandwidth: Some(b),
+                });
+            }
+        }
         v
     }
 
@@ -214,26 +254,32 @@ impl CudaBandpass {
         let len = data_f32.len();
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaBandpassError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaBandpassError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         for p in &combos {
             let period = p.period.unwrap_or(0);
             let bw = p.bandwidth.unwrap_or(0.0);
             if period < 2 || period > len {
                 return Err(CudaBandpassError::InvalidInput(format!(
-                    "invalid period {} for len {}", period, len
+                    "invalid period {} for len {}",
+                    period, len
                 )));
             }
             if !(0.0..=1.0).contains(&bw) || !bw.is_finite() || bw == 0.0 {
                 return Err(CudaBandpassError::InvalidInput(format!(
-                    "invalid bandwidth {}", bw
+                    "invalid bandwidth {}",
+                    bw
                 )));
             }
             // Ensure enough valid after first for HP stage
             let hp_period = (4.0 * period as f64 / bw).round() as usize;
             if len - first_valid < hp_period {
                 return Err(CudaBandpassError::InvalidInput(format!(
-                    "not enough valid data: need >= {}, have {}", hp_period, len - first_valid
+                    "not enough valid data: need >= {}, have {}",
+                    hp_period,
+                    len - first_valid
                 )));
             }
         }
@@ -306,7 +352,13 @@ impl CudaBandpass {
         };
         let cuda_hp = CudaHighpass::new(0).map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
         cuda_hp
-            .highpass_batch_device(&d_prices, &d_hp_periods, n as i32, hp_unique.len() as i32, &mut d_hp)
+            .highpass_batch_device(
+                &d_prices,
+                &d_hp_periods,
+                n as i32,
+                hp_unique.len() as i32,
+                &mut d_hp,
+            )
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
 
         // Params to device
@@ -314,10 +366,10 @@ impl CudaBandpass {
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
         let d_alpha = DeviceBuffer::from_slice(&alphas)
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
-        let d_beta = DeviceBuffer::from_slice(&betas)
-            .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
-        let d_trig = DeviceBuffer::from_slice(&trig)
-            .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
+        let d_beta =
+            DeviceBuffer::from_slice(&betas).map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
+        let d_trig =
+            DeviceBuffer::from_slice(&trig).map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
 
         // Outputs
         let mut d_bp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }
@@ -342,7 +394,10 @@ impl CudaBandpass {
             BatchKernelPolicy::Auto => suggested.max(128),
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
-        unsafe { (*(self as *const _ as *mut CudaBandpass)).last_batch = Some(BatchKernelSelected::Plain { block_x: bx }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaBandpass)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x: bx });
+        }
         let block: BlockSize = (bx, 1, 1).into();
         let grid_x = ((rows as u32) + block.x - 1) / block.x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -386,10 +441,26 @@ impl CudaBandpass {
 
         Ok(CudaBandpassBatchResult {
             outputs: DeviceArrayF32Quad {
-                first: DeviceArrayF32 { buf: d_bp, rows, cols: n },
-                second: DeviceArrayF32 { buf: d_bpn, rows, cols: n },
-                third: DeviceArrayF32 { buf: d_sig, rows, cols: n },
-                fourth: DeviceArrayF32 { buf: d_trg, rows, cols: n },
+                first: DeviceArrayF32 {
+                    buf: d_bp,
+                    rows,
+                    cols: n,
+                },
+                second: DeviceArrayF32 {
+                    buf: d_bpn,
+                    rows,
+                    cols: n,
+                },
+                third: DeviceArrayF32 {
+                    buf: d_sig,
+                    rows,
+                    cols: n,
+                },
+                fourth: DeviceArrayF32 {
+                    buf: d_trg,
+                    rows,
+                    cols: n,
+                },
             },
             combos,
         })
@@ -419,7 +490,9 @@ impl CudaBandpass {
                 data_tm_f32,
                 cols,
                 rows,
-                &crate::indicators::moving_averages::highpass::HighPassParams { period: Some(hp_period) },
+                &crate::indicators::moving_averages::highpass::HighPassParams {
+                    period: Some(hp_period),
+                },
             )
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
 
@@ -455,7 +528,10 @@ impl CudaBandpass {
             ManySeriesKernelPolicy::Auto => suggested.max(128),
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
         };
-        unsafe { (*(self as *const _ as *mut CudaBandpass)).last_many = Some(ManySeriesKernelSelected::OneD { block_x: bx }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaBandpass)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x: bx });
+        }
         let grid_x = ((cols as u32) + bx - 1) / bx;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (bx, 1, 1).into();
@@ -494,10 +570,26 @@ impl CudaBandpass {
         self.maybe_log_many_debug();
 
         Ok(DeviceArrayF32Quad {
-            first: DeviceArrayF32 { buf: d_bp, rows, cols },
-            second: DeviceArrayF32 { buf: d_bpn, rows, cols },
-            third: DeviceArrayF32 { buf: d_sig, rows, cols },
-            fourth: DeviceArrayF32 { buf: d_trg_out, rows, cols },
+            first: DeviceArrayF32 {
+                buf: d_bp,
+                rows,
+                cols,
+            },
+            second: DeviceArrayF32 {
+                buf: d_bpn,
+                rows,
+                cols,
+            },
+            third: DeviceArrayF32 {
+                buf: d_sig,
+                rows,
+                cols,
+            },
+            fourth: DeviceArrayF32 {
+                buf: d_trg_out,
+                rows,
+                cols,
+            },
         })
     }
 }
@@ -526,15 +618,24 @@ pub mod benches {
         sweep: BandPassBatchRange,
     }
     impl CudaBenchState for BPBatchState {
-        fn launch(&mut self) { let _ = self.cuda.bandpass_batch_dev(&self.prices, &self.sweep); }
+        fn launch(&mut self) {
+            let _ = self.cuda.bandpass_batch_dev(&self.prices, &self.sweep);
+        }
     }
 
     fn prep_one_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaBandpass::new(0).expect("cuda bandpass");
         let prices = gen_series(ONE_SERIES_LEN);
         // Small sweep to avoid huge VRAM usage
-        let sweep = BandPassBatchRange { period: (16, 22, 2), bandwidth: (0.2, 0.4, 0.1) };
-        Box::new(BPBatchState { cuda, prices, sweep })
+        let sweep = BandPassBatchRange {
+            period: (16, 22, 2),
+            bandwidth: (0.2, 0.4, 0.1),
+        };
+        Box::new(BPBatchState {
+            cuda,
+            prices,
+            sweep,
+        })
     }
 
     struct BPManyState {
@@ -547,7 +648,10 @@ pub mod benches {
     impl CudaBenchState for BPManyState {
         fn launch(&mut self) {
             let _ = self.cuda.bandpass_many_series_one_param_time_major_dev(
-                &self.data_tm, self.cols, self.rows, &self.params,
+                &self.data_tm,
+                self.cols,
+                self.rows,
+                &self.params,
             );
         }
     }
@@ -557,8 +661,17 @@ pub mod benches {
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_ROWS;
         let data_tm = gen_time_major_prices(cols, rows);
-        let params = BandPassParams { period: Some(20), bandwidth: Some(0.3) };
-        Box::new(BPManyState { cuda, data_tm, cols, rows, params })
+        let params = BandPassParams {
+            period: Some(20),
+            bandwidth: Some(0.3),
+        };
+        Box::new(BPManyState {
+            cuda,
+            data_tm,
+            cols,
+            rows,
+            params,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

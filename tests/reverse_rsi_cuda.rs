@@ -67,7 +67,13 @@ fn reverse_rsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -76,9 +82,7 @@ fn reverse_rsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
 #[test]
 fn reverse_rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[reverse_rsi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[reverse_rsi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -99,14 +103,21 @@ fn reverse_rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
-        for t in 0..rows { p[t] = price_tm[t * cols + s]; }
+        for t in 0..rows {
+            p[t] = price_tm[t * cols + s];
+        }
         // Align CPU baseline to FP32 input used on GPU
         let p_f32: Vec<f32> = p.iter().map(|&v| v as f32).collect();
         let p_cpu_f64: Vec<f64> = p_f32.iter().map(|&v| v as f64).collect();
-        let params = ReverseRsiParams { rsi_length: Some(rsi_length), rsi_level: Some(rsi_level) };
+        let params = ReverseRsiParams {
+            rsi_length: Some(rsi_length),
+            rsi_level: Some(rsi_level),
+        };
         let input = ReverseRsiInput::from_slice(&p_cpu_f64, params);
         let out = reverse_rsi_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
@@ -116,7 +127,10 @@ fn reverse_rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
             &price_tm_f32,
             cols,
             rows,
-            &ReverseRsiParams { rsi_length: Some(rsi_length), rsi_level: Some(rsi_level) },
+            &ReverseRsiParams {
+                rsi_length: Some(rsi_length),
+                rsi_level: Some(rsi_level),
+            },
         )
         .expect("reverse_rsi_many_series_one_param_time_major_dev");
 
@@ -128,9 +142,12 @@ fn reverse_rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
 
     let tol = 7e-4;
     for idx in 0..g_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol), "many-series mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol),
+            "many-series mismatch at {}",
+            idx
+        );
     }
 
     Ok(())
 }
-

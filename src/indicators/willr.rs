@@ -2742,16 +2742,15 @@ pub fn willr_cuda_many_series_one_param_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaWillr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .willr_many_series_one_param_time_major_dev(
-                high_slice,
-                low_slice,
-                close_slice,
-                cols,
-                rows,
-                period,
-            )
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.willr_many_series_one_param_time_major_dev(
+            high_slice,
+            low_slice,
+            close_slice,
+            cols,
+            rows,
+            period,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     Ok(DeviceArrayF32Py { inner })

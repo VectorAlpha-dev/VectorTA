@@ -46,8 +46,8 @@ pub struct CudaCci {
 impl CudaCci {
     pub fn new(device_id: usize) -> Result<Self, CudaCciError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaCciError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaCciError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaCciError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cci_kernel.ptx"));
@@ -77,7 +77,12 @@ impl CudaCci {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
 
-        Ok(Self { module, stream, _context: context, debug_batch_logged: false })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            debug_batch_logged: false,
+        })
     }
 
     #[inline]
@@ -98,20 +103,29 @@ impl CudaCci {
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Ok((free, _)) = cust::memory::mem_get_info() {
             required_bytes.saturating_add(headroom) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     fn expand_periods(range: &CciBatchRange) -> Vec<CciParams> {
         let (start, end, step) = range.period;
         if step == 0 || start == end {
-            return vec![CciParams { period: Some(start) }];
+            return vec![CciParams {
+                period: Some(start),
+            }];
         }
         let mut v = Vec::new();
         let mut p = start;
-        while p <= end { v.push(CciParams { period: Some(p) }); p = p.saturating_add(step); }
+        while p <= end {
+            v.push(CciParams { period: Some(p) });
+            p = p.saturating_add(step);
+        }
         v
     }
 
@@ -130,12 +144,21 @@ impl CudaCci {
 
         let combos = Self::expand_periods(sweep);
         if combos.is_empty() {
-            return Err(CudaCciError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaCciError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         for c in &combos {
             let p = c.period.unwrap_or(0);
-            if p == 0 { return Err(CudaCciError::InvalidInput("period must be >=1".into())); }
-            if p > len { return Err(CudaCciError::InvalidInput(format!("period {} > len {}", p, len))); }
+            if p == 0 {
+                return Err(CudaCciError::InvalidInput("period must be >=1".into()));
+            }
+            if p > len {
+                return Err(CudaCciError::InvalidInput(format!(
+                    "period {} > len {}",
+                    p, len
+                )));
+            }
             if len - first_valid < p {
                 return Err(CudaCciError::InvalidInput(format!(
                     "not enough valid data for period {} (tail={})",
@@ -236,16 +259,15 @@ impl CudaCci {
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
             let h_periods = LockedBuffer::from_slice(&periods)
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
-            let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-                .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
-            let mut d_periods = unsafe {
-                DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream)
-            }
-            .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
-            let mut d_out = unsafe {
-                DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream)
-            }
-            .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
+            let mut d_prices =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
+                    .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
+            let mut d_periods =
+                unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
+                    .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
+            let mut d_out =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }
+                    .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
             unsafe {
                 d_prices
                     .async_copy_from(&h_prices, &self.stream)
@@ -277,9 +299,16 @@ impl CudaCci {
                 .synchronize()
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
             if !self.debug_batch_logged && env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
-                eprintln!("[cci] batch kernel: Plain, block_x=auto, chunked={} rows", rows);
+                eprintln!(
+                    "[cci] batch kernel: Plain, block_x=auto, chunked={} rows",
+                    rows
+                );
             }
-            Ok(DeviceArrayF32 { buf: d_out, rows, cols: len })
+            Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            })
         } else {
             let d_prices = DeviceBuffer::from_slice(data_f32)
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
@@ -304,9 +333,16 @@ impl CudaCci {
                 launched += n_this;
             }
             if !self.debug_batch_logged && env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
-                eprintln!("[cci] batch kernel: Plain, block_x=auto, chunked={} rows", rows);
+                eprintln!(
+                    "[cci] batch kernel: Plain, block_x=auto, chunked={} rows",
+                    rows
+                );
             }
-            Ok(DeviceArrayF32 { buf: d_out, rows, cols: len })
+            Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            })
         }
     }
 
@@ -317,7 +353,9 @@ impl CudaCci {
         period: usize,
     ) -> Result<(Vec<i32>, usize), CudaCciError> {
         if data_tm_f32.len() != cols * rows {
-            return Err(CudaCciError::InvalidInput("time-major buffer shape mismatch".into()));
+            return Err(CudaCciError::InvalidInput(
+                "time-major buffer shape mismatch".into(),
+            ));
         }
         if period == 0 || period > rows {
             return Err(CudaCciError::InvalidInput("invalid period".into()));
@@ -326,9 +364,13 @@ impl CudaCci {
         for s in 0..cols {
             let mut fv = None;
             for r in 0..rows {
-                if !data_tm_f32[r * cols + s].is_nan() { fv = Some(r); break; }
+                if !data_tm_f32[r * cols + s].is_nan() {
+                    fv = Some(r);
+                    break;
+                }
             }
-            let fv = fv.ok_or_else(|| CudaCciError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv =
+                fv.ok_or_else(|| CudaCciError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv < period {
                 return Err(CudaCciError::InvalidInput(format!(
                     "series {} insufficient data for period {} (tail={})",
@@ -410,18 +452,15 @@ impl CudaCci {
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
             let h_first = LockedBuffer::from_slice(&first_valids)
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
-            let mut d_prices = unsafe {
-                DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream)
-            }
-            .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
-            let mut d_first = unsafe {
-                DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream)
-            }
-            .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
-            let mut d_out = unsafe {
-                DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream)
-            }
-            .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
+            let mut d_prices =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                    .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
+            let mut d_first =
+                unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
+                    .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
+            let mut d_out =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                    .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
             unsafe {
                 d_prices
                     .async_copy_from(&h_prices, &self.stream)
@@ -434,7 +473,11 @@ impl CudaCci {
             self.stream
                 .synchronize()
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
-            Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+            Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols,
+            })
         } else {
             let d_prices = DeviceBuffer::from_slice(data_tm_f32)
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
@@ -443,7 +486,11 @@ impl CudaCci {
             let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
             self.launch_many_series_kernel(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
-            Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+            Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols,
+            })
         }
     }
 }
@@ -479,7 +526,9 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaCci::new(0).expect("cuda cci");
         let data = gen_series(SERIES_LEN);
-        let sweep = CciBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) };
+        let sweep = CciBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
         Box::new(CciBatchState { cuda, data, sweep })
     }
 

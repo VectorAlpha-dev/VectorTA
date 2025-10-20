@@ -19,11 +19,11 @@ use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, Function, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
-use std::ffi::CString;
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
+use std::ffi::CString;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -165,8 +165,9 @@ impl CudaSrwma {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaSrwmaError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaSrwmaError::Cuda(e.to_string()))?
+                }
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)

@@ -1,6 +1,6 @@
 // CUDA integration tests for Chaikin Accumulation/Distribution (AD)
 
-use my_project::indicators::ad::{ad_with_kernel, AdInput, AdParams, AdData};
+use my_project::indicators::ad::{ad_with_kernel, AdData, AdInput, AdParams};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -9,7 +9,9 @@ use cust::memory::CopyDestination;
 use my_project::cuda::{cuda_available, CudaAd};
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     let diff = (a - b).abs();
     let scale = a.abs().max(b.abs());
     diff <= atol + rtol * scale
@@ -43,7 +45,15 @@ fn ad_cuda_series_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         volume[i] = ((x * 0.009).cos().abs() + 0.9) * 1200.0;
     }
 
-    let input = AdInput { data: AdData::Slices { high: &high, low: &low, close: &close, volume: &volume }, params: AdParams::default() };
+    let input = AdInput {
+        data: AdData::Slices {
+            high: &high,
+            low: &low,
+            close: &close,
+            volume: &volume,
+        },
+        params: AdParams::default(),
+    };
     let cpu = ad_with_kernel(&input, Kernel::Scalar)?;
 
     let cuda = CudaAd::new(0).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
@@ -59,7 +69,11 @@ fn ad_cuda_series_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let (atol, rtol) = (2e-2, 2e-3); // single-series permits slightly looser tolerance
     for i in 0..n {
-        assert!(approx_eq(cpu.values[i], gpu[i] as f64, atol, rtol), "mismatch at {}", i);
+        assert!(
+            approx_eq(cpu.values[i], gpu[i] as f64, atol, rtol),
+            "mismatch at {}",
+            i
+        );
     }
     Ok(())
 }
@@ -105,9 +119,19 @@ fn ad_cuda_many_series_time_major_matches_cpu() -> Result<(), Box<dyn std::error
             c[t] = close_tm[idx];
             v[t] = volume_tm[idx];
         }
-        let input = AdInput { data: AdData::Slices { high: &h, low: &l, close: &c, volume: &v }, params: AdParams::default() };
+        let input = AdInput {
+            data: AdData::Slices {
+                high: &h,
+                low: &l,
+                close: &c,
+                volume: &v,
+            },
+            params: AdParams::default(),
+        };
         let out = ad_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let cuda = CudaAd::new(0).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
@@ -123,7 +147,11 @@ fn ad_cuda_many_series_time_major_matches_cpu() -> Result<(), Box<dyn std::error
 
     let (atol, rtol) = (1e-2, 5e-4);
     for idx in 0..(cols * rows) {
-        assert!(approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, atol, rtol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, atol, rtol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }

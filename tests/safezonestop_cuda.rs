@@ -84,9 +84,7 @@ fn safezonestop_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
 #[test]
 fn safezonestop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[safezonestop_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[safezonestop_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -116,10 +114,16 @@ fn safezonestop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
             high[t] = high_tm[t * cols + s];
             low[t] = low_tm[t * cols + s];
         }
-        let params = SafeZoneStopParams { period: Some(period), mult: Some(mult), max_lookback: Some(lb) };
+        let params = SafeZoneStopParams {
+            period: Some(period),
+            mult: Some(mult),
+            max_lookback: Some(lb),
+        };
         let input = SafeZoneStopInput::from_slices(&high, &low, "long", params);
         let out = safezonestop_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
@@ -158,4 +162,3 @@ fn safezonestop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
 
     Ok(())
 }
-

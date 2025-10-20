@@ -91,8 +91,8 @@ pub struct CudaCg {
 impl CudaCg {
     pub fn new(device_id: usize) -> Result<Self, CudaCgError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cg_kernel.ptx"));
@@ -256,7 +256,11 @@ impl CudaCg {
         }
         self.maybe_log_batch_debug();
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
     }
 
     // -------- Many-series × one param (time-major) --------
@@ -271,7 +275,9 @@ impl CudaCg {
             return Err(CudaCgError::InvalidInput("empty matrix shape".into()));
         }
         if prices_tm_f32.len() != cols * rows {
-            return Err(CudaCgError::InvalidInput("time-major input size mismatch".into()));
+            return Err(CudaCgError::InvalidInput(
+                "time-major input size mismatch".into(),
+            ));
         }
         let period = params.period.unwrap_or(10);
         if period == 0 || period > rows {
@@ -281,10 +287,10 @@ impl CudaCg {
         // Compute per-series first_valids over time-major input
         let first_valids = compute_first_valids_time_major(prices_tm_f32, cols, rows);
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices_tm_f32).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-        let d_first =
-            DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices_tm_f32)
+            .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(cols * rows)
                 .map_err(|e| CudaCgError::Cuda(e.to_string()))?
@@ -322,7 +328,11 @@ impl CudaCg {
         }
         self.maybe_log_many_debug();
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
 
@@ -362,76 +372,89 @@ pub mod benches {
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
         // Batch: one series × many params
-        v.push(CudaBenchScenario::new(
-            "cg",
-            "one_series_many_params",
-            "cg",
-            "cg_batch/1x-many",
-            || {
-                struct St {
-                    cuda: CudaCg,
-                    prices: Vec<f32>,
-                    sweep: CgBatchRange,
-                }
-                impl CudaBenchState for St {
-                    fn launch(&mut self) {
-                        let _ = self
-                            .cuda
-                            .cg_batch_dev(&self.prices, &self.sweep)
-                            .expect("cg_batch_dev");
+        v.push(
+            CudaBenchScenario::new(
+                "cg",
+                "one_series_many_params",
+                "cg",
+                "cg_batch/1x-many",
+                || {
+                    struct St {
+                        cuda: CudaCg,
+                        prices: Vec<f32>,
+                        sweep: CgBatchRange,
                     }
-                }
-                let prices = (0..100_000).map(|i| (i as f32).sin()).collect::<Vec<_>>();
-                let sweep = CgBatchRange { period: (10, 40, 10) };
-                let cuda = CudaCg::new(0).expect("cuda cg");
-                Box::new(St { cuda, prices, sweep })
-            },
-        )
-        .with_sample_size(20)
-        .with_inner_iters(1));
+                    impl CudaBenchState for St {
+                        fn launch(&mut self) {
+                            let _ = self
+                                .cuda
+                                .cg_batch_dev(&self.prices, &self.sweep)
+                                .expect("cg_batch_dev");
+                        }
+                    }
+                    let prices = (0..100_000).map(|i| (i as f32).sin()).collect::<Vec<_>>();
+                    let sweep = CgBatchRange {
+                        period: (10, 40, 10),
+                    };
+                    let cuda = CudaCg::new(0).expect("cuda cg");
+                    Box::new(St {
+                        cuda,
+                        prices,
+                        sweep,
+                    })
+                },
+            )
+            .with_sample_size(20)
+            .with_inner_iters(1),
+        );
 
         // Many-series: 512 series × 8192 rows, single param
-        v.push(CudaBenchScenario::new(
-            "cg",
-            "many_series_one_param",
-            "cg",
-            "cg_many/series-major",
-            || {
-                struct St {
-                    cuda: CudaCg,
-                    tm: Vec<f32>,
-                    cols: usize,
-                    rows: usize,
-                    p: CgParams,
-                }
-                impl CudaBenchState for St {
-                    fn launch(&mut self) {
-                        let _ = self
-                            .cuda
-                            .cg_many_series_one_param_time_major_dev(
-                                &self.tm,
-                                self.cols,
-                                self.rows,
-                                &self.p,
-                            )
-                            .expect("cg_many_series_one_param_time_major_dev");
+        v.push(
+            CudaBenchScenario::new(
+                "cg",
+                "many_series_one_param",
+                "cg",
+                "cg_many/series-major",
+                || {
+                    struct St {
+                        cuda: CudaCg,
+                        tm: Vec<f32>,
+                        cols: usize,
+                        rows: usize,
+                        p: CgParams,
                     }
-                }
-                let cols = 512usize;
-                let rows = 8_192usize;
-                let mut tm = vec![f32::NAN; cols * rows];
-                for r in 0..rows {
-                    for c in 0..cols {
-                        tm[r * cols + c] = ((r as f32) * 0.001 + (c as f32) * 0.0001).sin();
+                    impl CudaBenchState for St {
+                        fn launch(&mut self) {
+                            let _ = self
+                                .cuda
+                                .cg_many_series_one_param_time_major_dev(
+                                    &self.tm, self.cols, self.rows, &self.p,
+                                )
+                                .expect("cg_many_series_one_param_time_major_dev");
+                        }
                     }
-                }
-                let cuda = CudaCg::new(0).expect("cuda cg");
-                let p = CgParams { period: Some(20) };
-                Box::new(St { cuda, tm, cols, rows, p })
-            },
-        )
-        .with_sample_size(20)
-        .with_inner_iters(1));
+                    let cols = 512usize;
+                    let rows = 8_192usize;
+                    let mut tm = vec![f32::NAN; cols * rows];
+                    for r in 0..rows {
+                        for c in 0..cols {
+                            tm[r * cols + c] = ((r as f32) * 0.001 + (c as f32) * 0.0001).sin();
+                        }
+                    }
+                    let cuda = CudaCg::new(0).expect("cuda cg");
+                    let p = CgParams { period: Some(20) };
+                    Box::new(St {
+                        cuda,
+                        tm,
+                        cols,
+                        rows,
+                        p,
+                    })
+                },
+            )
+            .with_sample_size(20)
+            .with_inner_iters(1),
+        );
         v
     }
 }

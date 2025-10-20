@@ -2618,9 +2618,12 @@ pub fn natr_cuda_batch_dev_py(
     if h.len() != l.len() || h.len() != c.len() {
         return Err(PyValueError::new_err("mismatched input lengths"));
     }
-    let sweep = NatrBatchRange { period: period_range };
+    let sweep = NatrBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
-        let mut cuda = CudaNatr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut cuda =
+            CudaNatr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.natr_batch_dev(h, l, c, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -2652,7 +2655,8 @@ pub fn natr_cuda_many_series_one_param_dev_py(
     let cols = high_tm.shape()[1];
 
     let inner = py.allow_threads(|| {
-        let mut cuda = CudaNatr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut cuda =
+            CudaNatr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.natr_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

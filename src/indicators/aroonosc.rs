@@ -1680,6 +1680,10 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaAroonOsc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -1688,10 +1692,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::CudaAroonOsc;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -1876,9 +1876,12 @@ pub fn aroonosc_cuda_batch_dev_py(
         return Err(PyValueError::new_err("mismatched input lengths"));
     }
 
-    let sweep = AroonOscBatchRange { length: length_range };
+    let sweep = AroonOscBatchRange {
+        length: length_range,
+    };
     let inner = py.allow_threads(|| {
-        let cuda = CudaAroonOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaAroonOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.aroonosc_batch_dev(high, low, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -1913,7 +1916,8 @@ pub fn aroonosc_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let inner = py.allow_threads(|| {
-        let cuda = CudaAroonOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaAroonOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.aroonosc_many_series_one_param_time_major_dev(h, l, cols, rows, length)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

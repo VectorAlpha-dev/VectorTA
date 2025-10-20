@@ -66,8 +66,8 @@ pub struct CudaBop {
 impl CudaBop {
     pub fn new(device_id: usize) -> Result<Self, CudaBopError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/bop_kernel.ptx"));
@@ -130,7 +130,15 @@ impl CudaBop {
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
             .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
 
-        self.launch_batch(&d_open, &d_high, &d_low, &d_close, len, first_valid, &mut d_out)?;
+        self.launch_batch(
+            &d_open,
+            &d_high,
+            &d_low,
+            &d_close,
+            len,
+            first_valid,
+            &mut d_out,
+        )?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: 1,
@@ -231,10 +239,7 @@ impl CudaBop {
                 }
             }
             if fv < 0 {
-                return Err(CudaBopError::InvalidInput(format!(
-                    "series {} all NaN",
-                    s
-                )));
+                return Err(CudaBopError::InvalidInput(format!("series {} all NaN", s)));
             }
             first_valids[s] = fv;
         }
@@ -259,12 +264,14 @@ impl CudaBop {
             DeviceBuffer::from_slice(low_tm).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
         let d_close =
             DeviceBuffer::from_slice(close_tm).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
-        let d_first =
-            DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaBopError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
             .map_err(|e| CudaBopError::Cuda(e.to_string()))?;
 
-        self.launch_many_series(&d_open, &d_high, &d_low, &d_close, &d_first, cols, rows, &mut d_out)?;
+        self.launch_many_series(
+            &d_open, &d_high, &d_low, &d_close, &d_first, cols, rows, &mut d_out,
+        )?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -336,7 +343,9 @@ impl CudaBop {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] BOP batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaBop)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaBop)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -352,7 +361,9 @@ impl CudaBop {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] BOP many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaBop)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaBop)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -370,7 +381,9 @@ impl CudaBop {
             ));
         }
         let first_valid = (0..len)
-            .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+            .find(|&i| {
+                !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan()
+            })
             .ok_or_else(|| CudaBopError::InvalidInput("all values are NaN".into()))?;
         Ok((first_valid, len))
     }
@@ -399,8 +412,21 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct BopBatchState { cuda: CudaBop, open: Vec<f32>, high: Vec<f32>, low: Vec<f32>, close: Vec<f32> }
-    impl CudaBenchState for BopBatchState { fn launch(&mut self) { let _ = self.cuda.bop_batch_dev(&self.open, &self.high, &self.low, &self.close).expect("bop batch"); } }
+    struct BopBatchState {
+        cuda: CudaBop,
+        open: Vec<f32>,
+        high: Vec<f32>,
+        low: Vec<f32>,
+        close: Vec<f32>,
+    }
+    impl CudaBenchState for BopBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .bop_batch_dev(&self.open, &self.high, &self.low, &self.close)
+                .expect("bop batch");
+        }
+    }
     fn prep_one_series_batch() -> Box<dyn CudaBenchState> {
         let cuda = CudaBop::new(0).expect("cuda bop");
         let mut open = gen_series(ONE_SERIES_LEN);
@@ -414,11 +440,37 @@ pub mod benches {
             low[i] = open[i] - (0.5 + 0.05 * x.sin()).abs();
             close[i] = open[i] + 0.2 * (x).sin();
         }
-        Box::new(BopBatchState { cuda, open, high, low, close })
+        Box::new(BopBatchState {
+            cuda,
+            open,
+            high,
+            low,
+            close,
+        })
     }
 
-    struct BopManyState { cuda: CudaBop, open_tm: Vec<f32>, high_tm: Vec<f32>, low_tm: Vec<f32>, close_tm: Vec<f32> }
-    impl CudaBenchState for BopManyState { fn launch(&mut self) { let _ = self.cuda.bop_many_series_one_param_time_major_dev(&self.open_tm, &self.high_tm, &self.low_tm, &self.close_tm, MANY_COLS, MANY_ROWS).expect("bop many"); } }
+    struct BopManyState {
+        cuda: CudaBop,
+        open_tm: Vec<f32>,
+        high_tm: Vec<f32>,
+        low_tm: Vec<f32>,
+        close_tm: Vec<f32>,
+    }
+    impl CudaBenchState for BopManyState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .bop_many_series_one_param_time_major_dev(
+                    &self.open_tm,
+                    &self.high_tm,
+                    &self.low_tm,
+                    &self.close_tm,
+                    MANY_COLS,
+                    MANY_ROWS,
+                )
+                .expect("bop many");
+        }
+    }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaBop::new(0).expect("cuda bop");
         let n = MANY_COLS * MANY_ROWS;
@@ -427,8 +479,24 @@ pub mod benches {
         let mut high = vec![f32::NAN; n];
         let mut low = vec![f32::NAN; n];
         let mut close = vec![f32::NAN; n];
-        for s in 0..MANY_COLS { for t in s..MANY_ROWS { let idx = t * MANY_COLS + s; let x = (t as f32) * 0.002 + (s as f32) * 0.01; let b = base[idx]; open[idx] = b + 0.001 * x.cos(); high[idx] = b + 0.3 + 0.02 * x.sin(); low[idx] = b - 0.3 - 0.02 * x.cos(); close[idx] = b + 0.05 * x.sin(); } }
-        Box::new(BopManyState { cuda, open_tm: open, high_tm: high, low_tm: low, close_tm: close })
+        for s in 0..MANY_COLS {
+            for t in s..MANY_ROWS {
+                let idx = t * MANY_COLS + s;
+                let x = (t as f32) * 0.002 + (s as f32) * 0.01;
+                let b = base[idx];
+                open[idx] = b + 0.001 * x.cos();
+                high[idx] = b + 0.3 + 0.02 * x.sin();
+                low[idx] = b - 0.3 - 0.02 * x.cos();
+                close[idx] = b + 0.05 * x.sin();
+            }
+        }
+        Box::new(BopManyState {
+            cuda,
+            open_tm: open,
+            high_tm: high,
+            low_tm: low,
+            close_tm: close,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

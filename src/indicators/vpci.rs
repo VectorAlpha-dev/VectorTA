@@ -2635,9 +2635,9 @@ pub fn vpci_batch_unified_js(
 
 // ================== CUDA Python Bindings (Device outputs) ==================
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::vpci_wrapper::CudaVpci;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::vpci_wrapper::CudaVpci;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
@@ -2653,13 +2653,22 @@ pub fn vpci_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::IntoPyArray;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
-    let c = close_f32.as_slice()?; let v = volume_f32.as_slice()?;
-    if c.len() != v.len() { return Err(PyValueError::new_err("length mismatch")); }
-    let sweep = VpciBatchRange { short_range: short_range_tuple, long_range: long_range_tuple };
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let c = close_f32.as_slice()?;
+    let v = volume_f32.as_slice()?;
+    if c.len() != v.len() {
+        return Err(PyValueError::new_err("length mismatch"));
+    }
+    let sweep = VpciBatchRange {
+        short_range: short_range_tuple,
+        long_range: long_range_tuple,
+    };
     let (pair, combos) = py.allow_threads(|| {
         let cuda = CudaVpci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vpci_batch_dev(c, v, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.vpci_batch_dev(c, v, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
     dict.set_item("vpci", Py::new(py, DeviceArrayF32Py { inner: pair.a })?)?;
@@ -2668,11 +2677,19 @@ pub fn vpci_cuda_batch_dev_py<'py>(
     dict.set_item("cols", c.len())?;
     dict.set_item(
         "short_ranges",
-        combos.iter().map(|p| p.short_range.unwrap_or(5) as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.short_range.unwrap_or(5) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     dict.set_item(
         "long_ranges",
-        combos.iter().map(|p| p.long_range.unwrap_or(25) as u64).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|p| p.long_range.unwrap_or(25) as u64)
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     Ok(dict)
 }
@@ -2689,17 +2706,29 @@ pub fn vpci_cuda_many_series_one_param_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::PyUntypedArrayMethods;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let shape = close_tm_f32.shape();
-    if shape.len() != 2 { return Err(PyValueError::new_err("expected 2D array for close")); }
-    if volume_tm_f32.shape() != shape { return Err(PyValueError::new_err("input arrays must share the same shape")); }
-    let rows = shape[0]; let cols = shape[1];
-    let c = close_tm_f32.as_slice()?; let v = volume_tm_f32.as_slice()?;
-    let params = VpciParams { short_range: Some(short_range), long_range: Some(long_range) };
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("expected 2D array for close"));
+    }
+    if volume_tm_f32.shape() != shape {
+        return Err(PyValueError::new_err(
+            "input arrays must share the same shape",
+        ));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let c = close_tm_f32.as_slice()?;
+    let v = volume_tm_f32.as_slice()?;
+    let params = VpciParams {
+        short_range: Some(short_range),
+        long_range: Some(long_range),
+    };
     let pair = py.allow_threads(|| {
         let cuda = CudaVpci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .vpci_many_series_one_param_time_major_dev(c, v, cols, rows, &params)
+        cuda.vpci_many_series_one_param_time_major_dev(c, v, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);

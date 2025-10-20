@@ -1,8 +1,8 @@
 // CUDA tests for Decycler Oscillator (DEC_OSC)
 
 use my_project::indicators::dec_osc::{
-    dec_osc_batch_with_kernel, dec_osc_with_kernel, DecOscBatchBuilder, DecOscBatchRange, DecOscInput,
-    DecOscParams,
+    dec_osc_batch_with_kernel, dec_osc_with_kernel, DecOscBatchBuilder, DecOscBatchRange,
+    DecOscInput, DecOscParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -45,7 +45,10 @@ fn dec_osc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             data[i] = (x * 0.00123).sin() + 0.00017 * x + 50.0;
         }
     }
-    let sweep = DecOscBatchRange { hp_period: (50, 90, 10), k: (0.5, 1.5, 0.5) };
+    let sweep = DecOscBatchRange {
+        hp_period: (50, 90, 10),
+        k: (0.5, 1.5, 0.5),
+    };
 
     let cpu = dec_osc_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
 
@@ -65,7 +68,13 @@ fn dec_osc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..host.len() {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={}, gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={}, gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -74,9 +83,7 @@ fn dec_osc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn dec_osc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[dec_osc_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[dec_osc_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -91,16 +98,23 @@ fn dec_osc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
             }
         }
     }
-    let params = DecOscParams { hp_period: Some(64), k: Some(1.0) };
+    let params = DecOscParams {
+        hp_period: Some(64),
+        k: Some(1.0),
+    };
 
     // CPU baseline
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = tm[t * cols + s]; }
+        for t in 0..rows {
+            series[t] = tm[t * cols + s];
+        }
         let input = DecOscInput::from_slice(&series, params.clone());
         let out = dec_osc_with_kernel(&input, Kernel::Scalar)?.values;
-        for t in 0..rows { cpu_tm[t * cols + s] = out[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out[t];
+        }
     }
 
     let cuda = CudaDecOsc::new(0).expect("CudaDecOsc::new");
@@ -124,4 +138,3 @@ fn dec_osc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
     }
     Ok(())
 }
-

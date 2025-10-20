@@ -14,7 +14,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::moving_averages::CudaVlma;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -53,7 +55,9 @@ fn vlma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let mut cuda = CudaVlma::new(0).expect("CudaVlma::new");
-    let dev = cuda.vlma_batch_dev(&price_f32, &sweep).expect("vlma_batch_dev");
+    let dev = cuda
+        .vlma_batch_dev(&price_f32, &sweep)
+        .expect("vlma_batch_dev");
 
     assert_eq!(cpu.rows, dev.rows);
     assert_eq!(cpu.cols, dev.cols);
@@ -65,7 +69,13 @@ fn vlma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -74,9 +84,7 @@ fn vlma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn vlma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[vlma_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[vlma_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -96,15 +104,29 @@ fn vlma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let mut cpu = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = tm[t * cols + s]; }
-        let params = VlmaParams { min_period: Some(min_p), max_period: Some(max_p), matype: Some("sma".to_string()), devtype: Some(0) };
+        for t in 0..rows {
+            series[t] = tm[t * cols + s];
+        }
+        let params = VlmaParams {
+            min_period: Some(min_p),
+            max_period: Some(max_p),
+            matype: Some("sma".to_string()),
+            devtype: Some(0),
+        };
         let input = VlmaInput::from_slice(&series, params);
         let out = vlma_with_kernel(&input, Kernel::Scalar)?.values;
-        for t in 0..rows { cpu[t * cols + s] = out[t]; }
+        for t in 0..rows {
+            cpu[t * cols + s] = out[t];
+        }
     }
 
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
-    let params = VlmaParams { min_period: Some(min_p), max_period: Some(max_p), matype: Some("sma".to_string()), devtype: Some(0) };
+    let params = VlmaParams {
+        min_period: Some(min_p),
+        max_period: Some(max_p),
+        matype: Some("sma".to_string()),
+        devtype: Some(0),
+    };
     let mut cuda = CudaVlma::new(0).expect("CudaVlma::new");
     let dev_tm = cuda
         .vlma_many_series_one_param_time_major_dev(&tm_f32, cols, rows, &params)
@@ -118,9 +140,12 @@ fn vlma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let tol = 2e-3;
     for idx in 0..g_tm.len() {
-        assert!(approx_eq(cpu[idx], g_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu[idx], g_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
 
     Ok(())
 }
-

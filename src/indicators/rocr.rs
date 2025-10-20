@@ -1112,7 +1112,6 @@ pub fn rocr_cuda_batch_dev_py(
     data_f32: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-    
 ) -> PyResult<crate::indicators::moving_averages::alma::DeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::CudaRocr;
@@ -1123,7 +1122,9 @@ pub fn rocr_cuda_batch_dev_py(
     }
 
     let slice = data_f32.as_slice()?;
-    let sweep = RocrBatchRange { period: period_range };
+    let sweep = RocrBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaRocr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.rocr_batch_dev(slice, &sweep)

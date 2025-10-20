@@ -41,9 +41,7 @@ fn cmo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         let x = i as f64;
         price[i] = (x * 0.00123).sin() + 0.00017 * x;
     }
-    let sweep = CmoBatchRange {
-        period: (7, 28, 7),
-    };
+    let sweep = CmoBatchRange { period: (7, 28, 7) };
 
     // Align CPU baseline to FP32 input used on GPU
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
@@ -52,7 +50,9 @@ fn cmo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     // Use previously built price_f32
     let cuda = CudaCmo::new(0).expect("CudaCmo::new");
-    let dev = cuda.cmo_batch_dev(&price_f32, &sweep).expect("cmo_batch_dev");
+    let dev = cuda
+        .cmo_batch_dev(&price_f32, &sweep)
+        .expect("cmo_batch_dev");
 
     assert_eq!(cpu.rows, dev.rows);
     assert_eq!(cpu.cols, dev.cols);
@@ -64,7 +64,13 @@ fn cmo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -73,9 +79,7 @@ fn cmo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn cmo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[cmo_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[cmo_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -97,7 +101,9 @@ fn cmo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         for t in 0..rows {
             p[t] = price_tm[t * cols + s];
         }
-        let params = CmoParams { period: Some(period) };
+        let params = CmoParams {
+            period: Some(period),
+        };
         let _input = CmoInput::from_slice(&p, params.clone());
         // Align CPU baseline to FP32 input used on GPU
         let p_f32: Vec<f32> = p.iter().map(|&v| v as f32).collect();
@@ -116,7 +122,9 @@ fn cmo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             &price_tm_f32,
             cols,
             rows,
-            &CmoParams { period: Some(period) },
+            &CmoParams {
+                period: Some(period),
+            },
         )
         .expect("cmo_many_series_one_param_time_major_dev");
 

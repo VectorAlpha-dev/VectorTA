@@ -1,15 +1,19 @@
-use my_project::indicators::ott::{ott_batch_with_kernel, ott_with_kernel, OttBatchRange, OttInput, OttParams, OttData};
+use my_project::indicators::ott::{
+    ott_batch_with_kernel, ott_with_kernel, OttBatchRange, OttData, OttInput, OttParams,
+};
 use my_project::utilities::enums::Kernel;
 
+#[cfg(feature = "cuda")]
+use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::CudaOtt;
-#[cfg(feature = "cuda")]
-use cust::memory::CopyDestination;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -30,7 +34,10 @@ fn ott_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let len = 4096usize;
     let mut price = vec![f64::NAN; len];
-    for i in 4..len { let x = i as f64; price[i] = (x * 0.00123).sin() + 0.00017 * x; }
+    for i in 4..len {
+        let x = i as f64;
+        price[i] = (x * 0.00123).sin() + 0.00017 * x;
+    }
     let sweep = OttBatchRange {
         period: (2, 3, 1),
         percent: (1.0, 1.4, 0.4),
@@ -40,7 +47,9 @@ fn ott_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let cpu = ott_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaOtt::new(0).expect("CudaOtt::new");
-    let dev = cuda.ott_batch_dev(&price_f32, &sweep).expect("ott_batch_dev");
+    let dev = cuda
+        .ott_batch_dev(&price_f32, &sweep)
+        .expect("ott_batch_dev");
     assert_eq!(cpu.rows, dev.rows);
     assert_eq!(cpu.cols, dev.cols);
     let mut got = vec![0f32; dev.len()];
@@ -49,7 +58,13 @@ fn ott_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = got[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -64,32 +79,58 @@ fn ott_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let cols = 8usize;
     let rows = 1024usize;
     let mut price_tm = vec![f64::NAN; cols * rows];
-    for s in 0..cols { for t in s..rows {
-        let x = (t as f64) + (s as f64) * 0.2;
-        price_tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
-    }}
+    for s in 0..cols {
+        for t in s..rows {
+            let x = (t as f64) + (s as f64) * 0.2;
+            price_tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+        }
+    }
 
     // CPU baseline per series (VAR default)
-    let period = 10usize; let percent = 1.4;
+    let period = 10usize;
+    let percent = 1.4;
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows { series[t] = price_tm[t * cols + s]; }
-        let params = OttParams { period: Some(period), percent: Some(percent), ma_type: Some("VAR".to_string()) };
-        let input = OttInput { data: OttData::Slice(&series), params };
+        for t in 0..rows {
+            series[t] = price_tm[t * cols + s];
+        }
+        let params = OttParams {
+            period: Some(period),
+            percent: Some(percent),
+            ma_type: Some("VAR".to_string()),
+        };
+        let input = OttInput {
+            data: OttData::Slice(&series),
+            params,
+        };
         let out = ott_with_kernel(&input, Kernel::Scalar)?.values;
-        for t in 0..rows { cpu_tm[t * cols + s] = out[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out[t];
+        }
     }
 
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaOtt::new(0).expect("CudaOtt::new");
-    let params = OttParams { period: Some(period), percent: Some(percent), ma_type: Some("VAR".to_string()) };
-    let dev = cuda.ott_many_series_one_param_time_major_dev(&price_tm_f32, cols, rows, &params)
+    let params = OttParams {
+        period: Some(period),
+        percent: Some(percent),
+        ma_type: Some("VAR".to_string()),
+    };
+    let dev = cuda
+        .ott_many_series_one_param_time_major_dev(&price_tm_f32, cols, rows, &params)
         .expect("ott_many_series_one_param_time_major_dev");
-    assert_eq!(dev.rows, rows); assert_eq!(dev.cols, cols);
-    let mut got = vec![0f32; dev.len()]; dev.buf.copy_to(&mut got)?;
+    assert_eq!(dev.rows, rows);
+    assert_eq!(dev.cols, cols);
+    let mut got = vec![0f32; dev.len()];
+    dev.buf.copy_to(&mut got)?;
     let tol = 2e-3;
-    for idx in 0..got.len() { assert!(approx_eq(cpu_tm[idx], got[idx] as f64, tol), "mismatch at {}", idx); }
+    for idx in 0..got.len() {
+        assert!(
+            approx_eq(cpu_tm[idx], got[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
+    }
     Ok(())
 }
-

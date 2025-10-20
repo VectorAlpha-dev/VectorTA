@@ -1,8 +1,8 @@
 // Integration tests for CUDA BOP kernels
 
 use my_project::indicators::bop::{bop_with_kernel, BopInput, BopParams};
-use my_project::utilities::enums::Kernel;
 use my_project::utilities::data_loader::{read_candles_from_csv, source_type};
+use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
@@ -135,12 +135,7 @@ fn bop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let cuda = CudaBop::new(0).expect("CudaBop::new");
     let dev_tm = cuda
         .bop_many_series_one_param_time_major_dev(
-            &open_f32,
-            &high_f32,
-            &low_f32,
-            &close_f32,
-            cols,
-            rows,
+            &open_f32, &high_f32, &low_f32, &close_f32, cols, rows,
         )
         .expect("bop_many_series_one_param_time_major_dev");
 
@@ -152,9 +147,12 @@ fn bop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let tol = 5e-5;
     for idx in 0..g_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
 
     Ok(())
 }
-

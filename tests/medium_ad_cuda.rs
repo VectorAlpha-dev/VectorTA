@@ -83,9 +83,7 @@ fn medium_ad_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
 #[test]
 fn medium_ad_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!(
-            "[medium_ad_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
-        );
+        eprintln!("[medium_ad_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
@@ -107,9 +105,7 @@ fn medium_ad_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         for t in 0..rows {
             series[t] = data_tm[t * cols + s];
         }
-        let out = MediumAdBuilder::new()
-            .period(period)
-            .apply_slice(&series)?;
+        let out = MediumAdBuilder::new().period(period).apply_slice(&series)?;
         for t in 0..rows {
             cpu_tm[t * cols + s] = out.values[t];
         }
@@ -145,4 +141,3 @@ fn medium_ad_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     Ok(())
 }
-

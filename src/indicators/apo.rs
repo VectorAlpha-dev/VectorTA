@@ -2359,7 +2359,10 @@ pub fn apo_cuda_batch_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data_f32.as_slice()?;
-    let sweep = ApoBatchRange { short: short_range, long: long_range };
+    let sweep = ApoBatchRange {
+        short: short_range,
+        long: long_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaApo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.apo_batch_dev(slice, &sweep)
@@ -2390,7 +2393,10 @@ pub fn apo_cuda_many_series_one_param_dev_py(
     let flat = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = ApoParams { short_period: Some(short_period), long_period: Some(long_period) };
+    let params = ApoParams {
+        short_period: Some(short_period),
+        long_period: Some(long_period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaApo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.apo_many_series_one_param_time_major_dev(flat, cols, rows, &params)

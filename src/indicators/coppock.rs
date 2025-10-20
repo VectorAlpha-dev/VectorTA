@@ -2616,9 +2616,9 @@ pub fn coppock_batch_py<'py>(
 
 // ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::coppock_wrapper::CudaCoppock;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::coppock_wrapper::CudaCoppock;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
@@ -2633,13 +2633,20 @@ pub fn coppock_cuda_batch_dev_py(
     ma_range: (usize, usize, usize),
     device_id: usize,
 ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let price = data.as_slice()?;
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
-    let sweep = CoppockBatchRange { short: short_range, long: long_range, ma: ma_range };
+    let sweep = CoppockBatchRange {
+        short: short_range,
+        long: long_range,
+        ma: ma_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaCoppock::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.coppock_batch_dev(&price_f32, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.coppock_batch_dev(&price_f32, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }
@@ -2656,16 +2663,29 @@ pub fn coppock_cuda_many_series_one_param_dev_py(
     long_period: usize,
     ma_period: usize,
     device_id: usize,
-    ) -> PyResult<DeviceArrayF32Py> {
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+) -> PyResult<DeviceArrayF32Py> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let slice = data_tm.as_slice()?;
-    let expected = cols.checked_mul(rows).ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
-    if slice.len() != expected { return Err(PyValueError::new_err("time-major input length mismatch")); }
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    if slice.len() != expected {
+        return Err(PyValueError::new_err("time-major input length mismatch"));
+    }
     let price_f32: Vec<f32> = slice.iter().map(|&v| v as f32).collect();
     let inner = py.allow_threads(|| {
         let cuda = CudaCoppock::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.coppock_many_series_one_param_time_major_dev(&price_f32, cols, rows, short_period, long_period, ma_period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.coppock_many_series_one_param_time_major_dev(
+            &price_f32,
+            cols,
+            rows,
+            short_period,
+            long_period,
+            ma_period,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

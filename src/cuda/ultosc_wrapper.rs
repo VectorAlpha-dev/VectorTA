@@ -42,15 +42,22 @@ impl std::error::Error for CudaUltoscError {}
 pub enum BatchKernelPolicy {
     #[default]
     Auto,
-    Plain { block_x: u32 },
+    Plain {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
-    OneD { block_x: u32 },
-    Tiled2D { tx: u32, ty: u32 },
+    OneD {
+        block_x: u32,
+    },
+    Tiled2D {
+        tx: u32,
+        ty: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -60,7 +67,9 @@ pub struct CudaUltoscPolicy {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum BatchKernelSelected { Plain { block_x: u32 } }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
@@ -81,8 +90,8 @@ pub struct CudaUltosc {
 impl CudaUltosc {
     pub fn new(device_id: usize) -> Result<Self, CudaUltoscError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ultosc_kernel.ptx"));
@@ -112,33 +121,56 @@ impl CudaUltosc {
         })
     }
 
-    pub fn set_policy(&mut self, p: CudaUltoscPolicy) { self.policy = p; }
-    pub fn policy(&self) -> &CudaUltoscPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, p: CudaUltoscPolicy) {
+        self.policy = p;
+    }
+    pub fn policy(&self) -> &CudaUltoscPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
-        match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && v.to_lowercase() != "false", Err(_) => true }
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Some((free, _)) = Self::device_mem_info() { required.saturating_add(headroom) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required.saturating_add(headroom) <= free
+        } else {
+            true
+        }
     }
     #[inline]
     fn maybe_log_batch_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] ultosc batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaUltosc)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaUltosc)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -146,13 +178,17 @@ impl CudaUltosc {
     fn maybe_log_many_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] ultosc many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaUltosc)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaUltosc)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -166,31 +202,45 @@ impl CudaUltosc {
         close_f32: &[f32],
         sweep: &UltOscBatchRange,
     ) -> Result<DeviceArrayF32, CudaUltoscError> {
-        let (combos, first_valid, len) = Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
+        let (combos, first_valid, len) =
+            Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
         let (pcmtl, ptr) = build_prefix_sums_ulthlc(high_f32, low_f32, close_f32, first_valid);
 
         // VRAM estimate + headroom (~64MB)
         let headroom = 64 * 1024 * 1024usize;
-        let bytes_required =
-            2 * (len + 1) * std::mem::size_of::<f64>() // pcmtl + ptr
+        let bytes_required = 2 * (len + 1) * std::mem::size_of::<f64>() // pcmtl + ptr
             + 3 * combos.len() * std::mem::size_of::<i32>() // p1/p2/p3
             + combos.len() * len * std::mem::size_of::<f32>(); // out
         if !Self::will_fit(bytes_required, headroom) {
             return Err(CudaUltoscError::Cuda(format!(
                 "insufficient VRAM: need ~{} MiB incl. headroom",
-                (bytes_required + headroom + (1<<20)-1) / (1<<20)
+                (bytes_required + headroom + (1 << 20) - 1) / (1 << 20)
             )));
         }
 
         // Device staging
-        let d_pcmtl = DeviceBuffer::from_slice(&pcmtl).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_ptr = DeviceBuffer::from_slice(&ptr).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let p1s: Vec<i32> = combos.iter().map(|c| c.timeperiod1.unwrap_or(7) as i32).collect();
-        let p2s: Vec<i32> = combos.iter().map(|c| c.timeperiod2.unwrap_or(14) as i32).collect();
-        let p3s: Vec<i32> = combos.iter().map(|c| c.timeperiod3.unwrap_or(28) as i32).collect();
-        let d_p1 = DeviceBuffer::from_slice(&p1s).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_p2 = DeviceBuffer::from_slice(&p2s).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_p3 = DeviceBuffer::from_slice(&p3s).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let d_pcmtl =
+            DeviceBuffer::from_slice(&pcmtl).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let d_ptr =
+            DeviceBuffer::from_slice(&ptr).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let p1s: Vec<i32> = combos
+            .iter()
+            .map(|c| c.timeperiod1.unwrap_or(7) as i32)
+            .collect();
+        let p2s: Vec<i32> = combos
+            .iter()
+            .map(|c| c.timeperiod2.unwrap_or(14) as i32)
+            .collect();
+        let p3s: Vec<i32> = combos
+            .iter()
+            .map(|c| c.timeperiod3.unwrap_or(28) as i32)
+            .collect();
+        let d_p1 =
+            DeviceBuffer::from_slice(&p1s).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let d_p2 =
+            DeviceBuffer::from_slice(&p2s).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let d_p3 =
+            DeviceBuffer::from_slice(&p3s).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
 
         // VRAM estimate + headroom (~64MB)
         let out_elems = combos.len() * len;
@@ -209,7 +259,11 @@ impl CudaUltosc {
             &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -225,14 +279,19 @@ impl CudaUltosc {
         nrows: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaUltoscError> {
-        if nrows == 0 || len == 0 { return Ok(()); }
+        if nrows == 0 || len == 0 {
+            return Ok(());
+        }
 
         let func = self
             .module
             .get_function("ultosc_batch_f32")
             .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x.max(64) };
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(64),
+        };
         let grid_x = ((len as u32) + block_x - 1) / block_x;
         let max_grid_y: usize = 65_535;
 
@@ -241,18 +300,25 @@ impl CudaUltosc {
             let chunk = (nrows - launched).min(max_grid_y);
             let grid: GridSize = (grid_x.max(1), chunk as u32, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
-            unsafe { (*(self as *const _ as *mut CudaUltosc)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+            unsafe {
+                (*(self as *const _ as *mut CudaUltosc)).last_batch =
+                    Some(BatchKernelSelected::Plain { block_x });
+            }
 
             unsafe {
                 let mut pcmtl_ptr = d_pcmtl.as_device_ptr().as_raw();
                 let mut ptr_ptr = d_ptr.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
-                let mut p1_ptr = d_p1.as_device_ptr().as_raw() + (launched as u64) * std::mem::size_of::<i32>() as u64;
-                let mut p2_ptr = d_p2.as_device_ptr().as_raw() + (launched as u64) * std::mem::size_of::<i32>() as u64;
-                let mut p3_ptr = d_p3.as_device_ptr().as_raw() + (launched as u64) * std::mem::size_of::<i32>() as u64;
+                let mut p1_ptr = d_p1.as_device_ptr().as_raw()
+                    + (launched as u64) * std::mem::size_of::<i32>() as u64;
+                let mut p2_ptr = d_p2.as_device_ptr().as_raw()
+                    + (launched as u64) * std::mem::size_of::<i32>() as u64;
+                let mut p3_ptr = d_p3.as_device_ptr().as_raw()
+                    + (launched as u64) * std::mem::size_of::<i32>() as u64;
                 let mut nrows_i = chunk as i32;
-                let mut out_ptr = d_out.as_device_ptr().as_raw() + (launched as u64) * (len as u64) * std::mem::size_of::<f32>() as u64;
+                let mut out_ptr = d_out.as_device_ptr().as_raw()
+                    + (launched as u64) * (len as u64) * std::mem::size_of::<f32>() as u64;
                 let args: &mut [*mut c_void] = &mut [
                     &mut pcmtl_ptr as *mut _ as *mut c_void,
                     &mut ptr_ptr as *mut _ as *mut c_void,
@@ -281,26 +347,56 @@ impl CudaUltosc {
         sweep: &UltOscBatchRange,
     ) -> Result<(Vec<UltOscParams>, usize, usize), CudaUltoscError> {
         if high.len() != low.len() || high.len() != close.len() {
-            return Err(CudaUltoscError::InvalidInput("input length mismatch".into()));
+            return Err(CudaUltoscError::InvalidInput(
+                "input length mismatch".into(),
+            ));
         }
-        if high.is_empty() { return Err(CudaUltoscError::InvalidInput("empty input".into())); }
+        if high.is_empty() {
+            return Err(CudaUltoscError::InvalidInput("empty input".into()));
+        }
         let len = high.len();
         // Find first valid index where both i-1 and i are finite
         let mut first_valid = None;
-        for i in 1..len { if high[i-1].is_finite() && low[i-1].is_finite() && close[i-1].is_finite() && high[i].is_finite() && low[i].is_finite() && close[i].is_finite() { first_valid = Some(i); break; } }
-        let first = first_valid.ok_or_else(|| CudaUltoscError::InvalidInput("all values are NaN".into()))?;
+        for i in 1..len {
+            if high[i - 1].is_finite()
+                && low[i - 1].is_finite()
+                && close[i - 1].is_finite()
+                && high[i].is_finite()
+                && low[i].is_finite()
+                && close[i].is_finite()
+            {
+                first_valid = Some(i);
+                break;
+            }
+        }
+        let first = first_valid
+            .ok_or_else(|| CudaUltoscError::InvalidInput("all values are NaN".into()))?;
 
         let combos = expand_grid_ultosc(sweep);
-        if combos.is_empty() { return Err(CudaUltoscError::InvalidInput("no parameter combinations".into())); }
+        if combos.is_empty() {
+            return Err(CudaUltoscError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         // Validate each combo
         for c in &combos {
             let p1 = c.timeperiod1.unwrap_or(7);
             let p2 = c.timeperiod2.unwrap_or(14);
             let p3 = c.timeperiod3.unwrap_or(28);
             let maxp = p1.max(p2).max(p3);
-            if maxp == 0 { return Err(CudaUltoscError::InvalidInput("periods must be > 0".into())); }
-            if maxp > len { return Err(CudaUltoscError::InvalidInput("period exceeds data length".into())); }
-            if len - first < maxp { return Err(CudaUltoscError::InvalidInput("not enough valid data".into())); }
+            if maxp == 0 {
+                return Err(CudaUltoscError::InvalidInput("periods must be > 0".into()));
+            }
+            if maxp > len {
+                return Err(CudaUltoscError::InvalidInput(
+                    "period exceeds data length".into(),
+                ));
+            }
+            if len - first < maxp {
+                return Err(CudaUltoscError::InvalidInput(
+                    "not enough valid data".into(),
+                ));
+            }
         }
         Ok((combos, first, len))
     }
@@ -318,12 +414,32 @@ impl CudaUltosc {
         p2: usize,
         p3: usize,
     ) -> Result<DeviceArrayF32, CudaUltoscError> {
-        let prep = Self::prepare_many_series_inputs(high_tm_f32, low_tm_f32, close_tm_f32, cols, rows, p1, p2, p3)?;
-        let (pcmtl_tm, ptr_tm) = build_prefix_sums_time_major_ulthlc(high_tm_f32, low_tm_f32, close_tm_f32, cols, rows, &prep.first_valids);
-        let d_pcmtl_tm = DeviceBuffer::from_slice(&pcmtl_tm).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_ptr_tm = DeviceBuffer::from_slice(&ptr_tm).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&prep.first_valids).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let prep = Self::prepare_many_series_inputs(
+            high_tm_f32,
+            low_tm_f32,
+            close_tm_f32,
+            cols,
+            rows,
+            p1,
+            p2,
+            p3,
+        )?;
+        let (pcmtl_tm, ptr_tm) = build_prefix_sums_time_major_ulthlc(
+            high_tm_f32,
+            low_tm_f32,
+            close_tm_f32,
+            cols,
+            rows,
+            &prep.first_valids,
+        );
+        let d_pcmtl_tm = DeviceBuffer::from_slice(&pcmtl_tm)
+            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let d_ptr_tm =
+            DeviceBuffer::from_slice(&ptr_tm).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&prep.first_valids)
+            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
 
         self.launch_many_series(
             &d_pcmtl_tm,
@@ -337,7 +453,11 @@ impl CudaUltosc {
             &mut d_out_tm,
         )?;
 
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -353,7 +473,9 @@ impl CudaUltosc {
         d_first_valids: &DeviceBuffer<i32>,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaUltoscError> {
-        if cols == 0 || rows == 0 { return Ok(()); }
+        if cols == 0 || rows == 0 {
+            return Ok(());
+        }
         let func = self
             .module
             .get_function("ultosc_many_series_one_param_f32")
@@ -361,11 +483,17 @@ impl CudaUltosc {
 
         match self.policy.many_series {
             ManySeriesKernelPolicy::Auto | ManySeriesKernelPolicy::OneD { .. } => {
-                let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64), _ => 256 };
+                let block_x: u32 = match self.policy.many_series {
+                    ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
+                    _ => 256,
+                };
                 let grid_x = ((rows as u32) + block_x - 1) / block_x;
                 let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
-                unsafe { (*(self as *const _ as *mut CudaUltosc)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+                unsafe {
+                    (*(self as *const _ as *mut CudaUltosc)).last_many =
+                        Some(ManySeriesKernelSelected::OneD { block_x });
+                }
                 unsafe {
                     let mut pcmtl_ptr = d_pcmtl_tm.as_device_ptr().as_raw();
                     let mut ptr_ptr = d_ptr_tm.as_device_ptr().as_raw();
@@ -398,7 +526,10 @@ impl CudaUltosc {
                 let grid_x = ((rows as u32) + tx - 1) / tx;
                 let grid_y = ((cols as u32) + ty - 1) / ty;
                 let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
-                unsafe { (*(self as *const _ as *mut CudaUltosc)).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty }); }
+                unsafe {
+                    (*(self as *const _ as *mut CudaUltosc)).last_many =
+                        Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
+                }
                 unsafe {
                     let mut pcmtl_ptr = d_pcmtl_tm.as_device_ptr().as_raw();
                     let mut ptr_ptr = d_ptr_tm.as_device_ptr().as_raw();
@@ -441,12 +572,24 @@ impl CudaUltosc {
         p3: usize,
     ) -> Result<PreparedManySeries, CudaUltoscError> {
         if high_tm.len() != low_tm.len() || high_tm.len() != close_tm.len() {
-            return Err(CudaUltoscError::InvalidInput("matrix length mismatch".into()));
+            return Err(CudaUltoscError::InvalidInput(
+                "matrix length mismatch".into(),
+            ));
         }
-        if cols == 0 || rows == 0 { return Err(CudaUltoscError::InvalidInput("matrix dims must be positive".into())); }
-        if high_tm.len() != cols * rows { return Err(CudaUltoscError::InvalidInput("matrix shape mismatch".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaUltoscError::InvalidInput(
+                "matrix dims must be positive".into(),
+            ));
+        }
+        if high_tm.len() != cols * rows {
+            return Err(CudaUltoscError::InvalidInput(
+                "matrix shape mismatch".into(),
+            ));
+        }
         let maxp = p1.max(p2).max(p3);
-        if maxp == 0 { return Err(CudaUltoscError::InvalidInput("periods must be > 0".into())); }
+        if maxp == 0 {
+            return Err(CudaUltoscError::InvalidInput("periods must be > 0".into()));
+        }
 
         // first_valid per series where (t-1,t) rows are all finite
         let mut first_valids = vec![0i32; cols];
@@ -466,20 +609,32 @@ impl CudaUltosc {
                     break;
                 }
             }
-            let val = fv.ok_or_else(|| CudaUltoscError::InvalidInput(format!("series {} all NaN", s)))?;
-            if rows - val < maxp { return Err(CudaUltoscError::InvalidInput("not enough valid data".into())); }
+            let val =
+                fv.ok_or_else(|| CudaUltoscError::InvalidInput(format!("series {} all NaN", s)))?;
+            if rows - val < maxp {
+                return Err(CudaUltoscError::InvalidInput(
+                    "not enough valid data".into(),
+                ));
+            }
             first_valids[s] = val as i32;
         }
         Ok(PreparedManySeries { first_valids })
     }
 }
 
-struct PreparedManySeries { first_valids: Vec<i32> }
+struct PreparedManySeries {
+    first_valids: Vec<i32>,
+}
 
 // ---------------- Prefix builders ----------------
 
 // Build prefix sums for CMTL and TR on a single series (len+1 each) in f64
-fn build_prefix_sums_ulthlc(high: &[f32], low: &[f32], close: &[f32], first_valid: usize) -> (Vec<f64>, Vec<f64>) {
+fn build_prefix_sums_ulthlc(
+    high: &[f32],
+    low: &[f32],
+    close: &[f32],
+    first_valid: usize,
+) -> (Vec<f64>, Vec<f64>) {
     let len = high.len();
     let mut pcmtl = vec![0.0f64; len + 1];
     let mut ptr = vec![0.0f64; len + 1];
@@ -494,8 +649,14 @@ fn build_prefix_sums_ulthlc(high: &[f32], low: &[f32], close: &[f32], first_vali
             let tl = if lo < pc { lo } else { pc };
             // tr = max( hi - low, |hi - pc|, |low - pc| )
             let mut trv = hi - lo;
-            let d1 = (hi - pc).abs(); if d1 > trv { trv = d1; }
-            let d2 = (lo - pc).abs(); if d2 > trv { trv = d2; }
+            let d1 = (hi - pc).abs();
+            if d1 > trv {
+                trv = d1;
+            }
+            let d2 = (lo - pc).abs();
+            if d2 > trv {
+                trv = d2;
+            }
             add_c = ci - tl;
             add_t = trv;
         }
@@ -529,8 +690,14 @@ fn build_prefix_sums_time_major_ulthlc(
                 let pc = close_tm[idx - cols] as f64; // previous row same series
                 let tl = if lo < pc { lo } else { pc };
                 let mut trv = hi - lo;
-                let d1 = (hi - pc).abs(); if d1 > trv { trv = d1; }
-                let d2 = (lo - pc).abs(); if d2 > trv { trv = d2; }
+                let d1 = (hi - pc).abs();
+                if d1 > trv {
+                    trv = d1;
+                }
+                let d2 = (lo - pc).abs();
+                if d2 > trv {
+                    trv = d2;
+                }
                 add_c = ci - tl;
                 add_t = trv;
             }
@@ -546,13 +713,27 @@ fn build_prefix_sums_time_major_ulthlc(
 // Local copy of expand_grid to avoid relying on private items in the indicator
 fn expand_grid_ultosc(r: &UltOscBatchRange) -> Vec<UltOscParams> {
     fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { vec![start] } else { (start..=end).step_by(step).collect() }
+        if step == 0 || start == end {
+            vec![start]
+        } else {
+            (start..=end).step_by(step).collect()
+        }
     }
     let t1 = axis(r.timeperiod1);
     let t2 = axis(r.timeperiod2);
     let t3 = axis(r.timeperiod3);
     let mut out = Vec::with_capacity(t1.len() * t2.len() * t3.len());
-    for &a in &t1 { for &b in &t2 { for &c in &t3 { out.push(UltOscParams { timeperiod1: Some(a), timeperiod2: Some(b), timeperiod3: Some(c) }); } } }
+    for &a in &t1 {
+        for &b in &t2 {
+            for &c in &t3 {
+                out.push(UltOscParams {
+                    timeperiod1: Some(a),
+                    timeperiod2: Some(b),
+                    timeperiod3: Some(c),
+                });
+            }
+        }
+    }
     out
 }
 
@@ -629,18 +810,40 @@ pub mod benches {
             timeperiod2: (8, 64, 8),
             timeperiod3: (16, 128, 16),
         };
-        let (combos, first, len) = CudaUltosc::prepare_batch_inputs(&high, &low, &close, &sweep).expect("prep");
+        let (combos, first, len) =
+            CudaUltosc::prepare_batch_inputs(&high, &low, &close, &sweep).expect("prep");
         let (pcmtl, ptr) = build_prefix_sums_ulthlc(&high, &low, &close, first);
-        let p1s: Vec<i32> = combos.iter().map(|c| c.timeperiod1.unwrap() as i32).collect();
-        let p2s: Vec<i32> = combos.iter().map(|c| c.timeperiod2.unwrap() as i32).collect();
-        let p3s: Vec<i32> = combos.iter().map(|c| c.timeperiod3.unwrap() as i32).collect();
+        let p1s: Vec<i32> = combos
+            .iter()
+            .map(|c| c.timeperiod1.unwrap() as i32)
+            .collect();
+        let p2s: Vec<i32> = combos
+            .iter()
+            .map(|c| c.timeperiod2.unwrap() as i32)
+            .collect();
+        let p3s: Vec<i32> = combos
+            .iter()
+            .map(|c| c.timeperiod3.unwrap() as i32)
+            .collect();
         let d_pcmtl = DeviceBuffer::from_slice(&pcmtl).expect("d_pcmtl");
         let d_ptr = DeviceBuffer::from_slice(&ptr).expect("d_ptr");
         let d_p1 = DeviceBuffer::from_slice(&p1s).expect("d_p1");
         let d_p2 = DeviceBuffer::from_slice(&p2s).expect("d_p2");
         let d_p3 = DeviceBuffer::from_slice(&p3s).expect("d_p3");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(combos.len() * len) }.expect("d_out");
-        Box::new(UltoscBatchState { cuda, d_pcmtl, d_ptr, d_p1, d_p2, d_p3, d_out, len, first, nrows: combos.len() })
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(combos.len() * len) }.expect("d_out");
+        Box::new(UltoscBatchState {
+            cuda,
+            d_pcmtl,
+            d_ptr,
+            d_p1,
+            d_p2,
+            d_p3,
+            d_out,
+            len,
+            first,
+            nrows: combos.len(),
+        })
     }
 
     struct UltoscManySeriesState {
@@ -694,16 +897,41 @@ pub mod benches {
 
     fn prep_ultosc_many_series() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaUltosc::new(0).expect("cuda ultosc");
-        cuda.set_policy(CudaUltoscPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 } });
+        cuda.set_policy(CudaUltoscPolicy {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 },
+        });
         let (high_tm, low_tm, close_tm) = synth_hlc_tm(MS_COLS, MS_ROWS);
         let (p1, p2, p3) = (7usize, 14usize, 28usize);
-        let prep = CudaUltosc::prepare_many_series_inputs(&high_tm, &low_tm, &close_tm, MS_COLS, MS_ROWS, p1, p2, p3).expect("prep ms");
-        let (pcmtl_tm, ptr_tm) = build_prefix_sums_time_major_ulthlc(&high_tm, &low_tm, &close_tm, MS_COLS, MS_ROWS, &prep.first_valids);
+        let prep = CudaUltosc::prepare_many_series_inputs(
+            &high_tm, &low_tm, &close_tm, MS_COLS, MS_ROWS, p1, p2, p3,
+        )
+        .expect("prep ms");
+        let (pcmtl_tm, ptr_tm) = build_prefix_sums_time_major_ulthlc(
+            &high_tm,
+            &low_tm,
+            &close_tm,
+            MS_COLS,
+            MS_ROWS,
+            &prep.first_valids,
+        );
         let d_pcmtl_tm = DeviceBuffer::from_slice(&pcmtl_tm).expect("d_pcmtl_tm");
         let d_ptr_tm = DeviceBuffer::from_slice(&ptr_tm).expect("d_ptr_tm");
         let d_first = DeviceBuffer::from_slice(&prep.first_valids).expect("d_first");
-        let d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(MS_COLS * MS_ROWS) }.expect("d_out_tm");
-        Box::new(UltoscManySeriesState { cuda, d_pcmtl_tm, d_ptr_tm, d_first, d_out_tm, cols: MS_COLS, rows: MS_ROWS, p1, p2, p3 })
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(MS_COLS * MS_ROWS) }.expect("d_out_tm");
+        Box::new(UltoscManySeriesState {
+            cuda,
+            d_pcmtl_tm,
+            d_ptr_tm,
+            d_first,
+            d_out_tm,
+            cols: MS_COLS,
+            rows: MS_ROWS,
+            p1,
+            p2,
+            p3,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

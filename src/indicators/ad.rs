@@ -17,6 +17,10 @@
 //! - **Decision note**: SIMD shows >5% speedup at 100k on x86_64 when enabled; scalar remains the
 //!   reference path and is fully safe. Runtime selection short-circuits to scalar where SIMD is unavailable.
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaAd;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -24,6 +28,8 @@ use crate::utilities::helpers::{
 };
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use numpy::PyReadonlyArray1;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -33,12 +39,6 @@ use pyo3::{pyfunction, Bound, PyResult, Python};
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::CudaAd;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::PyReadonlyArray1;
 
 #[derive(Debug, Clone)]
 pub enum AdData<'a> {
@@ -798,8 +798,7 @@ pub fn ad_cuda_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .ad_series_dev(high, low, close, volume)
+        cuda.ad_series_dev(high, low, close, volume)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
@@ -830,9 +829,10 @@ pub fn ad_cuda_many_series_one_param_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .ad_many_series_one_param_time_major_dev(high_tm, low_tm, close_tm, volume_tm, cols, rows)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.ad_many_series_one_param_time_major_dev(
+            high_tm, low_tm, close_tm, volume_tm, cols, rows,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     Ok(DeviceArrayF32Py { inner })

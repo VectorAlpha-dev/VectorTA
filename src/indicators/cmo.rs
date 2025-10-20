@@ -1246,15 +1246,21 @@ pub fn cmo_cuda_batch_dev_py<'py>(
     };
     let inner = py.allow_threads(|| {
         let cuda = CudaCmo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.cmo_batch_dev(prices, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.cmo_batch_dev(prices, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let dict = PyDict::new(py);
     let (start, end, step) = period_range;
     let mut periods: Vec<u64> = Vec::new();
-    if step == 0 { periods.push(start as u64); } else {
+    if step == 0 {
+        periods.push(start as u64);
+    } else {
         let mut p = start;
-        while p <= end { periods.push(p as u64); p = p.saturating_add(step); }
+        while p <= end {
+            periods.push(p as u64);
+            p = p.saturating_add(step);
+        }
     }
     dict.set_item("periods", periods.into_pyarray(py))?;
 
@@ -1278,7 +1284,9 @@ pub fn cmo_cuda_many_series_one_param_dev_py(
     let flat = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = CmoParams { period: Some(period) };
+    let params = CmoParams {
+        period: Some(period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaCmo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.cmo_many_series_one_param_time_major_dev(flat, cols, rows, &params)

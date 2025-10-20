@@ -1709,6 +1709,8 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -1719,8 +1721,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "qstick")]
@@ -1837,7 +1837,10 @@ pub fn register_qstick_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(qstick_cuda_batch_dev_py, m)?)?;
-        m.add_function(wrap_pyfunction!(qstick_cuda_many_series_one_param_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            qstick_cuda_many_series_one_param_dev_py,
+            m
+        )?)?;
     }
     Ok(())
 }
@@ -1856,10 +1859,14 @@ pub fn qstick_cuda_batch_dev_py(
     use crate::cuda::cuda_available;
     use crate::cuda::CudaQstick;
 
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let open_slice = open_f32.as_slice()?;
     let close_slice = close_f32.as_slice()?;
-    let sweep = QstickBatchRange { period: period_range };
+    let sweep = QstickBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaQstick::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.qstick_batch_dev(open_slice, close_slice, &sweep)
@@ -1882,7 +1889,9 @@ pub fn qstick_cuda_many_series_one_param_dev_py(
     use crate::cuda::CudaQstick;
     use numpy::PyUntypedArrayMethods;
 
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     if open_tm_f32.shape() != close_tm_f32.shape() {
         return Err(PyValueError::new_err("open/close shapes differ"));
     }

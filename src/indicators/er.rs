@@ -1269,9 +1269,9 @@ pub fn er_batch_into(
 
 // ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::er_wrapper::CudaEr;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyReadonlyArray1;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1293,11 +1293,12 @@ pub fn er_cuda_batch_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data_f32.as_slice()?;
-    let sweep = ErBatchRange { period: period_range };
+    let sweep = ErBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaEr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .er_batch_dev(slice, &sweep)
+        cuda.er_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
@@ -1321,8 +1322,7 @@ pub fn er_cuda_many_series_one_param_dev_py(
     let slice = data_tm_f32.as_slice()?;
     let inner = py.allow_threads(|| {
         let cuda = CudaEr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .er_many_series_one_param_time_major_dev(slice, cols, rows, period)
+        cuda.er_many_series_one_param_time_major_dev(slice, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })

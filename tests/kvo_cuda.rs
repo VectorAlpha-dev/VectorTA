@@ -11,7 +11,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::CudaKvo;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -46,8 +48,13 @@ fn kvo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         volume[i] = ((x * 0.0031).cos().abs() + 1.0) * 500.0;
     }
 
-    let sweep = my_project::indicators::kvo::KvoBatchRange { short_period: (2, 8, 2), long_period: (10, 18, 2) };
-    let cpu = KvoBatchBuilder::new().kernel(Kernel::ScalarBatch).apply_slices(&high, &low, &close, &volume)?;
+    let sweep = my_project::indicators::kvo::KvoBatchRange {
+        short_period: (2, 8, 2),
+        long_period: (10, 18, 2),
+    };
+    let cpu = KvoBatchBuilder::new()
+        .kernel(Kernel::ScalarBatch)
+        .apply_slices(&high, &low, &close, &volume)?;
 
     let h_f32: Vec<f32> = high.iter().copied().map(|v| v as f32).collect();
     let l_f32: Vec<f32> = low.iter().copied().map(|v| v as f32).collect();
@@ -55,7 +62,9 @@ fn kvo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let v_f32: Vec<f32> = volume.iter().copied().map(|v| v as f32).collect();
 
     let cuda = CudaKvo::new(0).expect("CudaKvo::new");
-    let (dev, combos) = cuda.kvo_batch_dev(&h_f32, &l_f32, &c_f32, &v_f32, &sweep).expect("kvo_batch_dev");
+    let (dev, combos) = cuda
+        .kvo_batch_dev(&h_f32, &l_f32, &c_f32, &v_f32, &sweep)
+        .expect("kvo_batch_dev");
     assert_eq!(dev.rows, cpu.rows);
     assert_eq!(dev.cols, cpu.cols);
     assert_eq!(combos.len(), cpu.rows);
@@ -67,7 +76,13 @@ fn kvo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..host.len() {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
     Ok(())
 }
@@ -116,7 +131,10 @@ fn kvo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             c[t] = c_tm[idx];
             v[t] = v_tm[idx];
         }
-        let params = KvoParams { short_period: Some(short), long_period: Some(long) };
+        let params = KvoParams {
+            short_period: Some(short),
+            long_period: Some(long),
+        };
         let input = KvoInput::from_slices(&h, &l, &c, &v, params);
         let out = kvo_with_kernel(&input, Kernel::Scalar)?.values;
         for t in 0..rows {
@@ -131,7 +149,18 @@ fn kvo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let cuda = CudaKvo::new(0).expect("CudaKvo::new");
     let dev = cuda
-        .kvo_many_series_one_param_time_major_dev(&h_f32, &l_f32, &c_f32, &v_f32, cols, rows, &KvoParams { short_period: Some(short), long_period: Some(long) })
+        .kvo_many_series_one_param_time_major_dev(
+            &h_f32,
+            &l_f32,
+            &c_f32,
+            &v_f32,
+            cols,
+            rows,
+            &KvoParams {
+                short_period: Some(short),
+                long_period: Some(long),
+            },
+        )
         .expect("kvo many series");
     assert_eq!(dev.rows, rows);
     assert_eq!(dev.cols, cols);
@@ -141,8 +170,11 @@ fn kvo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let tol = 2e-3;
     for idx in 0..g.len() {
-        assert!(approx_eq(cpu[idx], g[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu[idx], g[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }
-

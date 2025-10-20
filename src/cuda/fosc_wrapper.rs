@@ -25,8 +25,8 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::cell::Cell;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub enum CudaFoscError {
@@ -65,7 +65,10 @@ pub struct CudaFoscPolicy {
 }
 impl Default for CudaFoscPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -84,8 +87,8 @@ pub struct CudaFosc {
 impl CudaFosc {
     pub fn new(device_id: usize) -> Result<Self, CudaFoscError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/fosc_kernel.ptx"));
@@ -115,10 +118,18 @@ impl CudaFosc {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaFoscPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaFoscPolicy { &self.policy }
-    pub fn selected_batch_block_x(&self) -> Option<u32> { self.last_batch_block_x.get() }
-    pub fn selected_many_block_y(&self) -> Option<u32> { self.last_many_block_y.get() }
+    pub fn set_policy(&mut self, policy: CudaFoscPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaFoscPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_block_x(&self) -> Option<u32> {
+        self.last_batch_block_x.get()
+    }
+    pub fn selected_many_block_y(&self) -> Option<u32> {
+        self.last_many_block_y.get()
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -127,17 +138,25 @@ impl CudaFosc {
         }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(bx) = self.last_batch_block_x.get() {
-                eprintln!("[DEBUG] FOSC batch selected block_x={} (1 thread does scan)", bx);
+                eprintln!(
+                    "[DEBUG] FOSC batch selected block_x={} (1 thread does scan)",
+                    bx
+                );
                 self.debug_batch_logged.store(true, Ordering::Relaxed);
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
-        if self.debug_many_logged.load(Ordering::Relaxed) { return; }
+        if self.debug_many_logged.load(Ordering::Relaxed) {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(by) = self.last_many_block_y.get() {
-                eprintln!("[DEBUG] FOSC many-series selected block_y={} (1 thread per series)", by);
+                eprintln!(
+                    "[DEBUG] FOSC many-series selected block_y={} (1 thread per series)",
+                    by
+                );
                 self.debug_many_logged.store(true, Ordering::Relaxed);
             }
         }
@@ -165,18 +184,29 @@ impl CudaFosc {
             }
         }
 
-        let d_data = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
+        let d_data =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
+        let d_periods =
+            DeviceBuffer::from_slice(&periods).map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(len * n_combos)
                 .map_err(|e| CudaFoscError::Cuda(e.to_string()))?
         };
 
-        self.launch_batch_kernel(&d_data, len as i32, first_valid as i32, &d_periods, n_combos as i32, &mut d_out)?;
+        self.launch_batch_kernel(
+            &d_data,
+            len as i32,
+            first_valid as i32,
+            &d_periods,
+            n_combos as i32,
+            &mut d_out,
+        )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -189,7 +219,9 @@ impl CudaFosc {
         n_combos: i32,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaFoscError> {
-        if len <= 0 || n_combos <= 0 { return Ok(()); }
+        if len <= 0 || n_combos <= 0 {
+            return Ok(());
+        }
         let func = self
             .module
             .get_function("fosc_batch_f32")
@@ -239,7 +271,8 @@ impl CudaFosc {
         rows: usize,
         params: &FoscParams,
     ) -> Result<DeviceArrayF32, CudaFoscError> {
-        let (first_valids, period) = Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
+        let (first_valids, period) =
+            Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         let elems = cols * rows;
         // VRAM: in + first_valids + out + headroom
@@ -261,9 +294,20 @@ impl CudaFosc {
             DeviceBuffer::uninitialized(elems).map_err(|e| CudaFoscError::Cuda(e.to_string()))?
         };
 
-        self.launch_many_series_kernel(&d_data, &d_fv, cols as i32, rows as i32, period as i32, &mut d_out)?;
+        self.launch_many_series_kernel(
+            &d_data,
+            &d_fv,
+            cols as i32,
+            rows as i32,
+            period as i32,
+            &mut d_out,
+        )?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -276,7 +320,9 @@ impl CudaFosc {
         period: i32,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaFoscError> {
-        if cols <= 0 || rows <= 0 { return Ok(()); }
+        if cols <= 0 || rows <= 0 {
+            return Ok(());
+        }
         let func = self
             .module
             .get_function("fosc_many_series_one_param_time_major_f32")
@@ -318,7 +364,9 @@ impl CudaFosc {
 
     fn expand_periods(r: &FoscBatchRange) -> Vec<usize> {
         let (start, end, step) = r.period;
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
 
@@ -336,10 +384,14 @@ impl CudaFosc {
             .ok_or_else(|| CudaFoscError::InvalidInput("all values are NaN".into()))?;
         let periods_usize = Self::expand_periods(sweep);
         if periods_usize.is_empty() {
-            return Err(CudaFoscError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaFoscError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         for &p in &periods_usize {
-            if p == 0 { return Err(CudaFoscError::InvalidInput("period must be > 0".into())); }
+            if p == 0 {
+                return Err(CudaFoscError::InvalidInput("period must be > 0".into()));
+            }
             if p > len {
                 return Err(CudaFoscError::InvalidInput(format!(
                     "period {} exceeds data length {}",
@@ -355,7 +407,10 @@ impl CudaFosc {
                 )));
             }
         }
-        Ok((periods_usize.into_iter().map(|p| p as i32).collect(), first_valid))
+        Ok((
+            periods_usize.into_iter().map(|p| p as i32).collect(),
+            first_valid,
+        ))
     }
 
     fn prepare_many_series_inputs(
@@ -368,10 +423,14 @@ impl CudaFosc {
             return Err(CudaFoscError::InvalidInput("empty matrix".into()));
         }
         if data_tm_f32.len() != cols * rows {
-            return Err(CudaFoscError::InvalidInput("data size does not match cols*rows".into()));
+            return Err(CudaFoscError::InvalidInput(
+                "data size does not match cols*rows".into(),
+            ));
         }
         let period = params.period.unwrap_or(5);
-        if period == 0 { return Err(CudaFoscError::InvalidInput("period must be > 0".into())); }
+        if period == 0 {
+            return Err(CudaFoscError::InvalidInput("period must be > 0".into()));
+        }
         if period > rows {
             return Err(CudaFoscError::InvalidInput(format!(
                 "period {} exceeds series length {}",
@@ -382,7 +441,10 @@ impl CudaFosc {
         for s in 0..cols {
             let mut fv = -1i32;
             for t in 0..rows {
-                if !data_tm_f32[t * cols + s].is_nan() { fv = t as i32; break; }
+                if !data_tm_f32[t * cols + s].is_nan() {
+                    fv = t as i32;
+                    break;
+                }
             }
             if fv < 0 {
                 return Err(CudaFoscError::InvalidInput(format!(
@@ -407,12 +469,17 @@ impl CudaFosc {
 
 #[inline]
 fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
-    struct YChunks { n: usize, launched: usize }
+    struct YChunks {
+        n: usize,
+        launched: usize,
+    }
     impl Iterator for YChunks {
         type Item = (usize, usize);
         fn next(&mut self) -> Option<Self::Item> {
             const MAX: usize = 65_535;
-            if self.launched >= self.n { return None; }
+            if self.launched >= self.n {
+                return None;
+            }
             let start = self.launched;
             let len = (self.n - self.launched).min(MAX);
             self.launched += len;
@@ -447,18 +514,35 @@ pub mod benches {
         in_bytes + out_bytes + fv_bytes + 64 * 1024 * 1024
     }
 
-    struct FoscBatchState { cuda: CudaFosc, price: Vec<f32>, sweep: FoscBatchRange }
+    struct FoscBatchState {
+        cuda: CudaFosc,
+        price: Vec<f32>,
+        sweep: FoscBatchRange,
+    }
     impl CudaBenchState for FoscBatchState {
-        fn launch(&mut self) { let _ = self.cuda.fosc_batch_dev(&self.price, &self.sweep).expect("fosc batch"); }
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .fosc_batch_dev(&self.price, &self.sweep)
+                .expect("fosc batch");
+        }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaFosc::new(0).expect("cuda fosc");
         let price = gen_series(ONE_SERIES_LEN);
-        let sweep = FoscBatchRange { period: (10, 10 + PARAM_SWEEP - 1, 1) };
+        let sweep = FoscBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
         Box::new(FoscBatchState { cuda, price, sweep })
     }
 
-    struct FoscManyState { cuda: CudaFosc, data_tm: Vec<f32>, cols: usize, rows: usize, params: FoscParams }
+    struct FoscManyState {
+        cuda: CudaFosc,
+        data_tm: Vec<f32>,
+        cols: usize,
+        rows: usize,
+        params: FoscParams,
+    }
     impl CudaBenchState for FoscManyState {
         fn launch(&mut self) {
             let _ = self
@@ -478,7 +562,13 @@ pub mod benches {
         let rows = MANY_SERIES_ROWS;
         let data_tm = gen_time_major_prices(cols, rows);
         let params = FoscParams { period: Some(14) };
-        Box::new(FoscManyState { cuda, data_tm, cols, rows, params })
+        Box::new(FoscManyState {
+            cuda,
+            data_tm,
+            cols,
+            rows,
+            params,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

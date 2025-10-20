@@ -97,8 +97,8 @@ pub struct CudaMaSelector {
 impl CudaMaSelector {
     /// Create a new selector bound to a specific CUDA device.
     pub fn new(device_id: usize) -> Self {
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .expect("failed to create CUDA stream");
+        let stream =
+            Stream::new(StreamFlags::NON_BLOCKING, None).expect("failed to create CUDA stream");
         Self { device_id, stream }
     }
 
@@ -113,7 +113,9 @@ impl CudaMaSelector {
         // Validate early without forcing a conversion
         let n = data.prices_len();
         if n == 0 {
-            return Err(CudaMaSelectorError::InvalidInput("empty price input".into()));
+            return Err(CudaMaSelectorError::InvalidInput(
+                "empty price input".into(),
+            ));
         }
         if period == 0 || period > n {
             return Err(CudaMaSelectorError::InvalidInput(format!(
@@ -718,9 +720,8 @@ impl CudaMaSelector {
         let dev = self.ma_to_device(ma_type, data, period)?;
         debug_assert_eq!(dev.rows, 1);
         let total = dev.rows * dev.cols;
-        let mut pinned: LockedBuffer<f32> =
-            unsafe { LockedBuffer::uninitialized(total) }
-                .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(total) }
+            .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
         // Prefer async D2H if the underlying context/stream permits; otherwise falls back
         unsafe {
             dev.buf

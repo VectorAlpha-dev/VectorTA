@@ -18,10 +18,10 @@
 //! - Batch row-specific: not implemented; little cross-row reuse for Aroon windows. Current batch dispatches per-row to best kernel.
 //! - Memory: zero-copy helpers for outputs; warmup masked to preserve leading-NaN semantics.
 
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -36,6 +36,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaAroon};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -52,10 +56,6 @@ use std::collections::VecDeque;
 use std::convert::AsRef;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::{cuda_available, CudaAroon};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 #[derive(Debug, Clone)]
 pub enum AroonData<'a> {
@@ -1242,7 +1242,9 @@ pub fn aroon_cuda_batch_dev_py<'py>(
     }
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
-    let sweep = AroonBatchRange { length: length_range };
+    let sweep = AroonBatchRange {
+        length: length_range,
+    };
     let (up_dev, dn_dev) = py.allow_threads(|| {
         let cuda = CudaAroon::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let res = cuda
@@ -1250,7 +1252,10 @@ pub fn aroon_cuda_batch_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((res.outputs.first, res.outputs.second))
     })?;
-    Ok((DeviceArrayF32Py { inner: up_dev }, DeviceArrayF32Py { inner: dn_dev }))
+    Ok((
+        DeviceArrayF32Py { inner: up_dev },
+        DeviceArrayF32Py { inner: dn_dev },
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1281,7 +1286,10 @@ pub fn aroon_cuda_many_series_one_param_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((pair.first, pair.second))
     })?;
-    Ok((DeviceArrayF32Py { inner: up_dev }, DeviceArrayF32Py { inner: dn_dev }))
+    Ok((
+        DeviceArrayF32Py { inner: up_dev },
+        DeviceArrayF32Py { inner: dn_dev },
+    ))
 }
 
 #[inline(always)]

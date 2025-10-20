@@ -66,7 +66,10 @@ pub struct CudaVlmaPolicy {
 
 impl Default for CudaVlmaPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -95,8 +98,8 @@ pub struct CudaVlma {
 impl CudaVlma {
     pub fn new(device_id: usize) -> Result<Self, CudaVlmaError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vlma_kernel.ptx"));
@@ -132,44 +135,65 @@ impl CudaVlma {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaVlmaPolicy) -> Result<Self, CudaVlmaError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaVlmaPolicy,
+    ) -> Result<Self, CudaVlmaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
     }
-    pub fn set_policy(&mut self, policy: CudaVlmaPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaVlmaPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaVlmaPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaVlmaPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaVlmaError> {
-        self.stream.synchronize().map_err(|e| CudaVlmaError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))
     }
 
     #[inline]
     fn maybe_log_batch(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_scen = env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scen || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] VLMA batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaVlma)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaVlma)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per_scen = env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scen || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] VLMA many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaVlma)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaVlma)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -177,12 +201,21 @@ impl CudaVlma {
     // ----- Utilities -----
     #[inline]
     fn mem_check_enabled() -> bool {
-        match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && v.to_lowercase() != "false", Err(_) => true }
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
-        if let Ok((free, _total)) = mem_get_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Ok((free, _total)) = mem_get_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     }
 
     // ----- Host-side helpers -----
@@ -196,8 +229,16 @@ impl CudaVlma {
         let mut nan = 0i32;
         for i in 0..n {
             let v = data[i];
-            if v.is_nan() { nan += 1; } else { let d = v as f64; acc += d; acc2 += d * d; }
-            ps[i + 1] = acc; pss[i + 1] = acc2; pn[i + 1] = nan;
+            if v.is_nan() {
+                nan += 1;
+            } else {
+                let d = v as f64;
+                acc += d;
+                acc2 += d * d;
+            }
+            ps[i + 1] = acc;
+            pss[i + 1] = acc2;
+            pn[i + 1] = nan;
         }
         (ps, pss, pn)
     }
@@ -229,7 +270,10 @@ impl CudaVlma {
             .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
 
         // Chunk combos to respect grid limits (y/x either way). We use grid.x here.
-        let bx = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x.max(32), BatchKernelPolicy::Auto => 128 };
+        let bx = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+            BatchKernelPolicy::Auto => 128,
+        };
 
         let mut launched = 0usize;
         while launched < n_combos {
@@ -242,12 +286,21 @@ impl CudaVlma {
                 let mut ps_ptr = d_ps.as_device_ptr().as_raw();
                 let mut pss_ptr = d_pss.as_device_ptr().as_raw();
                 let mut pn_ptr = d_pn.as_device_ptr().as_raw();
-                let mut min_ptr = d_min.as_device_ptr().as_raw().wrapping_add((launched) as u64 * 4);
-                let mut max_ptr = d_max.as_device_ptr().as_raw().wrapping_add((launched) as u64 * 4);
+                let mut min_ptr = d_min
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((launched) as u64 * 4);
+                let mut max_ptr = d_max
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((launched) as u64 * 4);
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
                 let mut combos_i = this as i32;
-                let mut out_ptr = d_out.as_device_ptr().as_raw().wrapping_add((launched * len) as u64 * 4);
+                let mut out_ptr = d_out
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((launched * len) as u64 * 4);
 
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
@@ -289,7 +342,10 @@ impl CudaVlma {
             .module
             .get_function("vlma_many_series_one_param_f32")
             .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let bx = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32), ManySeriesKernelPolicy::Auto => 128 };
+        let bx = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+            ManySeriesKernelPolicy::Auto => 128,
+        };
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (bx, 1, 1).into();
 
@@ -325,9 +381,13 @@ impl CudaVlma {
         data_f32: &[f32],
         sweep: &VlmaBatchRange,
     ) -> Result<DeviceArrayF32, CudaVlmaError> {
-        if data_f32.is_empty() { return Err(CudaVlmaError::InvalidInput("empty data".into())); }
+        if data_f32.is_empty() {
+            return Err(CudaVlmaError::InvalidInput("empty data".into()));
+        }
         let len = data_f32.len();
-        let first_valid = data_f32.iter().position(|v| !v.is_nan())
+        let first_valid = data_f32
+            .iter()
+            .position(|v| !v.is_nan())
             .ok_or_else(|| CudaVlmaError::InvalidInput("all values are NaN".into()))?;
 
         // Supported combos only: SMA + stddev (devtype=0)
@@ -342,13 +402,16 @@ impl CudaVlma {
             let max_p = c.max_period.unwrap_or(0);
             if max_p == 0 || max_p > len {
                 return Err(CudaVlmaError::InvalidInput(format!(
-                    "invalid max_period {} for length {}", max_p, len
+                    "invalid max_period {} for length {}",
+                    max_p, len
                 )));
             }
             if len - first_valid < max_p {
                 return Err(CudaVlmaError::InvalidInput(format!(
                     "not enough valid data for max_period {} (valid after first {}: {})",
-                    max_p, first_valid, len - first_valid
+                    max_p,
+                    first_valid,
+                    len - first_valid
                 )));
             }
         }
@@ -357,11 +420,7 @@ impl CudaVlma {
         let (ps, pss, pn) = Self::build_prefixes(data_f32);
         let n = len;
         let m = combos.len();
-        let bytes = n * 4
-            + (n + 1) * 8 * 2
-            + (n + 1) * 4
-            + m * 4 * 2
-            + (m * n) * 4;
+        let bytes = n * 4 + (n + 1) * 8 * 2 + (n + 1) * 4 + m * 4 * 2 + (m * n) * 4;
         let headroom = 64 * 1024 * 1024; // 64MB
         if !Self::will_fit(bytes, headroom) {
             return Err(CudaVlmaError::InvalidInput(format!(
@@ -371,23 +430,48 @@ impl CudaVlma {
         }
 
         // Upload inputs
-        let d_prices = DeviceBuffer::from_slice(data_f32).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
         let d_ps = DeviceBuffer::from_slice(&ps).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let d_pss = DeviceBuffer::from_slice(&pss).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let d_pss =
+            DeviceBuffer::from_slice(&pss).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
         let d_pn = DeviceBuffer::from_slice(&pn).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let min_periods: Vec<i32> = combos.iter().map(|c| c.min_period.unwrap_or(1) as i32).collect();
-        let max_periods: Vec<i32> = combos.iter().map(|c| c.max_period.unwrap() as i32).collect();
-        let d_min = DeviceBuffer::from_slice(&min_periods).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let d_max = DeviceBuffer::from_slice(&max_periods).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let min_periods: Vec<i32> = combos
+            .iter()
+            .map(|c| c.min_period.unwrap_or(1) as i32)
+            .collect();
+        let max_periods: Vec<i32> = combos
+            .iter()
+            .map(|c| c.max_period.unwrap() as i32)
+            .collect();
+        let d_min = DeviceBuffer::from_slice(&min_periods)
+            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let d_max = DeviceBuffer::from_slice(&max_periods)
+            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
 
         // Output buffer
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(m * n) }
             .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
 
         // Launch
-        self.launch_batch(&d_prices, &d_ps, &d_pss, &d_pn, &d_min, &d_max, n, first_valid, m, &mut d_out)?;
+        self.launch_batch(
+            &d_prices,
+            &d_ps,
+            &d_pss,
+            &d_pn,
+            &d_min,
+            &d_max,
+            n,
+            first_valid,
+            m,
+            &mut d_out,
+        )?;
         self.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: m, cols: n })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: m,
+            cols: n,
+        })
     }
 
     pub fn vlma_many_series_one_param_time_major_dev(
@@ -397,9 +481,13 @@ impl CudaVlma {
         rows: usize,
         params: &VlmaParams,
     ) -> Result<DeviceArrayF32, CudaVlmaError> {
-        if cols == 0 || rows == 0 { return Err(CudaVlmaError::InvalidInput("empty matrix".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaVlmaError::InvalidInput("empty matrix".into()));
+        }
         if data_tm_f32.len() != cols * rows {
-            return Err(CudaVlmaError::InvalidInput("flat input length mismatch".into()));
+            return Err(CudaVlmaError::InvalidInput(
+                "flat input length mismatch".into(),
+            ));
         }
         if params.matype.as_deref() != Some("sma") || params.devtype.unwrap_or(0) != 0 {
             return Err(CudaVlmaError::InvalidInput(
@@ -408,7 +496,9 @@ impl CudaVlma {
         }
         let min_p = params.min_period.unwrap_or(5);
         let max_p = params.max_period.unwrap_or(50);
-        if min_p == 0 || max_p == 0 || min_p > max_p { return Err(CudaVlmaError::InvalidInput("invalid periods".into())); }
+        if min_p == 0 || max_p == 0 || min_p > max_p {
+            return Err(CudaVlmaError::InvalidInput("invalid periods".into()));
+        }
 
         // Compute first_valid per series and validate
         let mut first_valids = Vec::with_capacity(cols);
@@ -416,13 +506,19 @@ impl CudaVlma {
             let mut fv: Option<usize> = None;
             for t in 0..rows {
                 let v = data_tm_f32[t * cols + s];
-                if !v.is_nan() { fv = Some(t); break; }
+                if !v.is_nan() {
+                    fv = Some(t);
+                    break;
+                }
             }
-            let fv = fv.ok_or_else(|| CudaVlmaError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv =
+                fv.ok_or_else(|| CudaVlmaError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv < max_p {
                 return Err(CudaVlmaError::InvalidInput(format!(
                     "series {} not enough valid data (need {}, have {})",
-                    s, max_p, rows - fv
+                    s,
+                    max_p,
+                    rows - fv
                 )));
             }
             first_valids.push(fv as i32);
@@ -434,15 +530,29 @@ impl CudaVlma {
             return Err(CudaVlmaError::InvalidInput("insufficient VRAM".into()));
         }
 
-        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
+            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
         let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
             .map_err(|e| CudaVlmaError::Cuda(e.to_string()))?;
 
-        self.launch_many_series(&d_prices_tm, &d_first, min_p, max_p, cols, rows, &mut d_out_tm)?;
+        self.launch_many_series(
+            &d_prices_tm,
+            &d_first,
+            min_p,
+            max_p,
+            cols,
+            rows,
+            &mut d_out_tm,
+        )?;
         self.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 }
 
@@ -468,7 +578,11 @@ pub mod benches {
         price: Vec<f32>,
         sweep: VlmaBatchRange,
     }
-    impl CudaBenchState for VlmaBatchState { fn launch(&mut self) { let _ = self.cuda.vlma_batch_dev(&self.price, &self.sweep); } }
+    impl CudaBenchState for VlmaBatchState {
+        fn launch(&mut self) {
+            let _ = self.cuda.vlma_batch_dev(&self.price, &self.sweep);
+        }
+    }
 
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaVlma::new(0).expect("cuda vlma");
@@ -494,4 +608,3 @@ pub mod benches {
         .with_mem_required(bytes_one_series_many_params())]
     }
 }
-

@@ -1003,7 +1003,9 @@ pub fn linearreg_intercept_cuda_batch_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data.as_slice()?;
-    let sweep = LinearRegInterceptBatchRange { period: period_range };
+    let sweep = LinearRegInterceptBatchRange {
+        period: period_range,
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaLinregIntercept::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1037,14 +1039,14 @@ pub fn linearreg_intercept_cuda_many_series_one_param_dev_py(
     if slice.len() != expected {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
-    let params = LinearRegInterceptParams { period: Some(period) };
+    let params = LinearRegInterceptParams {
+        period: Some(period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaLinregIntercept::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.linearreg_intercept_many_series_one_param_time_major_dev(
-            slice, cols, rows, &params,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+        cuda.linearreg_intercept_many_series_one_param_time_major_dev(slice, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }

@@ -22,7 +22,11 @@
 //! - Streaming update: O(1) with embedded ATR stream and efficient state tracking.
 //! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaSupertrend};
 use crate::indicators::atr::{atr, AtrData, AtrError, AtrInput, AtrOutput, AtrParams};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -47,10 +51,6 @@ use std::convert::AsRef;
 use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::{cuda_available, CudaSupertrend};
 
 #[derive(Debug, Clone)]
 pub enum SuperTrendData<'a> {
@@ -1015,21 +1015,25 @@ pub fn supertrend_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::IntoPyArray;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high.as_slice()?;
     let l = low.as_slice()?;
     let c = close.as_slice()?;
-    let sweep = SuperTrendBatchRange { period: period_range, factor: factor_range };
-    let (trend, changed, combos) = py
-        .allow_threads(|| {
-            let cuda = CudaSupertrend::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let h32: Vec<f32> = h.iter().map(|&v| v as f32).collect();
-            let l32: Vec<f32> = l.iter().map(|&v| v as f32).collect();
-            let c32: Vec<f32> = c.iter().map(|&v| v as f32).collect();
-            cuda.supertrend_batch_dev(&h32, &l32, &c32, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let sweep = SuperTrendBatchRange {
+        period: period_range,
+        factor: factor_range,
+    };
+    let (trend, changed, combos) = py.allow_threads(|| {
+        let cuda =
+            CudaSupertrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let h32: Vec<f32> = h.iter().map(|&v| v as f32).collect();
+        let l32: Vec<f32> = l.iter().map(|&v| v as f32).collect();
+        let c32: Vec<f32> = c.iter().map(|&v| v as f32).collect();
+        cuda.supertrend_batch_dev(&h32, &l32, &c32, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
 
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: trend })?)?;
@@ -1056,23 +1060,39 @@ pub fn supertrend_cuda_many_series_one_param_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::IntoPyArray;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let h = high_tm.as_slice()?;
     let l = low_tm.as_slice()?;
     let c = close_tm.as_slice()?;
-    if h.len() != l.len() || l.len() != c.len() { return Err(PyValueError::new_err("length mismatch")); }
+    if h.len() != l.len() || l.len() != c.len() {
+        return Err(PyValueError::new_err("length mismatch"));
+    }
     let h32: Vec<f32> = h.iter().map(|&v| v as f32).collect();
     let l32: Vec<f32> = l.iter().map(|&v| v as f32).collect();
     let c32: Vec<f32> = c.iter().map(|&v| v as f32).collect();
     let out = py.allow_threads(|| {
-        let cuda = CudaSupertrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.supertrend_many_series_one_param_time_major_dev(&h32, &l32, &c32, cols, rows, period, factor as f32)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaSupertrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.supertrend_many_series_one_param_time_major_dev(
+            &h32,
+            &l32,
+            &c32,
+            cols,
+            rows,
+            period,
+            factor as f32,
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: out.plus })?)?;
-    dict.set_item("changed", Py::new(py, DeviceArrayF32Py { inner: out.minus })?)?;
+    dict.set_item(
+        "changed",
+        Py::new(py, DeviceArrayF32Py { inner: out.minus })?,
+    )?;
     dict.set_item("cols", cols)?;
     dict.set_item("rows", rows)?;
     Ok(dict)

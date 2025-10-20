@@ -74,7 +74,13 @@ fn ultosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
-        assert!(approx_eq(c, g, tol), "mismatch at {}: cpu={} gpu={}", idx, c, g);
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
     }
 
     Ok(())
@@ -94,7 +100,8 @@ fn ultosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let mut low_tm = vec![f64::NAN; cols * rows];
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
-        for t in 1..rows { // start at 1 so prev-close is present
+        for t in 1..rows {
+            // start at 1 so prev-close is present
             let x = (t as f64) + (s as f64) * 0.41;
             let base = (x * 0.002).sin() + 0.0003 * x;
             let spread = (x * 0.0013).cos().abs() + 0.04;
@@ -104,7 +111,9 @@ fn ultosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
             low_tm[idx] = base - spread;
         }
     }
-    let p1 = 7usize; let p2 = 14usize; let p3 = 28usize;
+    let p1 = 7usize;
+    let p2 = 14usize;
+    let p3 = 28usize;
 
     // CPU baseline per series
     let mut cpu_tm = vec![f64::NAN; cols * rows];
@@ -112,11 +121,22 @@ fn ultosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         let mut h = vec![f64::NAN; rows];
         let mut l = vec![f64::NAN; rows];
         let mut c = vec![f64::NAN; rows];
-        for t in 0..rows { let idx = t * cols + s; h[t] = high_tm[idx]; l[t] = low_tm[idx]; c[t] = close_tm[idx]; }
-        let params = UltOscParams { timeperiod1: Some(p1), timeperiod2: Some(p2), timeperiod3: Some(p3) };
+        for t in 0..rows {
+            let idx = t * cols + s;
+            h[t] = high_tm[idx];
+            l[t] = low_tm[idx];
+            c[t] = close_tm[idx];
+        }
+        let params = UltOscParams {
+            timeperiod1: Some(p1),
+            timeperiod2: Some(p2),
+            timeperiod3: Some(p3),
+        };
         let input = UltOscInput::from_slices(&h, &l, &c, params);
         let out = ultosc_with_kernel(&input, Kernel::Scalar)?.values;
-        for t in 0..rows { cpu_tm[t * cols + s] = out[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out[t];
+        }
     }
 
     let hf: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
@@ -132,8 +152,11 @@ fn ultosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     dev_tm.buf.copy_to(&mut host_tm)?;
     let tol = 1e-3;
     for idx in 0..host_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }
-

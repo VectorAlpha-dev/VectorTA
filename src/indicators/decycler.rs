@@ -38,10 +38,10 @@ use thiserror::Error;
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -56,9 +56,9 @@ use wasm_bindgen::prelude::*;
 
 // ---- CUDA Python device handle support ----
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaDecycler};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 
@@ -1791,15 +1791,20 @@ pub fn decycler_cuda_batch_dev_py(
     hp_period_range: (usize, usize, usize),
     k_range: (f64, f64, f64),
     device_id: usize,
- ) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_f32.as_slice()?;
-    let sweep = DecyclerBatchRange { hp_period: hp_period_range, k: k_range };
+    let sweep = DecyclerBatchRange {
+        hp_period: hp_period_range,
+        k: k_range,
+    };
     let inner = py.allow_threads(|| -> PyResult<_> {
-        let cuda = CudaDecycler::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.decycler_batch_dev(slice_in, &sweep).map_err(|e| PyValueError::new_err(e.to_string()))
+        let cuda =
+            CudaDecycler::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.decycler_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(DeviceArrayF32Py { inner })
 }
@@ -1817,16 +1822,24 @@ pub fn decycler_cuda_many_series_one_param_dev_py(
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
-    if hp_period < 2 { return Err(PyValueError::new_err("hp_period must be >= 2")); }
-    if !(k > 0.0) || !k.is_finite() { return Err(PyValueError::new_err("k must be positive and finite")); }
+    if hp_period < 2 {
+        return Err(PyValueError::new_err("hp_period must be >= 2"));
+    }
+    if !(k > 0.0) || !k.is_finite() {
+        return Err(PyValueError::new_err("k must be positive and finite"));
+    }
 
     let flat = data_tm_f32.as_slice()?;
     let shape = data_tm_f32.shape();
     let series_len = shape[0];
     let num_series = shape[1];
-    let params = DecyclerParams { hp_period: Some(hp_period), k: Some(k) };
+    let params = DecyclerParams {
+        hp_period: Some(hp_period),
+        k: Some(k),
+    };
     let inner = py.allow_threads(|| -> PyResult<_> {
-        let cuda = CudaDecycler::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaDecycler::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.decycler_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

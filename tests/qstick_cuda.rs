@@ -1,8 +1,8 @@
 // Integration tests for CUDA QStick kernels
 
 use my_project::indicators::qstick::{
-    qstick_batch_with_kernel, qstick_with_kernel, QstickBatchRange, QstickInput, QstickParams,
-    QstickData,
+    qstick_batch_with_kernel, qstick_with_kernel, QstickBatchRange, QstickData, QstickInput,
+    QstickParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -14,7 +14,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::CudaQstick;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -42,7 +44,9 @@ fn qstick_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         open[i] = (x * 0.001).cos() + 0.0003 * x;
         close[i] = open[i] + 0.1 * (x * 0.0023).sin();
     }
-    let sweep = QstickBatchRange { period: (5, 200, 5) };
+    let sweep = QstickBatchRange {
+        period: (5, 200, 5),
+    };
     let cpu = qstick_batch_with_kernel(&open, &close, &sweep, Kernel::ScalarBatch)?;
 
     let open_f32: Vec<f32> = open.iter().map(|&v| v as f32).collect();
@@ -97,18 +101,38 @@ fn qstick_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     for s in 0..cols {
         let mut o = vec![f64::NAN; rows];
         let mut c = vec![f64::NAN; rows];
-        for t in 0..rows { let idx = t * cols + s; o[t] = open_tm[idx]; c[t] = close_tm[idx]; }
-        let params = QstickParams { period: Some(period) };
-        let input = QstickInput { data: QstickData::Slices { open: &o, close: &c }, params };
+        for t in 0..rows {
+            let idx = t * cols + s;
+            o[t] = open_tm[idx];
+            c[t] = close_tm[idx];
+        }
+        let params = QstickParams {
+            period: Some(period),
+        };
+        let input = QstickInput {
+            data: QstickData::Slices {
+                open: &o,
+                close: &c,
+            },
+            params,
+        };
         let out = qstick_with_kernel(&input, Kernel::Scalar)?;
-        for t in 0..rows { cpu_tm[t * cols + s] = out.values[t]; }
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
     }
 
     let open_tm_f32: Vec<f32> = open_tm.iter().map(|&v| v as f32).collect();
     let close_tm_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaQstick::new(0).expect("CudaQstick::new");
     let dev_tm = cuda
-        .qstick_many_series_one_param_time_major_dev(&open_tm_f32, &close_tm_f32, cols, rows, period)
+        .qstick_many_series_one_param_time_major_dev(
+            &open_tm_f32,
+            &close_tm_f32,
+            cols,
+            rows,
+            period,
+        )
         .expect("qstick_many_series_one_param_time_major_dev");
 
     assert_eq!(dev_tm.rows, rows);
@@ -118,8 +142,11 @@ fn qstick_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
 
     let tol = 1e-4;
     for idx in 0..host_tm.len() {
-        assert!(approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }
-

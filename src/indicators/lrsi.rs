@@ -2064,7 +2064,8 @@ pub fn lrsi_cuda_batch_dev_py(
     }
     let sweep = LrsiBatchRange { alpha: alpha_range };
     let inner = py.allow_threads(|| {
-        let mut cuda = CudaLrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut cuda =
+            CudaLrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.lrsi_batch_dev(h, l, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -2095,7 +2096,8 @@ pub fn lrsi_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("mismatched matrix shapes"));
     }
     let inner = py.allow_threads(|| {
-        let mut cuda = CudaLrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut cuda =
+            CudaLrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.lrsi_many_series_one_param_time_major_dev(h, l, cols, rows, alpha)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

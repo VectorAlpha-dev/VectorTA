@@ -2978,7 +2978,9 @@ pub fn vwmacd_cuda_batch_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::IntoPyArray;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let prices = close_f32.as_slice()?;
     let volumes = volume_f32.as_slice()?;
     let sweep = VwmacdBatchRange {
@@ -2997,22 +2999,58 @@ pub fn vwmacd_cuda_batch_dev_py<'py>(
     })?;
 
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("macd", Py::new(py, DeviceArrayF32Py { inner: triplet.macd })?)?;
-    dict.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: triplet.signal })?)?;
-    dict.set_item("hist", Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
+    dict.set_item(
+        "macd",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: triplet.macd,
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "signal",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: triplet.signal,
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "hist",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: triplet.hist,
+            },
+        )?,
+    )?;
     dict.set_item("rows", combos.len())?;
     dict.set_item("cols", prices.len())?;
     dict.set_item(
         "fasts",
-        combos.iter().map(|c| c.fast_period.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|c| c.fast_period.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     dict.set_item(
         "slows",
-        combos.iter().map(|c| c.slow_period.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|c| c.slow_period.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     dict.set_item(
         "signals",
-        combos.iter().map(|c| c.signal_period.unwrap()).collect::<Vec<_>>().into_pyarray(py),
+        combos
+            .iter()
+            .map(|c| c.signal_period.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
     )?;
     Ok(dict)
 }
@@ -3030,11 +3068,15 @@ pub fn vwmacd_cuda_many_series_one_param_dev_py<'py>(
     device_id: usize,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::PyUntypedArrayMethods;
-    if !cuda_available() { return Err(PyValueError::new_err("CUDA not available")); }
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
     let ps = prices_tm_f32.shape();
     let vs = volumes_tm_f32.shape();
     if ps.len() != 2 || vs.len() != 2 || ps != vs {
-        return Err(PyValueError::new_err("expected two 2D arrays with same shape"));
+        return Err(PyValueError::new_err(
+            "expected two 2D arrays with same shape",
+        ));
     }
     let rows = ps[0];
     let cols = ps[1];
@@ -3056,9 +3098,33 @@ pub fn vwmacd_cuda_many_series_one_param_dev_py<'py>(
     })?;
 
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("macd", Py::new(py, DeviceArrayF32Py { inner: triplet.macd })?)?;
-    dict.set_item("signal", Py::new(py, DeviceArrayF32Py { inner: triplet.signal })?)?;
-    dict.set_item("hist", Py::new(py, DeviceArrayF32Py { inner: triplet.hist })?)?;
+    dict.set_item(
+        "macd",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: triplet.macd,
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "signal",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: triplet.signal,
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "hist",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: triplet.hist,
+            },
+        )?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("fast", fast)?;

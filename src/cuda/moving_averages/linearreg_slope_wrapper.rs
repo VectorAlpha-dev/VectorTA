@@ -7,9 +7,7 @@
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
-use crate::indicators::linearreg_slope::{
-    LinearRegSlopeBatchRange, LinearRegSlopeParams,
-};
+use crate::indicators::linearreg_slope::{LinearRegSlopeBatchRange, LinearRegSlopeParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
@@ -96,8 +94,8 @@ impl CudaLinearregSlope {
         let sm_count = device
             .get_attribute(DeviceAttribute::MultiprocessorCount)
             .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
-        let context = Context::new(device)
-            .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
+        let context =
+            Context::new(device).map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/linearreg_slope_kernel.ptx"));
         let module = match Module::from_ptx(
@@ -159,7 +157,9 @@ impl CudaLinearregSlope {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] LRS batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut Self)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut Self)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -176,7 +176,9 @@ impl CudaLinearregSlope {
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] LRS many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut Self)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut Self)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -210,8 +212,17 @@ impl CudaLinearregSlope {
     fn prepare_batch_inputs(
         data_f32: &[f32],
         sweep: &LinearRegSlopeBatchRange,
-    ) -> Result<(Vec<LinearRegSlopeParams>, usize, usize, Vec<i32>, Vec<f32>, Vec<f32>), CudaLinearregSlopeError>
-    {
+    ) -> Result<
+        (
+            Vec<LinearRegSlopeParams>,
+            usize,
+            usize,
+            Vec<i32>,
+            Vec<f32>,
+            Vec<f32>,
+        ),
+        CudaLinearregSlopeError,
+    > {
         if data_f32.is_empty() {
             return Err(CudaLinearregSlopeError::InvalidInput("empty data".into()));
         }
@@ -306,9 +317,8 @@ impl CudaLinearregSlope {
         let grid = self.grid_1d_for(combos_len, block_x);
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
-            (*(self as *const _ as *mut Self)).last_batch = Some(BatchKernelSelected::Plain {
-                block_x,
-            });
+            (*(self as *const _ as *mut Self)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
@@ -373,9 +383,20 @@ impl CudaLinearregSlope {
             .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
-            &d_prices, &d_periods, &d_xs, &d_dinv, len, nrows, first_valid, &mut d_out,
+            &d_prices,
+            &d_periods,
+            &d_xs,
+            &d_dinv,
+            len,
+            nrows,
+            first_valid,
+            &mut d_out,
         )?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: nrows, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: nrows,
+            cols: len,
+        })
     }
 
     pub fn linearreg_slope_batch_dev(
@@ -503,7 +524,10 @@ impl CudaLinearregSlope {
         };
         let grid = self.grid_1d_for(cols, block_x);
         let block: BlockSize = (block_x, 1, 1).into();
-        unsafe { (*(self as *const _ as *mut Self)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut Self)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         unsafe {
@@ -562,16 +586,13 @@ impl CudaLinearregSlope {
             .map_err(|e| CudaLinearregSlopeError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
-            &d_prices,
-            &d_first,
-            cols,
-            rows,
-            period,
-            x_sum,
-            denom_inv,
-            &mut d_out,
+            &d_prices, &d_first, cols, rows, period, x_sum, denom_inv, &mut d_out,
         )?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn linearreg_slope_many_series_one_param_time_major_dev(
@@ -584,7 +605,13 @@ impl CudaLinearregSlope {
         let (first_valids, period, x_sum, denom_inv) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(
-            data_tm_f32, cols, rows, &first_valids, period, x_sum, denom_inv,
+            data_tm_f32,
+            cols,
+            rows,
+            &first_valids,
+            period,
+            x_sum,
+            denom_inv,
         )?;
         self.stream
             .synchronize()
@@ -614,4 +641,3 @@ pub mod benches {
     );
     pub use linearreg_slope_benches::bench_profiles;
 }
-

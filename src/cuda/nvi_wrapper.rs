@@ -4,7 +4,7 @@
 //!
 //! Parity with ALMA wrapper policy:
 //! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/nvi_kernel.ptx"))
-//!   using DetermineTargetFromContext + OptLevel O2, with simpler fallbacks.
+//!   using DetermineTargetFromContext + OptLevel O4, with simpler fallbacks.
 //! - NON_BLOCKING stream, simple VRAM guard.
 //! - Public device entry points for:
 //!   - Batch (one series × many params): here a single 1×N row (NVI has no params).
@@ -48,21 +48,26 @@ pub struct CudaNvi {
 impl CudaNvi {
     pub fn new(device_id: usize) -> Result<Self, CudaNviError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
         let ctx = Context::new(device).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/nvi_kernel.ptx"));
-        let jit_opts = &[
+        // Prefer arch from current context + O4 (driver's most optimized level).
+        let primary_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
+        let module = Module::from_ptx(ptx, primary_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))
             .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        Ok(Self { module, stream, _ctx: ctx })
+        Ok(Self {
+            module,
+            stream,
+            _ctx: ctx,
+        })
     }
 
     #[inline]
@@ -77,9 +82,13 @@ impl CudaNvi {
             .iter()
             .zip(volume.iter())
             .position(|(&c, &v)| !c.is_nan() && !v.is_nan())
-            .ok_or_else(|| CudaNviError::InvalidInput("all values are NaN in one/both inputs".into()))?;
+            .ok_or_else(|| {
+                CudaNviError::InvalidInput("all values are NaN in one/both inputs".into())
+            })?;
         if close.len() - first < 2 {
-            return Err(CudaNviError::InvalidInput("not enough valid data (need >= 2 after first valid)".into()));
+            return Err(CudaNviError::InvalidInput(
+                "not enough valid data (need >= 2 after first valid)".into(),
+            ));
         }
         Ok(first)
     }
@@ -93,7 +102,11 @@ impl CudaNvi {
         }
     }
 
-    pub fn nvi_batch_dev(&self, close: &[f32], volume: &[f32]) -> Result<DeviceArrayF32, CudaNviError> {
+    pub fn nvi_batch_dev(
+        &self,
+        close: &[f32],
+        volume: &[f32],
+    ) -> Result<DeviceArrayF32, CudaNviError> {
         let first = Self::first_valid_pair(close, volume)?;
         let len = close.len();
 
@@ -103,8 +116,10 @@ impl CudaNvi {
             return Err(CudaNviError::Cuda("insufficient free VRAM".into()));
         }
 
-        let d_close = DeviceBuffer::from_slice(close).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let d_volume = DeviceBuffer::from_slice(volume).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        let d_close =
+            DeviceBuffer::from_slice(close).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        let d_volume =
+            DeviceBuffer::from_slice(volume).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
             .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
 
@@ -136,7 +151,11 @@ impl CudaNvi {
             .synchronize()
             .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: 1, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: 1,
+            cols: len,
+        })
     }
 
     pub fn nvi_many_series_one_param_time_major_dev(
@@ -153,22 +172,36 @@ impl CudaNvi {
             .checked_mul(rows)
             .ok_or_else(|| CudaNviError::InvalidInput("rows*cols overflow".into()))?;
         if close_tm.len() != expected || volume_tm.len() != expected {
-            return Err(CudaNviError::InvalidInput("time-major input length mismatch".into()));
+            return Err(CudaNviError::InvalidInput(
+                "time-major input length mismatch".into(),
+            ));
         }
 
-        // First-valid per series (host)
-        let mut first_valids = vec![rows as i32; cols];
-        for s in 0..cols {
-            for t in 0..rows {
-                let c = close_tm[t * cols + s];
-                let v = volume_tm[t * cols + s];
-                if !c.is_nan() && !v.is_nan() {
-                    first_valids[s] = t as i32;
-                    break;
+        // First-valid per series (host) — row-major scan for cache locality.
+        let rows_i32 = rows as i32;
+        let mut first_valids = vec![rows_i32; cols];
+        let mut remaining = cols;
+
+        'outer: for t in 0..rows {
+            let row_off = t * cols;
+            for s in 0..cols {
+                if first_valids[s] == rows_i32 {
+                    let c = close_tm[row_off + s];
+                    let v = volume_tm[row_off + s];
+                    if !c.is_nan() && !v.is_nan() {
+                        first_valids[s] = t as i32;
+                        remaining -= 1;
+                        if remaining == 0 {
+                            break 'outer;
+                        }
+                    }
                 }
             }
-            // Require at least 2 valid samples per series for a non-trivial scan
-            if (rows as i32 - first_valids[s]) < 2 {
+        }
+
+        // Require at least 2 valid samples per series for a non-trivial scan
+        for s in 0..cols {
+            if (rows_i32 - first_valids[s]) < 2 {
                 return Err(CudaNviError::InvalidInput(format!(
                     "series {}: not enough valid data (need >= 2 after first valid)",
                     s
@@ -182,9 +215,12 @@ impl CudaNvi {
             return Err(CudaNviError::Cuda("insufficient free VRAM".into()));
         }
 
-        let d_close = DeviceBuffer::from_slice(close_tm).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let d_volume = DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        let d_close =
+            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        let d_volume =
+            DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
             .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
 
@@ -221,7 +257,116 @@ impl CudaNvi {
             .synchronize()
             .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
+    }
+
+    /// Launch NVI (one series) using device-resident buffers in-place.
+    /// The kernel is enqueued on `self.stream` and this method returns immediately.
+    /// Callers must ensure device buffers outlive the enqueued work and synchronize as needed.
+    pub fn nvi_batch_dev_inplace(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaNviError> {
+        let len = d_close.len();
+        if len == 0 {
+            return Err(CudaNviError::InvalidInput("empty inputs".into()));
+        }
+        if d_volume.len() != len || d_out.len() != len {
+            return Err(CudaNviError::InvalidInput("length mismatch".into()));
+        }
+
+        let func = self
+            .module
+            .get_function("nvi_batch_f32")
+            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut vol_ptr = d_volume.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = (first_valid as i32).max(0);
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 5] = [
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut vol_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
+                .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Launch NVI (many series, time-major) using device-resident buffers in-place.
+    /// `d_first_valids` must have length == cols and live on device.
+    /// The kernel is enqueued on `self.stream`; synchronize externally when needed.
+    pub fn nvi_many_series_one_param_time_major_dev_inplace(
+        &self,
+        d_close_tm: &DeviceBuffer<f32>,
+        d_volume_tm: &DeviceBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        d_first_valids: &DeviceBuffer<i32>,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaNviError> {
+        if cols == 0 || rows == 0 {
+            return Err(CudaNviError::InvalidInput("cols/rows must be > 0".into()));
+        }
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaNviError::InvalidInput("rows*cols overflow".into()))?;
+        if d_close_tm.len() != expected
+            || d_volume_tm.len() != expected
+            || d_out_tm.len() != expected
+            || d_first_valids.len() != cols
+        {
+            return Err(CudaNviError::InvalidInput(
+                "device buffer length mismatch".into(),
+            ));
+        }
+
+        let func = self
+            .module
+            .get_function("nvi_many_series_one_param_f32")
+            .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+
+        // One thread per series; kernel grid-strides over s.
+        let block_x: u32 = 256;
+        let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let mut close_ptr = d_close_tm.as_device_ptr().as_raw();
+            let mut vol_ptr = d_volume_tm.as_device_ptr().as_raw();
+            let mut cols_i = cols as i32;
+            let mut rows_i = rows as i32;
+            let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
+            let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 6] = [
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut vol_ptr as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
+                &mut first_ptr as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
+                .map_err(|e| CudaNviError::Cuda(e.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -267,7 +412,11 @@ pub mod benches {
             close[0] = 100.0;
             volume[0] = 1000.0;
         }
-        Box::new(NviOneSeriesState { cuda, close, volume })
+        Box::new(NviOneSeriesState {
+            cuda,
+            close,
+            volume,
+        })
     }
 
     struct NviManySeriesState {
@@ -302,7 +451,11 @@ pub mod benches {
                 volume_tm[t * MANY_SERIES_COLS + s] = (x * 0.0017).cos().abs() * 500.0 + 100.0;
             }
         }
-        Box::new(NviManySeriesState { cuda, close_tm, volume_tm })
+        Box::new(NviManySeriesState {
+            cuda,
+            close_tm,
+            volume_tm,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -320,4 +473,3 @@ pub mod benches {
         ]
     }
 }
-

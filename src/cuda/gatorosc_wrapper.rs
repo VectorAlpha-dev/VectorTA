@@ -105,33 +105,45 @@ impl CudaGatorOsc {
     }
 
     #[inline]
-    pub fn set_policy(&mut self, p: CudaGatorOscPolicy) { self.policy = p; }
+    pub fn set_policy(&mut self, p: CudaGatorOscPolicy) {
+        self.policy = p;
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] GATOR batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaGatorOsc)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaGatorOsc)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] GATOR many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaGatorOsc)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaGatorOsc)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -143,14 +155,18 @@ impl CudaGatorOsc {
         sweep: &GatorOscBatchRange,
     ) -> Result<DeviceGatorOscQuad, CudaGatorOscError> {
         let len = data_f32.len();
-        if len == 0 { return Err(CudaGatorOscError::InvalidInput("empty series".into())); }
+        if len == 0 {
+            return Err(CudaGatorOscError::InvalidInput("empty series".into()));
+        }
         let first_valid = data_f32
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaGatorOscError::InvalidInput("all values are NaN".into()))?;
 
         let combos = expand_grid(sweep);
-        if combos.is_empty() { return Err(CudaGatorOscError::InvalidInput("empty sweep".into())); }
+        if combos.is_empty() {
+            return Err(CudaGatorOscError::InvalidInput("empty sweep".into()));
+        }
 
         // Flatten params and validate; compute max needed and max shift
         let mut jl: Vec<i32> = Vec::with_capacity(combos.len());
@@ -163,24 +179,34 @@ impl CudaGatorOsc {
         let mut max_shift: usize = 0;
         for p in &combos {
             let jlen = p.jaws_length.unwrap_or(13) as i32;
-            let jsh  = p.jaws_shift.unwrap_or(8) as i32;
+            let jsh = p.jaws_shift.unwrap_or(8) as i32;
             let tlen = p.teeth_length.unwrap_or(8) as i32;
-            let tsh  = p.teeth_shift.unwrap_or(5) as i32;
+            let tsh = p.teeth_shift.unwrap_or(5) as i32;
             let llen = p.lips_length.unwrap_or(5) as i32;
-            let lsh  = p.lips_shift.unwrap_or(3) as i32;
+            let lsh = p.lips_shift.unwrap_or(3) as i32;
             if jlen <= 0 || tlen <= 0 || llen <= 0 {
-                return Err(CudaGatorOscError::InvalidInput("non-positive length".into()));
+                return Err(CudaGatorOscError::InvalidInput(
+                    "non-positive length".into(),
+                ));
             }
-            let upper_needed = (jlen as usize).max(tlen as usize) + (jsh as usize).max(tsh as usize);
-            let lower_needed = (tlen as usize).max(llen as usize) + (tsh as usize).max(lsh as usize);
+            let upper_needed =
+                (jlen as usize).max(tlen as usize) + (jsh as usize).max(tsh as usize);
+            let lower_needed =
+                (tlen as usize).max(llen as usize) + (tsh as usize).max(lsh as usize);
             needed_max = needed_max.max(upper_needed.max(lower_needed));
             max_shift = max_shift.max((jsh as usize).max(tsh as usize).max(lsh as usize));
-            jl.push(jlen); js.push(jsh); tl.push(tlen); ts.push(tsh); ll.push(llen); ls.push(lsh);
+            jl.push(jlen);
+            js.push(jsh);
+            tl.push(tlen);
+            ts.push(tsh);
+            ll.push(llen);
+            ls.push(lsh);
         }
         let valid_tail = len - first_valid;
         if valid_tail < needed_max {
             return Err(CudaGatorOscError::InvalidInput(format!(
-                "not enough valid data: needed >= {}, valid = {}", needed_max, valid_tail
+                "not enough valid data: needed >= {}, valid = {}",
+                needed_max, valid_tail
             )));
         }
 
@@ -191,7 +217,10 @@ impl CudaGatorOsc {
         let bytes_out = 4 * rows * len * std::mem::size_of::<f32>();
         let required = bytes_params + bytes_prices + bytes_out;
         let headroom = 64usize * 1024 * 1024;
-        let fits = match mem_get_info() { Ok((free, _)) => required.saturating_add(headroom) <= free, Err(_) => true };
+        let fits = match mem_get_info() {
+            Ok((free, _)) => required.saturating_add(headroom) <= free,
+            Err(_) => true,
+        };
 
         let d_prices = DeviceBuffer::from_slice(data_f32)
             .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
@@ -226,7 +255,8 @@ impl CudaGatorOsc {
             let grid: GridSize = (chunk as u32, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             unsafe {
-                (*(this as *const _ as *mut CudaGatorOsc)).last_batch = Some(BatchKernelSelected::Plain { block_x });
+                (*(this as *const _ as *mut CudaGatorOsc)).last_batch =
+                    Some(BatchKernelSelected::Plain { block_x });
                 let mut p_ptr = d_prices.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
@@ -239,8 +269,14 @@ impl CudaGatorOsc {
                 let mut ncomb_i = chunk as i32;
                 let mut ring_len_i = (max_shift + 1) as i32;
                 let row_off = start * len * std::mem::size_of::<f32>();
-                let mut u_ptr = d_upper.as_device_ptr().as_raw().wrapping_add(row_off as u64);
-                let mut l_ptr = d_lower.as_device_ptr().as_raw().wrapping_add(row_off as u64);
+                let mut u_ptr = d_upper
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add(row_off as u64);
+                let mut l_ptr = d_lower
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add(row_off as u64);
                 let mut uc_ptr = d_uchn.as_device_ptr().as_raw().wrapping_add(row_off as u64);
                 let mut lc_ptr = d_lchn.as_device_ptr().as_raw().wrapping_add(row_off as u64);
                 let mut args: [*mut c_void; 15] = [
@@ -280,13 +316,37 @@ impl CudaGatorOsc {
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
             let mut d_lchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            launch_chunk(self, 0, rows, &mut d_upper, &mut d_lower, &mut d_uchn, &mut d_lchn)?;
+            launch_chunk(
+                self,
+                0,
+                rows,
+                &mut d_upper,
+                &mut d_lower,
+                &mut d_uchn,
+                &mut d_lchn,
+            )?;
             self.maybe_log_batch_debug();
             return Ok(DeviceGatorOscQuad {
-                upper: DeviceArrayF32 { buf: d_upper, rows, cols: len },
-                lower: DeviceArrayF32 { buf: d_lower, rows, cols: len },
-                upper_change: DeviceArrayF32 { buf: d_uchn, rows, cols: len },
-                lower_change: DeviceArrayF32 { buf: d_lchn, rows, cols: len },
+                upper: DeviceArrayF32 {
+                    buf: d_upper,
+                    rows,
+                    cols: len,
+                },
+                lower: DeviceArrayF32 {
+                    buf: d_lower,
+                    rows,
+                    cols: len,
+                },
+                upper_change: DeviceArrayF32 {
+                    buf: d_uchn,
+                    rows,
+                    cols: len,
+                },
+                lower_change: DeviceArrayF32 {
+                    buf: d_lchn,
+                    rows,
+                    cols: len,
+                },
             });
         }
 
@@ -295,20 +355,30 @@ impl CudaGatorOsc {
         let max_grid = 65_535usize;
         let mut host_upper = vec![0f32; rows * len];
         let mut host_lower = vec![0f32; rows * len];
-        let mut host_uchn  = vec![0f32; rows * len];
-        let mut host_lchn  = vec![0f32; rows * len];
+        let mut host_uchn = vec![0f32; rows * len];
+        let mut host_lchn = vec![0f32; rows * len];
         let mut launched = 0usize;
         while launched < rows {
             let chunk = (rows - launched).min(max_grid);
-            let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(chunk * len) }
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(chunk * len) }
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
+            let mut d_upper: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(chunk * len) }
+                    .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
+            let mut d_lower: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(chunk * len) }
+                    .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
             let mut d_uchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(chunk * len) }
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
             let mut d_lchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(chunk * len) }
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            launch_chunk(self, launched, chunk, &mut d_upper, &mut d_lower, &mut d_uchn, &mut d_lchn)?;
+            launch_chunk(
+                self,
+                launched,
+                chunk,
+                &mut d_upper,
+                &mut d_lower,
+                &mut d_uchn,
+                &mut d_lchn,
+            )?;
             d_upper
                 .copy_to(&mut host_upper[launched * len..launched * len + chunk * len])
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
@@ -332,10 +402,26 @@ impl CudaGatorOsc {
         let d_lchn = DeviceBuffer::from_slice(&host_lchn)
             .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
         Ok(DeviceGatorOscQuad {
-            upper: DeviceArrayF32 { buf: d_upper, rows, cols: len },
-            lower: DeviceArrayF32 { buf: d_lower, rows, cols: len },
-            upper_change: DeviceArrayF32 { buf: d_uchn, rows, cols: len },
-            lower_change: DeviceArrayF32 { buf: d_lchn, rows, cols: len },
+            upper: DeviceArrayF32 {
+                buf: d_upper,
+                rows,
+                cols: len,
+            },
+            lower: DeviceArrayF32 {
+                buf: d_lower,
+                rows,
+                cols: len,
+            },
+            upper_change: DeviceArrayF32 {
+                buf: d_uchn,
+                rows,
+                cols: len,
+            },
+            lower_change: DeviceArrayF32 {
+                buf: d_lchn,
+                rows,
+                cols: len,
+            },
         })
     }
 
@@ -352,21 +438,31 @@ impl CudaGatorOsc {
         lips_length: usize,
         lips_shift: usize,
     ) -> Result<DeviceGatorOscQuad, CudaGatorOscError> {
-        if cols == 0 || rows == 0 { return Err(CudaGatorOscError::InvalidInput("invalid dims".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaGatorOscError::InvalidInput("invalid dims".into()));
+        }
         if prices_tm.len() != cols * rows {
-            return Err(CudaGatorOscError::InvalidInput("time-major length mismatch".into()));
+            return Err(CudaGatorOscError::InvalidInput(
+                "time-major length mismatch".into(),
+            ));
         }
         if jaws_length == 0 || teeth_length == 0 || lips_length == 0 {
-            return Err(CudaGatorOscError::InvalidInput("non-positive length".into()));
+            return Err(CudaGatorOscError::InvalidInput(
+                "non-positive length".into(),
+            ));
         }
         // Per-series first_valid
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
             for t in 0..rows {
-                if !prices_tm[t * cols + s].is_nan() { fv = Some(t as i32); break; }
+                if !prices_tm[t * cols + s].is_nan() {
+                    fv = Some(t as i32);
+                    break;
+                }
             }
-            first_valids[s] = fv.ok_or_else(|| CudaGatorOscError::InvalidInput(format!("series {} all NaN", s)))?;
+            first_valids[s] =
+                fv.ok_or_else(|| CudaGatorOscError::InvalidInput(format!("series {} all NaN", s)))?;
         }
         let needed_upper = jaws_length.max(teeth_length) + jaws_shift.max(teeth_shift);
         let needed_lower = teeth_length.max(lips_length) + teeth_shift.max(lips_shift);
@@ -404,7 +500,8 @@ impl CudaGatorOsc {
         let block: BlockSize = (block_x, 1, 1).into();
         let ring_len = (jaws_shift.max(teeth_shift).max(lips_shift) + 1) as i32;
         unsafe {
-            (*(self as *const _ as *mut CudaGatorOsc)).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
+            (*(self as *const _ as *mut CudaGatorOsc)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
             let mut p_ptr = d_prices.as_device_ptr().as_raw();
             let mut fv_ptr = d_first.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
@@ -437,7 +534,8 @@ impl CudaGatorOsc {
                 &mut uc_ptr as *mut _ as *mut c_void,
                 &mut lc_ptr as *mut _ as *mut c_void,
             ];
-            let dyn_shmem = (ring_len as usize) * 3 * (block_x as usize) * std::mem::size_of::<f32>();
+            let dyn_shmem =
+                (ring_len as usize) * 3 * (block_x as usize) * std::mem::size_of::<f32>();
             self.stream
                 .launch(&func, grid, block, dyn_shmem.try_into().unwrap(), &mut args)
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
@@ -448,17 +546,37 @@ impl CudaGatorOsc {
 
         self.maybe_log_many_debug();
         Ok(DeviceGatorOscQuad {
-            upper: DeviceArrayF32 { buf: d_upper, rows, cols },
-            lower: DeviceArrayF32 { buf: d_lower, rows, cols },
-            upper_change: DeviceArrayF32 { buf: d_uchn, rows, cols },
-            lower_change: DeviceArrayF32 { buf: d_lchn, rows, cols },
+            upper: DeviceArrayF32 {
+                buf: d_upper,
+                rows,
+                cols,
+            },
+            lower: DeviceArrayF32 {
+                buf: d_lower,
+                rows,
+                cols,
+            },
+            upper_change: DeviceArrayF32 {
+                buf: d_uchn,
+                rows,
+                cols,
+            },
+            lower_change: DeviceArrayF32 {
+                buf: d_lchn,
+                rows,
+                cols,
+            },
         })
     }
 }
 
 // ---- Local helpers ----
 fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-    if step == 0 || start == end { vec![start] } else { (start..=end).step_by(step).collect() }
+    if step == 0 || start == end {
+        vec![start]
+    } else {
+        (start..=end).step_by(step).collect()
+    }
 }
 fn expand_grid(r: &GatorOscBatchRange) -> Vec<GatorOscParams> {
     let jl = axis(r.jaws_length);
@@ -467,7 +585,8 @@ fn expand_grid(r: &GatorOscBatchRange) -> Vec<GatorOscParams> {
     let ts = axis(r.teeth_shift);
     let ll = axis(r.lips_length);
     let ls = axis(r.lips_shift);
-    let mut out = Vec::with_capacity(jl.len() * js.len() * tl.len() * ts.len() * ll.len() * ls.len());
+    let mut out =
+        Vec::with_capacity(jl.len() * js.len() * tl.len() * ts.len() * ll.len() * ls.len());
     for &a in &jl {
         for &b in &js {
             for &c in &tl {
@@ -506,10 +625,17 @@ pub mod benches {
         in_bytes + out_bytes + (64 << 20)
     }
 
-    struct GatorBatchState { cuda: CudaGatorOsc, data: Vec<f32>, sweep: GatorOscBatchRange }
+    struct GatorBatchState {
+        cuda: CudaGatorOsc,
+        data: Vec<f32>,
+        sweep: GatorOscBatchRange,
+    }
     impl CudaBenchState for GatorBatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.gatorosc_batch_dev(&self.data, &self.sweep).expect("gator batch");
+            let _ = self
+                .cuda
+                .gatorosc_batch_dev(&self.data, &self.sweep)
+                .expect("gator batch");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -517,9 +643,12 @@ pub mod benches {
         let data = gen_series(ONE_SERIES_LEN);
         // 3×(length) × 2×(shift) grid ~ 96 rows
         let sweep = GatorOscBatchRange {
-            jaws_length: (8, 14, 2), jaws_shift: (2, 6, 2),
-            teeth_length: (6, 10, 2), teeth_shift: (1, 5, 2),
-            lips_length: (4, 8, 2), lips_shift: (0, 4, 2),
+            jaws_length: (8, 14, 2),
+            jaws_shift: (2, 6, 2),
+            teeth_length: (6, 10, 2),
+            teeth_shift: (1, 5, 2),
+            lips_length: (4, 8, 2),
+            lips_shift: (0, 4, 2),
         };
         Box::new(GatorBatchState { cuda, data, sweep })
     }

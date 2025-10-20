@@ -5,7 +5,7 @@ use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::CudaLinregIntercept;
 use my_project::indicators::linearreg_intercept::{
-    linearreg_intercept_batch_slice, LinearRegInterceptBatchRange, LinearRegInterceptBatchOutput,
+    linearreg_intercept_batch_slice, LinearRegInterceptBatchOutput, LinearRegInterceptBatchRange,
     LinearRegInterceptBuilder, LinearRegInterceptParams,
 };
 use my_project::utilities::enums::Kernel;
@@ -29,7 +29,13 @@ fn cuda_feature_off_noop() {
 }
 
 #[cfg(feature = "cuda")]
-fn compare_rows(cpu: &[f64], gpu: &[f64], combos: &[LinearRegInterceptParams], len: usize, first_valid: usize) {
+fn compare_rows(
+    cpu: &[f64],
+    gpu: &[f64],
+    combos: &[LinearRegInterceptParams],
+    len: usize,
+    first_valid: usize,
+) {
     for (row_idx, combo) in combos.iter().enumerate() {
         let period = combo.period.unwrap();
         let warm = first_valid + period - 1;
@@ -38,8 +44,14 @@ fn compare_rows(cpu: &[f64], gpu: &[f64], combos: &[LinearRegInterceptParams], l
             let expected = cpu[idx];
             let actual = gpu[idx];
             if col < warm {
-                assert!(expected.is_nan(), "CPU warmup NaN missing at row {row_idx} col {col}");
-                assert!(actual.is_nan(), "CUDA warmup mismatch at row {row_idx} col {col}");
+                assert!(
+                    expected.is_nan(),
+                    "CPU warmup NaN missing at row {row_idx} col {col}"
+                );
+                assert!(
+                    actual.is_nan(),
+                    "CUDA warmup mismatch at row {row_idx} col {col}"
+                );
             } else {
                 let diff = (expected - actual).abs();
                 let tol = 2.5e-3 + expected.abs() * 7.5e-4;
@@ -78,7 +90,9 @@ fn linearreg_intercept_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error
     }
 
     let mut gpu_flat = vec![0f32; dev.len()];
-    dev.buf.copy_to(&mut gpu_flat).expect("copy lri cuda results");
+    dev.buf
+        .copy_to(&mut gpu_flat)
+        .expect("copy lri cuda results");
     let gpu_flat_f64: Vec<f64> = gpu_flat.iter().map(|&v| v as f64).collect();
 
     compare_rows(&cpu_out, &gpu_flat_f64, &combos_cpu, len, first_valid);
@@ -122,9 +136,12 @@ fn linearreg_intercept_cuda_host_copy_matches_cpu() -> Result<(), Box<dyn std::e
 
 #[cfg(feature = "cuda")]
 #[test]
-fn linearreg_intercept_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+fn linearreg_intercept_cuda_many_series_one_param_matches_cpu(
+) -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
-        eprintln!("[linearreg_intercept_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        eprintln!(
+            "[linearreg_intercept_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device"
+        );
         return Ok(());
     }
 
@@ -145,13 +162,21 @@ fn linearreg_intercept_cuda_many_series_one_param_matches_cpu() -> Result<(), Bo
     let mut cpu_tm = vec![f64::NAN; rows * cols];
     for col in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for row in 0..rows { series[row] = data_tm[row * cols + col]; }
-        let out = LinearRegInterceptBuilder::new().period(period).apply_slice(&series)?;
-        for row in 0..rows { cpu_tm[row * cols + col] = out.values[row]; }
+        for row in 0..rows {
+            series[row] = data_tm[row * cols + col];
+        }
+        let out = LinearRegInterceptBuilder::new()
+            .period(period)
+            .apply_slice(&series)?;
+        for row in 0..rows {
+            cpu_tm[row * cols + col] = out.values[row];
+        }
     }
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
-    let params = LinearRegInterceptParams { period: Some(period) };
+    let params = LinearRegInterceptParams {
+        period: Some(period),
+    };
 
     let cuda = CudaLinregIntercept::new(0).expect("CudaLinregIntercept::new");
     let dev = cuda
@@ -168,11 +193,15 @@ fn linearreg_intercept_cuda_many_series_one_param_matches_cpu() -> Result<(), Bo
     for idx in 0..rows * cols {
         let expected = cpu_tm[idx];
         let actual = gpu_tm_f64[idx];
-        if expected.is_nan() { assert!(actual.is_nan(), "CUDA warmup mismatch at idx {idx}"); }
-        else {
+        if expected.is_nan() {
+            assert!(actual.is_nan(), "CUDA warmup mismatch at idx {idx}");
+        } else {
             let diff = (expected - actual).abs();
             let tol = 2.5e-3 + expected.abs() * 7.5e-4;
-            assert!(diff <= tol, "idx {idx} expected {expected} got {actual} diff {diff} tol {tol}");
+            assert!(
+                diff <= tol,
+                "idx {idx} expected {expected} got {actual} diff {diff} tol {tol}"
+            );
         }
     }
     Ok(())

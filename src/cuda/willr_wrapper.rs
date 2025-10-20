@@ -65,7 +65,9 @@ impl CudaWillr {
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => Module::from_ptx(ptx, &[]).map_err(|e| CudaWillrError::Cuda(e.to_string()))?,
+            Err(_) => {
+                Module::from_ptx(ptx, &[]).map_err(|e| CudaWillrError::Cuda(e.to_string()))?
+            }
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
@@ -89,7 +91,11 @@ impl CudaWillr {
             let mut free: usize = 0;
             let mut total: usize = 0;
             let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS { Some((free, total)) } else { None }
+            if res == cu::CUresult::CUDA_SUCCESS {
+                Some((free, total))
+            } else {
+                None
+            }
         }
     }
 
@@ -354,19 +360,26 @@ impl CudaWillr {
             )));
         }
 
-        let d_high = DeviceBuffer::from_slice(high_tm)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_tm)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm)
-            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_high =
+            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_low =
+            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_close =
+            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
 
         self.willr_many_series_one_param_device(
-            &d_high, &d_low, &d_close, cols as i32, rows as i32, period as i32, &d_first, &mut d_out,
+            &d_high,
+            &d_low,
+            &d_close,
+            cols as i32,
+            rows as i32,
+            period as i32,
+            &d_first,
+            &mut d_out,
         )?;
 
         self.stream
@@ -417,7 +430,9 @@ impl CudaWillr {
         period: usize,
     ) -> Result<(Vec<i32>, usize, usize, usize), CudaWillrError> {
         if cols == 0 || rows == 0 {
-            return Err(CudaWillrError::InvalidInput("cols and rows must be > 0".into()));
+            return Err(CudaWillrError::InvalidInput(
+                "cols and rows must be > 0".into(),
+            ));
         }
         let elems = cols
             .checked_mul(rows)

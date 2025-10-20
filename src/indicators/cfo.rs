@@ -17,10 +17,10 @@
 //! - Row-specific batch: not implemented. Potential via prefix sums (P/Q) for shared sums across rows; defer to a future PR.
 //! - Streaming Performance: O(1) per tick via rolling S_y/S_xy and precomputed OLS constants
 //! - Memory Optimization: GOOD - properly uses alloc_with_nan_prefix and make_uninit_matrix helpers for zero-copy allocation
-#[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1, PyUntypedArrayMethods};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArray1, PyUntypedArrayMethods};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1874,7 +1874,10 @@ pub fn cfo_cuda_batch_dev_py<'py>(
     }
 
     let slice_in = data_f32.as_slice()?;
-    let sweep = CfoBatchRange { period: period_range, scalar: scalar_range };
+    let sweep = CfoBatchRange {
+        period: period_range,
+        scalar: scalar_range,
+    };
 
     // Build combos on host for metadata; GPU computes values
     let combos = expand_grid(&sweep);
@@ -1894,7 +1897,14 @@ pub fn cfo_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    dict.set_item("scalars", combos.iter().map(|p| p.scalar.unwrap()).collect::<Vec<_>>().into_pyarray(py))?;
+    dict.set_item(
+        "scalars",
+        combos
+            .iter()
+            .map(|p| p.scalar.unwrap())
+            .collect::<Vec<_>>()
+            .into_pyarray(py),
+    )?;
     Ok((DeviceArrayF32Py { inner }, dict))
 }
 
@@ -1920,7 +1930,10 @@ pub fn cfo_cuda_many_series_one_param_dev_py<'py>(
     let rows = shape[0];
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
-    let params = CfoParams { period: Some(period), scalar: Some(scalar) };
+    let params = CfoParams {
+        period: Some(period),
+        scalar: Some(scalar),
+    };
     let inner = py.allow_threads(|| {
         let cuda = crate::cuda::oscillators::cfo_wrapper::CudaCfo::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;

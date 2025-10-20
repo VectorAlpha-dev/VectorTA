@@ -1696,14 +1696,13 @@ pub fn stoch_cuda_batch_dev_py(
         slowd_period,
         slowd_ma_type: (slowd_ma_type.to_string(), slowd_ma_type.to_string(), 0.0),
     };
-    let (k, d) = py
-        .allow_threads(|| {
-            let cuda = crate::cuda::oscillators::CudaStoch::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.stoch_batch_dev(h, l, c, &sweep)
-                .map(|b| (b.k, b.d))
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let (k, d) = py.allow_threads(|| {
+        let cuda = crate::cuda::oscillators::CudaStoch::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.stoch_batch_dev(h, l, c, &sweep)
+            .map(|b| (b.k, b.d))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     Ok((DeviceArrayF32Py { inner: k }, DeviceArrayF32Py { inner: d }))
 }
 
@@ -1738,13 +1737,12 @@ pub fn stoch_cuda_many_series_one_param_dev_py(
         slowd_period: Some(slowd_period),
         slowd_ma_type: Some(slowd_ma_type.to_string()),
     };
-    let (k, d) = py
-        .allow_threads(|| {
-            let cuda = crate::cuda::oscillators::CudaStoch::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.stoch_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+    let (k, d) = py.allow_threads(|| {
+        let cuda = crate::cuda::oscillators::CudaStoch::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.stoch_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
     Ok((DeviceArrayF32Py { inner: k }, DeviceArrayF32Py { inner: d }))
 }
 

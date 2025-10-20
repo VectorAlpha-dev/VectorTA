@@ -100,8 +100,8 @@ pub struct CudaVidya {
 impl CudaVidya {
     pub fn new(device_id: usize) -> Result<Self, CudaVidyaError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaVidyaError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vidya_kernel.ptx"));
@@ -113,8 +113,9 @@ impl CudaVidya {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaVidyaError::Cuda(e.to_string()))?,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaVidyaError::Cuda(e.to_string()))?
+                }
             },
         };
 
@@ -156,8 +157,8 @@ impl CudaVidya {
         let n_combos = prepared.combos.len();
 
         let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
-        let params_bytes = (prepared.short_i32.len() + prepared.long_i32.len()) * 4
-            + prepared.alpha_f32.len() * 4;
+        let params_bytes =
+            (prepared.short_i32.len() + prepared.long_i32.len()) * 4 + prepared.alpha_f32.len() * 4;
         let out_bytes = n_combos * prepared.series_len * 4;
         let required = prices_bytes + params_bytes + out_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
@@ -216,7 +217,8 @@ impl CudaVidya {
         series_len: usize,
         params: &VidyaParams,
     ) -> Result<DeviceArrayF32, CudaVidyaError> {
-        let prepared = Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
+        let prepared =
+            Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
         let prices_bytes = num_series * series_len * 4;
         let params_bytes = prepared.first_valids.len() * 4;
@@ -293,7 +295,10 @@ impl CudaVidya {
         if block_x == 0 {
             block_x = 256;
         }
-        unsafe { (*(self as *const _ as *mut CudaVidya)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaVidya)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
 
         // Chunk by device grid.x cap
@@ -358,7 +363,10 @@ impl CudaVidya {
         if block_x == 0 {
             block_x = 128;
         }
-        unsafe { (*(self as *const _ as *mut CudaVidya)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaVidya)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
 
         // One block per series (compat 1D launch)
@@ -412,9 +420,10 @@ impl CudaVidya {
             let lp = p.long_period.unwrap_or(0);
             let a = p.alpha.unwrap_or(-1.0);
             if sp < 2 || lp < sp || lp < 2 || !(0.0..=1.0).contains(&a) {
-                return Err(CudaVidyaError::InvalidInput(
-                    format!("invalid params: short={}, long={}, alpha={}", sp, lp, a),
-                ));
+                return Err(CudaVidyaError::InvalidInput(format!(
+                    "invalid params: short={}, long={}, alpha={}",
+                    sp, lp, a
+                )));
             }
             if series_len - first_valid < lp {
                 return Err(CudaVidyaError::InvalidInput(format!(
@@ -457,9 +466,10 @@ impl CudaVidya {
         let lp = params.long_period.unwrap_or(0);
         let a = params.alpha.unwrap_or(-1.0);
         if sp < 2 || lp < sp || lp < 2 || !(0.0..=1.0).contains(&a) {
-            return Err(CudaVidyaError::InvalidInput(
-                format!("invalid params: short={}, long={}, alpha={}", sp, lp, a),
-            ));
+            return Err(CudaVidyaError::InvalidInput(format!(
+                "invalid params: short={}, long={}, alpha={}",
+                sp, lp, a
+            )));
         }
         let mut first_valids = Vec::with_capacity(num_series);
         for s in 0..num_series {
@@ -512,11 +522,17 @@ impl CudaVidya {
     }
     #[inline]
     fn grid_chunks(total: usize, cap_x: usize) -> impl Iterator<Item = (usize, usize)> {
-        struct It { total: usize, cap: usize, start: usize }
+        struct It {
+            total: usize,
+            cap: usize,
+            start: usize,
+        }
         impl Iterator for It {
             type Item = (usize, usize);
             fn next(&mut self) -> Option<Self::Item> {
-                if self.start >= self.total { return None; }
+                if self.start >= self.total {
+                    return None;
+                }
                 let remain = self.total - self.start;
                 let len = remain.min(self.cap);
                 let s = self.start;
@@ -524,25 +540,37 @@ impl CudaVidya {
                 Some((s, len))
             }
         }
-        It { total, cap: cap_x.max(1), start: 0 }
+        It {
+            total,
+            cap: cap_x.max(1),
+            start: 0,
+        }
     }
     fn maybe_log_batch_debug(&self) {
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(BatchKernelSelected::Plain { block_x }) = self.last_batch {
                 eprintln!("[VIDYA] batch kernel: Plain block_x={}", block_x);
             }
         }
-        unsafe { (*(self as *const _ as *mut CudaVidya)).debug_batch_logged = true; }
+        unsafe {
+            (*(self as *const _ as *mut CudaVidya)).debug_batch_logged = true;
+        }
     }
     fn maybe_log_many_debug(&self) {
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(ManySeriesKernelSelected::OneD { block_x }) = self.last_many {
                 eprintln!("[VIDYA] many-series kernel: OneD block_x={}", block_x);
             }
         }
-        unsafe { (*(self as *const _ as *mut CudaVidya)).debug_many_logged = true; }
+        unsafe {
+            (*(self as *const _ as *mut CudaVidya)).debug_many_logged = true;
+        }
     }
 }
 
@@ -565,23 +593,38 @@ struct PreparedVidyaManySeries {
 
 fn expand_grid(r: &VidyaBatchRange) -> Vec<VidyaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return vec![start]; }
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return vec![start];
+        }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 { v.push(x); x += step; }
+        while x <= end + 1e-12 {
+            v.push(x);
+            x += step;
+        }
         v
     }
     let sp = axis_usize(r.short_period);
     let lp = axis_usize(r.long_period);
     let al = axis_f64(r.alpha);
     let mut out = Vec::with_capacity(sp.len() * lp.len() * al.len());
-    for &s in &sp { for &l in &lp { for &a in &al {
-        out.push(VidyaParams { short_period: Some(s), long_period: Some(l), alpha: Some(a) });
-    }}}
+    for &s in &sp {
+        for &l in &lp {
+            for &a in &al {
+                out.push(VidyaParams {
+                    short_period: Some(s),
+                    long_period: Some(l),
+                    alpha: Some(a),
+                });
+            }
+        }
+    }
     out
 }
 
@@ -636,24 +679,48 @@ pub mod benches {
                 )
                 .expect("vidya batch launch");
             self.cuda.synchronize().expect("sync");
-            if !self.warmed { self.warmed = true; }
+            if !self.warmed {
+                self.warmed = true;
+            }
         }
     }
     fn prep_vidya_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaVidya::new(0).expect("cuda vidya");
         let price = gen_series(ONE_SERIES_LEN);
-        let sweep = VidyaBatchRange { short_period: (2, 2, 0), long_period: (10, 10 + PARAM_SWEEP - 1, 1), alpha: (0.2, 0.2, 0.0) };
+        let sweep = VidyaBatchRange {
+            short_period: (2, 2, 0),
+            long_period: (10, 10 + PARAM_SWEEP - 1, 1),
+            alpha: (0.2, 0.2, 0.0),
+        };
         let combos = super::expand_grid(&sweep);
         let first_valid = price.iter().position(|&x| !x.is_nan()).unwrap_or(0);
         let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
-        let short_i32: Vec<i32> = combos.iter().map(|p| p.short_period.unwrap() as i32).collect();
-        let long_i32: Vec<i32> = combos.iter().map(|p| p.long_period.unwrap() as i32).collect();
+        let short_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.short_period.unwrap() as i32)
+            .collect();
+        let long_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.long_period.unwrap() as i32)
+            .collect();
         let alpha_f32: Vec<f32> = combos.iter().map(|p| p.alpha.unwrap() as f32).collect();
         let d_short = DeviceBuffer::from_slice(&short_i32).expect("d_short");
         let d_long = DeviceBuffer::from_slice(&long_i32).expect("d_long");
         let d_alpha = DeviceBuffer::from_slice(&alpha_f32).expect("d_alpha");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(ONE_SERIES_LEN * combos.len()) }.expect("d_out");
-        Box::new(VidyaBatchState { cuda, d_prices, d_out, d_short, d_long, d_alpha, first_valid, len: ONE_SERIES_LEN, combos: combos.len(), warmed: false })
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(ONE_SERIES_LEN * combos.len()) }.expect("d_out");
+        Box::new(VidyaBatchState {
+            cuda,
+            d_prices,
+            d_out,
+            d_short,
+            d_long,
+            d_alpha,
+            first_valid,
+            len: ONE_SERIES_LEN,
+            combos: combos.len(),
+            warmed: false,
+        })
     }
 
     struct VidyaManyState {
@@ -683,7 +750,9 @@ pub mod benches {
                 )
                 .expect("vidya many launch");
             self.cuda.synchronize().expect("sync");
-            if !self.warmed { self.warmed = true; }
+            if !self.warmed {
+                self.warmed = true;
+            }
         }
     }
     fn prep_vidya_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -695,11 +764,30 @@ pub mod benches {
         let lp = 64;
         let alpha = 0.2f32;
         let mut first_valids = vec![0i32; cols];
-        for s in 0..cols { for t in 0..rows { if prices_tm[t*cols+s].is_finite() { first_valids[s] = t as i32; break; } } }
+        for s in 0..cols {
+            for t in 0..rows {
+                if prices_tm[t * cols + s].is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
         let d_prices_tm = DeviceBuffer::from_slice(&prices_tm).expect("d_prices_tm");
         let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
-        let d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols*rows) }.expect("d_out_tm");
-        Box::new(VidyaManyState { cuda, d_prices_tm, d_first, d_out_tm, cols, rows, sp, lp, alpha, warmed: false })
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        Box::new(VidyaManyState {
+            cuda,
+            d_prices_tm,
+            d_first,
+            d_out_tm,
+            cols,
+            rows,
+            sp,
+            lp,
+            alpha,
+            warmed: false,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -725,4 +813,3 @@ pub mod benches {
         ]
     }
 }
-

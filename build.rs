@@ -429,7 +429,11 @@ fn compile_cuda_kernels() {
     // VOSC (Volume Oscillator)
     compile_kernel(&cuda_path, "kernels/cuda/vosc_kernel.cu", "vosc_kernel.ptx");
     // SafeZoneStop (trend stop indicator)
-    compile_kernel(&cuda_path, "kernels/cuda/safezonestop_kernel.cu", "safezonestop_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/safezonestop_kernel.cu",
+        "safezonestop_kernel.ptx",
+    );
     // ROCR (Rate of Change Ratio)
     compile_kernel(&cuda_path, "kernels/cuda/rocr_kernel.cu", "rocr_kernel.ptx");
     compile_kernel(
@@ -627,11 +631,7 @@ fn compile_cuda_kernels() {
         "kernels/cuda/moving_averages/wclprice_kernel.cu",
         "wclprice_kernel.ptx",
     );
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/sar_kernel.cu",
-        "sar_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/sar_kernel.cu", "sar_kernel.ptx");
     compile_kernel(
         &cuda_path,
         "kernels/cuda/alphatrend_kernel.cu",
@@ -660,21 +660,9 @@ fn compile_cuda_kernels() {
         "kernels/cuda/zscore_kernel.cu",
         "zscore_kernel.ptx",
     );
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/voss_kernel.cu",
-        "voss_kernel.ptx",
-    );
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/cksp_kernel.cu",
-        "cksp_kernel.ptx",
-    );
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/emd_kernel.cu",
-        "emd_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/voss_kernel.cu", "voss_kernel.ptx");
+    compile_kernel(&cuda_path, "kernels/cuda/cksp_kernel.cu", "cksp_kernel.ptx");
+    compile_kernel(&cuda_path, "kernels/cuda/emd_kernel.cu", "emd_kernel.ptx");
     // MinMax (local extrema)
     compile_kernel(
         &cuda_path,
@@ -702,22 +690,14 @@ fn compile_cuda_kernels() {
         "kernels/cuda/kaufmanstop_kernel.cu",
         "kaufmanstop_kernel.ptx",
     );
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/mass_kernel.cu",
-        "mass_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/mass_kernel.cu", "mass_kernel.ptx");
     compile_kernel(
         &cuda_path,
         "kernels/cuda/oscillators/kvo_kernel.cu",
         "kvo_kernel.ptx",
     );
     // NATR
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/natr_kernel.cu",
-        "natr_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/natr_kernel.cu", "natr_kernel.ptx");
     compile_kernel(
         &cuda_path,
         "kernels/cuda/linearreg_angle_kernel.cu",
@@ -735,23 +715,11 @@ fn compile_cuda_kernels() {
         "percentile_nearest_rank_kernel.ptx",
     );
     // PRB (Polynomial Regression Bands)
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/prb_kernel.cu",
-        "prb_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/prb_kernel.cu", "prb_kernel.ptx");
     // VI (Vortex Indicator)
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/vi_kernel.cu",
-        "vi_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/vi_kernel.cu", "vi_kernel.ptx");
     // VPCI (Volume Price Confirmation Index)
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/vpci_kernel.cu",
-        "vpci_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/vpci_kernel.cu", "vpci_kernel.ptx");
     // Mod God Mode (composite oscillator)
     compile_kernel(
         &cuda_path,
@@ -763,11 +731,7 @@ fn compile_cuda_kernels() {
         "kernels/cuda/bollinger_bands_kernel.cu",
         "bollinger_bands_kernel.ptx",
     );
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/ad_kernel.cu",
-        "ad_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/ad_kernel.cu", "ad_kernel.ptx");
     compile_kernel(
         &cuda_path,
         "kernels/cuda/devstop_kernel.cu",
@@ -785,23 +749,11 @@ fn compile_cuda_kernels() {
         "ttm_trend_kernel.ptx",
     );
     // NVI
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/nvi_kernel.cu",
-        "nvi_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/nvi_kernel.cu", "nvi_kernel.ptx");
     // PVI
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/pvi_kernel.cu",
-        "pvi_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/pvi_kernel.cu", "pvi_kernel.ptx");
     // VPT
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/vpt_kernel.cu",
-        "vpt_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/vpt_kernel.cu", "vpt_kernel.ptx");
     // SuperTrend
     compile_kernel(
         &cuda_path,
@@ -815,17 +767,9 @@ fn compile_cuda_kernels() {
         "medium_ad_kernel.ptx",
     );
     // DI (+DI/-DI)
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/di_kernel.cu",
-        "di_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/di_kernel.cu", "di_kernel.ptx");
     // ATR
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/atr_kernel.cu",
-        "atr_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/atr_kernel.cu", "atr_kernel.ptx");
     // Chande (Chandelier Exit)
     compile_kernel(
         &cuda_path,
@@ -833,11 +777,7 @@ fn compile_cuda_kernels() {
         "chande_kernel.ptx",
     );
     // CVI (Chaikin's Volatility)
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/cvi_kernel.cu",
-        "cvi_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/cvi_kernel.cu", "cvi_kernel.ptx");
     // DVDIQQE
     compile_kernel(
         &cuda_path,
@@ -845,33 +785,17 @@ fn compile_cuda_kernels() {
         "dvdiqqe_kernel.ptx",
     );
     // ER (Kaufman Efficiency Ratio)
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/er_kernel.cu",
-        "er_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/er_kernel.cu", "er_kernel.ptx");
     // PFE (Polarized Fractal Efficiency)
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/pfe_kernel.cu",
-        "pfe_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/pfe_kernel.cu", "pfe_kernel.ptx");
     // Keltner (combine kernel)
     compile_kernel(
         &cuda_path,
         "kernels/cuda/keltner_kernel.cu",
         "keltner_kernel.ptx",
     );
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/adx_kernel.cu",
-        "adx_kernel.ptx",
-    );
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/dm_kernel.cu",
-        "dm_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/adx_kernel.cu", "adx_kernel.ptx");
+    compile_kernel(&cuda_path, "kernels/cuda/dm_kernel.cu", "dm_kernel.ptx");
     compile_kernel(
         &cuda_path,
         "kernels/cuda/chandelier_exit_kernel.cu",
@@ -882,22 +806,10 @@ fn compile_cuda_kernels() {
         "kernels/cuda/damiani_volatmeter_kernel.cu",
         "damiani_volatmeter_kernel.ptx",
     );
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/dx_kernel.cu",
-        "dx_kernel.ptx",
-    );
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/eri_kernel.cu",
-        "eri_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/dx_kernel.cu", "dx_kernel.ptx");
+    compile_kernel(&cuda_path, "kernels/cuda/eri_kernel.cu", "eri_kernel.ptx");
     // OBV (On-Balance Volume)
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/obv_kernel.cu",
-        "obv_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/obv_kernel.cu", "obv_kernel.ptx");
     // HalfTrend indicator
     compile_kernel(
         &cuda_path,
@@ -911,11 +823,7 @@ fn compile_cuda_kernels() {
         "pivot_kernel.ptx",
     );
     // Ulcer Index (UI)
-    compile_kernel(
-        &cuda_path,
-        "kernels/cuda/ui_kernel.cu",
-        "ui_kernel.ptx",
-    );
+    compile_kernel(&cuda_path, "kernels/cuda/ui_kernel.cu", "ui_kernel.ptx");
     // StdDev (rolling standard deviation)
     compile_kernel(
         &cuda_path,
@@ -923,17 +831,33 @@ fn compile_cuda_kernels() {
         "stddev_kernel.ptx",
     );
     // Donchian Channels (upper/middle/lower)
-    compile_kernel(&cuda_path, "kernels/cuda/donchian_kernel.cu", "donchian_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/donchian_kernel.cu",
+        "donchian_kernel.ptx",
+    );
     // Trend/strength
     compile_kernel(&cuda_path, "kernels/cuda/adxr_kernel.cu", "adxr_kernel.ptx");
     // Correlation (high vs low)
-    compile_kernel(&cuda_path, "kernels/cuda/correl_hl_kernel.cu", "correl_hl_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/correl_hl_kernel.cu",
+        "correl_hl_kernel.ptx",
+    );
     // Elder's Force Index (EFI)
     compile_kernel(&cuda_path, "kernels/cuda/efi_kernel.cu", "efi_kernel.ptx");
     // Market Facilitation Index (marketefi)
-    compile_kernel(&cuda_path, "kernels/cuda/marketefi_kernel.cu", "marketefi_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/marketefi_kernel.cu",
+        "marketefi_kernel.ptx",
+    );
     // Kurtosis (excess kurtosis)
-    compile_kernel(&cuda_path, "kernels/cuda/kurtosis_kernel.cu", "kurtosis_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/kurtosis_kernel.cu",
+        "kurtosis_kernel.ptx",
+    );
     // Low Pass Channel (LPC)
     compile_kernel(&cuda_path, "kernels/cuda/lpc_kernel.cu", "lpc_kernel.ptx");
 }
