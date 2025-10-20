@@ -1,16 +1,16 @@
 // CUDA kernels for Average Sentiment Oscillator (ASO)
+// Optimized FP32 versions (CUDA 13 / Ada+ friendly)
 //
-// Two entry points:
-//  - aso_batch_f32:     one series × many params (period, mode per combo)
-//                        Uses precomputed sparse tables for rolling min/max.
-//  - aso_many_series_one_param_f32: many series × one param (time-major layout)
-//                        Single block per series; sequential scan with monotonic deques.
+// Highlights:
+//  - Hoist sparse-table invariants out of hot loop
+//  - Branch-free mode mixing via weights
+//  - Kahan compensated sliding sums (robust FP32)
+//  - Runtime pow2 fast path for ring/deque modulo
 //
-// Semantics:
-//  - FP32 compute. Warmup indices are NaN-initialized. Division-by-zero in
-//    intrabar/group scales uses 1.0 as reciprocal factor (i.e., scale=50.0).
-//  - NaN propagation follows arithmetic results; we do not force NaNs beyond
-//    what the scalar path would naturally produce.
+// Semantics preserved:
+//  - FP32 compute; warmup indices are NaN
+//  - Division-by-zero -> reciprocal 1.0 (scale = 50.0)
+//  - NaN propagation follows arithmetic
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -19,13 +19,49 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// -------------- Helpers --------------
+// ----------------- Helpers -----------------
 __device__ __forceinline__ float inv_or_one(const float x) {
-    return (x != 0.0f) ? (1.0f / x) : 1.0f;
+    return (x != 0.0f) ? __fdividef(1.0f, x) : 1.0f;
 }
 
-// -------------- Batch: one series × many params --------------
-// Dynamic shared memory layout per block:
+__device__ __forceinline__ void mode_weights(const int mode, float& w_intra, float& w_group) {
+    // mode: 0 = avg(intra,group), 1 = intra, 2 = group
+    // Replace per-sample branching with fixed weights.
+    if (mode == 0) { w_intra = 0.5f; w_group = 0.5f; }
+    else if (mode == 2) { w_intra = 0.0f; w_group = 1.0f; }
+    else { w_intra = 1.0f; w_group = 0.0f; }
+}
+
+// Kahan compensated add: sum += y (compensated in c)
+__device__ __forceinline__ void kahan_add(float y, float& sum, float& c) {
+    float t  = y - c;
+    float ns = sum + t;
+    c        = (ns - sum) - t;
+    sum      = ns;
+}
+
+// Fast modulo for power-of-two period
+struct ModHelper {
+    const int period;
+    const bool is_pow2;
+    const int mask; // period-1 when pow2
+    __device__ __forceinline__ ModHelper(int p)
+        : period(p), is_pow2((p & (p - 1)) == 0), mask(p - 1) {}
+    __device__ __forceinline__ int inc_wrap(int x) const {
+        if (is_pow2) return (x + 1) & mask;
+        int nx = x + 1; return (nx == period) ? 0 : nx;
+    }
+    __device__ __forceinline__ int dec_wrap(int x) const {
+        if (is_pow2) return (x - 1) & mask;
+        return (x == 0) ? (period - 1) : (x - 1);
+    }
+    __device__ __forceinline__ int mod(int x) const {
+        return is_pow2 ? (x & mask) : (x % period);
+    }
+};
+
+// ----------------- Batch: one series × many params -----------------
+// Dynamic shared memory per block: 2 * period * sizeof(float)
 //   [0..period-1]   -> ring_b (float)
 //   [period..2P-1]  -> ring_e (float)
 extern "C" __global__ void aso_batch_f32(
@@ -33,10 +69,10 @@ extern "C" __global__ void aso_batch_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
     const float* __restrict__ close,
-    const int* __restrict__ periods,
-    const int* __restrict__ modes,
-    const int* __restrict__ log2_tbl,
-    const int* __restrict__ level_offsets,
+    const int*   __restrict__ periods,
+    const int*   __restrict__ modes,
+    const int*   __restrict__ log2_tbl,
+    const int*   __restrict__ level_offsets,
     const float* __restrict__ st_max,
     const float* __restrict__ st_min,
     int series_len,
@@ -44,110 +80,128 @@ extern "C" __global__ void aso_batch_f32(
     int level_count,
     int n_combos,
     float* __restrict__ out_bulls,
-    float* __restrict__ out_bears) {
+    float* __restrict__ out_bears)
+{
     const int combo = blockIdx.x;
     if (combo >= n_combos) return;
 
     const int period = periods[combo];
     if (period <= 0) return;
-    const int mode = modes[combo];
+
+    // Precompute mode weights once per combo (avoids inner-loop branches).
+    const int  mode = modes[combo];
+    float w_intra, w_group;
+    mode_weights(mode, w_intra, w_group);
 
     const int base = combo * series_len;
 
-    // Initialize warmup with NaNs in parallel.
+    // Initialize to NaN so warmup region is well-defined.
+    // (Kept here for drop-in compatibility; see the note below for a faster optional prefill.)
     for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
         out_bulls[base + i] = NAN;
         out_bears[base + i] = NAN;
     }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; // single-lane sequential scan per combo
+    // Single-lane sequential scan per combo (dependencies across t).
+    if (threadIdx.x != 0) return;
 
     const int warm = first_valid + period - 1;
     if (warm >= series_len) return;
 
+    // Sparse table invariants hoisted out of the loop.
+    const int k = log2_tbl[period];
+    if (k < 0 || k >= level_count) return;
+    const int offset   = 1 << k;
+    const int lvl_base = level_offsets[k];
+    const float* __restrict__ st_max_lvl = st_max + lvl_base;
+    const float* __restrict__ st_min_lvl = st_min + lvl_base;
+
+    // Dynamic shared memory rings
     extern __shared__ float smem[];
     float* ring_b = smem;
     float* ring_e = smem + period;
-    int head = 0; int filled = 0;
-    float sum_b = 0.0f, sum_e = 0.0f;
 
-    // Zero the first `period` elements we will touch to keep defined behavior.
-    for (int k = 0; k < period; ++k) { ring_b[k] = 0.0f; ring_e[k] = 0.0f; }
+    // Initialize rings
+    for (int i = 0; i < period; ++i) { ring_b[i] = 0.0f; ring_e[i] = 0.0f; }
 
-    for (int t = warm; t < series_len; ++t) {
+    ModHelper mh(period);
+    int   head   = 0;
+    int   filled = 0;
+    float sum_b  = 0.0f, cb = 0.0f; // Kahan sum + compensation
+    float sum_e  = 0.0f, ce = 0.0f;
+
+    // Prepare rolling sparse-table indices and gopen index
+    int start     = warm - period + 1;
+    int idx_a     = start;
+    int idx_b     = warm + 1 - offset;
+    int gopen_idx = start;
+
+    // Main time loop
+    for (int t = warm; t < series_len; ++t, ++start, ++idx_a, ++idx_b, ++gopen_idx) {
         const float o = open[t];
         const float h = high[t];
         const float l = low[t];
         const float c = close[t];
 
-        // Intrabar component
-        const float intrarange = h - l;
-        const float scale1 = 50.0f * inv_or_one(intrarange);
-        const float intrabarbulls = ((c - l) + (h - o)) * scale1;
-        const float intrabarbears = ((h - c) + (o - l)) * scale1;
+        // Intrabar (per-bar) component
+        const float intrarange    = h - l;
+        const float scale1        = 50.0f * inv_or_one(intrarange);
+        const float intrabarbulls = fmaf((c - l) + (h - o), scale1, 0.0f);
+        const float intrabarbears = fmaf((h - c) + (o - l), scale1, 0.0f);
 
-        // Group component via sparse tables
-        const int start = t - period + 1;
-        int k = log2_tbl[period];
-        if (k < 0 || k >= level_count) { continue; }
-        const int offset = 1 << k;
-        const int lvl_base = level_offsets[k];
-        const int idx_a = lvl_base + start;
-        const int idx_b = lvl_base + (t + 1 - offset);
-        const float gh = fmaxf(st_max[idx_a], st_max[idx_b]);
-        const float gl = fminf(st_min[idx_a], st_min[idx_b]);
-        const float gopen = open[start];
-        const float gr = gh - gl;
-        const float scale2 = 50.0f * inv_or_one(gr);
-        const float groupbulls = ((c - gl) + (gh - gopen)) * scale2;
-        const float groupbears = ((gh - c) + (gopen - gl)) * scale2;
+        // Group component from sparse tables (O(1) RMQ)
+        const float gh    = fmaxf(st_max_lvl[idx_a], st_max_lvl[idx_b]);
+        const float gl    = fminf(st_min_lvl[idx_a], st_min_lvl[idx_b]);
+        const float gopen = open[gopen_idx];
+        const float gr    = gh - gl;
+        const float scale2        = 50.0f * inv_or_one(gr);
+        const float groupbulls    = fmaf((c - gl) + (gh - gopen), scale2, 0.0f);
+        const float groupbears    = fmaf((gh - c) + (gopen - gl), scale2, 0.0f);
 
-        float b = intrabarbulls;
-        float e = intrabarbears;
-        if (mode == 0) {
-            b = 0.5f * (intrabarbulls + groupbulls);
-            e = 0.5f * (intrabarbears + groupbears);
-        } else if (mode == 2) {
-            b = groupbulls;
-            e = groupbears;
-        }
+        // Mix intrabar / group via weights (no branch in the hot loop)
+        const float b = fmaf(w_intra, intrabarbulls, w_group * groupbulls);
+        const float e = fmaf(w_intra, intrabarbears, w_group * groupbears);
 
         const float old_b = (filled == period) ? ring_b[head] : 0.0f;
         const float old_e = (filled == period) ? ring_e[head] : 0.0f;
-        sum_b += b - old_b;
-        sum_e += e - old_e;
+
+        // Kahan-compensated sliding updates
+        kahan_add(b - old_b, sum_b, cb);
+        kahan_add(e - old_e, sum_e, ce);
+
         ring_b[head] = b;
         ring_e[head] = e;
-        head += 1; if (head == period) head = 0;
-        if (filled < period) filled += 1;
+        head = mh.inc_wrap(head);
+        if (filled < period) ++filled;
 
         const float n = (float)filled;
-        out_bulls[base + t] = sum_b / n;
-        out_bears[base + t] = sum_e / n;
+        out_bulls[base + t] = __fdividef(sum_b, n);
+        out_bears[base + t] = __fdividef(sum_e, n);
     }
 }
 
-// -------------- Many series × one param (time-major) --------------
-// Dynamic shared memory layout per block:
-//   float ring_b[period], ring_e[period];
-//   int   dq_min_idx[period], dq_max_idx[period];
+// ----------------- Many series × one param (time-major) -----------------
+// Dynamic shared memory per block:
+//   floats: ring_b[period], ring_e[period]
+//   ints:   dq_min_idx[period], dq_max_idx[period]
 extern "C" __global__ void aso_many_series_one_param_f32(
     const float* __restrict__ open_tm,
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
-    const int* __restrict__ first_valids, // per series
-    int cols,
-    int rows,
+    const int*   __restrict__ first_valids, // per series
+    int cols,    // number of series (columns)
+    int rows,    // number of rows (time)
     int period,
     int mode,
     float* __restrict__ out_bulls_tm,
-    float* __restrict__ out_bears_tm) {
+    float* __restrict__ out_bears_tm)
+{
     const int s = blockIdx.x; // series index (column)
     if (s >= cols || period <= 0) return;
 
-    // Initialize outputs to NaN in parallel across threads in the block
+    // Initialize outputs to NaN (kept for drop-in parity).
     for (int t = threadIdx.x; t < rows; t += blockDim.x) {
         const int idx = t * cols + s;
         out_bulls_tm[idx] = NAN;
@@ -155,32 +209,40 @@ extern "C" __global__ void aso_many_series_one_param_f32(
     }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; // single-lane per series
+    if (threadIdx.x != 0) return; // single-lane per series (time dependency)
 
-    const int fv = first_valids[s];
+    const int fv   = first_valids[s];
     const int warm = fv + period - 1;
     if (warm >= rows) return;
 
+    float w_intra, w_group;
+    mode_weights(mode, w_intra, w_group);
+
     extern __shared__ unsigned char smem_uc[];
-    float* ring_b = reinterpret_cast<float*>(smem_uc);
-    float* ring_e = ring_b + period;
-    int* dq_min_idx = reinterpret_cast<int*>(ring_e + period);
-    int* dq_max_idx = dq_min_idx + period;
+    float* ring_b     = reinterpret_cast<float*>(smem_uc);
+    float* ring_e     = ring_b + period;
+    int*   dq_min_idx = reinterpret_cast<int*>(ring_e + period);
+    int*   dq_max_idx = dq_min_idx + period;
 
     for (int i = 0; i < period; ++i) {
         ring_b[i] = 0.0f; ring_e[i] = 0.0f;
         dq_min_idx[i] = 0; dq_max_idx[i] = 0;
     }
 
-    int head = 0; int filled = 0;
-    float sum_b = 0.0f, sum_e = 0.0f;
+    ModHelper mh(period);
+    int head = 0, filled = 0;
+    float sum_b = 0.0f, cb = 0.0f;
+    float sum_e = 0.0f, ce = 0.0f;
 
-    // Monotonic deques (store indices into the time-major arrays)
+    // Monotonic deques (store indices into time-major arrays)
     int min_head = 0, min_tail = 0, min_len = 0;
     int max_head = 0, max_tail = 0, max_len = 0;
 
-    for (int t = fv; t < rows; ++t) {
-        const int idx = t * cols + s;
+    // Carry time-major indices forward to avoid repeated multiplies
+    int idx       = fv * cols + s;                         // t*cols + s
+    int start_idx = idx - (period - 1) * cols;             // (t - period + 1)*cols + s
+
+    for (int t = fv; t < rows; ++t, idx += cols, start_idx += cols) {
         const float o = open_tm[idx];
         const float h = high_tm[idx];
         const float l = low_tm[idx];
@@ -188,67 +250,61 @@ extern "C" __global__ void aso_many_series_one_param_f32(
 
         // push low into monotonic-min deque
         while (min_len > 0) {
-            int back = (min_tail == 0) ? (period - 1) : (min_tail - 1);
-            int j = dq_min_idx[back];
+            int back = mh.dec_wrap(min_tail);
+            int j    = dq_min_idx[back];
             float lj = low_tm[j * cols + s];
-            if (l <= lj) { min_tail = back; min_len -= 1; } else { break; }
+            if (l <= lj) { min_tail = back; --min_len; } else { break; }
         }
-        if (min_len == period) { min_head = (min_head + 1) % period; min_len -= 1; }
-        dq_min_idx[min_tail] = t; min_tail = (min_tail + 1) % period; min_len += 1;
+        if (min_len == period) { min_head = mh.inc_wrap(min_head); --min_len; }
+        dq_min_idx[min_tail] = t; min_tail = mh.inc_wrap(min_tail); ++min_len;
 
         // push high into monotonic-max deque
         while (max_len > 0) {
-            int back = (max_tail == 0) ? (period - 1) : (max_tail - 1);
-            int j = dq_max_idx[back];
+            int back = mh.dec_wrap(max_tail);
+            int j    = dq_max_idx[back];
             float hj = high_tm[j * cols + s];
-            if (h >= hj) { max_tail = back; max_len -= 1; } else { break; }
+            if (h >= hj) { max_tail = back; --max_len; } else { break; }
         }
-        if (max_len == period) { max_head = (max_head + 1) % period; max_len -= 1; }
-        dq_max_idx[max_tail] = t; max_tail = (max_tail + 1) % period; max_len += 1;
+        if (max_len == period) { max_head = mh.inc_wrap(max_head); --max_len; }
+        dq_max_idx[max_tail] = t; max_tail = mh.inc_wrap(max_tail); ++max_len;
 
         if (t >= warm) {
             const int start = t - period + 1;
-            while (min_len > 0 && dq_min_idx[min_head] < start) {
-                min_head = (min_head + 1) % period; min_len -= 1;
-            }
-            while (max_len > 0 && dq_max_idx[max_head] < start) {
-                max_head = (max_head + 1) % period; max_len -= 1;
-            }
+            while (min_len > 0 && dq_min_idx[min_head] < start) { min_head = mh.inc_wrap(min_head); --min_len; }
+            while (max_len > 0 && dq_max_idx[max_head] < start) { max_head = mh.inc_wrap(max_head); --max_len; }
 
-            const float gl = low_tm[dq_min_idx[min_head] * cols + s];
-            const float gh = high_tm[dq_max_idx[max_head] * cols + s];
-            const float gopen = open_tm[start * cols + s];
+            const float gl    = low_tm[dq_min_idx[min_head] * cols + s];
+            const float gh    = high_tm[dq_max_idx[max_head] * cols + s];
+            const float gopen = open_tm[start_idx];
 
-            const float intrarange = h - l;
-            const float scale1 = 50.0f * inv_or_one(intrarange);
-            const float intrabarbulls = ((c - l) + (h - o)) * scale1;
-            const float intrabarbears = ((h - c) + (o - l)) * scale1;
+            // Intrabar
+            const float intrarange    = h - l;
+            const float scale1        = 50.0f * inv_or_one(intrarange);
+            const float intrabarbulls = fmaf((c - l) + (h - o), scale1, 0.0f);
+            const float intrabarbears = fmaf((h - c) + (o - l), scale1, 0.0f);
 
-            const float gr = gh - gl;
-            const float scale2 = 50.0f * inv_or_one(gr);
-            const float groupbulls = ((c - gl) + (gh - gopen)) * scale2;
-            const float groupbears = ((gh - c) + (gopen - gl)) * scale2;
+            // Group
+            const float gr            = gh - gl;
+            const float scale2        = 50.0f * inv_or_one(gr);
+            const float groupbulls    = fmaf((c - gl) + (gh - gopen), scale2, 0.0f);
+            const float groupbears    = fmaf((gh - c) + (gopen - gl), scale2, 0.0f);
 
-            float b = intrabarbulls;
-            float e = intrabarbears;
-            if (mode == 0) {
-                b = 0.5f * (intrabarbulls + groupbulls);
-                e = 0.5f * (intrabarbears + groupbears);
-            } else if (mode == 2) {
-                b = groupbulls; e = groupbears;
-            }
+            const float b = fmaf(w_intra, intrabarbulls, w_group * groupbulls);
+            const float e = fmaf(w_intra, intrabarbears, w_group * groupbears);
 
             const float old_b = (filled == period) ? ring_b[head] : 0.0f;
             const float old_e = (filled == period) ? ring_e[head] : 0.0f;
-            sum_b += b - old_b; sum_e += e - old_e;
+
+            kahan_add(b - old_b, sum_b, cb);
+            kahan_add(e - old_e, sum_e, ce);
+
             ring_b[head] = b; ring_e[head] = e;
-            head += 1; if (head == period) head = 0;
-            if (filled < period) filled += 1;
+            head = mh.inc_wrap(head);
+            if (filled < period) ++filled;
 
             const float n = (float)filled;
-            const int out_idx = idx;
-            out_bulls_tm[out_idx] = sum_b / n;
-            out_bears_tm[out_idx] = sum_e / n;
+            out_bulls_tm[idx] = __fdividef(sum_b, n);
+            out_bears_tm[idx] = __fdividef(sum_e, n);
         }
     }
 }

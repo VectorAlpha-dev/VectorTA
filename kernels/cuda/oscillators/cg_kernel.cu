@@ -1,8 +1,8 @@
 // CUDA kernels for Center of Gravity (CG)
 //
-// Math pattern: dot-product style with fixed linear weights 1..(period-1).
-// Warmup semantics: first valid index is `first_valid + period`; prefix is NaN.
-// Division-by-zero or NaN denominator yields 0.0f, matching scalar policy.
+// Optimized rolling-update implementation for one series × many params, and
+// a strided rolling variant for many series × one param. Optional prefix-sum
+// kernels are provided for large-period, many-combo scenarios.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -10,6 +10,8 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+
+// --- constants & helpers -----------------------------------------------------
 
 #ifndef CG_NAN
 #define CG_NAN (__int_as_float(0x7fffffff))
@@ -22,20 +24,45 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
+// Emit 0.0 when |den| <= eps or den is not finite (matches scalar policy)
+static __device__ __forceinline__ bool cg_bad_den(float den) {
+    return (!isfinite(den)) || fabsf(den) <= 1.1920929e-7f; // FLT_EPSILON
+}
+
+// Light-weight compensated accumulator (Kahan-Babuška/Neumaier style).
+// Works well in FP32 without the FP64 throughput penalty.
+struct CompSum {
+    float s;
+    float c;
+    __device__ __forceinline__ CompSum() : s(0.0f), c(0.0f) {}
+    __device__ __forceinline__ void add(float x) {
+        float t = s + x;
+        c += (fabsf(s) >= fabsf(x)) ? (s - t) + x : (x - t) + s;
+        s  = t;
+    }
+    __device__ __forceinline__ void sub(float x) { add(-x); }
+    __device__ __forceinline__ float val() const { return s + c; }
+};
+
+// ----------------------------------------------------------------------------
+// One price series, many (period) combos. Each thread computes one combo.
+// Time complexity per thread: O(series_len), independent of 'period'.
+// ----------------------------------------------------------------------------
 extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
-                                         const int*   __restrict__ periods,
-                                         int series_len,
-                                         int n_combos,
-                                         int first_valid,
-                                         float* __restrict__ out) {
+                                        const int*   __restrict__ periods,
+                                        int series_len,
+                                        int n_combos,
+                                        int first_valid,
+                                        float* __restrict__ out)
+{
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
 
     const int period = periods[combo];
     const int base   = combo * series_len;
-    float* out_ptr   = out + base;
+    float* __restrict__ out_ptr = out + base;
 
-    // Basic input validation mirrors CPU path behavior.
+    // Input validation (mirror CPU behavior)
     if (UNLIKELY(period <= 0 || period > series_len ||
                  first_valid < 0 || first_valid >= series_len)) {
         for (int i = 0; i < series_len; ++i) out_ptr[i] = CG_NAN;
@@ -43,50 +70,97 @@ extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
     }
     const int tail_len = series_len - first_valid;
     if (UNLIKELY(tail_len < (period + 1))) {
-        // Not enough valid points for CG warmup policy (needs period + 1)
         for (int i = 0; i < series_len; ++i) out_ptr[i] = CG_NAN;
         return;
     }
 
-    const int warm   = first_valid + period; // first computed index for CG
-    const int window = period - 1;           // number of terms in dot-product
+    const int warm   = first_valid + period;   // first computed index
+    const int window = period - 1;             // number of terms in dot product
 
-    // Prefill NaN prefix up to (warm-1)
+    // Prefill NaN prefix
     for (int i = 0; i < warm; ++i) out_ptr[i] = CG_NAN;
 
     if (window <= 0) {
-        // Degenerate case: write zeros from warm to end
+        // Degenerate: zeros from warm to end
         for (int i = warm; i < series_len; ++i) out_ptr[i] = 0.0f;
         return;
     }
 
-    for (int i = warm; i < series_len; ++i) {
-        const float* base_ptr = prices + i;
-        float num = 0.0f;
-        float den = 0.0f;
-        // Accumulate newest (weight=1) to oldest (weight=window)
-        for (int k = 0; k < window; ++k) {
-            const float p = base_ptr[-k];
-            num += (float)(k + 1) * p;
-            den += p;
-        }
-        // Match scalar: tiny/NaN denominator -> 0.0
-        if (!isfinite(den) || fabsf(den) <= 1.1920929e-7f /* FLT_EPSILON */) {
-            out_ptr[i] = 0.0f;
+    // --- Initialize first window at i = warm --------------------------------
+    // S = sum of prices in window, T = sum of (k+1)*price (k=0..window-1)
+    CompSum S_acc, T_acc;
+    int nan_count = 0;
+
+    // Accumulate newest (weight=1) at prices[warm], ... oldest weight=window
+    for (int k = 0; k < window; ++k) {
+        const float p = prices[warm - k];
+        if (isfinite(p)) {
+            S_acc.add(p);
+            T_acc.add(fmaf((float)(k + 1), p, 0.0f));
         } else {
-            out_ptr[i] = -num / den;
+            nan_count++;
+        }
+    }
+
+    // Emit result for i = warm
+    {
+        const float S = S_acc.val();
+        out_ptr[warm] = (nan_count > 0 || cg_bad_den(S)) ? 0.0f : (-T_acc.val() / S);
+    }
+
+    // --- Slide the window in O(1) per step ----------------------------------
+    // Recurrence: T_{i+1} = T_i + S_{i+1} - w * drop
+    // where S_{i+1} = S_i + add - drop, and w = window.
+    // Periodic re-normalization to limit FP32 drift on long runs.
+    const int REFRESH_EVERY = 512;
+    int since_refresh = 0;
+    for (int i = warm; i < series_len - 1; ++i) {
+        const float add  = prices[i + 1];               // new sample entering
+        const float drop = prices[i - window + 1];      // oldest leaving
+
+        if (isfinite(add))  S_acc.add(add); else ++nan_count;
+        if (isfinite(drop)) S_acc.sub(drop); else --nan_count;
+
+        // T <- T + S (after S has been updated)
+        T_acc.add(S_acc.val());
+        // minus w*drop (only if finite to avoid NaN poisoning)
+        if (isfinite(drop)) T_acc.sub((float)window * drop);
+
+        // Write output
+        const float S = S_acc.val();
+        out_ptr[i + 1] = (nan_count > 0 || cg_bad_den(S)) ? 0.0f : (-T_acc.val() / S);
+
+        // Periodic refresh to tame accumulated rounding error in FP32
+        if (++since_refresh >= REFRESH_EVERY) {
+            since_refresh = 0;
+            // Rebuild S and T exactly for the current window [i+1 - (window-1) .. i+1]
+            CompSum S_new, T_new;
+            int nc = 0;
+            const int cur = i + 1;
+            for (int k = 0; k < window; ++k) {
+                const float p = prices[cur - k];
+                if (isfinite(p)) { S_new.add(p); T_new.add(fmaf((float)(k + 1), p, 0.0f)); }
+                else { nc++; }
+            }
+            S_acc = S_new;
+            T_acc = T_new;
+            nan_count = nc;
         }
     }
 }
 
+// ----------------------------------------------------------------------------
 // prices_tm: time-major layout [row * num_series + series]
+// Many series, one period. Each thread processes one series (column).
+// ----------------------------------------------------------------------------
 extern "C" __global__ void cg_many_series_one_param_f32(
     const float* __restrict__ prices_tm,
     const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int period,
-    float* __restrict__ out_tm) {
+    float* __restrict__ out_tm)
+{
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
 
@@ -94,57 +168,180 @@ extern "C" __global__ void cg_many_series_one_param_f32(
     float*       __restrict__ col_out = out_tm    + series;
 
     if (UNLIKELY(period <= 0 || period > series_len)) {
-        // Write NaN column
-        float* o = col_out;
-        for (int row = 0; row < series_len; ++row, o += num_series) *o = CG_NAN;
+        // Fill NaN column
+        for (int row = 0; row < series_len; ++row)
+            col_out[(size_t)row * num_series] = CG_NAN;
         return;
     }
 
     const int first_valid = first_valids[series];
     if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
-        float* o = col_out;
-        for (int row = 0; row < series_len; ++row, o += num_series) *o = CG_NAN;
+        for (int row = 0; row < series_len; ++row)
+            col_out[(size_t)row * num_series] = CG_NAN;
         return;
     }
 
     const int tail_len = series_len - first_valid;
     if (UNLIKELY(tail_len < (period + 1))) {
-        float* o = col_out;
-        for (int row = 0; row < series_len; ++row, o += num_series) *o = CG_NAN;
+        for (int row = 0; row < series_len; ++row)
+            col_out[(size_t)row * num_series] = CG_NAN;
         return;
     }
 
     const int warm   = first_valid + period;
     const int window = period - 1;
 
-    // Prefill NaN up to warm-1
-    {
-        float* o = col_out;
-        for (int row = 0; row < warm; ++row, o += num_series) *o = CG_NAN;
-    }
+    // Prefill NaN prefix
+    for (int row = 0; row < warm; ++row)
+        col_out[(size_t)row * num_series] = CG_NAN;
 
     if (window <= 0) {
-        // Degenerate: zeros from warm
-        float* o = col_out + (size_t)warm * num_series;
-        for (int row = warm; row < series_len; ++row, o += num_series) *o = 0.0f;
+        for (int row = warm; row < series_len; ++row)
+            col_out[(size_t)row * num_series] = 0.0f;
         return;
     }
 
-    // For each row >= warm, compute dot over (window) elements, strided by num_series
-    for (int row = warm; row < series_len; ++row) {
-        const float* base = col_in + (size_t)row * num_series;
-        float num = 0.0f;
-        float den = 0.0f;
-        for (int k = 0; k < window; ++k) {
-            const float p = *(base - (size_t)k * num_series);
-            num += (float)(k + 1) * p;
-            den += p;
-        }
-        float* dst = col_out + (size_t)row * num_series;
-        if (!isfinite(den) || fabsf(den) <= 1.1920929e-7f) {
-            *dst = 0.0f;
+    // Initialize first window at row = warm
+    CompSum S_acc, T_acc;
+    int nan_count = 0;
+    for (int k = 0; k < window; ++k) {
+        const float p = col_in[(size_t)(warm - k) * num_series];
+        if (isfinite(p)) {
+            S_acc.add(p);
+            T_acc.add(fmaf((float)(k + 1), p, 0.0f));
         } else {
-            *dst = -num / den;
+            nan_count++;
+        }
+    }
+
+    {
+        const float S = S_acc.val();
+        col_out[(size_t)warm * num_series] =
+            (nan_count > 0 || cg_bad_den(S)) ? 0.0f : (-T_acc.val() / S);
+    }
+
+    const int REFRESH_EVERY = 512;
+    int since_refresh = 0;
+    for (int row = warm; row < series_len - 1; ++row) {
+        const float add  = col_in[(size_t)(row + 1) * num_series];
+        const float drop = col_in[(size_t)(row - window + 1) * num_series];
+
+        if (isfinite(add))  S_acc.add(add); else ++nan_count;
+        if (isfinite(drop)) S_acc.sub(drop); else --nan_count;
+
+        T_acc.add(S_acc.val());
+        if (isfinite(drop)) T_acc.sub((float)window * drop);
+
+        const float S = S_acc.val();
+        col_out[(size_t)(row + 1) * num_series] =
+            (nan_count > 0 || cg_bad_den(S)) ? 0.0f : (-T_acc.val() / S);
+
+        if (++since_refresh >= REFRESH_EVERY) {
+            since_refresh = 0;
+            CompSum S_new, T_new;
+            int nc = 0;
+            const int cur = row + 1;
+            for (int k = 0; k < window; ++k) {
+                const float p = col_in[(size_t)(cur - k) * num_series];
+                if (isfinite(p)) { S_new.add(p); T_new.add(fmaf((float)(k + 1), p, 0.0f)); }
+                else { nc++; }
+            }
+            S_acc = S_new;
+            T_acc = T_new;
+            nan_count = nc;
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// OPTIONAL: prefix-sum precompute path for very large periods with many combos.
+// Build once per price series, then compute any period in O(series_len).
+// ----------------------------------------------------------------------------
+
+// Build prefix arrays (length = series_len):
+//   P[i]   = sum_{t=0..i} price[t]             (non-finite treated as 0)
+//   Q[i]   = sum_{t=0..i} t * price[t]         (non-finite treated as 0)
+//   C[i]   = count_{t=0..i} !isfinite(price[t])
+extern "C" __global__ void cg_prefix_prepare_f32(const float* __restrict__ prices,
+                                                 int series_len,
+                                                 float* __restrict__ P,
+                                                 float* __restrict__ Q,
+                                                 int*   __restrict__ C)
+{
+    // Single-thread scan for simplicity; adequate when amortized across combos.
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+    float ps = 0.0f;
+    float qs = 0.0f;
+    int   cs = 0;
+    for (int i = 0; i < series_len; ++i) {
+        const float p = prices[i];
+        if (isfinite(p)) {
+            ps += p;
+            qs = fmaf((float)i, p, qs);
+        } else {
+            cs += 1;
+        }
+        P[i] = ps;
+        Q[i] = qs;
+        C[i] = cs;
+    }
+}
+
+// Use prefix arrays to compute CG. Each thread = one period combo.
+extern "C" __global__ void cg_batch_f32_from_prefix(
+    const float* __restrict__ /*prices*/,   // unused, kept for symmetry
+    const int*   __restrict__ periods,
+    int series_len,
+    int n_combos,
+    int first_valid,
+    const float* __restrict__ P,
+    const float* __restrict__ Q,
+    const int*   __restrict__ C,
+    float* __restrict__ out)
+{
+    const int combo = blockIdx.x * blockDim.x + threadIdx.x;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    float* __restrict__ out_ptr = out + (size_t)combo * series_len;
+
+    if (UNLIKELY(period <= 0 || period > series_len ||
+                 first_valid < 0 || first_valid >= series_len)) {
+        for (int i = 0; i < series_len; ++i) out_ptr[i] = CG_NAN;
+        return;
+    }
+    const int tail_len = series_len - first_valid;
+    if (UNLIKELY(tail_len < (period + 1))) {
+        for (int i = 0; i < series_len; ++i) out_ptr[i] = CG_NAN;
+        return;
+    }
+
+    const int warm   = first_valid + period;
+    const int window = period - 1;
+
+    // NaN prefix
+    for (int i = 0; i < warm; ++i) out_ptr[i] = CG_NAN;
+    if (window <= 0) {
+        for (int i = warm; i < series_len; ++i) out_ptr[i] = 0.0f;
+        return;
+    }
+
+    // For row i, use range [a..b] = [i-window+1 .. i]
+    for (int i = warm; i < series_len; ++i) {
+        const int a = i - window + 1;
+        const int b = i;
+
+        const float sumP = (P[b] - (a > 0 ? P[a - 1] : 0.0f));
+        const float sumQ = (Q[b] - (a > 0 ? Q[a - 1] : 0.0f));
+        const int   nans = (C[b] - (a > 0 ? C[a - 1] : 0));
+
+        if (nans > 0 || cg_bad_den(sumP)) {
+            out_ptr[i] = 0.0f;
+        } else {
+            // num = (i+1)*sumP - sumQ
+            const float num = fmaf((float)(i + 1), sumP, -sumQ);
+            out_ptr[i] = -num / sumP;
         }
     }
 }

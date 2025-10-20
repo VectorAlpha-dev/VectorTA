@@ -23,6 +23,13 @@ use std::error::Error;
 use std::ffi::c_void;
 use std::fmt;
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(super) struct Float2 { pub x: f32, pub y: f32 }
+
+// Safe because Float2 is plain-old-data with no pointers and #[repr(C)]
+unsafe impl cust::memory::DeviceCopy for Float2 {}
+
 #[derive(Debug)]
 pub enum CudaErError {
     Cuda(String),
@@ -101,16 +108,27 @@ impl CudaEr {
         Ok((combos, first_valid))
     }
 
-    fn build_prefix_absdiff(data_f32: &[f32]) -> Vec<f64> {
+    fn build_prefix_absdiff_dsf(data_f32: &[f32]) -> Vec<Float2> {
+        // Build DS prefix of abs diffs: prefix[t] = sum_{k=0..t-1} |x[k+1]-x[k]| in double-single
         let n = data_f32.len();
-        let mut pref = vec![0.0f64; n];
-        // Find first valid; ahead of that prefix stays 0
+        let mut pref = vec![Float2 { x: 0.0, y: 0.0 }; n];
+        let two_sumf = |a: f32, b: f32| -> (f32, f32) {
+            let t = a + b;
+            let bp = t - a;
+            let e = (a - (t - bp)) + (b - bp);
+            (t, e)
+        };
+        let mut hi: f32 = 0.0;
+        let mut lo: f32 = 0.0;
         if let Some(first) = data_f32.iter().position(|v| !v.is_nan()) {
             let mut j = first;
             while j + 1 < n {
-                let d1 = data_f32[j + 1] as f64;
-                let d0 = data_f32[j] as f64;
-                pref[j + 1] = pref[j] + (d1 - d0).abs();
+                let d = (data_f32[j + 1] - data_f32[j]).abs();
+                let (s1, e1) = two_sumf(hi, d);
+                let lo1 = lo + e1;
+                let (s2, e2) = two_sumf(s1, lo1);
+                hi = s2; lo = e2;
+                pref[j + 1] = Float2 { x: hi, y: lo };
                 j += 1;
             }
         }
@@ -133,117 +151,96 @@ impl CudaEr {
         let len = data_f32.len();
         let n_combos = combos.len();
 
+        // Build DS prefix on host and prefer prefix kernel by default.
+        let prefix = Self::build_prefix_absdiff_dsf(data_f32);
+
+        // Estimate VRAM including prefix; if too tight, fallback to rolling DS kernel.
+        let bytes_est = len * std::mem::size_of::<f32>()
+            + n_combos * std::mem::size_of::<i32>()
+            + n_combos * len * std::mem::size_of::<f32>()
+            + len * std::mem::size_of::<Float2>();
+        if !Self::will_fit(bytes_est, 64usize << 20) {
+            return self.er_batch_dev_fallback_rolling(data_f32, &combos, first_valid);
+        }
+
         // Device buffers
+        let d_data = DeviceBuffer::from_slice(data_f32).map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods).map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        let d_prefix = DeviceBuffer::from_slice(&prefix).map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }
+            .map_err(|e| CudaErError::Cuda(e.to_string()))?;
+
+        let func = self.module.get_function("er_batch_prefix_f32").map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        let block_x: u32 = 256;
+        let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
+        let chunk = Self::chunk_rows(n_combos, len);
+        let mut launched = 0usize;
+        while launched < n_combos {
+            let cur = (n_combos - launched).min(chunk);
+            let grid: GridSize = (grid_x.max(1), cur as u32, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            unsafe {
+                let mut data_ptr = d_data.as_device_ptr().as_raw();
+                let mut pref_ptr = d_prefix.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut fv_i = first_valid as i32;
+                let mut per_ptr = d_periods.as_device_ptr().as_raw().wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
+                let mut ncomb_i = cur as i32;
+                let mut out_ptr = d_out.as_device_ptr().as_raw().wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
+                let args: &mut [*mut c_void] = &mut [
+                    &mut data_ptr as *mut _ as *mut c_void,
+                    &mut pref_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut per_ptr as *mut _ as *mut c_void,
+                    &mut ncomb_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaErError::Cuda(e.to_string()))?;
+            }
+            launched += cur;
+        }
+
+        self.stream.synchronize().map_err(|e| CudaErError::Cuda(e.to_string()))?;
+
+        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
+    }
+
+    fn er_batch_dev_fallback_rolling(&self, data_f32: &[f32], combos: &[ErCombo], first_valid: usize) -> Result<DeviceArrayF32, CudaErError> {
+        let len = data_f32.len();
+        let n_combos = combos.len();
         let d_data = DeviceBuffer::from_slice(data_f32).map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
         let d_periods = DeviceBuffer::from_slice(&periods).map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }
             .map_err(|e| CudaErError::Cuda(e.to_string()))?;
 
-        // VRAM sanity (best-effort)
-        let bytes_est = len * std::mem::size_of::<f32>()
-            + n_combos * std::mem::size_of::<i32>()
-            + n_combos * len * std::mem::size_of::<f32>();
-        if !Self::will_fit(bytes_est, 64usize << 20) {
-            return Err(CudaErError::InvalidInput("insufficient free VRAM".into()));
+        let func = self.module.get_function("er_batch_f32").map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        let block_x: u32 = 256;
+        let grid_x: u32 = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        unsafe {
+            let mut data_ptr = d_data.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut fv_i = first_valid as i32;
+            let mut per_ptr = d_periods.as_device_ptr().as_raw();
+            let mut ncomb_i = n_combos as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut data_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut fv_i as *mut _ as *mut c_void,
+                &mut per_ptr as *mut _ as *mut c_void,
+                &mut ncomb_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaErError::Cuda(e.to_string()))?;
         }
-
-        // Optional override: ER_BATCH_IMPL=prefix|f32|f64
-        let impl_override = std::env::var("ER_BATCH_IMPL").ok();
-        let want_prefix = impl_override.as_deref() == Some("prefix");
-        let want_f32 = impl_override.as_deref() == Some("f32");
-        let want_f64 = impl_override.as_deref() == Some("f64");
-
-        // Prefer high-accuracy FP64 input kernel when available (unless overridden to f32/prefix)
-        if !want_f32 && !want_prefix && self.module.get_function("er_batch_f64").is_ok() {
-            let func = self.module.get_function("er_batch_f64").map_err(|e| CudaErError::Cuda(e.to_string()))?;
-            let data_f64: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
-            let d_data64 = DeviceBuffer::from_slice(&data_f64).map_err(|e| CudaErError::Cuda(e.to_string()))?;
-            let block_x: u32 = 256;
-            let grid_x: u32 = ((n_combos as u32) + block_x - 1) / block_x;
-            let grid: GridSize = (grid_x.max(1), 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            unsafe {
-                let mut data_ptr = d_data64.as_device_ptr().as_raw();
-                let mut len_i = len as i32;
-                let mut fv_i = first_valid as i32;
-                let mut per_ptr = d_periods.as_device_ptr().as_raw();
-                let mut ncomb_i = n_combos as i32;
-                let mut out_ptr = d_out.as_device_ptr().as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut data_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                    &mut fv_i as *mut _ as *mut c_void,
-                    &mut per_ptr as *mut _ as *mut c_void,
-                    &mut ncomb_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
-                self.stream.launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaErError::Cuda(e.to_string()))?;
-            }
-        } else if !want_prefix && self.module.get_function("er_batch_f32").is_ok() && (want_f32 || len < 8192 || n_combos < 64) {
-            let func = self.module.get_function("er_batch_f32").map_err(|e| CudaErError::Cuda(e.to_string()))?;
-            let block_x: u32 = 256;
-            let grid_x: u32 = ((n_combos as u32) + block_x - 1) / block_x;
-            let grid: GridSize = (grid_x.max(1), 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            unsafe {
-                let mut data_ptr = d_data.as_device_ptr().as_raw();
-                let mut len_i = len as i32;
-                let mut fv_i = first_valid as i32;
-                let mut per_ptr = d_periods.as_device_ptr().as_raw();
-                let mut ncomb_i = n_combos as i32;
-                let mut out_ptr = d_out.as_device_ptr().as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut data_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                    &mut fv_i as *mut _ as *mut c_void,
-                    &mut per_ptr as *mut _ as *mut c_void,
-                    &mut ncomb_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
-                self.stream.launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaErError::Cuda(e.to_string()))?;
-            }
-        } else {
-            // Fallback to prefix-based kernel
-            let prefix = Self::build_prefix_absdiff(data_f32);
-            let d_prefix = DeviceBuffer::from_slice(&prefix).map_err(|e| CudaErError::Cuda(e.to_string()))?;
-            let func = self.module.get_function("er_batch_prefix_f32").map_err(|e| CudaErError::Cuda(e.to_string()))?;
-            let block_x: u32 = 256;
-            let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
-            let chunk = Self::chunk_rows(n_combos, len);
-            let mut launched = 0usize;
-            while launched < n_combos {
-                let cur = (n_combos - launched).min(chunk);
-                let grid: GridSize = (grid_x.max(1), cur as u32, 1).into();
-                let block: BlockSize = (block_x, 1, 1).into();
-                unsafe {
-                    let mut data_ptr = d_data.as_device_ptr().as_raw();
-                    let mut pref_ptr = d_prefix.as_device_ptr().as_raw();
-                    let mut len_i = len as i32;
-                    let mut fv_i = first_valid as i32;
-                    let mut per_ptr = d_periods.as_device_ptr().as_raw().wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
-                    let mut ncomb_i = cur as i32;
-                    let mut out_ptr = d_out.as_device_ptr().as_raw().wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
-                    let args: &mut [*mut c_void] = &mut [
-                        &mut data_ptr as *mut _ as *mut c_void,
-                        &mut pref_ptr as *mut _ as *mut c_void,
-                        &mut len_i as *mut _ as *mut c_void,
-                        &mut fv_i as *mut _ as *mut c_void,
-                        &mut per_ptr as *mut _ as *mut c_void,
-                        &mut ncomb_i as *mut _ as *mut c_void,
-                        &mut out_ptr as *mut _ as *mut c_void,
-                    ];
-                    self.stream.launch(&func, grid, block, 0, args)
-                        .map_err(|e| CudaErError::Cuda(e.to_string()))?;
-                }
-                launched += cur;
-            }
-        }
-
         self.stream.synchronize().map_err(|e| CudaErError::Cuda(e.to_string()))?;
-
         Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
     }
 
@@ -330,7 +327,7 @@ pub mod benches {
         cuda: CudaEr,
         d_data: DeviceBuffer<f32>,
         d_periods: DeviceBuffer<i32>,
-        d_prefix: DeviceBuffer<f64>,
+        d_prefix: DeviceBuffer<super::Float2>,
         d_out: DeviceBuffer<f32>,
         len: usize,
         n_combos: usize,
@@ -375,7 +372,7 @@ pub mod benches {
         let sweep = ErBatchRange { period: (5, 49, 1) };
         let combos: Vec<i32> = (5..=49).collect::<Vec<_>>().into_iter().map(|p| p as i32).collect();
         let first_valid = price.iter().position(|v| !v.is_nan()).unwrap_or(0);
-        let prefix = super::CudaEr::build_prefix_absdiff(&price);
+        let prefix = super::CudaEr::build_prefix_absdiff_dsf(&price);
         let d_data = DeviceBuffer::from_slice(&price).expect("d_data");
         let d_periods = DeviceBuffer::from_slice(&combos).expect("d_periods");
         let d_prefix = DeviceBuffer::from_slice(&prefix).expect("d_prefix");

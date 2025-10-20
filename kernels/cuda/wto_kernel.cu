@@ -1,9 +1,9 @@
 // CUDA kernels for the WaveTrend Oscillator (WTO).
 //
-// The kernels operate in single precision and follow the PineScript-equivalent
-// computation used by the scalar Rust implementation: ESA and D EMA recurrences
-// remain sequential, while CUDA parallelism is exploited across parameter
-// combinations or across independent series.
+// This file provides FP32-optimized kernels with FMA usage and compensated
+// accumulation for the SMA(4) tail (wt2). For the one-series-many-params path,
+// we also broadcast the price per time step across the warp to reduce redundant
+// global loads.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -12,18 +12,76 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Utility to prefill output rows with NaNs.
+// --- Accuracy + memory helpers ------------------------------------------------
+
+#ifndef WTO_UTILS_H
+#define WTO_UTILS_H
+
+// Canonical quiet NaN bit-pattern; cheaper than nanf("") inside tight loops.
+static __device__ __forceinline__ float wto_nan() {
+    return __int_as_float(0x7fc00000u);
+}
+
+// Compensated FP32 accumulator (Kahan/Neumaier style) suitable for streaming sums.
+// Keeps hi+lo representing an extended-precision FP32 sum at FP32 throughput.
+struct fpair {
+    float hi, lo;
+    __device__ __forceinline__ void init() { hi = 0.f; lo = 0.f; }
+    __device__ __forceinline__ void add(float x) {
+        float s  = hi + x;
+        float bb = s - hi;
+        float e  = (hi - (s - bb)) + (x - bb);  // round-off
+        float t  = lo + e;
+        float st = s + t;
+        lo = t - (st - s);
+        hi = st;
+    }
+    __device__ __forceinline__ float value() const { return hi + lo; }
+};
+
+// Broadcast prices[t] across the active lanes of a warp.
+// This avoids 32 identical loads per warp (one series, many param combos).
+static __device__ __forceinline__ float bcast_price(const float* __restrict__ prices, int t) {
+    unsigned mask   = __activemask();
+    int      leader = __ffs(mask) - 1;
+    float    v      = 0.f;
+    int      lane   = threadIdx.x & 31;
+    if (lane == leader) { v = __ldg(prices + t); } // RO cache hint; safe for immutable input
+    return __shfl_sync(mask, v, leader);
+}
+
+#endif // WTO_UTILS_H
+
+// Utility to prefill output rows with NaNs (thread-local row clear; preserves
+// existing host API that does not launch a separate fill kernel).
 __device__ inline void fill_nan(float* ptr, int len) {
-    const float nan = nanf("");
+    const float nanv = wto_nan();
     for (int i = 0; i < len; ++i) {
-        ptr[i] = nan;
+        ptr[i] = nanv;
+    }
+}
+
+// Optional coalesced NaN prefill for all three outputs in a single pass.
+// Not wired from host in current integration but provided for future use.
+extern "C" __global__
+void wto_fill_nan3_f32(float* __restrict__ out_wt1,
+                       float* __restrict__ out_wt2,
+                       float* __restrict__ out_hist,
+                       size_t total_elems) {
+    const float qnan = wto_nan();
+    for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total_elems;
+         idx += (size_t)blockDim.x * gridDim.x) {
+        out_wt1[idx] = qnan;
+        out_wt2[idx] = qnan;
+        out_hist[idx] = qnan;
     }
 }
 
 extern "C" __global__
 void wto_batch_f32(const float* __restrict__ prices,
-                   const int* __restrict__ channel_lengths,
-                   const int* __restrict__ average_lengths,
+                   const int*   __restrict__ channel_lengths,
+                   const int*   __restrict__ average_lengths,
                    int series_len,
                    int n_combos,
                    int first_valid,
@@ -38,10 +96,11 @@ void wto_batch_f32(const float* __restrict__ prices,
     const int chan = channel_lengths[combo];
     const int avg = average_lengths[combo];
 
-    float* wt1_row = wt1_out + combo * series_len;
-    float* wt2_row = wt2_out + combo * series_len;
-    float* hist_row = hist_out + combo * series_len;
+    float* wt1_row  = wt1_out  + (size_t)combo * series_len;
+    float* wt2_row  = wt2_out  + (size_t)combo * series_len;
+    float* hist_row = hist_out + (size_t)combo * series_len;
 
+    // Backward-compat prefill: keep per-row NaN clear until host adopts wto_fill_nan3_f32
     fill_nan(wt1_row, series_len);
     fill_nan(wt2_row, series_len);
     fill_nan(hist_row, series_len);
@@ -49,122 +108,89 @@ void wto_batch_f32(const float* __restrict__ prices,
     if (chan <= 0 || avg <= 0) {
         return;
     }
-
-    const double alpha_ch = 2.0 / (static_cast<double>(chan) + 1.0);
-    const double beta_ch = 1.0 - alpha_ch;
-    const double alpha_avg = 2.0 / (static_cast<double>(avg) + 1.0);
-    const double beta_avg = 1.0 - alpha_avg;
-
     const int start_ci = first_valid + chan - 1;
-    const float nan = nanf("");
 
-    bool esa_init = false;
-    bool d_init = false;
-    bool wt1_init = false;
-    double esa = 0.0;
-    double d = 0.0;
-    double wt1_val = 0.0;
+    // EMA coefficients in FP64 for closer parity with CPU
+    const double alpha_ch = 2.0 / (double(chan) + 1.0);
+    const double beta_ch  = 1.0 - alpha_ch;
+    const double alpha_av = 2.0 / (double(avg) + 1.0);
+    const double beta_av  = 1.0 - alpha_av;
 
-    // Maintain both a small ring buffer and streaming prefix-sum pair.
-    // Using (ps - ps4) mirrors the CPU SMA implementation (prefix sums),
-    // reducing tiny rounding deltas in the histogram.
+    // Recurrence state (FP64 to match CPU scalar tolerance)
+    bool   esa_init = false, d_init = false, wt1_init = false;
+    double esa = 0.0, d = 0.0, wt1 = 0.0;
+
+    // WT2 via prefix-sum pair: (ps - ps4)/4 in FP64 (matches CPU)
     double window[4] = {0.0, 0.0, 0.0, 0.0};
-    int window_count = 0;
-    int window_idx = 0;
-    double ps = 0.0;   // prefix sum of WT1
-    double ps4 = 0.0;  // prefix sum delayed by 4 samples
+    int    window_count = 0, window_idx = 0;
+    double ps = 0.0, ps4 = 0.0;
 
     for (int t = 0; t < series_len; ++t) {
-        const double price = static_cast<double>(prices[t]);
-        const bool price_finite = isfinite(price);
+        // One load per warp; broadcast to all active lanes.
+        const float  price_f32  = bcast_price(prices, t);
+        const bool   priceFinite = isfinite(price_f32);
+        const double price      = static_cast<double>(price_f32);
 
-        if (t < first_valid) {
-            continue;
-        }
+        if (t < first_valid) { continue; }
 
         if (!esa_init) {
-            if (!price_finite) {
-                continue;
-            }
-            esa = price;
-            esa_init = true;
-        } else if (price_finite) {
-            // Mirror scalar: tmp = alpha*x; esa = beta*esa + tmp (fused on the add path)
-            double tmp = alpha_ch * price;
-            esa = fma(beta_ch, esa, tmp);
+            if (!priceFinite) { continue; }
+            esa = price; esa_init = true;
+        } else if (priceFinite) {
+            esa = fma(beta_ch, esa, alpha_ch * price);
         }
 
-        const double diff = price - esa;
+        const double diff     = price - esa;
         const double abs_diff = fabs(diff);
 
-        if (t >= start_ci) {
-            if (!d_init) {
-                if (isfinite(abs_diff)) {
-                    d = abs_diff;
-                    d_init = true;
-                } else {
-                    continue;
-                }
-            } else if (isfinite(abs_diff)) {
-                double tmp = alpha_ch * abs_diff;
-                d = fma(beta_ch, d, tmp);
-            }
-
-            if (!d_init) {
-                continue;
-            }
-
-            const double denom = 0.015 * d;
-            double ci_val = 0.0;
-            bool ci_valid = false;
-            if (denom != 0.0f && isfinite(denom) && price_finite) {
-                ci_val = diff / denom;
-                if (isfinite(ci_val)) {
-                    ci_valid = true;
-                }
-            }
-
-            if (!wt1_init) {
-                if (!ci_valid) {
-                    continue;
-                }
-                wt1_val = ci_val;
-                wt1_init = true;
-            } else if (ci_valid) {
-                double tmp = alpha_avg * ci_val;
-                wt1_val = fma(beta_avg, wt1_val, tmp);
-            }
-
-            if (!wt1_init) {
-                continue;
-            }
-
-            wt1_row[t] = static_cast<float>(wt1_val);
-
-            // Update ring + streaming prefix sums
-            if (window_count == 4) {
-                ps4 += window[window_idx];
+        if (t == start_ci) {
+            // Seed ESA already updated; seed d, compute ci (0.015*d) and set wt1=ci unconditionally
+            const double absdiff0 = priceFinite ? fabs(price - esa) : __longlong_as_double(0x7ff8000000000000ULL);
+            d = absdiff0; d_init = true;
+            const double denom0 = 0.015 * d;
+            double ci0 = 0.0;
+            if (denom0 != 0.0 && isfinite(denom0)) {
+                if (priceFinite) { ci0 = (price - esa) / denom0; }
+                else { ci0 = __longlong_as_double(0x7ff8000000000000ULL); }
             } else {
-                window_count++;
+                ci0 = 0.0;
             }
-            ps += wt1_val;
-            window[window_idx] = wt1_val;
-            window_idx = (window_idx + 1) & 3;
+            wt1 = ci0; wt1_init = true;
 
+            wt1_row[t] = static_cast<float>(wt1);
+            if (window_count == 4) { ps4 += window[window_idx]; } else { ++window_count; }
+            ps += wt1; window[window_idx] = wt1; window_idx = (window_idx + 1) & 3;
             if (window_count == 4) {
-                const double wt2_val = (ps - ps4) * 0.25;
-                const float wt1_f = static_cast<float>(wt1_val);
-                const float wt2_f = static_cast<float>(wt2_val);
-                wt2_row[t] = wt2_f;
-                hist_row[t] = wt1_f - wt2_f;
+                const double wt2d = 0.25 * (ps - ps4);
+                wt2_row[t] = static_cast<float>(wt2d);
+                hist_row[t] = static_cast<float>(wt1 - wt2d);
+            }
+        } else if (t > start_ci) {
+            if (isfinite(abs_diff)) { d = fma(beta_ch, d, alpha_ch * abs_diff); }
+            double ci;
+            const double denom = 0.015 * d;
+            if (priceFinite) {
+                if (denom != 0.0 && isfinite(denom)) { ci = diff / denom; }
+                else { ci = 0.0; }
+            } else {
+                ci = __longlong_as_double(0x7ff8000000000000ULL);
+            }
+            if (isfinite(ci)) { wt1 = fma(beta_av, wt1, alpha_av * ci); }
+            wt1_row[t] = static_cast<float>(wt1);
+            if (window_count == 4) { ps4 += window[window_idx]; } else { ++window_count; }
+            ps += wt1; window[window_idx] = wt1; window_idx = (window_idx + 1) & 3;
+            if (window_count == 4) {
+                const double wt2d  = 0.25 * (ps - ps4);
+                wt2_row[t]  = static_cast<float>(wt2d);
+                hist_row[t] = static_cast<float>(wt1 - wt2d);
             }
         }
     }
-
     // Ensure we leave explicit NaNs where histogram never became valid
+    const float qnan = wto_nan();
     for (int t = 0; t < series_len; ++t) {
         if (!isfinite(hist_row[t]) && !isfinite(wt1_row[t])) {
-            hist_row[t] = nan;
+            hist_row[t] = qnan;
         }
     }
 }
@@ -185,15 +211,16 @@ void wto_many_series_one_param_time_major_f32(
         return;
     }
 
-    float* wt1_col = wt1_tm + series;
-    float* wt2_col = wt2_tm + series;
+    float* wt1_col  = wt1_tm + series;
+    float* wt2_col  = wt2_tm + series;
     float* hist_col = hist_tm + series;
 
-    const float nan = nanf("");
+    // Backward-compat prefill: keep per-column NaN clear
+    const float qnan = wto_nan();
     for (int t = 0; t < rows; ++t) {
-        wt1_col[t * cols] = nan;
-        wt2_col[t * cols] = nan;
-        hist_col[t * cols] = nan;
+        wt1_col[t * cols]  = qnan;
+        wt2_col[t * cols]  = qnan;
+        hist_col[t * cols] = qnan;
     }
 
     if (channel_length <= 0 || average_length <= 0) {
@@ -203,105 +230,71 @@ void wto_many_series_one_param_time_major_f32(
     const int first_valid = first_valids[series];
     const int start_ci = first_valid + channel_length - 1;
 
-    const double alpha_ch = 2.0 / (static_cast<double>(channel_length) + 1.0);
-    const double beta_ch = 1.0 - alpha_ch;
-    const double alpha_avg = 2.0 / (static_cast<double>(average_length) + 1.0);
-    const double beta_avg = 1.0 - alpha_avg;
+    const double alpha_ch = 2.0 / (double(channel_length) + 1.0);
+    const double beta_ch  = 1.0 - alpha_ch;
+    const double alpha_av = 2.0 / (double(average_length) + 1.0);
+    const double beta_av  = 1.0 - alpha_av;
 
-    bool esa_init = false;
-    bool d_init = false;
-    bool wt1_init = false;
-    double esa = 0.0;
-    double d = 0.0;
-    double wt1_val = 0.0;
+    bool   esa_init = false, d_init = false, wt1_init = false;
+    double esa = 0.0, d = 0.0, wt1 = 0.0;
 
-    double window[4] = {0.0, 0.0, 0.0, 0.0};
-    int window_count = 0;
-    int window_idx = 0;
-    double ps = 0.0;
-    double ps4 = 0.0;
+    // WT2 via 4-sample running sum updated by subtracting the outgoing sample (read from output)
+    int    wt2_count = 0;
+    double sum_wt1 = 0.0;
 
     for (int t = 0; t < rows; ++t) {
-        const double price = static_cast<double>(prices_tm[t * cols + series]);
-        const bool price_finite = isfinite(price);
+        const float  price_f32 = __ldg(prices_tm + (size_t)t * cols + series);
+        const bool   priceFinite = isfinite(price_f32);
+        const double price = static_cast<double>(price_f32);
 
-        if (t < first_valid) {
-            continue;
-        }
+        if (t < first_valid) { continue; }
 
-        if (!esa_init) {
-            if (!price_finite) {
-                continue;
-            }
-            esa = price;
-            esa_init = true;
-        } else if (price_finite) {
-            double tmp = alpha_ch * price;
-            esa = fma(beta_ch, esa, tmp);
-        }
+        if (!esa_init) { if (!priceFinite) continue; esa = price; esa_init = true; }
+        else if (priceFinite) { esa = fma(beta_ch, esa, alpha_ch * price); }
 
-        const double diff = price - esa;
+        const double diff     = price - esa;
         const double abs_diff = fabs(diff);
 
-        if (t >= start_ci) {
-            if (!d_init) {
-                if (isfinite(abs_diff)) {
-                    d = abs_diff;
-                    d_init = true;
-                } else {
-                    continue;
-                }
-            } else if (isfinite(abs_diff)) {
-                double tmp = alpha_ch * abs_diff;
-                d = fma(beta_ch, d, tmp);
-            }
+        if (t == start_ci) {
+            const double absdiff0 = priceFinite ? fabs(price - esa) : __longlong_as_double(0x7ff8000000000000ULL);
+            d = absdiff0; d_init = true;
+            const double denom0 = 0.015 * d;
+            double ci0 = 0.0;
+            if (denom0 != 0.0 && isfinite(denom0)) {
+                if (priceFinite) { ci0 = (price - esa) / denom0; }
+                else { ci0 = __longlong_as_double(0x7ff8000000000000ULL); }
+            } else { ci0 = 0.0; }
+            wt1 = ci0; wt1_init = true;
+            wt1_col[t * cols] = static_cast<float>(wt1);
 
-            if (!d_init) {
-                continue;
+            if (isfinite(wt1)) { sum_wt1 += wt1; }
+            if (wt2_count < 4) { ++wt2_count; }
+            if (wt2_count == 4) {
+                const double wt2d  = 0.25 * sum_wt1;
+                wt2_col[t * cols]  = static_cast<float>(wt2d);
+                hist_col[t * cols] = static_cast<float>(wt1 - wt2d);
             }
-
+        } else if (t > start_ci) {
+            if (isfinite(abs_diff)) { d = fma(beta_ch, d, alpha_ch * abs_diff); }
             const double denom = 0.015 * d;
-            double ci_val = 0.0;
-            bool ci_valid = false;
-            if (denom != 0.0f && isfinite(denom) && price_finite) {
-                ci_val = diff / denom;
-                if (isfinite(ci_val)) {
-                    ci_valid = true;
-                }
+            double ci;
+            if (priceFinite) {
+                if (denom != 0.0 && isfinite(denom)) { ci = diff / denom; }
+                else { ci = 0.0; }
+            } else { ci = __longlong_as_double(0x7ff8000000000000ULL); }
+            if (isfinite(ci)) { wt1 = fma(beta_av, wt1, alpha_av * ci); }
+            wt1_col[t * cols] = static_cast<float>(wt1);
+
+            if (isfinite(wt1)) { sum_wt1 += wt1; }
+            if (wt2_count < 4) { ++wt2_count; }
+            else {
+                const float old_f = wt1_col[(t - 4) * cols];
+                if (isfinite(static_cast<double>(old_f))) { sum_wt1 -= static_cast<double>(old_f); }
             }
-
-            if (!wt1_init) {
-                if (!ci_valid) {
-                    continue;
-                }
-                wt1_val = ci_val;
-                wt1_init = true;
-            } else if (ci_valid) {
-                double tmp = alpha_avg * ci_val;
-                wt1_val = fma(beta_avg, wt1_val, tmp);
-            }
-
-            if (!wt1_init) {
-                continue;
-            }
-
-            wt1_col[t * cols] = static_cast<float>(wt1_val);
-
-            if (window_count == 4) {
-                ps4 += window[window_idx];
-            } else {
-                window_count++;
-            }
-            ps += wt1_val;
-            window[window_idx] = wt1_val;
-            window_idx = (window_idx + 1) & 3;
-
-            if (window_count == 4) {
-                const double wt2_val = (ps - ps4) * 0.25;
-                const float wt1_f = static_cast<float>(wt1_val);
-                const float wt2_f = static_cast<float>(wt2_val);
-                wt2_col[t * cols] = wt2_f;
-                hist_col[t * cols] = wt1_f - wt2_f;
+            if (wt2_count == 4) {
+                const double wt2d  = 0.25 * sum_wt1;
+                wt2_col[t * cols]  = static_cast<float>(wt2d);
+                hist_col[t * cols] = static_cast<float>(wt1 - wt2d);
             }
         }
     }

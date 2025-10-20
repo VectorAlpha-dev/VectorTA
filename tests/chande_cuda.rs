@@ -53,7 +53,7 @@ fn chande_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let cpu = chande_batch_with_kernel(&high_q, &low_q, &close_q, &sweep, dir, Kernel::ScalarBatch)?;
 
     // Reuse quantized f32 inputs
-    let cuda = CudaChande::new(0).expect("CudaChande::new");
+    let mut cuda = CudaChande::new(0).expect("CudaChande::new");
     let dev = cuda
         .chande_batch_dev(&high_f32, &low_f32, &close_f32, &sweep, dir)
         .expect("chande_batch_dev");
@@ -107,7 +107,7 @@ fn chande_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let close_tm_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
-    let cuda = CudaChande::new(0).expect("CudaChande::new");
+    let mut cuda = CudaChande::new(0).expect("CudaChande::new");
     let dev = cuda
         .chande_many_series_one_param_time_major_dev(&high_tm_f32, &low_tm_f32, &close_tm_f32, cols, rows, period, mult as f32, direction)
         .expect("chande_many_series_one_param_time_major_dev");

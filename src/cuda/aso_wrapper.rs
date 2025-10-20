@@ -12,15 +12,17 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::aso::{AsoBatchRange, AsoParams};
 use crate::indicators::willr::build_willr_gpu_tables; // reuse min/max sparse tables
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
-use cust::function::{BlockSize, GridSize};
-use cust::memory::DeviceBuffer;
+use cust::function::{BlockSize, Function, GridSize};
+use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+// Low-level CUDA driver syscalls for per-kernel attributes
+use cust::sys;
 
 #[derive(Debug)]
 pub enum CudaAsoError {
@@ -128,10 +130,15 @@ impl CudaAso {
         let d_offsets = DeviceBuffer::from_slice(&tables.level_offsets).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
         let d_st_max = DeviceBuffer::from_slice(&tables.st_max).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
         let d_st_min = DeviceBuffer::from_slice(&tables.st_min).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let mut d_bulls: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-            .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let mut d_bears: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-            .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
+        // Stream-pooled async allocations; ordered before the kernel in this stream
+        let mut d_bulls: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
+        }
+        .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
+        let mut d_bears: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
+        }
+        .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
             &d_open,
@@ -179,12 +186,14 @@ impl CudaAso {
         d_bears: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAsoError> {
         if n_combos == 0 || series_len == 0 { return Ok(()); }
-        let func = self.module.get_function("aso_batch_f32")
+        let mut func = self.module.get_function("aso_batch_f32")
             .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
         let block_x = match self.batch_policy { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         let smem_bytes = (2 * max_period * std::mem::size_of::<f32>()) as u32;
+        // Opt-in to larger dynamic shared memory and set cache preference heuristics
+        set_kernel_smem_prefs(&mut func, smem_bytes)?;
 
         unsafe {
             let mut open_ptr = d_open.as_device_ptr().as_raw();
@@ -264,8 +273,14 @@ impl CudaAso {
         let d_low = DeviceBuffer::from_slice(low_tm_f32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
         let d_close = DeviceBuffer::from_slice(close_tm_f32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let mut d_bulls: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }.map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let mut d_bears: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }.map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
+        let mut d_bulls: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(expected, &self.stream)
+        }
+        .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
+        let mut d_bears: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(expected, &self.stream)
+        }
+        .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
             &d_open,
@@ -298,13 +313,15 @@ impl CudaAso {
         d_bears: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAsoError> {
         if cols == 0 || rows == 0 { return Ok(()); }
-        let func = self.module.get_function("aso_many_series_one_param_f32")
+        let mut func = self.module.get_function("aso_many_series_one_param_f32")
             .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
         let block_x = match self.many_policy { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         // shared: ring_b/e (2*period*f32) + dq_min_idx/dq_max_idx (2*period*i32)
-        let smem_bytes = (2 * period * std::mem::size_of::<f32>() + 2 * period * std::mem::size_of::<i32>()) as u32;
+        let smem_bytes = (2 * period * std::mem::size_of::<f32>()
+            + 2 * period * std::mem::size_of::<i32>()) as u32;
+        set_kernel_smem_prefs(&mut func, smem_bytes)?;
         unsafe {
             let mut open_ptr = d_open.as_device_ptr().as_raw();
             let mut high_ptr = d_high.as_device_ptr().as_raw();
@@ -339,15 +356,37 @@ impl CudaAso {
 
 // ---- Helpers ----
 fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    if let Ok((free, _total)) = mem_get_info() {
+        required_bytes.saturating_add(headroom_bytes) <= free
+    } else {
+        true
+    }
+}
+
+// Best-effort: opt-in to larger dynamic shared memory per block and hint cache config
+#[inline(always)]
+fn set_kernel_smem_prefs(func: &mut Function, smem_bytes: u32) -> Result<(), CudaAsoError> {
     unsafe {
-        let mut free: usize = 0;
-        let mut total: usize = 0;
-        let res = cust::sys::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-        if res == cust::sys::CUresult::CUDA_SUCCESS {
-            return required_bytes.saturating_add(headroom_bytes) <= free;
+        let raw = func.to_raw();
+        // Request up to smem_bytes of dynamic shared memory per block
+        let _ = sys::cuFuncSetAttribute(
+            raw,
+            sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+            smem_bytes as i32,
+        );
+        if smem_bytes > 48 * 1024 {
+            // Prefer shared-memory carve-out when using lots of dynamic smem
+            let _ = sys::cuFuncSetAttribute(
+                raw,
+                sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                100,
+            );
+            let _ = func.set_cache_config(CacheConfig::PreferShared);
+        } else {
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
         }
     }
-    true
+    Ok(())
 }
 
 fn expand_params(range: &AsoBatchRange) -> Vec<AsoParams> {

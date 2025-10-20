@@ -154,6 +154,11 @@ impl CudaDecOsc {
         }
     }
 
+    #[inline]
+    fn ceil_div_u32(n: u32, d: u32) -> u32 { (n + d - 1) / d }
+    #[inline]
+    fn ceil_div_usize(n: usize, d: usize) -> usize { (n + d - 1) / d }
+
     fn expand_grid(range: &DecOscBatchRange) -> Vec<DecOscParams> {
         fn axis_usize(a: (usize, usize, usize)) -> Vec<usize> {
             let (s, e, st) = a;
@@ -239,8 +244,8 @@ impl CudaDecOsc {
             .get_function("dec_osc_batch_f32")
             .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
 
-        // Use occupancy suggestion for block size; one block per combo
-        let (suggested_block_x, _min_grid) = func
+        // Use occupancy suggestion for block size and minimum grid size
+        let (suggested_block_x, min_grid) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
             .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
         let block_x = match self.policy.batch {
@@ -249,7 +254,11 @@ impl CudaDecOsc {
         };
         unsafe { (*(self as *const _ as *mut CudaDecOsc)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
         self.maybe_log_batch_debug();
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        // Right-sized grid: one thread per combo → ceil_div(n_combos, block_x)
+        let combos_u32 = n_combos as u32;
+        let mut grid_x = Self::ceil_div_u32(combos_u32, block_x);
+        grid_x = grid_x.max(min_grid);
+        let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
@@ -332,10 +341,25 @@ impl CudaDecOsc {
                 .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
         }
 
-        const MAX_ROWS: usize = 65_535;
+        // Compute block_x once to size chunks up to grid.x limit
+        let func = self
+            .module
+            .get_function("dec_osc_batch_f32")
+            .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
+        let (suggested_block_x, _min_grid) = func
+            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+            .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => suggested_block_x.max(128),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(64),
+        } as usize;
+
+        const MAX_GRID_X: usize = 65_535; // keep legacy guard
+        let max_combos_per_launch = MAX_GRID_X.saturating_mul(block_x);
+
         let mut launched = 0usize;
         while launched < rows {
-            let n = (rows - launched).min(MAX_ROWS);
+            let n = (rows - launched).min(max_combos_per_launch);
             self.launch_batch_kernel(
                 &d_prices,
                 &d_periods,
@@ -461,12 +485,40 @@ impl CudaDecOsc {
         let (first_valids, period, k_f32) =
             Self::prepare_many_series(data_tm_f32, cols, rows, params)?;
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
+        // VRAM guard similar to batch path
+        let prices_bytes = data_tm_f32.len() * std::mem::size_of::<f32>();
+        let first_bytes  = first_valids.len() * std::mem::size_of::<i32>();
+        let out_bytes    = cols * rows * std::mem::size_of::<f32>();
+        let need         = prices_bytes + first_bytes + out_bytes;
+        let headroom     = 64 * 1024 * 1024;
+        if !Self::will_fit(need, headroom) {
+            return Err(CudaDecOscError::InvalidInput(format!(
+                "insufficient VRAM: need ~{:.2} MB",
+                (need + headroom) as f64 / (1024.0 * 1024.0)
+            )));
+        }
+
+        // Pinned + async transfers for truly asynchronous copies
+        let h_prices = LockedBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
+        let h_first = LockedBuffer::from_slice(&first_valids)
             .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
+
+        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
             .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
+        let mut d_first  = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
+            .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
+        let mut d_out    = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+            .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
+
+        unsafe {
+            d_prices
+                .async_copy_from(&h_prices, &self.stream)
+                .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
+            d_first
+                .async_copy_from(&h_first, &self.stream)
+                .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
+        }
 
         self.launch_many_series_kernel(
             &d_prices,

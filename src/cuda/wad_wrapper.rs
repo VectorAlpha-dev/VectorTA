@@ -8,7 +8,7 @@
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -176,42 +176,37 @@ impl CudaWad {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWadError> {
+        // Grid-stride batch kernel: choose a robust grid/block for occupancy
         let func = self
             .module
             .get_function("wad_batch_f32")
             .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
 
-        // Single-thread sequential per row; keep a reasonable block size for potential future
-        // cooperative init. Allow override via WAD_BLOCK_X.
-        let block_x = env::var("WAD_BLOCK_X").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(1);
-        let use_block = BlockSize::xyz(block_x.max(1), 1, 1);
+        let block_x = self.default_block_x("WAD_BLOCK_X", 256);
+        let grid_x = self.choose_grid_1d(n_combos, block_x)?;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
-        const MAX_ROWS_PER_LAUNCH: usize = 65_535;
-        let mut launched = 0usize;
-        while launched < n_combos {
-            let rows = (n_combos - launched).min(MAX_ROWS_PER_LAUNCH);
-            let grid: GridSize = (rows as u32, 1, 1).into();
-            unsafe {
-                let mut high_ptr = d_high.as_device_ptr().as_raw();
-                let mut low_ptr  = d_low.as_device_ptr().as_raw();
-                let mut close_ptr= d_close.as_device_ptr().as_raw();
-                let mut len_i    = series_len as i32;
-                let mut combos_i = rows as i32;
-                let mut out_ptr  = d_out.as_device_ptr().add(launched * series_len).as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut high_ptr as *mut _ as *mut c_void,
-                    &mut low_ptr  as *mut _ as *mut c_void,
-                    &mut close_ptr as *mut _ as *mut c_void,
-                    &mut len_i    as *mut _ as *mut c_void,
-                    &mut combos_i as *mut _ as *mut c_void,
-                    &mut out_ptr  as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, grid, use_block, 0, args)
-                    .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
-            }
-            launched += rows;
+        unsafe {
+            let mut high_ptr  = d_high.as_device_ptr().as_raw();
+            let mut low_ptr   = d_low.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut len_i     = series_len as i32;
+            let mut combos_i  = n_combos as i32;
+            let mut out_ptr   = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr  as *mut _ as *mut c_void,
+                &mut low_ptr   as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut len_i     as *mut _ as *mut c_void,
+                &mut combos_i  as *mut _ as *mut c_void,
+                &mut out_ptr   as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
         }
+
         unsafe { (*(self as *const _ as *mut CudaWad)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
         self.maybe_log_batch_debug();
         Ok(())
@@ -224,8 +219,14 @@ impl CudaWad {
     ) -> Result<DeviceArrayF32, CudaWadError> {
         let series_len = Self::prepare_batch_inputs(high, low, close)?;
 
-        // VRAM check: 3 inputs + output
-        let required = (3 * series_len + n_combos * series_len) * std::mem::size_of::<f32>();
+        // VRAM check: 3 inputs + output (with overflow checks)
+        let required_cells_inputs = 3usize
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaWadError::InvalidInput("size overflow".into()))?;
+        let required_cells_output = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaWadError::InvalidInput("size overflow".into()))?;
+        let required = (required_cells_inputs + required_cells_output) * std::mem::size_of::<f32>();
         let headroom = 64 * 1024 * 1024; // ~64MB
         if !Self::will_fit(required, headroom) {
             return Err(CudaWadError::InvalidInput(format!(
@@ -234,16 +235,33 @@ impl CudaWad {
             )));
         }
 
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }
+        // Upload inputs asynchronously
+        let d_high  = unsafe { DeviceBuffer::from_slice_async(high,  &self.stream) }
             .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
-        let d_low  = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }
+        let d_low   = unsafe { DeviceBuffer::from_slice_async(low,   &self.stream) }
             .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
-        let d_close= unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }
-            .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }
             .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
 
-        self.launch_batch_kernel(&d_high, &d_low, &d_close, series_len, n_combos, &mut d_out)?;
+        // Output buffer
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
+        }.map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+
+        if n_combos > 1 {
+            // Compute once then broadcast to all rows (WAD rows are identical)
+            let mut d_row: DeviceBuffer<f32> = unsafe {
+                DeviceBuffer::uninitialized_async(series_len, &self.stream)
+            }.map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+
+            self.launch_compute_single_row(&d_high, &d_low, &d_close, series_len, &mut d_row)?;
+            self.launch_broadcast_row(&d_row, series_len, n_combos, &mut d_out)?;
+        } else {
+            // Regular batch kernel (grid-stride over combos)
+            self.launch_batch_kernel(&d_high, &d_low, &d_close, series_len, n_combos, &mut d_out)?;
+        }
+
+        // Ensure completion before returning
         self.stream.synchronize().map_err(|e| CudaWadError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
     }
@@ -314,9 +332,9 @@ impl CudaWad {
             .get_function("wad_many_series_one_param_f32")
             .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
 
-        // Many-series: one thread per series; allow override of block_x, default 128
-        let block_x = env::var("WAD_MS_BLOCK_X").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(128);
-        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        // Many-series: one thread per series; grid-stride over series with robust defaults
+        let block_x = self.default_block_x("WAD_MS_BLOCK_X", 256);
+        let grid_x = self.choose_grid_1d(cols, block_x)?;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x.max(1), 1, 1).into();
         unsafe { (*(self as *const _ as *mut CudaWad)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
@@ -341,6 +359,113 @@ impl CudaWad {
                 .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
         }
         self.maybe_log_many_debug();
+        Ok(())
+    }
+
+    // ----- Helpers: device SM count and launch heuristics -----
+    #[inline]
+    fn sm_count(&self) -> Result<u32, CudaWadError> {
+        let dev = Device::get_device(self.device_id)
+            .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+        dev.get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map(|v| v as u32)
+            .map_err(|e| CudaWadError::Cuda(e.to_string()))
+    }
+
+    /// Pick a default block size unless user overrides via env. Defaults to 256.
+    #[inline]
+    fn default_block_x(&self, env_key: &str, fallback: u32) -> u32 {
+        env::var(env_key)
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&bx| bx != 0)
+            .unwrap_or(fallback)
+    }
+
+    /// Given problem size N and threads-per-block, choose a grid that is large enough
+    /// to saturate the GPU but not absurdly large. Heuristic: min(ceil_div(N, block_x), SMs * 32).
+    #[inline]
+    fn choose_grid_1d(&self, n: usize, block_x: u32) -> Result<u32, CudaWadError> {
+        let sm = self.sm_count()?;
+        let target_blocks = sm.saturating_mul(32);
+        let need = ((n as u64 + block_x as u64 - 1) / block_x as u64) as u32;
+        Ok(need.max(1).min(target_blocks.max(1)))
+    }
+
+    // ----- Optional helpers: compute-once + broadcast for WAD -----
+    fn launch_compute_single_row(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        series_len: usize,
+        d_row_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaWadError> {
+        let func = self
+            .module
+            .get_function("wad_compute_single_row_f32")
+            .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+
+        unsafe {
+            let mut high_ptr  = d_high.as_device_ptr().as_raw();
+            let mut low_ptr   = d_low.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut len_i     = series_len as i32;
+            let mut out_ptr   = d_row_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr  as *mut _ as *mut c_void,
+                &mut low_ptr   as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut len_i     as *mut _ as *mut c_void,
+                &mut out_ptr   as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn launch_broadcast_row(
+        &self,
+        d_row: &DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaWadError> {
+        let func = self
+            .module
+            .get_function("broadcast_row_f32")
+            .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+
+        let total = series_len
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaWadError::InvalidInput("overflow in broadcast size".into()))?;
+
+        // Reuse the main batch block size default; no indicator-specific extra env knob.
+        let block_x = self.default_block_x("WAD_BLOCK_X", 256);
+        let grid_x = self.choose_grid_1d(total, block_x)?;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let mut row_ptr  = d_row.as_device_ptr().as_raw();
+            let mut len_i    = series_len as i32;
+            let mut combos_i = n_combos as i32;
+            let mut out_ptr  = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut row_ptr  as *mut _ as *mut c_void,
+                &mut len_i    as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut out_ptr  as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+        }
         Ok(())
     }
 

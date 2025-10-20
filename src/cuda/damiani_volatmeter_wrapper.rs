@@ -12,7 +12,7 @@
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer, DeviceCopy};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -21,6 +21,12 @@ use std::fmt;
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::indicators::damiani_volatmeter::{DamianiVolatmeterBatchRange, DamianiVolatmeterParams};
+
+// CUDA vector equivalent for float2 (hi, lo) compensated prefix sums
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Float2 { pub x: f32, pub y: f32 }
+unsafe impl DeviceCopy for Float2 {}
 
 #[derive(Debug)]
 pub enum CudaDamianiError {
@@ -223,8 +229,42 @@ impl CudaDamianiVolatmeter {
         (s, ss)
     }
 
+    #[inline]
+    fn pack_double_prefix_to_float2(src: &[f64]) -> Vec<Float2> {
+        let mut out = Vec::with_capacity(src.len());
+        for &d in src {
+            let hi = d as f32;
+            let lo = (d - hi as f64) as f32;
+            out.push(Float2 { x: hi, y: lo });
+        }
+        out
+    }
+
+    #[inline]
+    fn pack_double_prefix_to_float2_pinned(src: &[f64]) -> Option<LockedBuffer<Float2>> {
+        let mut buf = unsafe { LockedBuffer::<Float2>::uninitialized(src.len()) }.ok()?;
+        for (i, &d) in src.iter().enumerate() {
+            let hi = d as f32;
+            let lo = (d - hi as f64) as f32;
+            buf[i] = Float2 { x: hi, y: lo };
+        }
+        Some(buf)
+    }
+
+    #[inline]
+    fn compute_tr_close_only_pinned(prices: &[f32], first_valid: usize) -> Option<LockedBuffer<f32>> {
+        let mut buf: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(prices.len()) }.ok()?;
+        for i in 0..first_valid { buf[i] = 0.0; }
+        let mut prev_close = f32::NAN; let mut have_prev = false;
+        for i in first_valid..prices.len() {
+            let c = prices[i];
+            buf[i] = if have_prev && c.is_finite() { (c - prev_close).abs() } else { 0.0 };
+            if c.is_finite() { prev_close = c; have_prev = true; }
+        }
+        Some(buf)
+    }
+
     fn launch_batch(&self,
-        d_prices: &DeviceBuffer<f32>,
         series_len: usize,
         first_valid: usize,
         d_vis_atr: &DeviceBuffer<i32>,
@@ -233,21 +273,22 @@ impl CudaDamianiVolatmeter {
         d_sed_std: &DeviceBuffer<i32>,
         d_threshold: &DeviceBuffer<f32>,
         n_combos: usize,
-        d_s: &DeviceBuffer<f64>,
-        d_ss: &DeviceBuffer<f64>,
+        d_s: &DeviceBuffer<Float2>,
+        d_ss: &DeviceBuffer<Float2>,
         d_tr: &DeviceBuffer<f32>,
         d_out: &mut DeviceBuffer<f32>) -> Result<(), CudaDamianiError>
     {
         let func = self.module.get_function("damiani_volatmeter_batch_f32")
             .map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
         let block_x_env = std::env::var("DAMIANI_BLOCK_X").ok().and_then(|v| v.parse::<u32>().ok());
+        // 1 thread per block by default (thread 0 does the scan); overrideable via policy/env
         let block_x = block_x_env
             .or_else(|| match self.policy_batch { BatchKernelPolicy::Plain { block_x } => Some(block_x), _ => None })
-            .unwrap_or(128).max(32);
+            .unwrap_or(1).max(1);
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
-            let mut p = d_prices.as_device_ptr().as_raw();
+            let mut p: u64 = 0; // kernel ignores prices; pass null device ptr
             let mut n = series_len as i32;
             let mut fv = first_valid as i32;
             let mut va = d_vis_atr.as_device_ptr().as_raw();
@@ -309,23 +350,22 @@ impl CudaDamianiVolatmeter {
 
         // Precomputes (host)
         let tr = Self::compute_tr_close_only(prices, first_valid);
-        let (s_prefix, ss_prefix) = Self::compute_prefix_sums(prices, first_valid);
+        let (s_prefix_f64, ss_prefix_f64) = Self::compute_prefix_sums(prices, first_valid);
+        let s_prefix: Vec<Float2> = Self::pack_double_prefix_to_float2(&s_prefix_f64);
+        let ss_prefix: Vec<Float2> = Self::pack_double_prefix_to_float2(&ss_prefix_f64);
 
-        // VRAM: inputs + params + prefixes + output (2 rows per combo)
+        // VRAM: params + prefixes (Float2) + TR + outputs (2 rows per combo)
         let rows = combos.len();
-        let req = (series_len * std::mem::size_of::<f32>())
-            + (rows * (4 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>()))
-            + (2 * series_len * std::mem::size_of::<f64>())
-            + (series_len * std::mem::size_of::<f32>()) // tr
+        let req = (rows * (4 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>()))
+            + (2 * series_len * std::mem::size_of::<Float2>())
+            + (series_len * std::mem::size_of::<f32>()) // TR
             + (2 * rows * series_len * std::mem::size_of::<f32>());
         let headroom = std::env::var("CUDA_MEM_HEADROOM").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
         if !Self::will_fit(req, headroom) {
             return Err(CudaDamianiError::InvalidInput("insufficient VRAM for Damiani batch".into()));
         }
 
-        // Device buffers
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }
-            .map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
+        // Device buffers (prices not uploaded for batch kernel)
         let vis_atr: Vec<i32> = combos.iter().map(|p| p.vis_atr.unwrap() as i32).collect();
         let vis_std: Vec<i32> = combos.iter().map(|p| p.vis_std.unwrap() as i32).collect();
         let sed_atr: Vec<i32> = combos.iter().map(|p| p.sed_atr.unwrap() as i32).collect();
@@ -336,13 +376,37 @@ impl CudaDamianiVolatmeter {
         let d_sa = DeviceBuffer::from_slice(&sed_atr).map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
         let d_ss_ = DeviceBuffer::from_slice(&sed_std).map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
         let d_th = DeviceBuffer::from_slice(&thresh).map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
-        let d_s  = DeviceBuffer::from_slice(&s_prefix).map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
-        let d_ss = DeviceBuffer::from_slice(&ss_prefix).map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
-        let d_tr = DeviceBuffer::from_slice(&tr).map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
+        // Use pinned upload if available
+        let (d_s, d_ss) = match (
+            Self::pack_double_prefix_to_float2_pinned(&s_prefix_f64),
+            Self::pack_double_prefix_to_float2_pinned(&ss_prefix_f64),
+        ) {
+            (Some(s_pin), Some(ss_pin)) => {
+                let ds = unsafe { DeviceBuffer::from_slice_async(&*s_pin, &self.stream) }
+                    .map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
+                let dss = unsafe { DeviceBuffer::from_slice_async(&*ss_pin, &self.stream) }
+                    .map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
+                (ds, dss)
+            }
+            _ => {
+                let ds = unsafe { DeviceBuffer::from_slice_async(&s_prefix, &self.stream) }
+                    .map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
+                let dss = unsafe { DeviceBuffer::from_slice_async(&ss_prefix, &self.stream) }
+                    .map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
+                (ds, dss)
+            }
+        };
+        let d_tr = if let Some(tr_pin) = Self::compute_tr_close_only_pinned(prices, first_valid) {
+            unsafe { DeviceBuffer::from_slice_async(&*tr_pin, &self.stream) }
+                .map_err(|e| CudaDamianiError::Cuda(e.to_string()))?
+        } else {
+            unsafe { DeviceBuffer::from_slice_async(&tr, &self.stream) }
+                .map_err(|e| CudaDamianiError::Cuda(e.to_string()))?
+        };
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(2 * rows * series_len, &self.stream) }
             .map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
 
-        self.launch_batch(&d_prices, series_len, first_valid, &d_va, &d_vs, &d_sa, &d_ss_, &d_th, rows, &d_s, &d_ss, &d_tr, &mut d_out)?;
+        self.launch_batch(series_len, first_valid, &d_va, &d_vs, &d_sa, &d_ss_, &d_th, rows, &d_s, &d_ss, &d_tr, &mut d_out)?;
         self.stream.synchronize().map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
 
         Ok((DeviceArrayF32 { buf: d_out, rows: 2 * rows, cols: series_len }, combos))
@@ -360,8 +424,8 @@ impl CudaDamianiVolatmeter {
         sed_std: usize,
         threshold: f32,
         d_first_valids: &DeviceBuffer<i32>,
-        d_s_tm: &DeviceBuffer<f64>,
-        d_ss_tm: &DeviceBuffer<f64>,
+        d_s_tm: &DeviceBuffer<Float2>,
+        d_ss_tm: &DeviceBuffer<Float2>,
         d_out_tm: &mut DeviceBuffer<f32>) -> Result<(), CudaDamianiError>
     {
         let func = self.module.get_function("damiani_volatmeter_many_series_one_param_time_major_f32")
@@ -369,7 +433,7 @@ impl CudaDamianiVolatmeter {
         let block_x_env = std::env::var("DAMIANI_MANY_BLOCK_X").ok().and_then(|v| v.parse::<u32>().ok());
         let block_x = block_x_env
             .or_else(|| match self.policy_many { ManySeriesKernelPolicy::OneD { block_x } => Some(block_x), _ => None })
-            .unwrap_or(128).max(32);
+            .unwrap_or(1).max(1);
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
@@ -451,12 +515,27 @@ impl CudaDamianiVolatmeter {
         }
 
         // Precompute stddev prefix (close only) time-major
-        let (s_tm, ss_tm) = Self::compute_prefix_sums_time_major(close_tm, cols, rows, &first_valids);
+        let (s_tm_f64, ss_tm_f64) = Self::compute_prefix_sums_time_major(close_tm, cols, rows, &first_valids);
+        // Try to build pinned Float2 buffers for faster async H2D; fall back to Vec
+        let (s_tm_opt, ss_tm_opt) = (
+            Self::pack_double_prefix_to_float2_pinned(&s_tm_f64),
+            Self::pack_double_prefix_to_float2_pinned(&ss_tm_f64),
+        );
+        let (s_tm_vec, ss_tm_vec);
+        let (use_pinned_s, use_pinned_ss);
+        match (s_tm_opt, ss_tm_opt) {
+            (Some(_), Some(_)) => { use_pinned_s = true; use_pinned_ss = true; s_tm_vec = Vec::new(); ss_tm_vec = Vec::new(); }
+            _ => {
+                use_pinned_s = false; use_pinned_ss = false;
+                s_tm_vec = Self::pack_double_prefix_to_float2(&s_tm_f64);
+                ss_tm_vec = Self::pack_double_prefix_to_float2(&ss_tm_f64);
+            }
+        }
 
-        // VRAM estimate: 3 inputs + first_valids + prefixes + outputs (2 mats)
+        // VRAM estimate: 3 inputs + first_valids + prefixes (Float2) + outputs (2 mats)
         let req = (3 * cols * rows * std::mem::size_of::<f32>())
             + (cols * std::mem::size_of::<i32>())
-            + (2 * cols * rows * std::mem::size_of::<f64>())
+            + (2 * cols * rows * std::mem::size_of::<Float2>())
             + (2 * cols * rows * std::mem::size_of::<f32>());
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(req, headroom) {
@@ -468,8 +547,18 @@ impl CudaDamianiVolatmeter {
         let d_low  = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream)  }.map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
         let d_close= unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream)}.map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
-        let d_s = DeviceBuffer::from_slice(&s_tm).map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
-        let d_ss = DeviceBuffer::from_slice(&ss_tm).map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
+        let d_s = if use_pinned_s {
+            let pin = Self::pack_double_prefix_to_float2_pinned(&s_tm_f64).unwrap();
+            unsafe { DeviceBuffer::from_slice_async(&*pin, &self.stream) }.map_err(|e| CudaDamianiError::Cuda(e.to_string()))?
+        } else {
+            unsafe { DeviceBuffer::from_slice_async(&s_tm_vec, &self.stream) }.map_err(|e| CudaDamianiError::Cuda(e.to_string()))?
+        };
+        let d_ss = if use_pinned_ss {
+            let pin = Self::pack_double_prefix_to_float2_pinned(&ss_tm_f64).unwrap();
+            unsafe { DeviceBuffer::from_slice_async(&*pin, &self.stream) }.map_err(|e| CudaDamianiError::Cuda(e.to_string()))?
+        } else {
+            unsafe { DeviceBuffer::from_slice_async(&ss_tm_vec, &self.stream) }.map_err(|e| CudaDamianiError::Cuda(e.to_string()))?
+        };
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(2 * cols * rows, &self.stream) }
             .map_err(|e| CudaDamianiError::Cuda(e.to_string()))?;
 
@@ -529,16 +618,16 @@ pub mod benches {
     }
 
     fn bytes_batch() -> usize {
-        (ONE_SERIES_LEN * (1 + 1) * std::mem::size_of::<f32>()  // prices + tr
-            + 2 * ONE_SERIES_LEN * std::mem::size_of::<f64>()    // prefixes
+        (1 * ONE_SERIES_LEN * std::mem::size_of::<f32>()         // TR only (no prices upload)
+            + 2 * ONE_SERIES_LEN * std::mem::size_of::<Float2>() // prefixes as Float2
             + 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>()    // outputs (2 rows)
             + 64 * 1024 * 1024)                                   // headroom
     }
     fn bytes_many() -> usize {
-        (3 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()
+        (3 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()     // H,L,C
             + COLS_256 * std::mem::size_of::<i32>()
-            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<f64>()
-            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()
+            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<Float2>() // prefixes as Float2
+            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()    // outputs
             + 64 * 1024 * 1024)
     }
 
