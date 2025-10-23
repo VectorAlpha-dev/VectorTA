@@ -12,15 +12,21 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::chop::{ChopBatchRange, ChopParams};
 use crate::indicators::willr::build_willr_gpu_tables; // reuse sparse-table prep for H/L
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer, DeviceCopy};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::fmt;
+
+// Keep this in sync with the kernel's register-ring threshold
+const CHOP_REG_RING_MAX: usize = 64;
+
+// Above this, stage through pinned memory for truly async H->D
+const PINNED_STAGING_THRESHOLD: usize = 1 << 20; // 1 MiB
 
 #[derive(Debug)]
 pub enum CudaChopError {
@@ -51,10 +57,10 @@ impl CudaChop {
         let context = Context::new(device).map_err(|e| CudaChopError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/chop_kernel.ptx"));
-        // O2 default with fallbacks for driver variance
+        // Request max optimization; fall back if driver rejects
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -63,11 +69,30 @@ impl CudaChop {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
 
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-        })
+        Ok(Self { module, stream, _context: context })
+    }
+
+    #[inline]
+    fn upload_slice_async<T: DeviceCopy>(&self, slice: &[T]) -> Result<DeviceBuffer<T>, CudaChopError> {
+        use std::mem::size_of;
+        let bytes = slice.len() * size_of::<T>();
+        if bytes >= PINNED_STAGING_THRESHOLD {
+            // Stage through pinned host memory so cudaMemcpyAsync stays non-blocking.
+            let mut pinned: LockedBuffer<T> = unsafe { LockedBuffer::uninitialized(slice.len()) }
+                .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
+            pinned.as_mut_slice().copy_from_slice(slice);
+
+            let mut d = unsafe { DeviceBuffer::uninitialized_async(slice.len(), &self.stream) }
+                .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
+            unsafe {
+                d.async_copy_from(pinned.as_slice(), &self.stream)
+                    .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
+            }
+            Ok(d)
+        } else {
+            unsafe { DeviceBuffer::from_slice_async(slice, &self.stream) }
+                .map_err(|e| CudaChopError::Cuda(e.to_string()))
+        }
     }
 
     #[inline]
@@ -193,49 +218,37 @@ impl CudaChop {
             ));
         }
 
-        // Upload inputs/params
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_close = unsafe { DeviceBuffer::from_slice_async(close_f32, &self.stream) }
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_drifts = DeviceBuffer::from_slice(&drifts_i32)
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_scalars = DeviceBuffer::from_slice(&scalars_f32)
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
+        // Upload inputs/params (prefer truly async copies with pinned staging for large buffers)
+        let d_high    = self.upload_slice_async(high_f32)?;
+        let d_low     = self.upload_slice_async(low_f32)?;
+        let d_close   = self.upload_slice_async(close_f32)?;
+        let d_periods = self.upload_slice_async(&periods_i32)?;
+        let d_drifts  = self.upload_slice_async(&drifts_i32)?;
+        let d_scalars = self.upload_slice_async(&scalars_f32)?;
 
-        let d_log2 = DeviceBuffer::from_slice(&tables.log2)
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_offsets = DeviceBuffer::from_slice(&tables.level_offsets)
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_st_max = DeviceBuffer::from_slice(&tables.st_max)
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_st_min = DeviceBuffer::from_slice(&tables.st_min)
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_nan_psum = DeviceBuffer::from_slice(&tables.nan_psum)
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
+        let d_log2     = self.upload_slice_async(&tables.log2)?;
+        let d_offsets  = self.upload_slice_async(&tables.level_offsets)?;
+        let d_st_max   = self.upload_slice_async(&tables.st_max)?;
+        let d_st_min   = self.upload_slice_async(&tables.st_min)?;
+        let d_nan_psum = self.upload_slice_async(&tables.nan_psum)?;
 
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
                 .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
 
         // Kernel
-        let func = self
+        let mut func = self
             .module
             .get_function("chop_batch_f32")
             .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
 
-        // Occupancy-based suggestion
-        let (_, suggested) = func
-            .suggested_launch_configuration(
-                (max_period * std::mem::size_of::<f32>()) as usize,
-                BlockSize::xyz(0, 0, 0),
-            )
-            .unwrap_or((0, 0));
-        let block_x = if suggested > 0 { suggested } else { 256 };
+        // Choose dynamic shared mem per regime and set cache preference
+        let shared_bytes: usize = if max_period <= CHOP_REG_RING_MAX { 0 } else { max_period * std::mem::size_of::<f32>() };
+        let _ = if shared_bytes == 0 {
+            func.set_cache_config(CacheConfig::PreferL1)
+        } else {
+            func.set_cache_config(CacheConfig::PreferShared)
+        };
 
         // Chunk rows to keep grid.x <= 65_535
         let rows = combos.len();
@@ -243,8 +256,7 @@ impl CudaChop {
         while launched < rows {
             let n_this = (rows - launched).min(65_535);
             let grid: GridSize = (n_this as u32, 1u32, 1u32).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            let shared_bytes = max_period * std::mem::size_of::<f32>();
+            let block: BlockSize = (256u32, 1u32, 1u32).into();
             let stream = &self.stream;
             unsafe {
                 launch!(
@@ -404,26 +416,22 @@ impl CudaChop {
         }
 
         // Upload
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }
+        let d_high  = self.upload_slice_async(high_tm_f32)?;
+        let d_low   = self.upload_slice_async(low_tm_f32)?;
+        let d_psum  = self.upload_slice_async(&atr_psum_tm)?;
+        let d_first = self.upload_slice_async(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
             .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm_f32, &self.stream) }
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_psum = DeviceBuffer::from_slice(&atr_psum_tm)
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
-                .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
 
-        let func = self
+        let mut func = self
             .module
             .get_function("chop_many_series_one_param_f32")
             .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // 128 threads per block by default
-        let block: BlockSize = (128u32, 1u32, 1u32).into();
-        let grid: GridSize = (((cols as u32 + 127) / 128).max(1), 1u32, 1u32).into();
+        // 256 threads per block
+        let block: BlockSize = (256u32, 1u32, 1u32).into();
+        let grid: GridSize = (((cols as u32 + 255) / 256).max(1), 1u32, 1u32).into();
         let stream = &self.stream;
         unsafe {
             launch!(

@@ -1,23 +1,41 @@
 // CUDA kernels for Average Directional Index (ADX)
 //
-// Math follows the scalar Rust implementation in src/indicators/adx.rs:
-// - Warmup sums over [first_valid+1 .. first_valid+period]
-// - Wilder-style smoothing of TR, +DM, -DM
-// - DX accumulation for first `period` points to seed ADX
-// - Then ADX recurrence: adx = (adx*(p-1) + dx) / p
-//
-// Semantics:
-// - FP32 inputs/outputs, double accumulations for stability
-// - Before warm_end = first_valid + 2*period - 1, outputs are NaN
-// - Division-by-zero branches yield 0.0 exactly like the scalar path
+// Drop-in optimization focused on one-series → many-params and many-series → one-param.
+// Key changes:
+// - FP32 arithmetic with Kahan/Neumaier compensation during warmup; FMA-friendly recurrences.
+// - Warp-level streaming for the batch kernel: lane0 loads H/L/C and broadcasts via __shfl_sync.
+// - Only write the NaN prefix per row; avoid full-row prefill unless explicitly requested.
 
 #include <cuda_runtime.h>
 #include <math.h>
 
-__device__ inline void fill_nan_row(float* ptr, int len) {
-    const float nan = nanf("");
-    for (int i = 0; i < len; ++i) ptr[i] = nan;
+// ---- Helpers ---------------------------------------------------------------
+
+__device__ __forceinline__ float qnan_f32() { return __int_as_float(0x7fc00000); }
+
+// Kahan/Neumaier compensated sum in FP32
+struct KahanF {
+    float sum, c;
+    __device__ __forceinline__ void reset() { sum = 0.f; c = 0.f; }
+    __device__ __forceinline__ void add(float x) {
+        float y = x - c;
+        float t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    }
+};
+
+// Optional: global prefill of NaNs (not used by wrappers, but handy for experiments)
+extern "C" __global__ void fill_nan_f32(float* out, size_t n) {
+    const float nanv = qnan_f32();
+    for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += blockDim.x * gridDim.x) {
+        out[idx] = nanv;
+    }
 }
+
+// ---- Optimized one-series-many-params kernel -------------------------------
+// Works with any blockDim.x that is a multiple of 32. Each warp processes up to 32
+// parameter combos in parallel; lane 0 of each warp streams H/L/C and broadcasts via shfl.
 
 extern "C" __global__
 void adx_batch_f32(const float* __restrict__ high,
@@ -28,104 +46,136 @@ void adx_batch_f32(const float* __restrict__ high,
                    int n_combos,
                    int first_valid,
                    float* __restrict__ out) {
-    const int combo = blockIdx.x * blockDim.x + threadIdx.x;
-    if (combo >= n_combos) return;
+    const int tid  = blockIdx.x * blockDim.x + threadIdx.x;   // unique thread id
+    if (tid >= n_combos) return;
 
-    const int p = periods[combo];
-    float* row = out + combo * series_len;
-    fill_nan_row(row, series_len);
-    if (p <= 0) return;
+    const int lane = threadIdx.x & 31;                        // lane id in warp
+    const int warp_id = threadIdx.x >> 5;                     // warp index within block
+    const int warp_base = warp_id * 32;                       // base slot in shared arrays
 
-    // Require at least period+1 valid bars after first_valid (host validates, but keep defensive)
-    if (first_valid < 0 || first_valid + p >= series_len) return;
+    // Load this thread's parameter
+    const int p = periods[tid];
+    float* row = out + (size_t)tid * series_len;
 
-    // Warmup accumulation j = 1..=p (relative to first_valid)
-    int i0 = first_valid;
-    double prev_h = (double)high[i0];
-    double prev_l = (double)low[i0];
-    double prev_c = (double)close[i0];
-
-    double tr_sum = 0.0;
-    double plus_dm_sum = 0.0;
-    double minus_dm_sum = 0.0;
-    for (int j = 1; j <= p; ++j) {
-        const int i = i0 + j;
-        const double ch = (double)high[i];
-        const double cl = (double)low[i];
-        const double hl = ch - cl;
-        const double hpc = fabs(ch - prev_c);
-        const double lpc = fabs(cl - prev_c);
-        const double tr = fmax(fmax(hl, hpc), lpc);
-        const double up = ch - prev_h;
-        const double down = prev_l - cl;
-        if (up > down && up > 0.0) plus_dm_sum += up;
-        if (down > up && down > 0.0) minus_dm_sum += down;
-        tr_sum += tr;
-        prev_h = ch;
-        prev_l = cl;
-        prev_c = (double)close[i];
+    // Rejects and minimal NaN handling
+    if (p <= 0 || first_valid < 0 || first_valid + p >= series_len) {
+        // mark whole row as NaN to be conservative
+        const float nanv = qnan_f32();
+        for (int i = 0; i < series_len; ++i) row[i] = nanv;
+        return;
     }
 
-    double atr = tr_sum;
-    double plus_s = plus_dm_sum;
-    double minus_s = minus_dm_sum;
+    // Fill only the invalid prefix [0 .. first_valid + 2*p - 1]
+    const int warm_end_excl = min(series_len, first_valid + 2 * p);
+    const float nanv = qnan_f32();
+    for (int i = 0; i < warm_end_excl; ++i) row[i] = nanv;
 
-    const double rp = 1.0 / (double)p;
-    const double one_minus_rp = 1.0 - rp;
-    const double pm1 = (double)p - 1.0;
+    // Precompute FP32 coefficients
+    const float rp = 1.0f / (float)p;
+    const float one_minus_rp = 1.0f - rp;
+    const float pm1_over_p = ((float)p - 1.0f) * rp;
 
-    // Initial DX from the first smoothed window
-    double plus_di_prev = (atr != 0.0) ? ((plus_s / atr) * 100.0) : 0.0;
-    double minus_di_prev = (atr != 0.0) ? ((minus_s / atr) * 100.0) : 0.0;
-    double sum_di_prev = plus_di_prev + minus_di_prev;
-    double dx_sum = (sum_di_prev != 0.0) ? (fabs(plus_di_prev - minus_di_prev) / sum_di_prev) * 100.0 : 0.0;
-    int dx_count = 1;
-    double adx_last = 0.0;
+    // Stream time from t0 = first_valid
+    const int t0 = first_valid;
 
-    // Main pass i = first_valid + p + 1 .. series_len-1
-    int i = i0 + p + 1;
-    double prev_h2 = (double)high[i0 + p];
-    double prev_l2 = (double)low[i0 + p];
-    double prev_c2 = (double)close[i0 + p];
-    for (; i < series_len; ++i) {
-        const double ch = (double)high[i];
-        const double cl = (double)low[i];
-        const double hl = ch - cl;
-        const double hpc = fabs(ch - prev_c2);
-        const double lpc = fabs(cl - prev_c2);
-        const double tr = fmax(fmax(hl, hpc), lpc);
-        const double up = ch - prev_h2;
-        const double down = prev_l2 - cl;
-        const double plus_dm = (up > down && up > 0.0) ? up : 0.0;
-        const double minus_dm = (down > up && down > 0.0) ? down : 0.0;
+    // Each warp's lane0 loads; shfl broadcasts inside the warp
+    __shared__ float sh_h[1024];
+    __shared__ float sh_l[1024];
+    __shared__ float sh_c[1024];
+    if (lane == 0) {
+        sh_h[warp_base] = high[t0];
+        sh_l[warp_base] = low[t0];
+        sh_c[warp_base] = close[t0];
+    }
+    __syncthreads();
+    float prev_h = sh_h[warp_base];
+    float prev_l = sh_l[warp_base];
+    float prev_c = sh_c[warp_base];
 
-        atr = atr * one_minus_rp + tr;
-        plus_s = plus_s * one_minus_rp + plus_dm;
-        minus_s = minus_s * one_minus_rp + minus_dm;
+    // Per-thread parameter state
+    int warm_j = 0;
+    KahanF tr_sum; tr_sum.reset();
+    KahanF plus_sum; plus_sum.reset();
+    KahanF minus_sum; minus_sum.reset();
 
-        const double plus_di = (atr != 0.0) ? ((plus_s / atr) * 100.0) : 0.0;
-        const double minus_di = (atr != 0.0) ? ((minus_s / atr) * 100.0) : 0.0;
-        const double sum_di = plus_di + minus_di;
-        const double dx = (sum_di != 0.0) ? (fabs(plus_di - minus_di) / sum_di) * 100.0 : 0.0;
+    float atr = 0.f, plus_s = 0.f, minus_s = 0.f;
+    KahanF dx_sum; dx_sum.reset();
+    int dx_count = 0;
+    float adx_last = 0.f;
 
-        if (dx_count < p) {
-            dx_sum += dx;
-            dx_count += 1;
-            if (dx_count == p) {
-                adx_last = dx_sum * rp;
-                row[i] = (float)adx_last;
+    for (int t = t0 + 1; t < series_len; ++t) {
+        // lane0 loads next prices and broadcasts to this warp
+        if (lane == 0) {
+            sh_h[warp_base] = high[t];
+            sh_l[warp_base] = low[t];
+            sh_c[warp_base] = close[t];
+        }
+        __syncthreads();
+        float ch = sh_h[warp_base];
+        float cl = sh_l[warp_base];
+        float cc = sh_c[warp_base];
+
+        const float hl  = ch - cl;
+        const float hpc = fabsf(ch - prev_c);
+        const float lpc = fabsf(cl - prev_c);
+        const float tr  = fmaxf(fmaxf(hl, hpc), lpc);
+        const float up   = ch - prev_h;
+        const float down = prev_l - cl;
+        const float plus_dm  = (up > down && up > 0.f)   ? up   : 0.f;
+        const float minus_dm = (down > up && down > 0.f) ? down : 0.f;
+
+        if (warm_j < p) {
+            tr_sum.add(tr);
+            plus_sum.add(plus_dm);
+            minus_sum.add(minus_dm);
+            ++warm_j;
+            if (warm_j == p) {
+                atr     = tr_sum.sum;
+                plus_s  = plus_sum.sum;
+                minus_s = minus_sum.sum;
+                const float inv_atr = (atr != 0.f) ? (100.f / atr) : 0.f;
+                const float plus_di_prev  = plus_s  * inv_atr;
+                const float minus_di_prev = minus_s * inv_atr;
+                const float sum_di_prev   = plus_di_prev + minus_di_prev;
+                const float dx0 = (sum_di_prev != 0.f)
+                                  ? (fabsf(plus_di_prev - minus_di_prev) * (100.f / sum_di_prev))
+                                  : 0.f;
+                dx_sum.add(dx0);
+                dx_count = 1;
             }
         } else {
-            adx_last = (adx_last * pm1 + dx) * rp;
-            row[i] = (float)adx_last;
+            atr     = __fmaf_rn(atr,     one_minus_rp, tr);
+            plus_s  = __fmaf_rn(plus_s,  one_minus_rp, plus_dm);
+            minus_s = __fmaf_rn(minus_s, one_minus_rp, minus_dm);
+
+            const float inv_atr = (atr != 0.f) ? (100.f / atr) : 0.f;
+            const float plus_di  = plus_s  * inv_atr;
+            const float minus_di = minus_s * inv_atr;
+            const float denom    = plus_di + minus_di;
+            const float dx       = (denom != 0.f)
+                                  ? (fabsf(plus_di - minus_di) * (100.f / denom))
+                                  : 0.f;
+
+            if (dx_count < p) {
+                dx_sum.add(dx);
+                ++dx_count;
+                if (dx_count == p) {
+                    adx_last = dx_sum.sum * rp;
+                    row[t] = adx_last;
+                }
+            } else {
+                adx_last = __fmaf_rn(adx_last, pm1_over_p, dx * rp);
+                row[t] = adx_last;
+            }
         }
 
-        prev_h2 = ch;
-        prev_l2 = cl;
-        prev_c2 = (double)close[i];
+        // advance previous for next bar
+        prev_h = ch; prev_l = cl; prev_c = cc;
+        __syncthreads();
     }
 }
 
+// ---- Many-series, one-param, time-major kernel -----------------------------
 extern "C" __global__
 void adx_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
@@ -136,96 +186,108 @@ void adx_many_series_one_param_time_major_f32(
     int period,
     const int* __restrict__ first_valids,
     float* __restrict__ out_tm) {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; // series index
-    if (s >= cols) return;
 
-    // Initialize column with NaNs
-    for (int t = 0; t < rows; ++t) out_tm[t * cols + s] = nanf("");
-    if (period <= 0) return;
+    for (int s = blockIdx.x * blockDim.x + threadIdx.x; s < cols; s += blockDim.x * gridDim.x) {
+        const int fv = first_valids[s];
+        auto at = [&](int t) { return t * cols + s; };
 
-    const int fv = first_valids[s];
-    if (fv < 0 || fv + period >= rows) return;
+        // Prefill only the invalid prefix for this series
+        const int warm_end_excl = (period > 0 && fv >= 0) ? min(rows, fv + 2 * period) : rows;
+        const float nanv = qnan_f32();
+        for (int t = 0; t < warm_end_excl; ++t) out_tm[at(t)] = nanv;
+        if (period <= 0 || fv < 0 || fv + period >= rows) continue;
 
-    auto at = [&](int t) {
-        return t * cols + s;
-    };
+        // Warmup (j=1..period) with FP32 + Kahan
+        int i0 = fv;
+        float prev_h = high_tm[at(i0)];
+        float prev_l = low_tm[at(i0)];
+        float prev_c = close_tm[at(i0)];
 
-    // Warmup j=1..=period relative to fv
-    int i0 = fv;
-    double prev_h = (double)high_tm[at(i0)];
-    double prev_l = (double)low_tm[at(i0)];
-    double prev_c = (double)close_tm[at(i0)];
+        KahanF tr_sum; tr_sum.reset();
+        KahanF plus_sum; plus_sum.reset();
+        KahanF minus_sum; minus_sum.reset();
 
-    double tr_sum = 0.0, plus_sum = 0.0, minus_sum = 0.0;
-    for (int j = 1; j <= period; ++j) {
-        const int t = i0 + j;
-        const double ch = (double)high_tm[at(t)];
-        const double cl = (double)low_tm[at(t)];
-        const double hl = ch - cl;
-        const double hpc = fabs(ch - prev_c);
-        const double lpc = fabs(cl - prev_c);
-        const double tr = fmax(fmax(hl, hpc), lpc);
-        const double up = ch - prev_h;
-        const double down = prev_l - cl;
-        if (up > down && up > 0.0) plus_sum += up;
-        if (down > up && down > 0.0) minus_sum += down;
-        tr_sum += tr;
-        prev_h = ch; prev_l = cl; prev_c = (double)close_tm[at(t)];
-    }
-
-    double atr = tr_sum;
-    double plus_s = plus_sum;
-    double minus_s = minus_sum;
-
-    const double rp = 1.0 / (double)period;
-    const double one_minus_rp = 1.0 - rp;
-    const double pm1 = (double)period - 1.0;
-
-    double plus_di_prev = (atr != 0.0) ? ((plus_s / atr) * 100.0) : 0.0;
-    double minus_di_prev = (atr != 0.0) ? ((minus_s / atr) * 100.0) : 0.0;
-    double sum_di_prev = plus_di_prev + minus_di_prev;
-    double dx_sum = (sum_di_prev != 0.0) ? (fabs(plus_di_prev - minus_di_prev) / sum_di_prev) * 100.0 : 0.0;
-    int dx_count = 1;
-    double adx_last = 0.0;
-
-    int t = i0 + period + 1;
-    double prev_h2 = (double)high_tm[at(i0 + period)];
-    double prev_l2 = (double)low_tm[at(i0 + period)];
-    double prev_c2 = (double)close_tm[at(i0 + period)];
-    for (; t < rows; ++t) {
-        const double ch = (double)high_tm[at(t)];
-        const double cl = (double)low_tm[at(t)];
-        const double hl = ch - cl;
-        const double hpc = fabs(ch - prev_c2);
-        const double lpc = fabs(cl - prev_c2);
-        const double tr = fmax(fmax(hl, hpc), lpc);
-        const double up = ch - prev_h2;
-        const double down = prev_l2 - cl;
-        const double plus_dm = (up > down && up > 0.0) ? up : 0.0;
-        const double minus_dm = (down > up && down > 0.0) ? down : 0.0;
-
-        atr = atr * one_minus_rp + tr;
-        plus_s = plus_s * one_minus_rp + plus_dm;
-        minus_s = minus_s * one_minus_rp + minus_dm;
-
-        const double plus_di = (atr != 0.0) ? ((plus_s / atr) * 100.0) : 0.0;
-        const double minus_di = (atr != 0.0) ? ((minus_s / atr) * 100.0) : 0.0;
-        const double sum_di = plus_di + minus_di;
-        const double dx = (sum_di != 0.0) ? (fabs(plus_di - minus_di) / sum_di) * 100.0 : 0.0;
-
-        if (dx_count < period) {
-            dx_sum += dx;
-            dx_count += 1;
-            if (dx_count == period) {
-                adx_last = dx_sum * rp;
-                out_tm[at(t)] = (float)adx_last;
-            }
-        } else {
-            adx_last = (adx_last * pm1 + dx) * rp;
-            out_tm[at(t)] = (float)adx_last;
+        for (int j = 1; j <= period; ++j) {
+            const int t = i0 + j;
+            const float ch = high_tm[at(t)];
+            const float cl = low_tm[at(t)];
+            const float hl  = ch - cl;
+            const float hpc = fabsf(ch - prev_c);
+            const float lpc = fabsf(cl - prev_c);
+            const float tr  = fmaxf(fmaxf(hl, hpc), lpc);
+            const float up   = ch - prev_h;
+            const float down = prev_l - cl;
+            if (up > down && up > 0.f)   plus_sum.add(up);
+            if (down > up && down > 0.f) minus_sum.add(down);
+            tr_sum.add(tr);
+            prev_h = ch; prev_l = cl; prev_c = close_tm[at(t)];
         }
 
-        prev_h2 = ch; prev_l2 = cl; prev_c2 = (double)close_tm[at(t)];
+        float atr = tr_sum.sum;
+        float plus_s = plus_sum.sum;
+        float minus_s = minus_sum.sum;
+
+        const float rp = 1.0f / (float)period;
+        const float one_minus_rp = 1.0f - rp;
+        const float pm1_over_p = ((float)period - 1.0f) * rp;
+
+        // initial DX
+        KahanF dx_sum; dx_sum.reset();
+        {
+            const float inv_atr = (atr != 0.f) ? (100.f / atr) : 0.f;
+            const float plus_di_prev  = plus_s  * inv_atr;
+            const float minus_di_prev = minus_s * inv_atr;
+            const float sum_di_prev   = plus_di_prev + minus_di_prev;
+            dx_sum.add((sum_di_prev != 0.f)
+                ? (fabsf(plus_di_prev - minus_di_prev) * (100.f / sum_di_prev))
+                : 0.f);
+        }
+        int dx_count = 1;
+        float adx_last = 0.f;
+
+        int t = i0 + period + 1;
+        float prev_h2 = high_tm[at(i0 + period)];
+        float prev_l2 = low_tm[at(i0 + period)];
+        float prev_c2 = close_tm[at(i0 + period)];
+
+        for (; t < rows; ++t) {
+            const float ch = high_tm[at(t)];
+            const float cl = low_tm[at(t)];
+            const float hl = ch - cl;
+            const float hpc = fabsf(ch - prev_c2);
+            const float lpc = fabsf(cl - prev_c2);
+            const float tr  = fmaxf(fmaxf(hl, hpc), lpc);
+            const float up   = ch - prev_h2;
+            const float down = prev_l2 - cl;
+            const float plus_dm  = (up > down && up > 0.f)   ? up   : 0.f;
+            const float minus_dm = (down > up && down > 0.f) ? down : 0.f;
+
+            atr     = __fmaf_rn(atr,     one_minus_rp, tr);
+            plus_s  = __fmaf_rn(plus_s,  one_minus_rp, plus_dm);
+            minus_s = __fmaf_rn(minus_s, one_minus_rp, minus_dm);
+
+            const float inv_atr2 = (atr != 0.f) ? (100.f / atr) : 0.f;
+            const float plus_di  = plus_s  * inv_atr2;
+            const float minus_di = minus_s * inv_atr2;
+            const float denom    = plus_di + minus_di;
+            const float dx       = (denom != 0.f)
+                                  ? (fabsf(plus_di - minus_di) * (100.f / denom))
+                                  : 0.f;
+
+            if (dx_count < period) {
+                dx_sum.add(dx);
+                ++dx_count;
+                if (dx_count == period) {
+                    adx_last = dx_sum.sum * rp;
+                    out_tm[at(t)] = adx_last;
+                }
+            } else {
+                adx_last = __fmaf_rn(adx_last, pm1_over_p, dx * rp);
+                out_tm[at(t)] = adx_last;
+            }
+
+            prev_h2 = ch; prev_l2 = cl; prev_c2 = close_tm[at(t)];
+        }
     }
 }
 

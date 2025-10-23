@@ -17,7 +17,7 @@
 
 use crate::cuda::moving_averages::{CudaHighpass, DeviceArrayF32};
 use crate::indicators::bandpass::{BandPassBatchRange, BandPassParams};
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
@@ -145,6 +145,9 @@ impl CudaBandpass {
             debug_many_logged: false,
         })
     }
+
+    #[inline]
+    pub fn stream(&self) -> &Stream { &self.stream }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -342,8 +345,12 @@ impl CudaBandpass {
         }
 
         // Stage 1: push prices + compute HP unique rows on device using CudaHighpass
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
+        // Use synchronous HtoD for prices to avoid cross-stream hazards with CudaHighpass
+        // (its kernels run on a different stream).
+        let d_prices = DeviceBuffer::from_slice(data_f32)
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
+        // NOTE: This buffer is consumed by CudaHighpass on its own stream.
+        // Keep this copy synchronous to avoid cross-stream hazards without events.
         let d_hp_periods = DeviceBuffer::from_slice(&hp_unique)
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
         let mut d_hp: DeviceBuffer<f32> = unsafe {
@@ -372,20 +379,26 @@ impl CudaBandpass {
             DeviceBuffer::from_slice(&trig).map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
 
         // Outputs
-        let mut d_bp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }
+        let mut d_bp: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * n, &self.stream) }
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
-        let mut d_bpn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }
+        let mut d_bpn: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * n, &self.stream) }
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
-        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }
+        let mut d_sig: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * n, &self.stream) }
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
-        let mut d_trg: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }
+        let mut d_trg: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * n, &self.stream) }
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
 
         // Launch bandpass kernel
-        let func = self
+        let mut func = self
             .module
             .get_function("bandpass_batch_from_hp_f32")
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
+        // Prefer L1 for read-heavy streaming kernel; ignore errors if unsupported.
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
         // occupancy suggestion
         let (suggested, _min_grid) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
@@ -434,9 +447,6 @@ impl CudaBandpass {
                 .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
         self.maybe_log_batch_debug();
 
         Ok(CudaBandpassBatchResult {
@@ -498,29 +508,29 @@ impl CudaBandpass {
 
         // Prepare params
         let (alpha, beta, trig, _hp) = Self::host_coeffs(period, bw);
-        let mut d_alpha = DeviceBuffer::from_slice(&[alpha])
-            .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
-        let mut d_beta = DeviceBuffer::from_slice(&[beta])
-            .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
-        let mut d_trig = DeviceBuffer::from_slice(&[trig])
-            .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
+        // No device copies of scalars; they are passed by value to the kernel.
 
         // Outputs (time-major)
         let total = cols * rows;
-        let mut d_bp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
+        let mut d_bp: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total, &self.stream) }
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
-        let mut d_bpn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
+        let mut d_bpn: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total, &self.stream) }
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
-        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
+        let mut d_sig: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total, &self.stream) }
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
-        let mut d_trg_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
+        let mut d_trg_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total, &self.stream) }
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
 
         // Launch many-series kernel
-        let func = self
+        let mut func = self
             .module
             .get_function("bandpass_many_series_one_param_time_major_from_hp_f32")
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
         let (suggested, _mg) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
             .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
@@ -564,9 +574,6 @@ impl CudaBandpass {
                 .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaBandpassError::Cuda(e.to_string()))?;
         self.maybe_log_many_debug();
 
         Ok(DeviceArrayF32Quad {

@@ -1,11 +1,14 @@
 // CUDA kernels for Linear Regression Angle (LRA).
 //
-// Batch path uses host-precomputed prefixes for sum(y), sum(k*y) with NaNs
-// excluded (treated as zero in the prefix) and a prefix count of NaNs to
-// guard window validity. This preserves CPU semantics and avoids poisoning
-// prefix differences. Many-series path scans per series with O(1) sliding
-// updates and performs an O(period) rebuild when a boundary value is NaN,
-// matching the scalar behavior and allowing recovery after NaN windows.
+// This version removes device-side FP64 from the hot paths and replaces
+// previous double math with compensated FP32 ("double-single") arithmetic.
+// It also fixes NaN window persistence in the many-series kernel by keeping
+// a rolling nan_count and rebuilding once when a window becomes clean.
+//
+// Batch path note: the host still builds FP64 prefixes (Σy, Σk*y) to
+// preserve ABI with existing wrappers. On device we down-convert each prefix
+// endpoint to FP32 and form a compensated difference via TwoSum, avoiding
+// FP64 arithmetic in the kernels while maintaining good accuracy.
 
 #include <cuda_runtime.h>
 #include <math.h>
@@ -26,12 +29,99 @@ static __device__ __forceinline__ int tm_idx(int row, int num_series, int series
     return row * num_series + series;
 }
 
+static __device__ __forceinline__ float kRad2Deg() {
+    return 57.2957795130823208767981548141051703f; // 180/pi
+}
+
+// Dual-float (double-single) accumulator: value ~= hi + lo (|lo| << |hi|)
+struct df32 {
+    float hi;
+    float lo;
+};
+
+static __device__ __forceinline__ df32 df32_make(float x) {
+    df32 r; r.hi = x; r.lo = 0.0f; return r;
+}
+
+// Exact error of a+b (Knuth TwoSum) for single precision
+static __device__ __forceinline__ void two_sum(float a, float b, float &s, float &e) {
+    s = a + b;
+    float bb = s - a;
+    e = (a - (s - bb)) + (b - bb);
+}
+
+// df32 + float
+static __device__ __forceinline__ df32 df32_add_f(df32 a, float b) {
+    float s, e; two_sum(a.hi, b, s, e);
+    e += a.lo;
+    float s2, e2; two_sum(s, e, s2, e2);
+    return {s2, e2};
+}
+
+// df32 - float
+static __device__ __forceinline__ df32 df32_sub_f(df32 a, float b) {
+    return df32_add_f(a, -b);
+}
+
+// df32 + df32
+static __device__ __forceinline__ df32 df32_add(df32 a, df32 b) {
+    float s, e; two_sum(a.hi, b.hi, s, e);
+    e += a.lo + b.lo;
+    float s2, e2; two_sum(s, e, s2, e2);
+    return {s2, e2};
+}
+
+// df32 - df32
+static __device__ __forceinline__ df32 df32_sub(df32 a, df32 b) {
+    return df32_add(a, { -b.hi, -b.lo });
+}
+
+// Add exact product a*b to accumulator (df32 += a*b)
+static __device__ __forceinline__ df32 df32_add_prod(df32 acc, float a, float b) {
+    float p = a * b;
+    float err = fmaf(a, b, -p);      // exact product error term in float
+    acc = df32_add_f(acc, p);
+    acc = df32_add_f(acc, err);
+    return acc;
+}
+
+// Subtract exact product a*b from accumulator (df32 -= a*b)
+static __device__ __forceinline__ df32 df32_sub_prod(df32 acc, float a, float b) {
+    float p = a * b;
+    float err = fmaf(a, b, -p);
+    acc = df32_sub_f(acc, p);
+    acc = df32_sub_f(acc, err);
+    return acc;
+}
+
+// Multiply df32 by scalar s (df32 *= s)
+static __device__ __forceinline__ df32 df32_mul_scalar(df32 a, float s) {
+    float p = a.hi * s;
+    float err = fmaf(a.hi, s, -p);
+    err += a.lo * s;
+    float s2, e2; two_sum(p, err, s2, e2);
+    return {s2, e2};
+}
+
+// Helpers for float2 <-> df32
+static __device__ __forceinline__ df32 df32_from_float2(const float2 v) {
+    df32 r; r.hi = v.x; r.lo = v.y; return r;
+}
+static __device__ __forceinline__ float2 float2_from_df32(const df32 v) {
+    return make_float2(v.hi, v.lo);
+}
+
+// Collapse df32 to float
+static __device__ __forceinline__ float df32_to_float(df32 a) {
+    return a.hi + a.lo;
+}
+
 // -------------------------- Batch kernel (one series × many params) --------------------------
 
 // Inputs:
 //  - prices:        [len]
-//  - prefix_sum:    [len+1] double, running sum of y with NaNs treated as 0
-//  - prefix_kd:     [len+1] double, running sum of (k_abs * y) with NaNs treated as 0
+//  - prefix_sum:    [len+1] double, running sum of y with NaNs treated as 0 (host-built)
+//  - prefix_kd:     [len+1] double, running sum of (k_abs * y) with NaNs treated as 0 (host-built)
 //  - prefix_nan:    [len+1] int, running count of NaNs
 //  - periods:       [n_combos]
 //  - sum_x:         [n_combos] float, Σx for x=0..p-1 = p*(p-1)/2
@@ -41,17 +131,17 @@ static __device__ __forceinline__ int tm_idx(int row, int num_series, int series
 //  - out:           [n_combos * len] row-major (combo-major) results in degrees
 
 extern "C" __global__ void linearreg_angle_batch_f32(
-    const float*  __restrict__ prices,
-    const double* __restrict__ prefix_sum,
-    const double* __restrict__ prefix_kd,
-    const int*    __restrict__ prefix_nan,
+    const float*   __restrict__ prices,
+    const float2*  __restrict__ prefix_sum2,
+    const float2*  __restrict__ prefix_kd2,
+    const int*     __restrict__ prefix_nan,
     int len,
     int first_valid,
-    const int*    __restrict__ periods,
-    const float*  __restrict__ sum_x,
-    const float*  __restrict__ inv_div,
+    const int*     __restrict__ periods,
+    const float*   __restrict__ sum_x,
+    const float*   __restrict__ inv_div,
     int n_combos,
-    float*        __restrict__ out)
+    float*         __restrict__ out)
 {
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -62,10 +152,7 @@ extern "C" __global__ void linearreg_angle_batch_f32(
     const int warm = first_valid + period - 1;
     const float sx_f   = sum_x[combo];
     const float invd_f = inv_div[combo];
-    const double sx    = (double)sx_f;
-    const double invd  = (double)invd_f;
-    const double p_d   = (double)period;
-    const float rad2deg_f = 180.0f / (float)M_PI;
+    const float rad2deg = kRad2Deg();
 
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
@@ -77,14 +164,18 @@ extern "C" __global__ void linearreg_angle_batch_f32(
             const int start = t + 1 - period;
             const int nan_cnt = prefix_nan[t + 1] - prefix_nan[start];
             if (nan_cnt == 0) {
-                const double sum_y  = prefix_sum[t + 1] - prefix_sum[start];
-                const double sum_kd = prefix_kd[t + 1] - prefix_kd[start];
-                // reversed-x identity: sum_xy = i*sum_y - sum_kd
-                const double sum_xy = ((double)t) * sum_y - sum_kd;
-                const double num = fma(p_d, sum_xy, -sx * sum_y); // p*sum_xy - sum_x*sum_y
-                const double slope = num * invd;
-                const float angle = atanf((float)slope) * rad2deg_f;
-                outv = angle;
+                df32 sum_y  = df32_sub(df32_from_float2(prefix_sum2[t + 1]),
+                                       df32_from_float2(prefix_sum2[start]));
+                df32 sum_kd = df32_sub(df32_from_float2(prefix_kd2[t + 1]),
+                                       df32_from_float2(prefix_kd2[start]));
+
+                // reversed-x identity: sum_xy = t*sum_y - sum_kd (absolute index weighting)
+                df32 sum_xy = df32_sub(df32_mul_scalar(sum_y, (float)t), sum_kd);
+                // numerator: p*sum_xy - sum_x*sum_y (df32)
+                df32 num = df32_sub(df32_mul_scalar(sum_xy, (float)period),
+                                    df32_mul_scalar(sum_y, sx_f));
+                const float slope = df32_to_float(num) * invd_f;
+                outv = atanf(slope) * rad2deg;
             }
         }
         out[row_off + t] = outv;
@@ -105,10 +196,10 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
     float* __restrict__ out_tm)
 {
     const int stride = blockDim.x * gridDim.x;
-    const double p_d  = (double)period;
-    const double sx   = (double)sum_x_f;
-    const double invd = (double)inv_div_f;
-    const float rad2deg_f = 180.0f / (float)M_PI;
+    const float p_f = (float)period;
+    const float sx_f = sum_x_f;
+    const float invd_f = inv_div_f;
+    const float rad2deg = kRad2Deg();
 
     for (int s = blockIdx.x * blockDim.x + threadIdx.x; s < cols; s += stride) {
         if (period < 2 || period > rows) {
@@ -129,63 +220,102 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
         const int warm = fv + period - 1;
         for (int r = 0; r < warm; ++r) out_tm[tm_idx(r, cols, s)] = LRA_NAN_F;
 
-        // Warm-up: sums over first (period-1) elements using absolute index weighting
-        double y_sum = 0.0;
-        double sum_kd = 0.0; // Σ (k_abs * y)
-        bool invalid = false;
-        for (int k = 0; k < period - 1; ++k) {
-            const int r0 = fv + k;
-            const float v_f = prices_tm[tm_idx(r0, cols, s)];
-            if (isnan(v_f)) { invalid = true; break; }
-            const double v = (double)v_f;
-            y_sum  += v;
-            sum_kd += (double)r0 * v;
+        // Initialize window at r = warm
+        df32 y_sum = df32_make(0.0f);
+        df32 sum_kd = df32_make(0.0f);
+        int nan_count = 0;
+
+        for (int k = 0; k < period; ++k) {
+            const int r0 = warm - period + 1 + k;
+            const float v = prices_tm[tm_idx(r0, cols, s)];
+            if (isnan(v)) {
+                nan_count++;
+            } else {
+                y_sum  = df32_add_f(y_sum, v);
+                sum_kd = df32_add_prod(sum_kd, (float)r0, v);
+            }
         }
 
-        float latest_f = prices_tm[tm_idx(warm, cols, s)];
-
-        for (int r = warm; r < rows; ++r) {
+        // Emit r = warm
+        {
             float outv = LRA_NAN_F;
-            float enter_f = latest_f;
-            if (r + 1 < rows) latest_f = prices_tm[tm_idx(r + 1, cols, s)];
-            const float leave_f = prices_tm[tm_idx(r - period + 1, cols, s)];
+            if (nan_count == 0) {
+                df32 sum_xy = df32_sub(df32_mul_scalar(y_sum, (float)warm), sum_kd);
+                df32 num = df32_sub(df32_mul_scalar(sum_xy, p_f),
+                                    df32_mul_scalar(y_sum, sx_f));
+                const float slope = df32_to_float(num) * invd_f;
+                outv = atanf(slope) * rad2deg;
+            }
+            out_tm[tm_idx(warm, cols, s)] = outv;
 
-            bool need_rebuild = invalid || isnan(enter_f) || isnan(leave_f);
-            if (need_rebuild) {
-                // Rebuild window sums; mark invalid if any NaN in window
-                y_sum = 0.0; sum_kd = 0.0; invalid = false;
-                for (int k = 0; k < period; ++k) {
-                    const int r0 = r - period + 1 + k;
-                    const float v_f = prices_tm[tm_idx(r0, cols, s)];
-                    if (isnan(v_f)) { invalid = true; break; }
-                    const double v = (double)v_f;
-                    y_sum  += v;
-                    sum_kd += (double)r0 * v;
-                }
-                if (!invalid) {
-                    const double sum_xy = (double)r * y_sum - sum_kd;
-                    const double b_num = fma(p_d, sum_xy, -sx * y_sum);
-                    const double slope = b_num * invd;
-                    outv = atanf((float)slope) * rad2deg_f;
+            // Prepare for next step when window is valid: remove earliest sample
+            if (nan_count == 0) {
+                const int leave0_idx = warm - period + 1;
+                const float leave0 = prices_tm[tm_idx(leave0_idx, cols, s)];
+                y_sum  = df32_sub_f(y_sum, leave0);
+                sum_kd = df32_sub_prod(sum_kd, (float)leave0_idx, leave0);
+            }
+        }
+
+        // Prefetch next entering value
+        float next_enter = (warm + 1 < rows) ? prices_tm[tm_idx(warm + 1, cols, s)] : LRA_NAN_F;
+
+        // Slide r = warm+1 .. rows-1
+        for (int r = warm + 1; r < rows; ++r) {
+            const float enter = next_enter;
+            if (r + 1 < rows) next_enter = prices_tm[tm_idx(r + 1, cols, s)];
+            const float leave = prices_tm[tm_idx(r - period + 1, cols, s)];
+
+            const bool enter_nan = isnan(enter);
+            const bool leave_nan = isnan(leave);
+            const int prev_nan_count = nan_count;
+            if (enter_nan) nan_count++;
+            if (leave_nan) nan_count--;
+
+            float outv = LRA_NAN_F;
+
+            if (nan_count == 0) {
+                if (prev_nan_count == 0) {
+                    // O(1) slide: include 'enter' at absolute index r, compute, then roll out 'leave'
+                    y_sum  = df32_add_f(y_sum, enter);
+                    sum_kd = df32_add_prod(sum_kd, (float)r, enter);
+
+                    df32 sum_xy = df32_sub(df32_mul_scalar(y_sum, (float)r), sum_kd);
+                    df32 num = df32_sub(df32_mul_scalar(sum_xy, p_f),
+                                        df32_mul_scalar(y_sum, sx_f));
+                    const double slope_d = (double)df32_to_float(num) * (double)invd_f;
+                    outv = atanf((float)slope_d) * rad2deg;
+
+                    // prepare for next step (r+1) by removing the earliest sample
+                    y_sum  = df32_sub_f(y_sum, leave);
+                    sum_kd = df32_sub_prod(sum_kd, (float)(r - period + 1), leave);
                 } else {
-                    outv = LRA_NAN_F;
+                    // Transition invalid->valid: rebuild exactly once
+                    y_sum  = df32_make(0.0f);
+                    sum_kd = df32_make(0.0f);
+                    for (int k = 0; k < period; ++k) {
+                        const int r0 = r - period + 1 + k;
+                        const float v = prices_tm[tm_idx(r0, cols, s)];
+                        // nan_count==0 ensures all finite
+                        y_sum  = df32_add_f(y_sum, v);
+                        sum_kd = df32_add_prod(sum_kd, (float)r0, v);
+                    }
+                    df32 sum_xy = df32_sub(df32_mul_scalar(y_sum, (float)r), sum_kd);
+                    df32 num = df32_sub(df32_mul_scalar(sum_xy, p_f),
+                                        df32_mul_scalar(y_sum, sx_f));
+                    const double slope_d = (double)df32_to_float(num) * (double)invd_f;
+                    outv = atanf((float)slope_d) * rad2deg;
+
+                    // prepare for next step
+                    y_sum  = df32_sub_f(y_sum, leave);
+                    sum_kd = df32_sub_prod(sum_kd, (float)(r - period + 1), leave);
                 }
             } else {
-                // O(1) slide using absolute-index identity
-                y_sum  += (double)enter_f;
-                sum_kd += (double)r * (double)enter_f;
-                const double sum_xy = (double)r * y_sum - sum_kd;
-                const double b_num = fma(p_d, sum_xy, -sx * y_sum);
-                const double slope = b_num * invd;
-                outv = atanf((float)slope) * rad2deg_f;
-
-                // Roll window
-                y_sum  -= (double)leave_f;
-                sum_kd -= (double)(r - period + 1) * (double)leave_f;
+                // Remain invalid while any NaN is within the window; defer O(1) slides until clean
+                outv = LRA_NAN_F;
             }
 
             out_tm[tm_idx(r, cols, s)] = outv;
-            invalid = false;
         }
     }
 }

@@ -11,7 +11,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32; // common VRAM handle
 use crate::indicators::rocr::RocrBatchRange;
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
@@ -67,6 +67,7 @@ pub struct CudaRocr {
     _context: Context,
     policy: CudaRocrPolicy,
     debug_once: std::sync::atomic::AtomicBool,
+    sm_count: u32,
 }
 
 impl CudaRocr {
@@ -74,6 +75,10 @@ impl CudaRocr {
         cust::init(CudaFlags::empty()).map_err(|e| CudaRocrError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaRocrError::Cuda(e.to_string()))?;
+        // Cache SM count for launch heuristics
+        let sm_count = device
+            .get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map_err(|e| CudaRocrError::Cuda(e.to_string()))? as u32;
         let context = Context::new(device).map_err(|e| CudaRocrError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/rocr_kernel.ptx"));
@@ -101,13 +106,42 @@ impl CudaRocr {
             _context: context,
             policy: CudaRocrPolicy::default(),
             debug_once: std::sync::atomic::AtomicBool::new(false),
+            sm_count,
         })
     }
 
-    pub fn new_with_policy(
-        device_id: usize,
-        policy: CudaRocrPolicy,
-    ) -> Result<Self, CudaRocrError> {
+    // Build inverse table on device: inv[j] = 0.0 if data[j] is 0 or NaN; else 1/data[j]
+    pub fn prepare_inv_device(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        d_inv_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaRocrError> {
+        let func = self
+            .module
+            .get_function("rocr_prepare_inv_f32")
+            .map_err(|e| CudaRocrError::Cuda(e.to_string()))?;
+        let block_x: u32 = 256;
+        let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let mut data_ptr = d_data.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut inv_ptr = d_inv_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut data_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut inv_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaRocrError::Cuda(e.to_string()))?;
+        }
+        Ok(())
+    }
+    pub fn new_with_policy(device_id: usize, policy: CudaRocrPolicy) -> Result<Self, CudaRocrError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
@@ -173,20 +207,13 @@ impl CudaRocr {
             )));
         }
 
-        // Shared precompute (optional): inv[j] = 0.0 if data[j] is 0 or NaN; else 1/data[j]
-        let mut inv: Vec<f32> = vec![0.0; len];
-        for j in first..len {
-            let v = data_f32[j];
-            inv[j] = if v == 0.0 || v.is_nan() {
-                0.0
-            } else {
-                1.0f32 / v
-            };
-        }
+        // Heuristic: only build inverse table when it likely pays off.
+        // Use device-side precompute when n_combos >= 3 and len >= 4096.
+        let use_inv = combos.len() >= 3 && len >= 4096;
 
         // VRAM estimate
         let out_bytes = combos.len() * len * std::mem::size_of::<f32>();
-        let required = (2 * len * std::mem::size_of::<f32>()) // data + inv
+        let required = ((1 + if use_inv { 1 } else { 0 }) * len * std::mem::size_of::<f32>()) // data + [inv?]
             + (combos.len() * std::mem::size_of::<i32>())
             + out_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
@@ -201,10 +228,6 @@ impl CudaRocr {
             DeviceBuffer::from_slice_async(data_f32, &self.stream)
                 .map_err(|e| CudaRocrError::Cuda(e.to_string()))?
         };
-        let d_inv = unsafe {
-            DeviceBuffer::from_slice_async(&inv, &self.stream)
-                .map_err(|e| CudaRocrError::Cuda(e.to_string()))?
-        };
         let periods_i32: Vec<i32> = combos.iter().map(|&p| p as i32).collect();
         let d_periods = unsafe {
             DeviceBuffer::from_slice_async(&periods_i32, &self.stream)
@@ -214,10 +237,20 @@ impl CudaRocr {
             DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream)
                 .map_err(|e| CudaRocrError::Cuda(e.to_string()))?
         };
+        // Optional device-side inverse precompute and usage
+        let mut d_inv_opt: Option<DeviceBuffer<f32>> = None;
+        if use_inv {
+            let mut d_inv: DeviceBuffer<f32> = unsafe {
+                DeviceBuffer::uninitialized_async(len, &self.stream)
+                    .map_err(|e| CudaRocrError::Cuda(e.to_string()))?
+            };
+            self.prepare_inv_device(&d_data, len, &mut d_inv)?;
+            d_inv_opt = Some(d_inv);
+        }
 
         self.rocr_batch_device(
             &d_data,
-            Some(&d_inv),
+            d_inv_opt.as_ref(),
             &d_periods,
             len,
             first,
@@ -265,7 +298,9 @@ impl CudaRocr {
             BatchKernelPolicy::Auto => 256u32,
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         };
-        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        let need_blocks = ((len as u32) + block_x - 1) / block_x;
+        let cap_blocks = self.sm_count.saturating_mul(32).max(1);
+        let grid_x = need_blocks.min(cap_blocks);
 
         // Debug selection logging (once per instance)
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
@@ -414,24 +449,27 @@ impl CudaRocr {
             .get_function("rocr_many_series_one_param_f32")
             .map_err(|e| CudaRocrError::Cuda(e.to_string()))?;
 
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 256u32,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
+        // 2D launch mapping for time-major data: threads span series (x) and time (y)
+        let (block_x, block_y) = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => (128u32, 4u32),
+            ManySeriesKernelPolicy::OneD { block_x } => (block_x.max(64), 4u32),
         };
-        let grid_x = ((rows as u32) + block_x - 1) / block_x;
+        let mut grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let mut grid_y = ((rows as u32) + block_y - 1) / block_y;
+        if grid_y > 65_535 { grid_y = 65_535; } // hardware limit; kernel grid-strides across time
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if !self
                 .debug_once
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
             {
                 eprintln!(
-                    "[DEBUG] ROCR many-series kernel: rocr_many_series_one_param_f32, block_x={}, grid_x={}, cols={}, rows={}, period={}",
-                    block_x, grid_x.max(1), cols, rows, period
+                    "[DEBUG] ROCR many-series kernel: rocr_many_series_one_param_f32, block=({},{}), grid=({},{}), cols={}, rows={}, period={}",
+                    block_x, block_y, grid_x.max(1), grid_y.max(1), cols, rows, period
                 );
             }
         }
-        let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+        let block: BlockSize = (block_x, block_y, 1).into();
 
         unsafe {
             let mut data_ptr = d_data_tm.as_device_ptr().as_raw();
@@ -526,13 +564,12 @@ pub mod benches {
         let combos = super::CudaRocr::expand_grid(&sweep);
         let n_combos = combos.len();
         let periods_i32: Vec<i32> = combos.iter().map(|&p| p as i32).collect();
-        let mut inv = vec![0.0f32; len];
-        for j in first..len {
-            let v = prices[j];
-            inv[j] = if v == 0.0 || v.is_nan() { 0.0 } else { 1.0 / v };
-        }
         let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
-        let d_inv = DeviceBuffer::from_slice(&inv).expect("d_inv");
+        // Build inverse on device to avoid host pass and H2D copy
+        let mut d_inv: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.expect("d_inv");
+        cuda.prepare_inv_device(&d_prices, len, &mut d_inv).expect("prepare_inv_device");
+        cuda.synchronize().expect("sync");
         let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");

@@ -1,72 +1,154 @@
 // CUDA kernels for TTM Trend (close > SMA(source, period) ? 1 : 0)
 //
-// Batch path: one series × many params. Uses host-precomputed inclusive
-// prefix sums of `source` (in FP64) to compute window averages in O(1).
-// Many-series path: time-major layout, one thread per series scans time
-// sequentially with a rolling sum.
+// Optimizations applied:
+// - Remove FP64 from hot path.
+// - Batch (one series × many params): 2-D tiled kernel with shared-memory reuse
+//   over time to cut global traffic; uses float-float (double-single) prefix
+//   with error-free transforms to compute window sums via prefix differences.
+// - Many-series path: FP32-only Kahan summation for numerical stability.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 #include <cuda_runtime.h>
-#include <math.h>
 #include <stdint.h>
 
-// ------------------ Batch: prefix-sum based ------------------
-// prefix_src: inclusive prefix where prefix[first] = source[first]
-// close:      input close series (f32)
-// periods:    per-row period (int)
-// warm_idx:   per-row warm index = first_valid + period - 1
-// series_len: length
-// first_valid: index of first non-NaN pair (source, close) on host
-// n_combos:   number of parameter rows
-// out:        row-major [n_combos * series_len], 0.0 for warmup, 1.0/0.0 after
-extern "C" __global__ void ttm_trend_batch_prefix_f64(
-    const double* __restrict__ prefix_src,
-    const float*  __restrict__ close,
-    const int*    __restrict__ periods,
-    const int*    __restrict__ warm_idx,
-    int series_len,
-    int first_valid,
-    int n_combos,
-    float* __restrict__ out)
-{
-    const int combo = blockIdx.x;
-    if (combo >= n_combos) return;
+// ============================================================================
+// Utilities: float-float (double-single) helpers using error-free transforms
+// ============================================================================
 
-    const int p    = periods[combo];
-    const int warm = warm_idx[combo];
-    if (p <= 0 || warm >= series_len || first_valid >= series_len) return;
-
-    const int base = combo * series_len;
-
-    // Clear row to 0.0 (warmup semantics for boolean output)
-    for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
-        out[base + idx] = 0.0f;
-    }
-    __syncthreads();
-
-    // Compute outputs starting at warm
-    const double invp = 1.0 / (double)p;
-    // Ensure first element is handled by a single thread to avoid races
-    if (threadIdx.x == 0) {
-        const double avg0 = prefix_src[warm] * invp; // window [first_valid .. warm]
-        out[base + warm] = ((double)close[warm] > avg0) ? 1.0f : 0.0f;
-    }
-    __syncthreads();
-
-    // Remaining indices: each thread strides over time
-    for (int i = warm + 1 + threadIdx.x; i < series_len; i += blockDim.x) {
-        const double sum = prefix_src[i] - prefix_src[i - p];
-        const double avg = sum * invp;
-        out[base + i] = ((double)close[i] > avg) ? 1.0f : 0.0f;
-    }
+// TwoSum: exact decomposition of a+b = s + e  (Dekker/Shewchuk)
+__device__ __forceinline__ void two_sum(float a, float b, float &s, float &e) {
+    s = a + b;
+    float bb = s - a;
+    e = (a - (s - bb)) + (b - bb);
 }
 
-// ------------------ Many-series × one param (time-major) ------------------
-// Layout: prices_tm[row * num_series + series]
-extern "C" __global__ void ttm_trend_many_series_one_param_time_major_f32(
+// ff2_sub: (a_hi+a_lo) - (b_hi+b_lo) -> float2{hi, lo}
+__device__ __forceinline__ float2 ff2_sub(const float2 a, const float2 b) {
+    float s, e;
+    two_sum(a.x, -b.x, s, e);      // subtract hi parts
+    e += (a.y - b.y);              // accumulate low parts to error
+    float hi, lo;
+    two_sum(s, e, hi, lo);         // renormalize
+    return make_float2(hi, lo);
+}
+
+// ff2_scale: (a_hi+a_lo) * s -> float2{hi, lo}, using one FMA to capture error
+__device__ __forceinline__ float2 ff2_scale(const float2 a, const float s) {
+    float hi = a.x * s;
+    // error in hi plus scaled low part; fmaf captures the rounding error of a.x*s
+    float err = fmaf(a.x, s, -hi) + a.y * s;
+    float rhi, rlo;
+    two_sum(hi, err, rhi, rlo);
+    return make_float2(rhi, rlo);
+}
+
+// ============================================================================
+// 1) Batch path: ONE series × MANY params, prefix-sum based (FP32+compensation)
+//
+// - prefix_ff2: inclusive prefix of `source` as float2 (hi, lo) per index
+// - close:      input close series (f32)
+// - periods:    per-row period (int)
+// - warm_idx:   per-row warm index = first_valid + period - 1
+// - series_len: length
+// - n_combos:   number of parameter rows
+// - out:        row-major [n_combos * series_len], assumed pre-zeroed
+//
+// Tiling: 2-D grid over (time, params). Each block caches a tile of
+// close[t] and prefix[t] in shared memory and reuses them across the
+// small parameter tile.
+// ============================================================================
+
+#ifndef TTM_TILE_TIME
+#define TTM_TILE_TIME 256     // threads along time (x)
+#endif
+#ifndef TTM_TILE_PARAMS
+#define TTM_TILE_PARAMS 8     // threads along params (y)
+#endif
+
+extern "C" __global__
+void ttm_trend_batch_prefix_ff2_tiled(
+    const float2* __restrict__ prefix_ff2, // inclusive prefix: prefix[first_valid] = source[first_valid]
+    const float*  __restrict__ close,      // close[t]
+    const int*    __restrict__ periods,    // per param
+    const int*    __restrict__ warm_idx,   // per param
+    int series_len,
+    int n_combos,
+    float* __restrict__ out)               // row-major [row*series_len + t]; pre-zeroed
+{
+    const int tx = threadIdx.x;                       // [0, TTM_TILE_TIME)
+    const int ty = threadIdx.y;                       // [0, TTM_TILE_PARAMS)
+    const int t0 = blockIdx.x * TTM_TILE_TIME;        // time tile start
+    const int p0 = blockIdx.y * TTM_TILE_PARAMS;      // param tile start
+    const int t  = t0 + tx;
+    const int row = p0 + ty;
+
+    // Shared tiles (time-major caches reused across up to TTM_TILE_PARAMS rows)
+    __shared__ float  sh_close[TTM_TILE_TIME];
+    __shared__ float2 sh_pref [TTM_TILE_TIME];
+    __shared__ int    sh_period[TTM_TILE_PARAMS];
+    __shared__ int    sh_warm  [TTM_TILE_PARAMS];
+
+    // Load time tile once (by ty==0)
+    if (ty == 0 && t < series_len) {
+        sh_close[tx] = close[t];
+        sh_pref[tx]  = prefix_ff2[t];
+    }
+
+    // Load per-row metadata once (by tx==0)
+    if (tx == 0) {
+        if (row < n_combos) {
+            sh_period[ty] = periods[row];
+            sh_warm  [ty] = warm_idx[row];
+        } else {
+            sh_period[ty] = 0;
+            sh_warm  [ty] = INT_MAX;
+        }
+    }
+    __syncthreads();
+
+    if (row >= n_combos || t >= series_len) return;
+
+    const int p    = sh_period[ty];
+    const int warm = sh_warm  [ty];
+    if (p <= 0) return;
+
+    // We assume 'out' is already memset to 0.0f. Only write for t >= warm.
+    if (t < warm) return;
+
+    const float invp = 1.0f / (float)p;
+    float avg;
+
+    if (t == warm) {
+        // avg = prefix[warm] * (1/p)
+        float2 scaled = ff2_scale(sh_pref[tx], invp);
+        avg = scaled.x + scaled.y;
+    } else {
+        // avg = (prefix[t] - prefix[t-p]) * (1/p)
+        const int j = t - p;
+        float2 pref_t  = sh_pref[tx];
+        float2 pref_j  = prefix_ff2[j];         // outside time tile; still coalesced across warp
+        float2 diff    = ff2_sub(pref_t, pref_j);
+        float2 scaled  = ff2_scale(diff, invp);
+        avg = scaled.x + scaled.y;
+    }
+
+    const float cv = sh_close[tx];
+    out[(size_t)row * series_len + t] = (cv > avg) ? 1.0f : 0.0f;
+}
+
+// ============================================================================
+// 2) Many-series × one param (time-major), FP32-only with Kahan summation
+//
+// Layout: time-major (row = time), column = series
+//   source_tm[t * num_series + s], close_tm[t * num_series + s]
+// Assumes 'out_tm' pre-zeroed.
+// ============================================================================
+
+extern "C" __global__
+void ttm_trend_many_series_one_param_time_major_f32(
     const float* __restrict__ source_tm,
     const float* __restrict__ close_tm,
     const int*   __restrict__ first_valids,
@@ -76,37 +158,50 @@ extern "C" __global__ void ttm_trend_many_series_one_param_time_major_f32(
     float* __restrict__ out_tm)
 {
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
-    if (series >= num_series) return;
-    if (period <= 0 || series_len <= 0) return;
+    if (series >= num_series || period <= 0 || series_len <= 0) return;
 
     const int stride = num_series;
     const int fv     = first_valids[series];
     if (fv < 0 || fv >= series_len) return;
-    const int warm = fv + period - 1;
-    const int col  = series;
 
-    // Warmup prefix: zeros
-    for (int r = 0; r < warm && r < series_len; ++r) {
-        out_tm[(size_t)r * stride + col] = 0.0f;
-    }
+    const int warm = fv + period - 1;
     if (warm >= series_len) return;
 
-    // Initial window sum over [fv .. warm]
-    double sum = 0.0;
+    // Initial window [fv..warm] using Kahan compensated summation
+    float s = 0.0f, c = 0.0f;
     for (int k = fv; k <= warm; ++k) {
-        sum += (double)source_tm[(size_t)k * stride + col];
+        const float x = source_tm[(size_t)k * stride + series];
+        float y = x - c;
+        float t = s + y;
+        c = (t - s) - y;
+        s = t;
     }
-    const double invp = 1.0 / (double)period;
-    double avg = sum * invp;
-    out_tm[(size_t)warm * stride + col] = ((double)close_tm[(size_t)warm * stride + col] > avg) ? 1.0f : 0.0f;
 
-    // Slide window
+    const float invp = 1.0f / (float)period;
+    float avg = s * invp;
+    out_tm[(size_t)warm * stride + series] =
+        (close_tm[(size_t)warm * stride + series] > avg) ? 1.0f : 0.0f;
+
+    // Slide window: s += add; s -= sub; both with compensation
     for (int t = warm + 1; t < series_len; ++t) {
-        const double add = (double)source_tm[(size_t)t * stride + col];
-        const double sub = (double)source_tm[(size_t)(t - period) * stride + col];
-        sum += add - sub;
-        avg = sum * invp;
-        out_tm[(size_t)t * stride + col] = ((double)close_tm[(size_t)t * stride + col] > avg) ? 1.0f : 0.0f;
+        const float add = source_tm[(size_t)t * stride + series];
+        const float sub = source_tm[(size_t)(t - period) * stride + series];
+
+        // Kahan add
+        float y1 = add - c;
+        float u1 = s + y1;
+        c = (u1 - s) - y1;
+        s = u1;
+
+        // Kahan subtract
+        float y2 = -sub - c;
+        float u2 = s + y2;
+        c = (u2 - s) - y2;
+        s = u2;
+
+        avg = s * invp;
+        out_tm[(size_t)t * stride + series] =
+            (close_tm[(size_t)t * stride + series] > avg) ? 1.0f : 0.0f;
     }
 }
 

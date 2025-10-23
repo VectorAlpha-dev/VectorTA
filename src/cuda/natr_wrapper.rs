@@ -257,33 +257,89 @@ impl CudaNatr {
         let periods_i32: Vec<i32> = periods_v.iter().map(|&p| p as i32).collect();
         let rows = periods_v.len();
 
-        // VRAM checks
+        // Heuristic: enable shared inv_close100 if it will save real work
+        let min_period = *periods_v.iter().min().unwrap();
+        let warm_needed = first_valid + min_period - 1;
+        let active_len = if len > warm_needed { len - warm_needed } else { 0 };
+        let use_precompute = rows >= 4 || (rows * active_len >= 1_000_000);
+
+        // VRAM checks (account for optional inv buffer)
         let out_bytes = rows * len * std::mem::size_of::<f32>();
         let in_bytes = tr.len() * std::mem::size_of::<f32>()
             + close.len() * std::mem::size_of::<f32>()
             + periods_i32.len() * std::mem::size_of::<i32>();
         let head = Self::headroom_bytes();
-        let total = out_bytes + in_bytes + head;
+        let extra_inv = if use_precompute { len * std::mem::size_of::<f32>() } else { 0 };
+        let total = out_bytes + in_bytes + extra_inv + head;
         if !Self::will_fit(total, 0) {
-            return Err(CudaNatrError::InvalidInput(
-                "insufficient VRAM for NATR batch".into(),
-            ));
+            // try without the inv buffer; if still too big, bail
+            let total_no_inv = out_bytes + in_bytes + head;
+            if !Self::will_fit(total_no_inv, 0) {
+                return Err(CudaNatrError::InvalidInput("insufficient VRAM for NATR batch".into()));
+            }
         }
 
-        // Upload inputs
-        let d_tr = DeviceBuffer::from_slice(&tr).map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close).map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-            .map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
+        // Upload inputs (async on NON_BLOCKING stream)
+        let d_tr: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::from_slice_async(&tr, &self.stream)
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?
+        };
+        let d_close: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::from_slice_async(close, &self.stream)
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?
+        };
+        let d_periods: DeviceBuffer<i32> = unsafe {
+            DeviceBuffer::from_slice_async(&periods_i32, &self.stream)
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?
+        };
+        let mut d_out: DeviceBuffer<f32> = match unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) } {
+            Ok(buf) => buf,
+            Err(_) => unsafe { DeviceBuffer::uninitialized(rows * len) }
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?,
+        };
 
-        // Launch policy
-        let func = self
-            .module
-            .get_function("natr_batch_f32")
-            .map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
+        // Optionally build inv_close100 on device
+        let mut d_inv: Option<DeviceBuffer<f32>> = None;
+        if use_precompute && Self::will_fit(out_bytes + in_bytes + (len * std::mem::size_of::<f32>()) + head, 0) {
+            // Additional VRAM check for the extra vector
+            let mut d = match unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) } {
+                Ok(buf) => buf,
+                Err(_) => unsafe { DeviceBuffer::<f32>::uninitialized(len) }
+                    .map_err(|e| CudaNatrError::Cuda(e.to_string()))?,
+            };
+            let make_fn = self
+                .module
+                .get_function("natr_make_inv_close100")
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut c_ptr = d_close.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut inv_ptr = d.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut c_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut inv_ptr as *mut _ as *mut c_void,
+                ];
+                let grid_x = ((len as u32) + 255) / 256;
+                let grid: GridSize = (grid_x, 1, 1).into();
+                let block: BlockSize = (256u32, 1, 1).into();
+                self.stream
+                    .launch(&make_fn, grid, block, 0, args)
+                    .map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
+            }
+            d_inv = Some(d);
+        }
+
+        // Choose kernel symbol based on availability of precompute buffer
+        let func = if d_inv.is_some() {
+            self.module
+                .get_function("natr_batch_f32_with_inv")
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?
+        } else {
+            self.module
+                .get_function("natr_batch_f32")
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?
+        };
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256u32,
@@ -294,25 +350,47 @@ impl CudaNatr {
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
-            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
-            let mut close_ptr = d_close.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut len_i = len as i32;
-            let mut first_i = first_valid as i32;
-            let mut rows_i = rows as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut tr_ptr as *mut _ as *mut c_void,
-                &mut close_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut len_i as *mut _ as *mut c_void,
-                &mut first_i as *mut _ as *mut c_void,
-                &mut rows_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
+            if let Some(mut d_inv) = d_inv {
+                let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+                let mut inv_ptr = d_inv.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut first_i = first_valid as i32;
+                let mut rows_i = rows as i32;
+                let mut out_ptr = d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut tr_ptr as *mut _ as *mut c_void,
+                    &mut inv_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
+            } else {
+                let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+                let mut close_ptr = d_close.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut first_i = first_valid as i32;
+                let mut rows_i = rows as i32;
+                let mut out_ptr = d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut tr_ptr as *mut _ as *mut c_void,
+                    &mut close_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
+            }
         }
 
         self.stream
@@ -363,17 +441,28 @@ impl CudaNatr {
             ));
         }
 
-        // Upload inputs
-        let d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
+        // Upload inputs (async on our stream)
+        let d_high: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::from_slice_async(high_tm, &self.stream)
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?
+        };
+        let d_low: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::from_slice_async(low_tm, &self.stream)
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?
+        };
+        let d_close: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::from_slice_async(close_tm, &self.stream)
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?
+        };
+        let d_fv: DeviceBuffer<i32> = unsafe {
+            DeviceBuffer::from_slice_async(&first_valids, &self.stream)
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?
+        };
+        let mut d_out: DeviceBuffer<f32> = match unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) } {
+            Ok(buf) => buf,
+            Err(_) => unsafe { DeviceBuffer::uninitialized(cols * rows) }
+                .map_err(|e| CudaNatrError::Cuda(e.to_string()))?,
+        };
 
         // Launch
         let func = self
@@ -381,7 +470,7 @@ impl CudaNatr {
             .get_function("natr_many_series_one_param_f32")
             .map_err(|e| CudaNatrError::Cuda(e.to_string()))?;
 
-        // Choose 4 warps per block by default (128 threads), tuneable via env
+        // Choose 4 warps per block by default (128 threads), tuneable via policy
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),

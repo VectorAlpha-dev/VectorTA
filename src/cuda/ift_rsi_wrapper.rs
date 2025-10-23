@@ -13,7 +13,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::ift_rsi::{IftRsiBatchRange, IftRsiParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -79,6 +79,11 @@ pub struct CudaIftRsi {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+    // --- cached device caps for launch heuristics ---
+    sm_count: u32,
+    max_smem_per_block: usize,
+    warp_size: u32,
+    max_threads_per_block: u32,
 }
 
 impl CudaIftRsi {
@@ -87,6 +92,20 @@ impl CudaIftRsi {
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
+
+        // Query device caps for heuristics and safety checks
+        let sm_count = device
+            .get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))? as u32;
+        let max_smem_per_block = device
+            .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)
+            .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))? as usize;
+        let warp_size = device
+            .get_attribute(DeviceAttribute::WarpSize)
+            .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))? as u32;
+        let max_threads_per_block = device
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))? as u32;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ift_rsi_kernel.ptx"));
         let jit_opts = &[
@@ -109,13 +128,22 @@ impl CudaIftRsi {
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
+            sm_count,
+            max_smem_per_block,
+            warp_size,
+            max_threads_per_block,
         })
     }
 
     #[inline]
-    pub fn set_policy(&mut self, policy: CudaIftRsiPolicy) {
-        self.policy = policy;
+    pub fn synchronize(&self) -> Result<(), CudaIftRsiError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))
     }
+
+    #[inline]
+    pub fn set_policy(&mut self, policy: CudaIftRsiPolicy) { self.policy = policy; }
     #[inline]
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch
@@ -251,20 +279,29 @@ impl CudaIftRsi {
             .get_function("ift_rsi_batch_f32")
             .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 1,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
-        };
-        let grid: GridSize = (combos.len() as u32, 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
-        let shmem_bytes: u32 = (max_wp * core::mem::size_of::<f32>()) as u32;
-        unsafe {
-            (*(self as *const _ as *mut CudaIftRsi)).last_batch =
-                Some(BatchKernelSelected::Plain {
-                    block_x,
-                    shmem_bytes,
-                });
+        // One warp per block by default; grid capped to ~8x SMs per guide.
+        // Safety check for shared memory ring used by each block
+        let shmem_bytes_usize: usize = max_wp
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("wma_period too large".into()))?;
+        if shmem_bytes_usize > self.max_smem_per_block {
+            return Err(CudaIftRsiError::InvalidInput(format!(
+                "wma_period={} requires {}B shared memory but device allows {}B per block",
+                max_wp, shmem_bytes_usize, self.max_smem_per_block
+            )));
         }
+
+        // One warp per block by default; kernel grid-strides over combos
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => self.warp_size.max(32),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        };
+        let target_blocks = self.sm_count.saturating_mul(8).max(1);
+        let grid_x = (combos.len() as u32).min(target_blocks);
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        let shmem_bytes: u32 = shmem_bytes_usize as u32;
+        unsafe { (*(self as *const _ as *mut CudaIftRsi)).last_batch = Some(BatchKernelSelected::Plain { block_x, shmem_bytes }); }
         unsafe {
             let mut in_ptr = d_in.as_device_ptr().as_raw();
             let mut series_len_i = len as i32;
@@ -286,10 +323,6 @@ impl CudaIftRsi {
                 .launch(&func, grid, block, shmem_bytes, args)
                 .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
         }
-
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
 
         self.maybe_log_batch_debug();
 
@@ -362,21 +395,35 @@ impl CudaIftRsi {
             .get_function("ift_rsi_many_series_one_param_f32")
             .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = match self.policy.many_series {
+        // Each thread needs wp*sizeof(f32) shared memory; clamp block by SMEM and HW limits
+        let bytes_per_thread = wma_p
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("wma_period too large".into()))?;
+        let max_threads_by_smem = (self.max_smem_per_block / bytes_per_thread).max(1);
+        let mut block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
         };
+        block_x = block_x
+            .min(max_threads_by_smem as u32)
+            .min(self.max_threads_per_block)
+            .max(1);
+
+        let shmem_bytes_usize = (block_x as usize)
+            .checked_mul(bytes_per_thread)
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("shared memory size overflow".into()))?;
+        if shmem_bytes_usize > self.max_smem_per_block {
+            return Err(CudaIftRsiError::InvalidInput(format!(
+                "block_x={} with wma_period={} needs {}B shared memory; device allows {}B",
+                block_x, wma_p, shmem_bytes_usize, self.max_smem_per_block
+            )));
+        }
+
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let shmem_bytes: u32 = (block_x as usize * wma_p * core::mem::size_of::<f32>()) as u32;
-        unsafe {
-            (*(self as *const _ as *mut CudaIftRsi)).last_many =
-                Some(ManySeriesKernelSelected::OneD {
-                    block_x,
-                    shmem_bytes,
-                });
-        }
+        let shmem_bytes: u32 = shmem_bytes_usize as u32;
+        unsafe { (*(self as *const _ as *mut CudaIftRsi)).last_many = Some(ManySeriesKernelSelected::OneD { block_x, shmem_bytes }); }
         unsafe {
             let mut in_ptr = d_in.as_device_ptr().as_raw();
             let mut first_ptr = d_first.as_device_ptr().as_raw();
@@ -398,9 +445,6 @@ impl CudaIftRsi {
                 .launch(&func, grid, block, shmem_bytes, args)
                 .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
         self.maybe_log_many_debug();
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -468,6 +512,8 @@ pub mod benches {
                 .cuda
                 .ift_rsi_batch_dev(&self.data, &self.sweep)
                 .expect("ift_rsi batch");
+            // Explicit sync for deterministic benchmark timing since the API is non-blocking
+            self.cuda.synchronize().expect("stream sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {

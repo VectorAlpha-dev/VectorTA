@@ -15,7 +15,8 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::ttm_trend::TtmTrendBatchRange;
 use cust::context::Context;
 use cust::device::Device;
-use cust::function::{BlockSize, GridSize};
+use cust::context::CacheConfig;
+use cust::function::{BlockSize, Function, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -62,7 +63,7 @@ impl CudaTtmTrend {
         // JIT with context-target + O2, then fallback
         let jit = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -142,13 +143,29 @@ impl CudaTtmTrend {
         Ok((combos, first, len))
     }
 
-    fn build_prefix_source_f64(source_f32: &[f32], first_valid: usize) -> Vec<f64> {
+    // Build inclusive prefix in float2 (hi, lo) starting at first_valid using error-free TwoSum.
+    // Memory layout matches CUDA float2 via [f32; 2].
+    fn build_prefix_source_ff2(source_f32: &[f32], first_valid: usize) -> Vec<[f32; 2]> {
+        #[inline]
+        fn two_sum(a: f32, b: f32) -> (f32, f32) {
+            let s = a + b;
+            let bb = s - a;
+            let e = (a - (s - bb)) + (b - bb);
+            (s, e)
+        }
+
         let n = source_f32.len();
-        let mut pref = vec![0.0f64; n];
+        let mut pref = vec![[0.0f32, 0.0f32]; n];
         if first_valid < n {
-            pref[first_valid] = source_f32[first_valid] as f64;
-            for i in (first_valid + 1)..n {
-                pref[i] = pref[i - 1] + (source_f32[i] as f64);
+            // running float-float sum: hi, lo
+            let mut hi: f32 = 0.0;
+            let mut lo: f32 = 0.0;
+            for i in first_valid..n {
+                let (s, mut e) = two_sum(hi, source_f32[i]);
+                e += lo;
+                let (rhi, rlo) = two_sum(s, e);
+                hi = rhi; lo = rlo;
+                pref[i] = [hi, lo];
             }
         }
         pref
@@ -170,14 +187,13 @@ impl CudaTtmTrend {
         let (combos, first, len) = Self::prepare_batch_inputs(source_f32, close_f32, sweep)?;
         let n_combos = combos.len();
 
-        // Host precompute: FP64 prefix of source
-        let prefix = Self::build_prefix_source_f64(source_f32, first);
+        // Host precompute: float-float prefix of source (hi, lo)
+        let prefix_ff2 = Self::build_prefix_source_ff2(source_f32, first);
 
         // Device buffers
-        let d_prefix = DeviceBuffer::from_slice(&prefix)
+        let d_prefix: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&prefix_ff2)
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_f32)
-            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let d_close  = DeviceBuffer::from_slice(close_f32).map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
         let warms: Vec<i32> = combos.iter().map(|c| c.warm).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)
@@ -187,8 +203,12 @@ impl CudaTtmTrend {
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
 
+        // Pre-zero outputs once (kernel writes only t >= warm)
+        unsafe { d_out.set_zero_async(&self.stream) }
+            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+
         // VRAM estimate (best-effort)
-        let est_bytes = len * (std::mem::size_of::<f64>() + std::mem::size_of::<f32>())
+        let est_bytes = len * (std::mem::size_of::<[f32; 2]>() + std::mem::size_of::<f32>())
             + n_combos * (std::mem::size_of::<i32>() * 2)
             + n_combos * len * std::mem::size_of::<f32>();
         if !Self::will_fit(est_bytes, 64usize << 20) {
@@ -197,53 +217,40 @@ impl CudaTtmTrend {
             ));
         }
 
-        // Launch kernel by chunks of rows (grid.x = rows chunk; blockDim.x = 256)
-        let func = self
+        // Launch tiled kernel (2-D grid over (time, params))
+        let mut func = self
             .module
-            .get_function("ttm_trend_batch_prefix_f64")
+            .get_function("ttm_trend_batch_prefix_ff2_tiled")
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        let block_x: u32 = 256;
-        let rows_per_launch = Self::chunk_rows(n_combos);
-        let mut launched = 0usize;
-        while launched < n_combos {
-            let cur = rows_per_launch.min(n_combos - launched);
-            // We map each row to a block in X, so grid = (cur, 1, 1)
-            let grid: GridSize = (cur as u32, 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            unsafe {
-                let mut pref_ptr = d_prefix.as_device_ptr().as_raw();
-                let mut close_ptr = d_close.as_device_ptr().as_raw();
-                let mut per_ptr = d_periods
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add(launched as u64 * std::mem::size_of::<i32>() as u64);
-                let mut warm_ptr = d_warms
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add(launched as u64 * std::mem::size_of::<i32>() as u64);
-                let mut len_i = len as i32;
-                let mut first_i = first as i32;
-                let mut ncomb_i = cur as i32;
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * len) as u64 * std::mem::size_of::<f32>() as u64);
-                let args: &mut [*mut c_void] = &mut [
-                    &mut pref_ptr as *mut _ as *mut c_void,
-                    &mut close_ptr as *mut _ as *mut c_void,
-                    &mut per_ptr as *mut _ as *mut c_void,
-                    &mut warm_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                    &mut first_i as *mut _ as *mut c_void,
-                    &mut ncomb_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-            }
-            launched += cur;
+        // Keep host constants in sync with .cu defaults
+        const TTM_TILE_TIME: u32 = 256;
+        const TTM_TILE_PARAMS: u32 = 8;
+        let grid_x: u32 = ((len as u32) + TTM_TILE_TIME - 1) / TTM_TILE_TIME;
+        let grid_y: u32 = ((n_combos as u32) + TTM_TILE_PARAMS - 1) / TTM_TILE_PARAMS;
+        let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+        let block: BlockSize = (TTM_TILE_TIME, TTM_TILE_PARAMS, 1).into();
+        unsafe {
+            let mut pref_ptr = d_prefix.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut per_ptr   = d_periods.as_device_ptr().as_raw();
+            let mut warm_ptr  = d_warms.as_device_ptr().as_raw();
+            let mut len_i     = len as i32;
+            let mut ncomb_i   = n_combos as i32;
+            let mut out_ptr   = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut pref_ptr as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut per_ptr as *mut _ as *mut c_void,
+                &mut warm_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut ncomb_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
         }
 
         self.stream
@@ -316,12 +323,24 @@ impl CudaTtmTrend {
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
+        // Pre-zero warmup region once; kernel only writes t >= warm per series
+        unsafe { d_out.set_zero_async(&self.stream) }
+            .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
 
-        let func = self
+        let mut func = self
             .module
             .get_function("ttm_trend_many_series_one_param_time_major_f32")
             .map_err(|e| CudaTtmTrendError::Cuda(e.to_string()))?;
-        let block_x: u32 = 256;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+        // Occupancy-guided block size (rounded to warp multiple with sane clamp)
+        let auto_block = || -> u32 {
+            let (_min_grid, bs) = func
+                .suggested_launch_configuration(0, (0, 0, 0).into())
+                .unwrap_or((0, 128));
+            let bs = ((bs + 31) / 32) * 32;
+            bs.max(32).min(256)
+        };
+        let block_x: u32 = auto_block();
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();

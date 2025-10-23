@@ -1,11 +1,12 @@
 // CUDA kernels for QQE (Quantitative Qualitative Estimation)
 //
-// Behavior rules:
-// - Warmup/NaN semantics mirror the scalar Rust implementation.
-// - Outputs are FP32; internal accumulations use double for stability.
-// - Batch kernel: one block per parameter combo; thread 0 scans time sequentially
-//   (recurrence). Other threads cooperatively prefill warmup NaNs.
-// - Many-series kernel (time-major): one block per series; thread 0 scans time sequentially.
+// Changes vs. original:
+// - Remove FP64 from hot loops; use float-float (double-single) only for Wilder
+//   running averages to reduce drift on long flats while keeping FP32 throughput.
+// - Fix inter-block race: only blockIdx.x==0 & threadIdx.x==0 performs sequential scan.
+//   Warmup NaNs are filled by threads within a single block (grid.x may be >1 in callers,
+//   but only block 0 will proceed beyond warmup).
+// - Use __ldg() read-only loads for prices to reduce cache pressure.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -13,16 +14,71 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include <stdint.h>
 
-// Compute QQE for a single series with given parameters.
-// prices: input series (length N)
-// N: series length
-// first_valid: index of first finite element in prices
-// rsi_p: RSI period (Wilder)
-// ema_p: smoothing period for EMA of RSI
-// fast_k: multiplier for ATR-of-RSI bands
-// out_fast, out_slow: pointers to per-row outputs (length N)
-static __device__ __forceinline__ void qqe_compute_series(
+// -----------------------
+// Small helpers
+// -----------------------
+
+static __device__ __forceinline__ float ld_ro(const float* p) {
+#if __CUDA_ARCH__ >= 350
+    return __ldg(p);
+#else
+    return *p;
+#endif
+}
+
+// canonical quiet-NaN bit pattern as float
+static __device__ __forceinline__ float qNaNf() {
+    return __uint_as_float(0x7fc00000u);
+}
+
+// ----- float-float ("double-single") helpers using FMA -----
+// We only use these for Wilder's running averages (avg_gain/loss).
+
+struct fpair { float hi, lo; }; // value ~= hi + lo
+
+static __device__ __forceinline__ fpair make_fpair(float x) { return {x, 0.0f}; }
+
+static __device__ __forceinline__ void two_sum(float a, float b, float &s, float &e) {
+    s = a + b;
+    float bp = s - a;
+    e = (a - (s - bp)) + (b - bp);
+}
+
+static __device__ __forceinline__ void quick_two_sum(float a, float b, float &s, float &e) {
+    s = a + b;
+    e = b - (s - a);
+}
+
+static __device__ __forceinline__ void two_prod(float a, float b, float &p, float &e) {
+    p = a * b;
+    e = fmaf(a, b, -p); // exact residual with FMA
+}
+
+// beta * x + alpha * u  (x is double-single)
+static __device__ __forceinline__ fpair ds_madd(float beta, const fpair &x, float alpha, float u) {
+    float p1, e1; two_prod(beta, x.hi, p1, e1);
+    float p2, e2; two_prod(beta, x.lo, p2, e2);
+    float p3, e3; two_prod(alpha,    u, p3, e3);
+
+    float s1, r1; two_sum(p1, p2, s1, r1);
+    float s2, r2; two_sum(s1, p3, s2, r2);
+
+    float lo = (e1 + e2 + e3) + (r1 + r2);
+    float hi, lo2; quick_two_sum(s2, lo, hi, lo2);
+    return {hi, lo2};
+}
+
+static __device__ __forceinline__ float ds_val(const fpair &x) {
+    return x.hi + x.lo;
+}
+
+// -------------------------------------------------------------
+// Compute QQE for a single series with given parameters (FP32)
+// Wilder accumulators (avg_gain/avg_loss) use float-float (DS).
+// -------------------------------------------------------------
+static __device__ __forceinline__ void qqe_compute_series_f32(
     const float* __restrict__ prices,
     int N,
     int first_valid,
@@ -41,96 +97,101 @@ static __device__ __forceinline__ void qqe_compute_series(
     const int warm = first_valid + rsi_p + ema_p - 2;
 
     // Wilder RSI initial averages over first rsi_p deltas
-    double avg_gain = 0.0;
-    double avg_loss = 0.0;
+    float avg_gain_f = 0.0f, avg_loss_f = 0.0f;
     bool bad = false;
     const int init_end = min(first_valid + rsi_p, N - 1);
     for (int i = first_valid + 1; i <= init_end; ++i) {
-        double di = (double)prices[i];
-        double dim1 = (double)prices[i - 1];
-        double delta = di - dim1;
+        float di   = ld_ro(&prices[i]);
+        float dim1 = ld_ro(&prices[i - 1]);
+        float delta = di - dim1;
         if (!isfinite(delta)) { bad = true; break; }
-        if (delta > 0.0) avg_gain += delta; else if (delta < 0.0) avg_loss -= delta;
+        if (delta > 0.0f) avg_gain_f += delta;
+        else if (delta < 0.0f) avg_loss_f -= delta;
     }
-    if (bad) return; // leave warmup NaNs in place
+    if (bad) return; // leave filled NaNs
 
-    const double inv_rsi = 1.0 / (double)rsi_p;
-    const double beta_rsi = 1.0 - inv_rsi;
-    avg_gain *= inv_rsi;
-    avg_loss *= inv_rsi;
+    const float inv_rsi  = 1.0f / (float)rsi_p;
+    const float beta_rsi = 1.0f - inv_rsi;
+
+    avg_gain_f *= inv_rsi;
+    avg_loss_f *= inv_rsi;
+
+    fpair avg_gain = make_fpair(avg_gain_f);
+    fpair avg_loss = make_fpair(avg_loss_f);
 
     // first RSI value at rsi_start
-    double rsi;
+    float rsi;
     {
-        const double denom = avg_gain + avg_loss;
-        rsi = (denom == 0.0) ? 50.0 : (100.0 * avg_gain / denom);
+        float denom = ds_val(avg_gain) + ds_val(avg_loss);
+        rsi = (denom == 0.0f) ? 50.0f : (100.0f * ds_val(avg_gain) / denom);
     }
     // Initialize FAST at rsi_start
-    if (rsi_start < N) {
-        out_fast[rsi_start] = (float)rsi;
-        // If warm <= rsi_start, also seed SLOW here
-        if (warm <= rsi_start) out_slow[rsi_start] = (float)rsi;
-    }
+    out_fast[rsi_start] = rsi;
+    // If warm <= rsi_start, also seed SLOW here
+    if (warm <= rsi_start) out_slow[rsi_start] = rsi;
 
     // EMA-of-RSI warmup via running mean then recursive EMA
-    double running_mean = rsi;
-    const double ema_alpha = 2.0 / ((double)ema_p + 1.0);
-    const double ema_beta = 1.0 - ema_alpha;
-    double prev_ema = rsi;
+    float running_mean = rsi;
+    const float ema_alpha = 2.0f / ((float)ema_p + 1.0f);
+    const float ema_beta  = 1.0f - ema_alpha;
+    float prev_ema = rsi;
 
     // QQE Slow line parameters (ATR-of-RSI style)
-    const double atr_alpha = 1.0 / 14.0;
-    const double atr_beta  = 1.0 - atr_alpha;
-    double wwma = 0.0;
-    double atrrsi = 0.0;
-    double prev_fast_val = rsi;
+    const float atr_alpha = 1.0f / 14.0f;
+    const float atr_beta  = 1.0f - atr_alpha;
+    float wwma = 0.0f;
+    float atrrsi = 0.0f;
+    float prev_fast_val = rsi;
 
     // Main scan from rsi_start+1 .. N-1
+#pragma unroll 1
     for (int i = rsi_start + 1; i < N; ++i) {
-        // Wilder RSI update
-        double di = (double)prices[i];
-        double dim1 = (double)prices[i - 1];
-        double delta = di - dim1;
-        double gain = (delta > 0.0) ? delta : 0.0;
-        double loss = (delta < 0.0) ? -delta : 0.0;
-        avg_gain = fma(beta_rsi, avg_gain, inv_rsi * gain);
-        avg_loss = fma(beta_rsi, avg_loss, inv_rsi * loss);
-        const double denom = avg_gain + avg_loss;
-        rsi = (denom == 0.0) ? 50.0 : (100.0 * avg_gain / denom);
+        // Wilder RSI update (FP32 with DS accumulators)
+        float di   = ld_ro(&prices[i]);
+        float dim1 = ld_ro(&prices[i - 1]);
+        float delta = di - dim1;
+        float gain = (delta > 0.0f) ? delta : 0.0f;
+        float loss = (delta < 0.0f) ? -delta : 0.0f;
+
+        avg_gain = ds_madd(beta_rsi, avg_gain, inv_rsi, gain);
+        avg_loss = ds_madd(beta_rsi, avg_loss, inv_rsi, loss);
+
+        float denom = ds_val(avg_gain) + ds_val(avg_loss);
+        rsi = (denom == 0.0f) ? 50.0f : (100.0f * ds_val(avg_gain) / denom);
 
         // FAST
-        double fast_i;
+        float fast_i;
         if (i < rsi_start + ema_p) {
-            // running mean during seed
-            const double n = (double)(i - rsi_start + 1);
-            running_mean = ((n - 1.0) * running_mean + rsi) / n;
+            float n = (float)(i - rsi_start + 1);
+            running_mean = ((n - 1.0f) * running_mean + rsi) / n;
             prev_ema = running_mean;
             fast_i = running_mean;
         } else {
-            prev_ema = fma(ema_beta, prev_ema, ema_alpha * rsi);
+            prev_ema = fmaf(ema_beta, prev_ema, ema_alpha * rsi);
             fast_i = prev_ema;
         }
-        out_fast[i] = (float)fast_i;
+        out_fast[i] = fast_i;
 
         if (i == warm) {
-            out_slow[i] = (float)fast_i; // anchor slow at warm
+            out_slow[i] = fast_i; // anchor slow at warm
             prev_fast_val = fast_i;
         } else if (i > warm) {
             // QQE slow update
-            const double tr = fabs(fast_i - prev_fast_val);
-            wwma  = fma(atr_beta,  wwma,  atr_alpha * tr);
-            atrrsi = fma(atr_beta, atrrsi, atr_alpha * wwma);
-            const double qup = fast_i + atrrsi * (double)fast_k;
-            const double qdn = fast_i - atrrsi * (double)fast_k;
+            float tr = fabsf(fast_i - prev_fast_val);
+            wwma   = fmaf(atr_beta,  wwma,  atr_alpha * tr);
+            atrrsi = fmaf(atr_beta, atrrsi, atr_alpha * wwma);
+            float qup = fast_i + atrrsi * fast_k;
+            float qdn = fast_i - atrrsi * fast_k;
 
-            const double prev = (double)out_slow[i - 1];
-            double slow;
+            float prev = out_slow[i - 1];
+            float slow;
             if (qup < prev) slow = qup;
             else if (fast_i > prev && prev_fast_val < prev) slow = qdn;
             else if (qdn > prev) slow = qdn;
             else if (fast_i < prev && prev_fast_val > prev) slow = qup;
             else slow = prev;
-            out_slow[i] = (float)slow;
+
+            out_slow[i] = slow;
             prev_fast_val = fast_i;
         }
     }
@@ -141,6 +202,7 @@ static __device__ __forceinline__ void qqe_compute_series(
 // Output layout: rows = 2 * n_combos, cols = series_len
 //   row 2*c     = FAST
 //   row 2*c + 1 = SLOW
+// NOTE: grid.x must be 1; one block per combo. We still guard against >1.
 // ----------------------------
 extern "C" __global__ void qqe_batch_f32(
     const float* __restrict__ prices,
@@ -165,23 +227,27 @@ extern "C" __global__ void qqe_batch_f32(
     float* __restrict__ out_fast = out + row_fast * series_len;
     float* __restrict__ out_slow = out + row_slow * series_len;
 
-    // Warmup NaNs (only up to warm index)
+    // Warmup NaNs (only up to warm index) – intra-block grid-stride
     int warm = first_valid + rsi_p + ema_p - 2;
     if (warm > series_len) warm = series_len;
-    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < warm; idx += gridDim.x * blockDim.x) {
-        out_fast[idx] = NAN;
-        out_slow[idx] = NAN;
+    const float nanv = qNaNf();
+    for (int idx = threadIdx.x; idx < warm; idx += blockDim.x) {
+        out_fast[idx] = nanv;
+        out_slow[idx] = nanv;
     }
-    __syncthreads();
+    __syncthreads(); // ensure warmup is visible before potential overwrite at rsi_start
 
-    if (threadIdx.x != 0) return; // single-thread sequential scan
-    qqe_compute_series(prices, series_len, first_valid, rsi_p, ema_p, fast_k, out_fast, out_slow);
+    // Single-thread sequential scan (one block per combo!)
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        qqe_compute_series_f32(prices, series_len, first_valid, rsi_p, ema_p, fast_k, out_fast, out_slow);
+    }
 }
 
 // ------------------------------------------------------------
 // Many-series × one-param (time-major)
 // prices_tm: [rows=series_len][cols=num_series]
 // out_tm:    [rows=series_len][cols=2*num_series]  (col s = FAST, col s+num_series = SLOW)
+// NOTE: grid.x should be 1; one block per series. We still guard against >1.
 // ------------------------------------------------------------
 extern "C" __global__ void qqe_many_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,
@@ -198,97 +264,103 @@ extern "C" __global__ void qqe_many_series_one_param_time_major_f32(
     if (rsi_period <= 0 || ema_period <= 0) return;
 
     const int fv = first_valids[s];
+
     // Prefill warmup NaNs for both outputs
     int warm = fv + rsi_period + ema_period - 2;
     if (warm > series_len) warm = series_len;
-    for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < warm; t += gridDim.x * blockDim.x) {
-        out_tm[t * (2 * num_series) + s] = NAN;
-        out_tm[t * (2 * num_series) + (s + num_series)] = NAN;
+    const int pitch = 2 * num_series;
+    const float nanv = qNaNf();
+    for (int t = threadIdx.x; t < warm; t += blockDim.x) {
+        out_tm[t * pitch + s] = nanv;
+        out_tm[t * pitch + (s + num_series)] = nanv;
     }
     __syncthreads();
 
-    if (threadIdx.x != 0) return;
-    // Compute with a view into time-major layout
-    // Wraps qqe_compute_series with strided accesses
-    // Build contiguous views into temporary pointers via lambdas is not possible in C, so copy into
-    // local helpers that index time-major buffers.
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    // We reuse the same recurrence using direct indices.
     const int rsi_start = fv + rsi_period;
     if (rsi_start >= series_len) return;
 
-    // Wilder RSI init
-    double avg_gain = 0.0, avg_loss = 0.0;
+    // Wilder RSI init (FP32 + DS)
+    float avg_gain_f = 0.0f, avg_loss_f = 0.0f;
     bool bad = false;
     const int init_end = min(fv + rsi_period, series_len - 1);
     for (int i = fv + 1; i <= init_end; ++i) {
-        double di   = (double)prices_tm[i * num_series + s];
-        double dim1 = (double)prices_tm[(i - 1) * num_series + s];
-        double delta = di - dim1;
+        float di   = ld_ro(&prices_tm[i * num_series + s]);
+        float dim1 = ld_ro(&prices_tm[(i - 1) * num_series + s]);
+        float delta = di - dim1;
         if (!isfinite(delta)) { bad = true; break; }
-        if (delta > 0.0) avg_gain += delta; else if (delta < 0.0) avg_loss -= delta;
+        if (delta > 0.0f) avg_gain_f += delta; else if (delta < 0.0f) avg_loss_f -= delta;
     }
     if (bad) return;
-    const double inv_rsi = 1.0 / (double)rsi_period;
-    const double beta_rsi = 1.0 - inv_rsi;
-    avg_gain *= inv_rsi; avg_loss *= inv_rsi;
-    double rsi;
+
+    const float inv_rsi  = 1.0f / (float)rsi_period;
+    const float beta_rsi = 1.0f - inv_rsi;
+    avg_gain_f *= inv_rsi; avg_loss_f *= inv_rsi;
+    fpair avg_gain = make_fpair(avg_gain_f);
+    fpair avg_loss = make_fpair(avg_loss_f);
+
+    float rsi;
     {
-        const double denom = avg_gain + avg_loss;
-        rsi = (denom == 0.0) ? 50.0 : (100.0 * avg_gain / denom);
+        float denom = ds_val(avg_gain) + ds_val(avg_loss);
+        rsi = (denom == 0.0f) ? 50.0f : (100.0f * ds_val(avg_gain) / denom);
     }
-    out_tm[rsi_start * (2 * num_series) + s] = (float)rsi;
-    if (warm <= rsi_start) out_tm[rsi_start * (2 * num_series) + (s + num_series)] = (float)rsi;
+    out_tm[rsi_start * pitch + s] = rsi;
+    if (warm <= rsi_start) out_tm[rsi_start * pitch + (s + num_series)] = rsi;
 
-    double running_mean = rsi;
-    const double ema_alpha = 2.0 / ((double)ema_period + 1.0);
-    const double ema_beta  = 1.0 - ema_alpha;
-    double prev_ema = rsi;
-    const double atr_alpha = 1.0 / 14.0;
-    const double atr_beta  = 1.0 - atr_alpha;
-    double wwma = 0.0, atrrsi = 0.0;
-    double prev_fast_val = rsi;
+    float running_mean = rsi;
+    const float ema_alpha = 2.0f / ((float)ema_period + 1.0f);
+    const float ema_beta  = 1.0f - ema_alpha;
+    float prev_ema = rsi;
+    const float atr_alpha = 1.0f / 14.0f;
+    const float atr_beta  = 1.0f - atr_alpha;
+    float wwma = 0.0f, atrrsi = 0.0f;
+    float prev_fast_val = rsi;
 
+#pragma unroll 1
     for (int i = rsi_start + 1; i < series_len; ++i) {
-        double di   = (double)prices_tm[i * num_series + s];
-        double dim1 = (double)prices_tm[(i - 1) * num_series + s];
-        double delta = di - dim1;
-        double gain = (delta > 0.0) ? delta : 0.0;
-        double loss = (delta < 0.0) ? -delta : 0.0;
-        avg_gain = fma(beta_rsi, avg_gain, inv_rsi * gain);
-        avg_loss = fma(beta_rsi, avg_loss, inv_rsi * loss);
-        const double denom = avg_gain + avg_loss;
-        rsi = (denom == 0.0) ? 50.0 : (100.0 * avg_gain / denom);
+        float di   = ld_ro(&prices_tm[i * num_series + s]);
+        float dim1 = ld_ro(&prices_tm[(i - 1) * num_series + s]);
+        float delta = di - dim1;
+        float gain = (delta > 0.0f) ? delta : 0.0f;
+        float loss = (delta < 0.0f) ? -delta : 0.0f;
 
-        double fast_i;
+        avg_gain = ds_madd(beta_rsi, avg_gain, inv_rsi, gain);
+        avg_loss = ds_madd(beta_rsi, avg_loss, inv_rsi, loss);
+        float denom = ds_val(avg_gain) + ds_val(avg_loss);
+        rsi = (denom == 0.0f) ? 50.0f : (100.0f * ds_val(avg_gain) / denom);
+
+        float fast_i;
         if (i < rsi_start + ema_period) {
-            const double n = (double)(i - rsi_start + 1);
-            running_mean = ((n - 1.0) * running_mean + rsi) / n;
+            float n = (float)(i - rsi_start + 1);
+            running_mean = ((n - 1.0f) * running_mean + rsi) / n;
             prev_ema = running_mean;
             fast_i = running_mean;
         } else {
-            prev_ema = fma(ema_beta, prev_ema, ema_alpha * rsi);
+            prev_ema = fmaf(ema_beta, prev_ema, ema_alpha * rsi);
             fast_i = prev_ema;
         }
-        out_tm[i * (2 * num_series) + s] = (float)fast_i;
+        out_tm[i * pitch + s] = fast_i;
 
         if (i == warm) {
-            out_tm[i * (2 * num_series) + (s + num_series)] = (float)fast_i;
+            out_tm[i * pitch + (s + num_series)] = fast_i;
             prev_fast_val = fast_i;
         } else if (i > warm) {
-            const double tr = fabs(fast_i - prev_fast_val);
-            wwma  = fma(atr_beta,  wwma,  atr_alpha * tr);
-            atrrsi = fma(atr_beta, atrrsi, atr_alpha * wwma);
-            const double qup = fast_i + atrrsi * (double)fast_factor;
-            const double qdn = fast_i - atrrsi * (double)fast_factor;
-            const double prev = (double)out_tm[(i - 1) * (2 * num_series) + (s + num_series)];
-            double slow;
+            float tr = fabsf(fast_i - prev_fast_val);
+            wwma   = fmaf(atr_beta,  wwma,  atr_alpha * tr);
+            atrrsi = fmaf(atr_beta, atrrsi, atr_alpha * wwma);
+            float qup = fast_i + atrrsi * fast_factor;
+            float qdn = fast_i - atrrsi * fast_factor;
+
+            float prev = out_tm[(i - 1) * pitch + (s + num_series)];
+            float slow;
             if (qup < prev) slow = qup;
             else if (fast_i > prev && prev_fast_val < prev) slow = qdn;
             else if (qdn > prev) slow = qdn;
             else if (fast_i < prev && prev_fast_val > prev) slow = qup;
             else slow = prev;
-            out_tm[i * (2 * num_series) + (s + num_series)] = (float)slow;
+
+            out_tm[i * pitch + (s + num_series)] = slow;
             prev_fast_val = fast_i;
         }
     }

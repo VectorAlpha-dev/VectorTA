@@ -71,6 +71,9 @@ pub struct CudaAdx {
 }
 
 impl CudaAdx {
+    #[inline(always)]
+    fn div_up(n: u32, d: u32) -> u32 { (n + d - 1) / d }
+
     pub fn new(device_id: usize) -> Result<Self, CudaAdxError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
         let device =
@@ -81,12 +84,18 @@ impl CudaAdx {
         let module = Module::from_ptx(
             ptx,
             &[
-                ModuleJitOption::OptLevel(OptLevel::O2),
-                ModuleJitOption::MaxRegisters(64),
+                ModuleJitOption::DetermineTargetFromContext,
+                ModuleJitOption::OptLevel(OptLevel::O4),
             ],
         )
+        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+        .or_else(|_| Module::from_ptx(ptx, &[]))
         .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
+        // Prefer a high-priority NON_BLOCKING stream; if priorities unsupported, this is 0.
+        let pr = cust::context::CurrentContext
+            ::get_stream_priority_range()
+            .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, Some(pr.greatest))
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
 
         Ok(Self {
@@ -176,7 +185,7 @@ impl CudaAdx {
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
 
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods_host)
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_host, &self.stream) }
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
@@ -223,9 +232,15 @@ impl CudaAdx {
                 expected
             )));
         }
-        arr.buf
-            .copy_to(out)
+        // Pinned host + async D→H ensures true async transfer; then memcpy into user slice.
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected) }
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
+        unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream) }
+            .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
+        out.copy_from_slice(pinned.as_slice());
         Ok((arr.rows, arr.cols, combos))
     }
 
@@ -246,10 +261,10 @@ impl CudaAdx {
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
 
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 32,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
-        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid_x = Self::div_up(n_combos as u32, block_x);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
@@ -317,7 +332,10 @@ impl CudaAdx {
             }
         }
 
-        let req = (3 * cols * rows + cols + cols * rows) * std::mem::size_of::<f32>();
+        let bytes_inputs = 3usize * cols * rows * std::mem::size_of::<f32>();
+        let bytes_first  = cols * std::mem::size_of::<i32>();
+        let bytes_out    = cols * rows * std::mem::size_of::<f32>();
+        let req = bytes_inputs + bytes_first + bytes_out;
         if !Self::device_mem_ok(req) {
             return Err(CudaAdxError::InvalidInput(
                 "insufficient device memory".into(),
@@ -363,10 +381,8 @@ impl CudaAdx {
         if out_tm.len() != cols * rows {
             return Err(CudaAdxError::InvalidInput("out slice wrong length".into()));
         }
-        let arr = self.adx_many_series_one_param_time_major_dev(
-            high_tm, low_tm, close_tm, cols, rows, period,
-        )?;
-        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(arr.len()) }
+        let arr = self.adx_many_series_one_param_time_major_dev(high_tm, low_tm, close_tm, cols, rows, period)?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
         unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream) }
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
@@ -392,11 +408,8 @@ impl CudaAdx {
             .module
             .get_function("adx_many_series_one_param_time_major_f32")
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 256,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
-        };
-        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::Auto => 256, ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32) };
+        let grid_x = Self::div_up(cols as u32, block_x);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {

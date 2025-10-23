@@ -12,7 +12,7 @@ use crate::indicators::rsx::{RsxBatchRange, RsxParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -59,7 +59,7 @@ impl CudaRsx {
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/rsx_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -111,10 +111,8 @@ impl CudaRsx {
             }
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices_f32).map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { to_device_buffer_async(&self.stream, prices_f32)? };
+        let d_periods = unsafe { to_device_buffer_async(&self.stream, &periods_i32)? };
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(len * n_combos)
                 .map_err(|e| CudaRsxError::Cuda(e.to_string()))?
@@ -152,45 +150,32 @@ impl CudaRsx {
             .get_function("rsx_batch_f32")
             .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
 
-        // Chunk across combos if needed to respect grid limits
-        let block_x = self.policy.batch_block_x.unwrap_or(128);
-        let max_blocks: u32 = 65_535;
-        let mut launched = 0usize;
-        while launched < n_combos {
-            let this_chunk = (n_combos - launched).min(max_blocks as usize);
-            let grid_x = this_chunk as u32;
-            let grid: GridSize = (grid_x.max(1), 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            unsafe {
-                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                let mut periods_ptr = d_periods
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
-                let mut series_len_i = len as i32;
-                let mut first_i = first_valid as i32;
-                let mut combos_i = this_chunk as i32;
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add(((launched * len) * std::mem::size_of::<f32>()) as u64);
-                let args: &mut [*mut c_void] = &mut [
-                    &mut prices_ptr as *mut _ as *mut c_void,
-                    &mut periods_ptr as *mut _ as *mut c_void,
-                    &mut series_len_i as *mut _ as *mut c_void,
-                    &mut first_i as *mut _ as *mut c_void,
-                    &mut combos_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
-            }
-            launched += this_chunk;
+        // One thread per combo per the new kernel mapping.
+        let block_x = self.policy.batch_block_x.unwrap_or(256);
+        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut series_len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut combos_i = n_combos as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRsxError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(|e| CudaRsxError::Cuda(e.to_string()))
     }
 
     // ---------- Many-series × one-param (time-major) ----------
@@ -246,10 +231,8 @@ impl CudaRsx {
             }
         }
 
-        let d_prices = DeviceBuffer::from_slice(prices_tm_f32)
-            .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { to_device_buffer_async(&self.stream, prices_tm_f32)? };
+        let d_first = unsafe { to_device_buffer_async(&self.stream, &first_valids)? };
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(expected).map_err(|e| CudaRsxError::Cuda(e.to_string()))?
         };
@@ -461,3 +444,22 @@ pub mod benches {
         ]
     }
 }
+
+// ---------- Internal helpers ----------
+#[inline]
+unsafe fn to_device_buffer_async<T: cust::memory::DeviceCopy>(
+    stream: &Stream,
+    host: &[T],
+) -> Result<DeviceBuffer<T>, CudaRsxError> {
+    const PIN_BYTES: usize = 4 * 1024 * 1024; // 4 MiB threshold
+    let bytes = host.len() * std::mem::size_of::<T>();
+    if bytes >= PIN_BYTES {
+        let pinned = LockedBuffer::from_slice(host)
+            .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
+        DeviceBuffer::from_slice_async(pinned.as_slice(), stream)
+            .map_err(|e| CudaRsxError::Cuda(e.to_string()))
+    } else {
+        DeviceBuffer::from_slice(host).map_err(|e| CudaRsxError::Cuda(e.to_string()))
+    }
+}
+

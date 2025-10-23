@@ -13,8 +13,8 @@
 //! - Warmup/NaN semantics identical to scalar: warm = first_valid + 2 + smoothing_len − 1
 
 use crate::cuda::moving_averages::DeviceArrayF32;
-use crate::indicators::fvg_trailing_stop::{FvgTrailingStopParams, FvgTsBatchRange};
-use cust::context::Context;
+use crate::indicators::fvg_trailing_stop::{FvgTsBatchRange, FvgTrailingStopParams};
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
@@ -254,14 +254,52 @@ impl CudaFvgTs {
         let mut d_lower_ts: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(nrows * len) }
             .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
 
-        let func = self
+        // ---- choose launch + shared-mem heuristic ----
+        let mut func = self
             .module
             .get_function("fvg_trailing_stop_batch_f32")
             .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::OneD { block_x } => block_x,
-            _ => 128,
-        };
+
+        // Default block size or policy override
+        let mut block_x = match self.policy.batch { BatchKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+
+        // Runtime heuristic: use shared rings only if max(w) ≤ 64
+        let max_w: usize = h_sw.iter().copied().map(|v| v as i32).max().unwrap_or(0).max(1) as usize;
+        let want_shmem = max_w <= 64;
+
+        // Each thread needs 3 * smem_stride floats; we pack per-thread slices back-to-back.
+        let smem_stride: usize = if want_shmem { max_w } else { 0 };
+        let bytes_per_thread: usize = 3 * smem_stride * std::mem::size_of::<f32>();
+
+        // If using shared memory, clamp block_x so that dynamic shared memory fits per block.
+        // If query fails, fall back to ~48KB (typical default without opt-in).
+        let mut use_shmem_rings = 0i32;
+        let mut dynamic_smem_bytes: usize = 0;
+
+        if want_shmem && bytes_per_thread > 0 {
+            let grid_probe: GridSize = (1, 1, 1).into();
+            let block_probe: BlockSize = (block_x, 1, 1).into();
+            let avail_dyn = func
+                .available_dynamic_shared_memory_per_block(grid_probe, block_probe)
+                .unwrap_or(48 * 1024);
+
+            let max_threads_by_smem = if bytes_per_thread > 0 {
+                (avail_dyn / bytes_per_thread) as u32
+            } else { block_x };
+
+            if max_threads_by_smem >= 32 {
+                block_x = block_x.min(max_threads_by_smem);
+                use_shmem_rings = 1;
+                dynamic_smem_bytes = bytes_per_thread * (block_x as usize);
+                let _ = func.set_cache_config(CacheConfig::PreferShared);
+            } else {
+                let _ = func.set_cache_config(CacheConfig::PreferL1);
+            }
+        } else {
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
+        }
+
+        // Final launch shape
         let grid_x = (((nrows as u32) + block_x - 1) / block_x).max(1);
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -279,6 +317,8 @@ impl CudaFvgTs {
             let mut p_l = d_lower.as_device_ptr().as_raw();
             let mut p_ut = d_upper_ts.as_device_ptr().as_raw();
             let mut p_lt = d_lower_ts.as_device_ptr().as_raw();
+            let mut use_shmem_i = use_shmem_rings as i32;
+            let mut smem_stride_i = if use_shmem_rings != 0 { smem_stride as i32 } else { 0i32 };
             let args: &mut [*mut c_void] = &mut [
                 &mut p_hi as *mut _ as *mut c_void,
                 &mut p_lo as *mut _ as *mut c_void,
@@ -292,9 +332,11 @@ impl CudaFvgTs {
                 &mut p_l as *mut _ as *mut c_void,
                 &mut p_ut as *mut _ as *mut c_void,
                 &mut p_lt as *mut _ as *mut c_void,
+                &mut use_shmem_i as *mut _ as *mut c_void,
+                &mut smem_stride_i as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&func, grid, block, 0, args)
+                .launch(&func, grid, block, dynamic_smem_bytes as u32, args)
                 .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
         }
         self.stream
@@ -387,14 +429,11 @@ impl CudaFvgTs {
         let mut d_lt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
 
-        let func = self
-            .module
-            .get_function("fvg_trailing_stop_many_series_one_param_f32")
+        let mut func = self.module.get_function("fvg_trailing_stop_many_series_one_param_f32")
             .map_err(|e| CudaFvgTsError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } => block_x,
-            _ => 128,
-        };
+        // Prefer L1 on this path (per-thread local histories)
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::OneD{block_x} => block_x, _ => 128 };
         let grid_x = (((cols as u32) + block_x - 1) / block_x).max(1);
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
