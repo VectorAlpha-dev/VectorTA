@@ -88,6 +88,9 @@ impl CudaBollingerBands {
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() { return true; }
         if let Some((free, _)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
@@ -128,10 +131,54 @@ impl CudaBollingerBands {
                 vec![s, e]
             }
         }
+        fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
+            if st == 0 || s == e {
+                vec![s]
+            } else {
+                (s..=e).step_by(st).collect()
+            }
+        }
+        fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
+            if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+                vec![s]
+            } else {
+                let mut v = Vec::new();
+                let mut x = s;
+                while x <= e + 1e-12 {
+                    v.push(x);
+                    x += st;
+                }
+                v
+            }
+        }
+        fn axis_str((s, e, _): (String, String, usize)) -> Vec<String> {
+            if s == e {
+                vec![s]
+            } else {
+                vec![s, e]
+            }
+        }
         let periods = axis_usize(range.period);
         let devups = axis_f64(range.devup);
         let devdns = axis_f64(range.devdn);
+        let devups = axis_f64(range.devup);
+        let devdns = axis_f64(range.devdn);
         let matypes = axis_str(range.matype.clone());
+        let devtypes = axis_usize(range.devtype);
+        let mut out = Vec::with_capacity(
+            periods.len() * devups.len() * devdns.len() * matypes.len() * devtypes.len(),
+        );
+        for &p in &periods {
+            for &u in &devups {
+                for &d in &devdns {
+                    for m in &matypes {
+                        for &t in &devtypes {
+                            out.push((p, u, d, m.clone(), t));
+                        }
+                    }
+                }
+            }
+        }
         let devtypes = axis_usize(range.devtype);
         let mut out = Vec::with_capacity(
             periods.len() * devups.len() * devdns.len() * matypes.len() * devtypes.len(),
@@ -169,6 +216,11 @@ impl CudaBollingerBands {
                 "no parameter combinations".into(),
             ));
         }
+        if raw.is_empty() {
+            return Err(CudaBollingerError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
 
         let mut unsupported_ma: HashSet<String> = HashSet::new();
         let mut combos = Vec::with_capacity(raw.len());
@@ -179,8 +231,24 @@ impl CudaBollingerBands {
                     p, len
                 )));
             }
+            if p == 0 || p > len {
+                return Err(CudaBollingerError::InvalidInput(format!(
+                    "invalid period {} for len {}",
+                    p, len
+                )));
+            }
             if len - first_valid < p {
                 return Err(CudaBollingerError::InvalidInput(format!(
+                    "not enough valid data for period {} (valid after first {}: {})",
+                    p,
+                    first_valid,
+                    len - first_valid
+                )));
+            }
+            if devt != 0 {
+                return Err(CudaBollingerError::InvalidInput(format!(
+                    "unsupported devtype {} (only 0=stddev)",
+                    devt
                     "not enough valid data for period {} (valid after first {}: {})",
                     p,
                     first_valid,
@@ -202,9 +270,21 @@ impl CudaBollingerBands {
                 devup: u as f32,
                 devdn: d as f32,
             });
+            if ma.to_ascii_lowercase() != "sma" {
+                unsupported_ma.insert(ma);
+                continue;
+            }
+            combos.push(BbCombo {
+                period: p,
+                devup: u as f32,
+                devdn: d as f32,
+            });
         }
         if combos.is_empty() {
             if unsupported_ma.is_empty() {
+                return Err(CudaBollingerError::InvalidInput(
+                    "no supported combos (require ma_type='sma' and devtype=0)".into(),
+                ));
                 return Err(CudaBollingerError::InvalidInput(
                     "no supported combos (require ma_type='sma' and devtype=0)".into(),
                 ));
@@ -367,8 +447,22 @@ impl CudaBollingerBands {
             .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
         let d_devdns = DeviceBuffer::from_slice(&devdns)
             .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
+        let devups: Vec<f32> = combos.iter().map(|c| c.devup).collect();
+        let devdns: Vec<f32> = combos.iter().map(|c| c.devdn).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods)
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
+        let d_devups = DeviceBuffer::from_slice(&devups)
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
+        let d_devdns = DeviceBuffer::from_slice(&devdns)
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
 
         let elems = combos.len() * len;
+        let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
+        let mut d_mid: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
+        let mut d_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
         let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
         let mut d_mid: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
@@ -383,8 +477,26 @@ impl CudaBollingerBands {
         self.stream
             .synchronize()
             .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
 
         Ok((
+            DeviceArrayF32 {
+                buf: d_up,
+                rows: combos.len(),
+                cols: len,
+            },
+            DeviceArrayF32 {
+                buf: d_mid,
+                rows: combos.len(),
+                cols: len,
+            },
+            DeviceArrayF32 {
+                buf: d_lo,
+                rows: combos.len(),
+                cols: len,
+            },
             DeviceArrayF32 {
                 buf: d_up,
                 rows: combos.len(),
@@ -437,12 +549,23 @@ impl CudaBollingerBands {
                 "cols or rows is zero".into(),
             ));
         }
+        if cols == 0 || rows == 0 {
+            return Err(CudaBollingerError::InvalidInput(
+                "cols or rows is zero".into(),
+            ));
+        }
         if data_tm_f32.len() != cols * rows {
             return Err(CudaBollingerError::InvalidInput(format!(
                 "data length {} != cols*rows {}",
                 data_tm_f32.len(),
                 cols * rows
+                "data length {} != cols*rows {}",
+                data_tm_f32.len(),
+                cols * rows
             )));
+        }
+        if period == 0 || period > rows {
+            return Err(CudaBollingerError::InvalidInput("invalid period".into()));
         }
         if period == 0 || period > rows {
             return Err(CudaBollingerError::InvalidInput("invalid period".into()));
@@ -472,8 +595,14 @@ impl CudaBollingerBands {
             }
             let fv = fv
                 .ok_or_else(|| CudaBollingerError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv = fv
+                .ok_or_else(|| CudaBollingerError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv < period {
                 return Err(CudaBollingerError::InvalidInput(format!(
+                    "series {} not enough valid data (needed {}, valid {})",
+                    s,
+                    period,
+                    rows - fv
                     "series {} not enough valid data (needed {}, valid {})",
                     s,
                     period,
@@ -494,6 +623,12 @@ impl CudaBollingerBands {
             .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
         let mut d_lo_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
+        let mut d_up_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
+        let mut d_md_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
+        let mut d_lo_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
 
         // Launch many-series kernel
         let func = self
@@ -506,7 +641,9 @@ impl CudaBollingerBands {
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
             let mut p_ps = d_ps.as_device_ptr().as_raw();
+            let mut p_ps = d_ps.as_device_ptr().as_raw();
             let mut p_ps2 = d_ps2.as_device_ptr().as_raw();
+            let mut p_pn = d_pn.as_device_ptr().as_raw();
             let mut p_pn = d_pn.as_device_ptr().as_raw();
             let mut period_i = period as i32;
             let mut devup_f = devup as f32;
@@ -538,8 +675,26 @@ impl CudaBollingerBands {
         self.stream
             .synchronize()
             .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))?;
 
         Ok((
+            DeviceArrayF32 {
+                buf: d_up_tm,
+                rows,
+                cols,
+            },
+            DeviceArrayF32 {
+                buf: d_md_tm,
+                rows,
+                cols,
+            },
+            DeviceArrayF32 {
+                buf: d_lo_tm,
+                rows,
+                cols,
+            },
             DeviceArrayF32 {
                 buf: d_up_tm,
                 rows,
@@ -559,6 +714,9 @@ impl CudaBollingerBands {
     }
 
     pub fn synchronize(&self) -> Result<(), CudaBollingerError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaBollingerError::Cuda(e.to_string()))
         self.stream
             .synchronize()
             .map_err(|e| CudaBollingerError::Cuda(e.to_string()))
@@ -585,6 +743,14 @@ pub mod benches {
         cuda: CudaBollingerBands,
         data: Vec<f32>,
         sweep: BollingerBandsBatchRange,
+    }
+    impl CudaBenchState for BbBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .bollinger_bands_batch_dev(&self.data, &self.sweep)
+                .unwrap();
+        }
     }
     impl CudaBenchState for BbBatchState {
         fn launch(&mut self) {
@@ -633,6 +799,21 @@ pub mod benches {
                 .unwrap();
         }
     }
+    impl CudaBenchState for BbManySeriesState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .bollinger_bands_many_series_one_param_time_major_dev(
+                    &self.tm,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    self.devup,
+                    self.devdn,
+                )
+                .unwrap();
+        }
+    }
 
     fn prep_many_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaBollingerBands::new(0).expect("cuda bb");
@@ -641,7 +822,21 @@ pub mod benches {
         let period = 20usize;
         let devup = 2.0f32;
         let devdn = 2.0f32;
+        let cols = 250usize;
+        let rows = 1_000_000usize;
+        let period = 20usize;
+        let devup = 2.0f32;
+        let devdn = 2.0f32;
         let tm = gen_time_major_prices(cols, rows);
+        Box::new(BbManySeriesState {
+            cuda,
+            tm,
+            cols,
+            rows,
+            period,
+            devup,
+            devdn,
+        })
         Box::new(BbManySeriesState {
             cuda,
             tm,
@@ -663,12 +858,16 @@ pub mod benches {
                 prep_one_series_many_params,
             )
             .with_mem_required(bytes_one_series_many_params()),
+            )
+            .with_mem_required(bytes_one_series_many_params()),
             CudaBenchScenario::new(
                 "bollinger_bands",
                 "many_series_one_param",
                 "bollinger_bands_cuda_many_series_one_param",
                 "250x1m",
                 prep_many_series,
+            )
+            .with_inner_iters(3),
             )
             .with_inner_iters(3),
         ]

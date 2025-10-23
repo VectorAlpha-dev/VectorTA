@@ -52,7 +52,13 @@ pub struct CudaMacdPolicy {
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -73,6 +79,8 @@ pub struct CudaMacd {
 impl CudaMacd {
     pub fn new(device_id: usize) -> Result<Self, CudaMacdError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
         let ctx = Context::new(device).map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
@@ -132,6 +140,12 @@ impl CudaMacd {
         let first_valid = data_f32
             .iter()
             .position(|v| !v.is_nan())
+        if len == 0 {
+            return Err(CudaMacdError::InvalidInput("empty series".into()));
+        }
+        let first_valid = data_f32
+            .iter()
+            .position(|v| !v.is_nan())
             .ok_or_else(|| CudaMacdError::InvalidInput("all values are NaN".into()))?;
 
         // Enforce EMA path for now (parity with scalar classic kernel)
@@ -141,9 +155,16 @@ impl CudaMacd {
                 "CUDA MACD currently supports ma_type=\"ema\" only (got \"{}\")",
                 ma0
             )));
+            return Err(CudaMacdError::Unsupported(format!(
+                "CUDA MACD currently supports ma_type=\"ema\" only (got \"{}\")",
+                ma0
+            )));
         }
 
         let combos = expand_grid_host(sweep);
+        if combos.is_empty() {
+            return Err(CudaMacdError::InvalidInput("no parameter combos".into()));
+        }
         if combos.is_empty() {
             return Err(CudaMacdError::InvalidInput("no parameter combos".into()));
         }
@@ -159,13 +180,22 @@ impl CudaMacd {
             if f <= 0 || s <= 0 || g <= 0 {
                 return Err(CudaMacdError::InvalidInput("non-positive periods".into()));
             }
+            if f <= 0 || s <= 0 || g <= 0 {
+                return Err(CudaMacdError::InvalidInput("non-positive periods".into()));
+            }
             if len - first_valid < s as usize {
                 return Err(CudaMacdError::InvalidInput(format!(
                     "not enough valid data: needed >= {}, valid = {}",
                     s,
                     len - first_valid
+                    "not enough valid data: needed >= {}, valid = {}",
+                    s,
+                    len - first_valid
                 )));
             }
+            fasts.push(f);
+            slows.push(s);
+            signals.push(g);
             fasts.push(f);
             slows.push(s);
             signals.push(g);
@@ -253,7 +283,15 @@ impl CudaMacd {
         if cols == 0 || rows == 0 {
             return Err(CudaMacdError::InvalidInput("cols or rows is zero".into()));
         }
+        if cols == 0 || rows == 0 {
+            return Err(CudaMacdError::InvalidInput("cols or rows is zero".into()));
+        }
         if data_tm_f32.len() != cols * rows {
+            return Err(CudaMacdError::InvalidInput(format!(
+                "data length {} != cols*rows {}",
+                data_tm_f32.len(),
+                cols * rows
+            )));
             return Err(CudaMacdError::InvalidInput(format!(
                 "data length {} != cols*rows {}",
                 data_tm_f32.len(),
@@ -265,10 +303,16 @@ impl CudaMacd {
             return Err(CudaMacdError::Unsupported(
                 "many-series MACD supports ma_type=\"ema\" only".into(),
             ));
+            return Err(CudaMacdError::Unsupported(
+                "many-series MACD supports ma_type=\"ema\" only".into(),
+            ));
         }
         let fast = params.fast_period.unwrap_or(12);
         let slow = params.slow_period.unwrap_or(26);
         let signal = params.signal_period.unwrap_or(9);
+        if fast == 0 || slow == 0 || signal == 0 {
+            return Err(CudaMacdError::InvalidInput("non-positive periods".into()));
+        }
         if fast == 0 || slow == 0 || signal == 0 {
             return Err(CudaMacdError::InvalidInput("non-positive periods".into()));
         }
@@ -277,6 +321,23 @@ impl CudaMacd {
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
+            for t in 0..rows {
+                let v = data_tm_f32[t * cols + s];
+                if !v.is_nan() {
+                    fv = Some(t);
+                    break;
+                }
+            }
+            let fv =
+                fv.ok_or_else(|| CudaMacdError::InvalidInput(format!("series {} all NaN", s)))?;
+            if rows - fv < slow {
+                return Err(CudaMacdError::InvalidInput(format!(
+                    "series {} lacks data: needed >= {}, valid = {}",
+                    s,
+                    slow,
+                    rows - fv
+                )));
+            }
             for t in 0..rows {
                 let v = data_tm_f32[t * cols + s];
                 if !v.is_nan() {
@@ -316,6 +377,10 @@ impl CudaMacd {
             .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
+            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
         let mut d_macd: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
         let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
@@ -323,6 +388,9 @@ impl CudaMacd {
         let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
 
+        let func = self
+            .module
+            .get_function("macd_many_series_one_param_f32")
         let func = self
             .module
             .get_function("macd_many_series_one_param_f32")
@@ -336,8 +404,10 @@ impl CudaMacd {
             let mut fast_i = fast as i32;
             let mut slow_i = slow as i32;
             let mut sig_i = signal as i32;
+            let mut sig_i = signal as i32;
             let mut first_ptr = d_first.as_device_ptr().as_raw();
             let mut macd_ptr = d_macd.as_device_ptr().as_raw();
+            let mut sig_ptr = d_sig.as_device_ptr().as_raw();
             let mut sig_ptr = d_sig.as_device_ptr().as_raw();
             let mut hist_ptr = d_hist.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
@@ -347,11 +417,15 @@ impl CudaMacd {
                 &mut fast_i as *mut _ as *mut c_void,
                 &mut slow_i as *mut _ as *mut c_void,
                 &mut sig_i as *mut _ as *mut c_void,
+                &mut sig_i as *mut _ as *mut c_void,
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut macd_ptr as *mut _ as *mut c_void,
                 &mut sig_ptr as *mut _ as *mut c_void,
+                &mut sig_ptr as *mut _ as *mut c_void,
                 &mut hist_ptr as *mut _ as *mut c_void,
             ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
             self.stream
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
@@ -359,8 +433,26 @@ impl CudaMacd {
         self.stream
             .synchronize()
             .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMacdError::Cuda(e.to_string()))?;
         self.maybe_log_many_debug();
         Ok(DeviceMacdTriplet {
+            macd: DeviceArrayF32 {
+                buf: d_macd,
+                rows,
+                cols,
+            },
+            signal: DeviceArrayF32 {
+                buf: d_sig,
+                rows,
+                cols,
+            },
+            hist: DeviceArrayF32 {
+                buf: d_hist,
+                rows,
+                cols,
+            },
             macd: DeviceArrayF32 {
                 buf: d_macd,
                 rows,
@@ -393,9 +485,15 @@ impl CudaMacd {
         if self.debug_batch_logged {
             return;
         }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 eprintln!("[DEBUG] MACD batch selected kernel: {:?}", sel);
+                unsafe {
+                    (*(self as *const _ as *mut CudaMacd)).debug_batch_logged = true;
+                }
                 unsafe {
                     (*(self as *const _ as *mut CudaMacd)).debug_batch_logged = true;
                 }
@@ -407,9 +505,15 @@ impl CudaMacd {
         if self.debug_many_logged {
             return;
         }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 eprintln!("[DEBUG] MACD many-series selected kernel: {:?}", sel);
+                unsafe {
+                    (*(self as *const _ as *mut CudaMacd)).debug_many_logged = true;
+                }
                 unsafe {
                     (*(self as *const _ as *mut CudaMacd)).debug_many_logged = true;
                 }
@@ -441,6 +545,16 @@ pub mod benches {
         in_b + out_b + (64 * 1024 * 1024)
     }
 
+    struct MacdBatchState {
+        cuda: CudaMacd,
+        price: Vec<f32>,
+        sweep: MacdBatchRange,
+    }
+    impl CudaBenchState for MacdBatchState {
+        fn launch(&mut self) {
+            let _ = self.cuda.macd_batch_dev(&self.price, &self.sweep).unwrap();
+        }
+    }
     struct MacdBatchState {
         cuda: CudaMacd,
         price: Vec<f32>,
@@ -483,8 +597,44 @@ pub mod benches {
                 .unwrap();
         }
     }
+    struct MacdManyState {
+        cuda: CudaMacd,
+        data_tm: Vec<f32>,
+        cols: usize,
+        rows: usize,
+        params: MacdParams,
+    }
+    impl CudaBenchState for MacdManyState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .macd_many_series_one_param_time_major_dev(
+                    &self.data_tm,
+                    self.cols,
+                    self.rows,
+                    &self.params,
+                )
+                .unwrap();
+        }
+    }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
         let cuda = CudaMacd::new(0).expect("cuda macd");
+        let cols = MANY_COLS;
+        let rows = MANY_ROWS;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = MacdParams {
+            fast_period: Some(12),
+            slow_period: Some(26),
+            signal_period: Some(9),
+            ma_type: Some("ema".to_string()),
+        };
+        Box::new(MacdManyState {
+            cuda,
+            data_tm,
+            cols,
+            rows,
+            params,
+        })
         let cols = MANY_COLS;
         let rows = MANY_ROWS;
         let data_tm = gen_time_major_prices(cols, rows);
@@ -505,6 +655,24 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
+            CudaBenchScenario::new(
+                "macd",
+                "one_series_many_params",
+                "macd_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "macd",
+                "many_series_one_param",
+                "macd_cuda_many_series_one_param",
+                "256x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
             CudaBenchScenario::new(
                 "macd",
                 "one_series_many_params",

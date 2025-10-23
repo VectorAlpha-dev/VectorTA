@@ -119,6 +119,9 @@ impl CudaGatorOsc {
     pub fn set_policy(&mut self, p: CudaGatorOscPolicy) {
         self.policy = p;
     }
+    pub fn set_policy(&mut self, p: CudaGatorOscPolicy) {
+        self.policy = p;
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -126,12 +129,20 @@ impl CudaGatorOsc {
         if self.debug_batch_logged {
             return;
         }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] GATOR batch selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaGatorOsc)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaGatorOsc)).debug_batch_logged = true;
@@ -145,12 +156,20 @@ impl CudaGatorOsc {
         if self.debug_many_logged {
             return;
         }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] GATOR many-series selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaGatorOsc)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaGatorOsc)).debug_many_logged = true;
@@ -169,12 +188,18 @@ impl CudaGatorOsc {
         if len == 0 {
             return Err(CudaGatorOscError::InvalidInput("empty series".into()));
         }
+        if len == 0 {
+            return Err(CudaGatorOscError::InvalidInput("empty series".into()));
+        }
         let first_valid = data_f32
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaGatorOscError::InvalidInput("all values are NaN".into()))?;
 
         let combos = expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaGatorOscError::InvalidInput("empty sweep".into()));
+        }
         if combos.is_empty() {
             return Err(CudaGatorOscError::InvalidInput("empty sweep".into()));
         }
@@ -189,23 +214,28 @@ impl CudaGatorOsc {
         let mut needed_max: usize = 0;
         for p in &combos {
             let jlen = p.jaws_length.unwrap_or(13) as i32;
-            let jsh  = p.jaws_shift.unwrap_or(8) as i32;
+            let jsh = p.jaws_shift.unwrap_or(8) as i32;
             let tlen = p.teeth_length.unwrap_or(8) as i32;
-            let tsh  = p.teeth_shift.unwrap_or(5) as i32;
+            let tsh = p.teeth_shift.unwrap_or(5) as i32;
             let llen = p.lips_length.unwrap_or(5) as i32;
-            let lsh  = p.lips_shift.unwrap_or(3) as i32;
+            let lsh = p.lips_shift.unwrap_or(3) as i32;
             if jlen <= 0 || tlen <= 0 || llen <= 0 {
-                return Err(CudaGatorOscError::InvalidInput("non-positive length".into()));
+                return Err(CudaGatorOscError::InvalidInput(
+                    "non-positive length".into(),
+                ));
             }
-            let upper_needed = (jlen as usize).max(tlen as usize) + (jsh as usize).max(tsh as usize);
-            let lower_needed = (tlen as usize).max(llen as usize) + (tsh as usize).max(lsh as usize);
+            let upper_needed =
+                (jlen as usize).max(tlen as usize) + (jsh as usize).max(tsh as usize);
+            let lower_needed =
+                (tlen as usize).max(llen as usize) + (tsh as usize).max(lsh as usize);
             needed_max = needed_max.max(upper_needed.max(lower_needed));
             jl.push(jlen); js.push(jsh); tl.push(tlen); ts_.push(tsh); ll.push(llen); ls.push(lsh);
         }
         let valid_tail = len - first_valid;
         if valid_tail < needed_max {
             return Err(CudaGatorOscError::InvalidInput(format!(
-                "not enough valid data: needed >= {}, valid = {}", needed_max, valid_tail
+                "not enough valid data: needed >= {}, valid = {}",
+                needed_max, valid_tail
             )));
         }
 
@@ -265,6 +295,8 @@ impl CudaGatorOsc {
             unsafe {
                 (*(this as *const _ as *mut CudaGatorOsc)).last_batch =
                     Some(BatchKernelSelected::Plain { block_x });
+                (*(this as *const _ as *mut CudaGatorOsc)).last_batch =
+                    Some(BatchKernelSelected::Plain { block_x });
                 let mut p_ptr = d_prices.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
@@ -322,10 +354,26 @@ impl CudaGatorOsc {
         self.maybe_log_batch_debug();
 
         Ok(DeviceGatorOscQuad {
-            upper: DeviceArrayF32 { buf: d_upper, rows, cols: len },
-            lower: DeviceArrayF32 { buf: d_lower, rows, cols: len },
-            upper_change: DeviceArrayF32 { buf: d_uchn, rows, cols: len },
-            lower_change: DeviceArrayF32 { buf: d_lchn, rows, cols: len },
+            upper: DeviceArrayF32 {
+                buf: d_upper,
+                rows,
+                cols: len,
+            },
+            lower: DeviceArrayF32 {
+                buf: d_lower,
+                rows,
+                cols: len,
+            },
+            upper_change: DeviceArrayF32 {
+                buf: d_uchn,
+                rows,
+                cols: len,
+            },
+            lower_change: DeviceArrayF32 {
+                buf: d_lchn,
+                rows,
+                cols: len,
+            },
         })
     }
 
@@ -345,12 +393,21 @@ impl CudaGatorOsc {
         if cols == 0 || rows == 0 {
             return Err(CudaGatorOscError::InvalidInput("invalid dims".into()));
         }
+        if cols == 0 || rows == 0 {
+            return Err(CudaGatorOscError::InvalidInput("invalid dims".into()));
+        }
         if prices_tm.len() != cols * rows {
+            return Err(CudaGatorOscError::InvalidInput(
+                "time-major length mismatch".into(),
+            ));
             return Err(CudaGatorOscError::InvalidInput(
                 "time-major length mismatch".into(),
             ));
         }
         if jaws_length == 0 || teeth_length == 0 || lips_length == 0 {
+            return Err(CudaGatorOscError::InvalidInput(
+                "non-positive length".into(),
+            ));
             return Err(CudaGatorOscError::InvalidInput(
                 "non-positive length".into(),
             ));
@@ -364,7 +421,13 @@ impl CudaGatorOsc {
                     fv = Some(t as i32);
                     break;
                 }
+                if !prices_tm[t * cols + s].is_nan() {
+                    fv = Some(t as i32);
+                    break;
+                }
             }
+            first_valids[s] =
+                fv.ok_or_else(|| CudaGatorOscError::InvalidInput(format!("series {} all NaN", s)))?;
             first_valids[s] =
                 fv.ok_or_else(|| CudaGatorOscError::InvalidInput(format!("series {} all NaN", s)))?;
         }
@@ -414,6 +477,8 @@ impl CudaGatorOsc {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
+            (*(self as *const _ as *mut CudaGatorOsc)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
             (*(self as *const _ as *mut CudaGatorOsc)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
             let mut p_ptr = d_prices.as_device_ptr().as_raw();
@@ -479,12 +544,37 @@ impl CudaGatorOsc {
                 rows,
                 cols,
             },
+            upper: DeviceArrayF32 {
+                buf: d_upper,
+                rows,
+                cols,
+            },
+            lower: DeviceArrayF32 {
+                buf: d_lower,
+                rows,
+                cols,
+            },
+            upper_change: DeviceArrayF32 {
+                buf: d_uchn,
+                rows,
+                cols,
+            },
+            lower_change: DeviceArrayF32 {
+                buf: d_lchn,
+                rows,
+                cols,
+            },
         })
     }
 }
 
 // ---- Local helpers ----
 fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+    if step == 0 || start == end {
+        vec![start]
+    } else {
+        (start..=end).step_by(step).collect()
+    }
     if step == 0 || start == end {
         vec![start]
     } else {
@@ -498,6 +588,8 @@ fn expand_grid(r: &GatorOscBatchRange) -> Vec<GatorOscParams> {
     let ts = axis(r.teeth_shift);
     let ll = axis(r.lips_length);
     let ls = axis(r.lips_shift);
+    let mut out =
+        Vec::with_capacity(jl.len() * js.len() * tl.len() * ts.len() * ll.len() * ls.len());
     let mut out =
         Vec::with_capacity(jl.len() * js.len() * tl.len() * ts.len() * ll.len() * ls.len());
     for &a in &jl {
@@ -552,8 +644,17 @@ pub mod benches {
         data: Vec<f32>,
         sweep: GatorOscBatchRange,
     }
+    struct GatorBatchState {
+        cuda: CudaGatorOsc,
+        data: Vec<f32>,
+        sweep: GatorOscBatchRange,
+    }
     impl CudaBenchState for GatorBatchState {
         fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .gatorosc_batch_dev(&self.data, &self.sweep)
+                .expect("gator batch");
             let _ = self
                 .cuda
                 .gatorosc_batch_dev(&self.data, &self.sweep)
@@ -565,6 +666,12 @@ pub mod benches {
         let data = gen_series(ONE_SERIES_LEN);
         // 3×(length) × 2×(shift) grid ~ 96 rows
         let sweep = GatorOscBatchRange {
+            jaws_length: (8, 14, 2),
+            jaws_shift: (2, 6, 2),
+            teeth_length: (6, 10, 2),
+            teeth_shift: (1, 5, 2),
+            lips_length: (4, 8, 2),
+            lips_shift: (0, 4, 2),
             jaws_length: (8, 14, 2),
             jaws_shift: (2, 6, 2),
             teeth_length: (6, 10, 2),

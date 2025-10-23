@@ -60,6 +60,10 @@ impl Default for CudaAtrPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -81,6 +85,8 @@ pub struct CudaAtr {
 impl CudaAtr {
     pub fn new(device_id: usize) -> Result<Self, CudaAtrError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
@@ -121,6 +127,14 @@ impl CudaAtr {
             .synchronize()
             .map_err(|e| CudaAtrError::Cuda(e.to_string()))
     }
+    pub fn set_policy(&mut self, policy: CudaAtrPolicy) {
+        self.policy = policy;
+    }
+    pub fn synchronize(&self) -> Result<(), CudaAtrError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaAtrError::Cuda(e.to_string()))
+    }
 
     fn first_valid_hlc(high: &[f32], low: &[f32], close: &[f32]) -> Result<usize, CudaAtrError> {
         if high.len() == 0 || low.len() == 0 || close.len() == 0 {
@@ -148,6 +162,14 @@ impl CudaAtr {
         } else {
             true
         }
+        if !check {
+            return true;
+        }
+        if let Ok((free, _)) = mem_get_info() {
+            bytes.saturating_add(headroom) <= free
+        } else {
+            true
+        }
     }
 
     fn chunk_size_for_batch(n_combos: usize, len: usize) -> usize {
@@ -156,6 +178,7 @@ impl CudaAtr {
         let params_bytes = n_combos * (std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>());
         let out_per_combo = len * std::mem::size_of::<f32>();
         let headroom = 64 * 1024 * 1024; // ~64MB
+                                         // Start from all combos and shrink until it fits.
                                          // Start from all combos and shrink until it fits.
         let mut chunk = n_combos.max(1);
         while chunk > 1 {
@@ -220,10 +243,16 @@ impl CudaAtr {
         if len == 0 {
             return Err(CudaAtrError::InvalidInput("empty input".into()));
         }
+        if len == 0 {
+            return Err(CudaAtrError::InvalidInput("empty input".into()));
+        }
         let first_valid = Self::first_valid_hlc(high, low, close)?;
 
         // Expand parameter combos (length axis only)
         let (start, end, step) = sweep.length;
+        if start == 0 {
+            return Err(CudaAtrError::InvalidInput("period must be > 0".into()));
+        }
         if start == 0 {
             return Err(CudaAtrError::InvalidInput("period must be > 0".into()));
         }
@@ -235,10 +264,17 @@ impl CudaAtr {
         if periods.is_empty() {
             return Err(CudaAtrError::InvalidInput("no parameter combos".into()));
         }
+        if periods.is_empty() {
+            return Err(CudaAtrError::InvalidInput("no parameter combos".into()));
+        }
         for &p in &periods {
             if p == 0 || p > len || (len - first_valid) < p {
                 return Err(CudaAtrError::InvalidInput(format!(
                     "invalid period {} for data length {} (valid after {}: {})",
+                    p,
+                    len,
+                    first_valid,
+                    len - first_valid
                     p,
                     len,
                     first_valid,
@@ -570,6 +606,9 @@ impl CudaAtr {
                 self.stream
                     .launch(&func, grid, block, 0, args)
                     .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
             }
             launched += cur;
         }
@@ -590,7 +629,20 @@ impl CudaAtr {
         let n = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaAtrError::InvalidInput("rows*cols overflow".into()))?;
+    fn first_valids_time_major(
+        high_tm: &[f32],
+        low_tm: &[f32],
+        close_tm: &[f32],
+        cols: usize,
+        rows: usize,
+    ) -> Result<Vec<i32>, CudaAtrError> {
+        let n = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAtrError::InvalidInput("rows*cols overflow".into()))?;
         if high_tm.len() != n || low_tm.len() != n || close_tm.len() != n {
+            return Err(CudaAtrError::InvalidInput(
+                "time-major input length mismatch".into(),
+            ));
             return Err(CudaAtrError::InvalidInput(
                 "time-major input length mismatch".into(),
             ));
@@ -623,13 +675,29 @@ impl CudaAtr {
         if period == 0 {
             return Err(CudaAtrError::InvalidInput("period must be > 0".into()));
         }
+        if period == 0 {
+            return Err(CudaAtrError::InvalidInput("period must be > 0".into()));
+        }
         let first_valids = Self::first_valids_time_major(high_tm, low_tm, close_tm, cols, rows)?;
         if rows < period {
             return Err(CudaAtrError::InvalidInput(
                 "not enough rows for period".into(),
             ));
         }
+        if rows < period {
+            return Err(CudaAtrError::InvalidInput(
+                "not enough rows for period".into(),
+            ));
+        }
 
+        let mut d_high =
+            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+        let mut d_low =
+            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+        let mut d_close =
+            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
         let mut d_high =
             DeviceBuffer::from_slice(high_tm).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
         let mut d_low =
@@ -669,10 +737,15 @@ impl CudaAtr {
             let mut low_ptr = d_low.as_device_ptr().as_raw();
             let mut close_ptr = d_close.as_device_ptr().as_raw();
             let mut fv_ptr = d_fv.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut fv_ptr = d_fv.as_device_ptr().as_raw();
             let mut period_i = period as i32;
+            let mut alpha = 1.0f32 / (period as f32);
             let mut alpha = 1.0f32 / (period as f32);
             let mut num_series_i = cols as i32;
             let mut series_len_i = rows as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
             let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut high_ptr as *mut _ as *mut c_void,
@@ -688,8 +761,16 @@ impl CudaAtr {
             self.stream
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
         }
 
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -722,6 +803,9 @@ pub mod benches {
             if v.is_nan() {
                 continue;
             }
+            if v.is_nan() {
+                continue;
+            }
             let x = i as f32 * 0.002f32;
             let off = (0.004 * x.sin()).abs() + 0.12;
             high[i] = v + off;
@@ -736,6 +820,14 @@ pub mod benches {
         low: Vec<f32>,
         close: Vec<f32>,
         sweep: AtrBatchRange,
+    }
+    impl CudaBenchState for AtrBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .atr_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
+                .unwrap();
+        }
     }
     impl CudaBenchState for AtrBatchState {
         fn launch(&mut self) {
@@ -770,10 +862,28 @@ pub mod benches {
                 .unwrap();
         }
     }
+    impl CudaBenchState for AtrManyState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .atr_many_series_one_param_time_major_dev(
+                    &self.high_tm,
+                    &self.low_tm,
+                    &self.close_tm,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                )
+                .unwrap();
+        }
+    }
 
     struct BatchPrepCfg;
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let len = ONE_SERIES_LEN;
+        let pstart = 5usize;
+        let pend = 64usize;
+        let pstep = 5usize;
         let pstart = 5usize;
         let pend = 64usize;
         let pstep = 5usize;
@@ -787,12 +897,21 @@ pub mod benches {
             sweep: AtrBatchRange {
                 length: (pstart, pend, pstep),
             },
+            sweep: AtrBatchRange {
+                length: (pstart, pend, pstep),
+            },
         })
     }
 
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
         let (cols, rows, period) = (256usize, 262_144usize, 14usize);
         let mut close_tm = vec![f32::NAN; cols * rows];
+        for s in 0..cols {
+            for t in s..rows {
+                let x = (t as f32) + (s as f32) * 0.2;
+                close_tm[t * cols + s] = (x * 0.0017).sin() + 0.00015 * x;
+            }
+        }
         for s in 0..cols {
             for t in s..rows {
                 let x = (t as f32) + (s as f32) * 0.2;
@@ -821,9 +940,33 @@ pub mod benches {
             rows,
             period,
         })
+        for s in 0..cols {
+            for t in 0..rows {
+                let v = close_tm[t * cols + s];
+                if v.is_nan() {
+                    continue;
+                }
+                let x = (t as f32) * 0.002;
+                let off = (0.004 * x.cos()).abs() + 0.11;
+                high_tm[t * cols + s] = v + off;
+                low_tm[t * cols + s] = v - off;
+            }
+        }
+        Box::new(AtrManyState {
+            cuda: CudaAtr::new(0).unwrap(),
+            high_tm,
+            low_tm,
+            close_tm,
+            cols,
+            rows,
+            period,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        let pstart = 5usize;
+        let pend = 64usize;
+        let pstep = 5usize;
         let pstart = 5usize;
         let pend = 64usize;
         let pstep = 5usize;
@@ -845,6 +988,9 @@ pub mod benches {
             "256x262k",
             prep_many_series_one_param,
         )
+        .with_mem_required(
+            (3 * cols * rows + cols * rows) * std::mem::size_of::<f32>() + 64 * 1024 * 1024,
+        );
         .with_mem_required(
             (3 * cols * rows + cols * rows) * std::mem::size_of::<f32>() + 64 * 1024 * 1024,
         );

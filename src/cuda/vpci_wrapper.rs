@@ -61,6 +61,15 @@ impl Default for BatchKernelPolicy {
         Self::Auto
     }
 }
+pub enum BatchKernelPolicy {
+    Auto,
+    Plain { block_x: u32 },
+}
+impl Default for BatchKernelPolicy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
@@ -72,8 +81,21 @@ impl Default for ManySeriesKernelPolicy {
         Self::Auto
     }
 }
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
+pub struct CudaVpciPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
 pub struct CudaVpciPolicy {
     pub batch: BatchKernelPolicy,
     pub many_series: ManySeriesKernelPolicy,
@@ -95,12 +117,22 @@ impl CudaVpci {
         device_id: usize,
         policy: CudaVpciPolicy,
     ) -> Result<Self, CudaVpciError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaVpciPolicy,
+    ) -> Result<Self, CudaVpciError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vpci_kernel.ptx"));
+        let jit = [
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
         let jit = [
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -111,7 +143,15 @@ impl CudaVpci {
             .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
+            .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
 
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy,
+        })
         Ok(Self {
             module,
             stream,
@@ -134,9 +174,33 @@ impl CudaVpci {
             .synchronize()
             .map_err(|e| CudaVpciError::Cuda(e.to_string()))
     }
+    #[inline]
+    pub fn set_policy(&mut self, policy: CudaVpciPolicy) {
+        self.policy = policy;
+    }
+    #[inline]
+    pub fn policy(&self) -> &CudaVpciPolicy {
+        &self.policy
+    }
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaVpciError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaVpciError::Cuda(e.to_string()))
+    }
 
     #[inline]
     fn mem_ok(bytes: usize, headroom: usize) -> bool {
+        if std::env::var("CUDA_MEM_CHECK")
+            .ok()
+            .filter(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .is_some()
+        {
+            return true;
+        }
+        mem_get_info()
+            .map(|(free, _)| bytes.saturating_add(headroom) <= free)
+            .unwrap_or(true)
         if std::env::var("CUDA_MEM_CHECK")
             .ok()
             .filter(|v| v == "0" || v.eq_ignore_ascii_case("false"))
@@ -201,6 +265,10 @@ impl CudaVpci {
                     first = Some(r);
                     break;
                 }
+                if close_tm[idx].is_finite() && volume_tm[idx].is_finite() {
+                    first = Some(r);
+                    break;
+                }
             }
             if let Some(fv) = first {
                 first_valids[s] = fv as i32;
@@ -235,6 +303,13 @@ impl CudaVpci {
         if len == 0 {
             return Err(CudaVpciError::InvalidInput("empty input".into()));
         }
+        if close_f32.len() != volume_f32.len() {
+            return Err(CudaVpciError::InvalidInput("length mismatch".into()));
+        }
+        let len = close_f32.len();
+        if len == 0 {
+            return Err(CudaVpciError::InvalidInput("empty input".into()));
+        }
 
         // Expand grid locally
         fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
@@ -244,9 +319,30 @@ impl CudaVpci {
                 (s..=e).step_by(st).collect()
             }
         }
+        fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
+            if st == 0 || s == e {
+                vec![s]
+            } else {
+                (s..=e).step_by(st).collect()
+            }
+        }
         let shorts = axis_usize(sweep.short_range);
         let longs = axis_usize(sweep.long_range);
+        let longs = axis_usize(sweep.long_range);
         let mut combos = Vec::with_capacity(shorts.len() * longs.len());
+        for &s in &shorts {
+            for &l in &longs {
+                combos.push(VpciParams {
+                    short_range: Some(s),
+                    long_range: Some(l),
+                });
+            }
+        }
+        if combos.is_empty() {
+            return Err(CudaVpciError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         for &s in &shorts {
             for &l in &longs {
                 combos.push(VpciParams {
@@ -280,6 +376,15 @@ impl CudaVpci {
                 "insufficient VRAM for VPCI batch".into(),
             ));
         }
+        let headroom = std::env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        if !Self::mem_ok(bytes, headroom) {
+            return Err(CudaVpciError::InvalidInput(
+                "insufficient VRAM for VPCI batch".into(),
+            ));
+        }
 
         // Upload inputs (pinned sources → legal async copies)
         let d_pfx_c:  DeviceBuffer<Float2> = unsafe { DeviceBuffer::from_slice_async(h_pfx_c.as_slice(), &self.stream) }.map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
@@ -300,6 +405,10 @@ impl CudaVpci {
             .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
         let mut d_vpcis: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
             .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
+        let mut d_vpci: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
+            .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
+        let mut d_vpcis: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
+            .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
 
         // Launch
         let func = self.module.get_function("vpci_batch_f32").map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
@@ -311,11 +420,18 @@ impl CudaVpci {
         unsafe {
             let mut pfx_c_ptr = d_pfx_c.as_device_ptr().as_raw();
             let mut pfx_v_ptr = d_pfx_v.as_device_ptr().as_raw();
+            let mut pfx_c_ptr = d_pfx_c.as_device_ptr().as_raw();
+            let mut pfx_v_ptr = d_pfx_v.as_device_ptr().as_raw();
             let mut pfx_cv_ptr = d_pfx_cv.as_device_ptr().as_raw();
+            let mut vol_ptr = d_vol.as_device_ptr().as_raw();
             let mut vol_ptr = d_vol.as_device_ptr().as_raw();
             let mut shorts_ptr = d_shorts.as_device_ptr().as_raw();
             let mut longs_ptr = d_longs.as_device_ptr().as_raw();
+            let mut longs_ptr = d_longs.as_device_ptr().as_raw();
             let mut series_len_i = len as i32;
+            let mut n_rows_i = rows as i32;
+            let mut first_valid_i = (first_valid.min(len)) as i32;
+            let mut out_vpci_ptr = d_vpci.as_device_ptr().as_raw();
             let mut n_rows_i = rows as i32;
             let mut first_valid_i = (first_valid.min(len)) as i32;
             let mut out_vpci_ptr = d_vpci.as_device_ptr().as_raw();
@@ -337,13 +453,33 @@ impl CudaVpci {
 
             self.stream
                 .launch(&func, grid, block, 0, &mut args[..])
+            self.stream
+                .launch(&func, grid, block, 0, &mut args[..])
                 .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
         }
 
         self.stream
             .synchronize()
             .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
 
+        Ok((
+            DeviceArrayF32Pair {
+                a: DeviceArrayF32 {
+                    buf: d_vpci,
+                    rows,
+                    cols: len,
+                },
+                b: DeviceArrayF32 {
+                    buf: d_vpcis,
+                    rows,
+                    cols: len,
+                },
+            },
+            combos,
+        ))
         Ok((
             DeviceArrayF32Pair {
                 a: DeviceArrayF32 {
@@ -383,6 +519,18 @@ impl CudaVpci {
                 "dims do not match data length".into(),
             ));
         }
+        let long_p = params.long_range.unwrap_or(25);
+        if short_p == 0 || long_p == 0 || short_p > long_p {
+            return Err(CudaVpciError::InvalidInput("invalid params".into()));
+        }
+        if cols == 0 || rows == 0 {
+            return Err(CudaVpciError::InvalidInput("invalid dims".into()));
+        }
+        if close_tm_f32.len() != rows * cols || volume_tm_f32.len() != rows * cols {
+            return Err(CudaVpciError::InvalidInput(
+                "dims do not match data length".into(),
+            ));
+        }
 
         let (first_valids, h_pfx_c, h_pfx_v, h_pfx_cv) = self.build_prefix_tm(close_tm_f32, volume_tm_f32, cols, rows)?;
 
@@ -401,6 +549,10 @@ impl CudaVpci {
             .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
         let mut d_vpcis: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
             .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
+        let mut d_vpci: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
+            .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
+        let mut d_vpcis: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
+            .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
 
         // Launch (X across series)
         let func = self.module.get_function("vpci_many_series_one_param_f32").map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
@@ -412,9 +564,17 @@ impl CudaVpci {
         unsafe {
             let mut pfx_c_ptr = d_pfx_c.as_device_ptr().as_raw();
             let mut pfx_v_ptr = d_pfx_v.as_device_ptr().as_raw();
+            let mut pfx_c_ptr = d_pfx_c.as_device_ptr().as_raw();
+            let mut pfx_v_ptr = d_pfx_v.as_device_ptr().as_raw();
             let mut pfx_cv_ptr = d_pfx_cv.as_device_ptr().as_raw();
             let mut vol_ptr = d_vol.as_device_ptr().as_raw();
+            let mut vol_ptr = d_vol.as_device_ptr().as_raw();
             let mut firsts_ptr = d_firsts.as_device_ptr().as_raw();
+            let mut cols_i = cols as i32;
+            let mut rows_i = rows as i32;
+            let mut short_i = short_p as i32;
+            let mut long_i = long_p as i32;
+            let mut out_vpci_ptr = d_vpci.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut rows_i = rows as i32;
             let mut short_i = short_p as i32;
@@ -436,14 +596,29 @@ impl CudaVpci {
             ];
             self.stream
                 .launch(&func, grid, block, 0, &mut args[..])
+            self.stream
+                .launch(&func, grid, block, 0, &mut args[..])
                 .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
         }
 
         self.stream
             .synchronize()
             .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaVpciError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32Pair {
+            a: DeviceArrayF32 {
+                buf: d_vpci,
+                rows,
+                cols,
+            },
+            b: DeviceArrayF32 {
+                buf: d_vpcis,
+                rows,
+                cols,
+            },
             a: DeviceArrayF32 {
                 buf: d_vpci,
                 rows,
@@ -486,9 +661,41 @@ pub mod benches {
             let _ = self.cuda.vpci_batch_dev(&self.c, &self.v, &self.sweep);
         }
     }
+    impl CudaBenchState for BatchState {
+        fn launch(&mut self) {
+            let _ = self.cuda.vpci_batch_dev(&self.c, &self.v, &self.sweep);
+        }
+    }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
+        v.push(
+            CudaBenchScenario::new(
+                "vpci",
+                "one_series_many_params",
+                "vpci_batch",
+                "vpci/batch/1e6",
+                || {
+                    let mut close = gen_series(ONE_SERIES_LEN);
+                    let mut vol = gen_series(ONE_SERIES_LEN);
+                    // Ensure both finite from some point
+                    for i in 0..1024 {
+                        close[i] = f32::NAN;
+                        vol[i] = f32::NAN;
+                    }
+                    Box::new(BatchState {
+                        cuda: CudaVpci::new(0).unwrap(),
+                        c: close,
+                        v: vol,
+                        sweep: VpciBatchRange {
+                            short_range: (5, 20, 1),
+                            long_range: (25, 60, 5),
+                        },
+                    })
+                },
+            )
+            .with_mem_required(bytes_one_series(((60 - 25) / 5 + 1) * ((20 - 5) / 1 + 1))),
+        );
         v.push(
             CudaBenchScenario::new(
                 "vpci",

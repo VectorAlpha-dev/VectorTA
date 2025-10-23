@@ -110,6 +110,18 @@ impl CudaZscore {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
+    pub fn set_policy(&mut self, policy: CudaZscorePolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaZscorePolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     fn expand_combos(range: &ZscoreBatchRange) -> Vec<(usize, f64, String, usize)> {
         fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
@@ -308,6 +320,10 @@ impl CudaZscore {
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         };
         // record selection once
+        unsafe {
+            (*(self as *const _ as *mut CudaZscore)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         unsafe {
             (*(self as *const _ as *mut CudaZscore)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -598,6 +614,10 @@ impl CudaZscore {
             (*(self as *const _ as *mut CudaZscore)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
+        unsafe {
+            (*(self as *const _ as *mut CudaZscore)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         self.maybe_log_many_debug();
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -632,6 +652,11 @@ impl CudaZscore {
             rows,
             cols,
         })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn zscore_many_series_one_param_time_major_into_host_f32(
@@ -649,9 +674,16 @@ impl CudaZscore {
                 "out slice wrong length: got {}, expected {}",
                 out_tm.len(),
                 expected
+                out_tm.len(),
+                expected
             )));
         }
         let arr = self.zscore_many_series_one_param_time_major_dev(
+            data_tm_f32,
+            cols,
+            rows,
+            period,
+            nbdev,
             data_tm_f32,
             cols,
             rows,
@@ -742,7 +774,21 @@ pub enum BatchKernelPolicy {
         block_x: u32,
     },
 }
+pub enum BatchKernelPolicy {
+    #[default]
+    Auto,
+    Plain {
+        block_x: u32,
+    },
+}
 #[derive(Clone, Copy, Debug, Default)]
+pub enum ManySeriesKernelPolicy {
+    #[default]
+    Auto,
+    OneD {
+        block_x: u32,
+    },
+}
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
@@ -756,12 +802,22 @@ pub struct CudaZscorePolicy {
     pub batch: BatchKernelPolicy,
     pub many_series: ManySeriesKernelPolicy,
 }
+pub struct CudaZscorePolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -772,10 +828,34 @@ impl Default for CudaZscorePolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
 impl CudaZscore {
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        env::var("CUDA_MEM_CHECK")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true)
+    }
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     #[inline]
     fn mem_check_enabled() -> bool {
         env::var("CUDA_MEM_CHECK")
@@ -805,6 +885,9 @@ impl CudaZscore {
             if start >= n {
                 return None;
             }
+            if start >= n {
+                return None;
+            }
             let len = (n - start).min(LIM);
             let cur = (start, len);
             start += len;
@@ -818,10 +901,16 @@ impl CudaZscore {
         if self.debug_batch_logged {
             return;
         }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] zscore batch selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaZscore)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaZscore)).debug_batch_logged = true;
@@ -836,10 +925,16 @@ impl CudaZscore {
         if self.debug_many_logged {
             return;
         }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] zscore many-series selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaZscore)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaZscore)).debug_many_logged = true;

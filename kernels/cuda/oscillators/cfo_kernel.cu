@@ -112,33 +112,61 @@ extern "C" __global__ void cfo_many_series_one_param_time_major_f32(
     const double inv_denom = 1.0 / (n * sx2 - sx * sx);
     const double half_nm1 = 0.5 * (n - 1.0);
 
-    const int stride = gridDim.x * blockDim.x; // stride over time dimension
-    const float nanf = f32_nan();
-    for (int t = tx; t < rows; t += stride) {
-        float out_val = nanf;
-        if (t >= warm) {
-            const int idx_valid = t - fv;       // 0-based within valid segment
-            const int r1 = idx_valid + 1;       // 1-based
-            const int l1_minus1 = r1 - period;  // (left1 - 1)
-
-            const int wr = (t * cols + s) + 1;
-            const int wl = ((t - period) * cols + s) + 1; // since t >= warm, (t - period) >= (fv - 1)
-
-            const double sum_y = prefix_sum_tm[wr] - prefix_sum_tm[wl];
-            const double sum_xy_raw = prefix_weighted_tm[wr] - prefix_weighted_tm[wl];
-            const double sum_xy = sum_xy_raw - ((double)l1_minus1) * sum_y;
-
-            const double b = (-sx) * sum_y + n * sum_xy;
-            const double b_scaled = b * inv_denom;
-            const double f = b_scaled * half_nm1 + sum_y / n;
-            const float cur = data_tm[t * cols + s];
-            if (!isnan(cur) && cur != 0.0f) {
-                out_val = scalar * (1.0f - (float)(f / (double)cur));
-            } else {
-                out_val = nanf;
-            }
+    // Exact streaming path per series to match CPU scalar implementation.
+    // Run sequentially on a single thread per series (x==0 of grid.x==0).
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        const float nanf = f32_nan();
+        // Emit NaNs before first valid
+        int t = 0;
+        for (; t < fv && t < rows; ++t) {
+            out_tm[t * cols + s] = nanf;
         }
-        out_tm[t * cols + s] = out_val;
+        if (t >= rows) return;
+
+        // Warm-up accumulation for first (period-1) samples
+        double sum_y = 0.0;
+        double sum_xy = 0.0;
+        int warm_needed = period - 1;
+        int k = 0;
+        for (; k < warm_needed && t < rows; ++k, ++t) {
+            float v = data_tm[t * cols + s];
+            double vd = (double)v;
+            double w = (double)(k + 1);
+            sum_y += vd;
+            sum_xy += vd * w;
+            out_tm[t * cols + s] = nanf;
+        }
+        if (t >= rows) return;
+
+        // First full window: add newest with weight n
+        {
+            float v = data_tm[t * cols + s];
+            double vd = (double)v;
+            sum_y += vd;
+            sum_xy += vd * n;
+            double b = (-sx) * sum_y + n * sum_xy;
+            double f = (b * inv_denom) * half_nm1 + sum_y / n;
+            out_tm[t * cols + s] = (!isnan(v) && v != 0.0f)
+                ? (float)(scalar * (1.0 - f / (double)v))
+                : nanf;
+            ++t;
+        }
+
+        // Steady-state sliding updates
+        for (; t < rows; ++t) {
+            float v_new = data_tm[t * cols + s];
+            float v_old = data_tm[(t - period) * cols + s];
+            double vd_new = (double)v_new;
+            double vd_old = (double)v_old;
+            double new_sum_xy = (n * vd_new) + (sum_xy - sum_y);
+            double new_sum_y = sum_y - vd_old + vd_new;
+            sum_xy = new_sum_xy;
+            sum_y = new_sum_y;
+            double b = (-sx) * sum_y + n * sum_xy;
+            double f = (b * inv_denom) * half_nm1 + sum_y / n;
+            out_tm[t * cols + s] = (!isnan(v_new) && v_new != 0.0f)
+                ? (float)(scalar * (1.0 - f / (double)v_new))
+                : nanf;
+        }
     }
 }
-

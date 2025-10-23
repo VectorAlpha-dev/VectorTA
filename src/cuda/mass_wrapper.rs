@@ -57,6 +57,9 @@ impl Default for BatchKernelPolicy {
     fn default() -> Self {
         BatchKernelPolicy::Auto
     }
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -66,6 +69,9 @@ pub enum ManySeriesKernelPolicy {
 }
 
 impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
     fn default() -> Self {
         ManySeriesKernelPolicy::Auto
     }
@@ -111,6 +117,8 @@ impl CudaMass {
         cust::init(CudaFlags::empty()).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mass_kernel.ptx"));
@@ -123,6 +131,8 @@ impl CudaMass {
             Err(_) => {
                 if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaMassError::Cuda(e.to_string()))?
@@ -131,7 +141,16 @@ impl CudaMass {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
+            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
 
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy: CudaMassPolicy::default(),
+            debug_logged: false,
+        })
         Ok(Self {
             module,
             stream,
@@ -144,8 +163,14 @@ impl CudaMass {
     pub fn set_policy(&mut self, policy: CudaMassPolicy) {
         self.policy = policy;
     }
+    pub fn set_policy(&mut self, policy: CudaMassPolicy) {
+        self.policy = policy;
+    }
 
     fn maybe_log_selected(&mut self, which: &str, block_x: u32) {
+        if self.debug_logged {
+            return;
+        }
         if self.debug_logged {
             return;
         }
@@ -161,6 +186,9 @@ impl CudaMass {
         high.iter()
             .zip(low.iter())
             .position(|(&h, &l)| h.is_finite() && l.is_finite())
+        high.iter()
+            .zip(low.iter())
+            .position(|(&h, &l)| h.is_finite() && l.is_finite())
     }
 
     fn precompute_ratio_prefix_one_series_ds(
@@ -171,8 +199,13 @@ impl CudaMass {
             return Err(CudaMassError::InvalidInput(
                 "mismatched or empty inputs".into(),
             ));
+            return Err(CudaMassError::InvalidInput(
+                "mismatched or empty inputs".into(),
+            ));
         }
         let n = high.len();
+        let first = Self::first_valid_hilo(high, low)
+            .ok_or_else(|| CudaMassError::InvalidInput("all values are NaN".into()))?;
         let first = Self::first_valid_hilo(high, low)
             .ok_or_else(|| CudaMassError::InvalidInput("all values are NaN".into()))?;
 
@@ -297,7 +330,13 @@ impl CudaMass {
         if cols == 0 || rows == 0 {
             return Err(CudaMassError::InvalidInput("cols/rows zero".into()));
         }
+        if cols == 0 || rows == 0 {
+            return Err(CudaMassError::InvalidInput("cols/rows zero".into()));
+        }
         if high_tm.len() != cols * rows || low_tm.len() != cols * rows {
+            return Err(CudaMassError::InvalidInput(
+                "time-major inputs wrong length".into(),
+            ));
             return Err(CudaMassError::InvalidInput(
                 "time-major inputs wrong length".into(),
             ));
@@ -320,7 +359,18 @@ impl CudaMass {
                     fv = Some(t);
                     break;
                 }
+                if h.is_finite() && l.is_finite() {
+                    fv = Some(t);
+                    break;
+                }
             }
+            let fv = match fv {
+                Some(x) => x,
+                None => {
+                    first_valids[s] = rows as i32;
+                    continue;
+                }
+            };
             let fv = match fv {
                 Some(x) => x,
                 None => {
@@ -344,6 +394,9 @@ impl CudaMass {
                 }
                 let hl = (high_tm[idx] as f64) - (low_tm[idx] as f64);
                 ema1 = ema1.mul_add(inv_alpha, hl * alpha);
+                if t == start_ema2 {
+                    ema2 = ema1;
+                }
                 if t == start_ema2 {
                     ema2 = ema1;
                 }
@@ -375,6 +428,9 @@ impl CudaMass {
             return Err(CudaMassError::InvalidInput(
                 "mismatched or empty inputs".into(),
             ));
+            return Err(CudaMassError::InvalidInput(
+                "mismatched or empty inputs".into(),
+            ));
         }
 
         // Expand parameter grid
@@ -383,10 +439,18 @@ impl CudaMass {
             return Err(CudaMassError::InvalidInput(
                 "no parameter combinations".into(),
             ));
+            return Err(CudaMassError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         let (prefix_ratio_ds, prefix_nan, first_valid) = Self::precompute_ratio_prefix_one_series_ds(high, low)?;
 
         let len = high.len();
+        let max_period = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
         let max_period = combos
             .iter()
             .map(|c| c.period.unwrap_or(0))
@@ -411,6 +475,9 @@ impl CudaMass {
                 return Err(CudaMassError::InvalidInput(
                     "insufficient device memory for mass batch".into(),
                 ));
+                return Err(CudaMassError::InvalidInput(
+                    "insufficient device memory for mass batch".into(),
+                ));
             }
         }
 
@@ -423,12 +490,20 @@ impl CudaMass {
             .iter()
             .map(|c| c.period.unwrap_or(0) as i32)
             .collect();
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0) as i32)
+            .collect();
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = DeviceBuffer::zeroed(len * combos.len())
             .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
 
         // Launch config
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
+            _ => 256,
+        };
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
             _ => 256,
@@ -466,7 +541,18 @@ impl CudaMass {
         self.stream
             .synchronize()
             .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
 
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
+            combos,
+        ))
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -516,11 +602,21 @@ fn expand_mass_combos(r: &MassBatchRange) -> Vec<MassParams> {
         return v;
     }
     if start == 0 || end == 0 || start > end || step == 0 {
+        v.push(MassParams {
+            period: Some(start),
+        });
+        return v;
+    }
+    if start == 0 || end == 0 || start > end || step == 0 {
         return v;
     }
     let mut p = start;
     while p <= end {
         v.push(MassParams { period: Some(p) });
+        match p.checked_add(step) {
+            Some(nxt) => p = nxt,
+            None => break,
+        }
         match p.checked_add(step) {
             Some(nxt) => p = nxt,
             None => break,
@@ -547,6 +643,10 @@ pub mod benches {
                 .cuda
                 .mass_batch_dev(&self.high, &self.low, &self.sweep)
                 .expect("mass batch");
+            let _ = self
+                .cuda
+                .mass_batch_dev(&self.high, &self.low, &self.sweep)
+                .expect("mass batch");
         }
     }
 
@@ -563,8 +663,18 @@ pub mod benches {
             let p = MassParams {
                 period: Some(self.period),
             };
+            let p = MassParams {
+                period: Some(self.period),
+            };
             let _ = self
                 .cuda
+                .mass_many_series_one_param_time_major_dev(
+                    &self.high_tm,
+                    &self.low_tm,
+                    self.cols,
+                    self.rows,
+                    &p,
+                )
                 .mass_many_series_one_param_time_major_dev(
                     &self.high_tm,
                     &self.low_tm,
@@ -585,6 +695,12 @@ pub mod benches {
             low[i] = high[i] - (0.5 + (x * 0.0017).cos().abs());
         }
         let sweep = MassBatchRange { period: (2, 32, 2) };
+        Box::new(MassBatchState {
+            cuda: CudaMass::new(0).expect("cuda mass"),
+            high,
+            low,
+            sweep,
+        })
         Box::new(MassBatchState {
             cuda: CudaMass::new(0).expect("cuda mass"),
             high,
@@ -615,10 +731,34 @@ pub mod benches {
             rows,
             period: 9,
         })
+        Box::new(MassManySeriesState {
+            cuda: CudaMass::new(0).expect("cuda mass"),
+            high_tm,
+            low_tm,
+            cols,
+            rows,
+            period: 9,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
+            CudaBenchScenario::new(
+                "mass",
+                "batch_dev",
+                "mass_cuda_batch_dev",
+                "120k_x_16combos",
+                prep_mass_batch,
+            )
+            .with_inner_iters(4),
+            CudaBenchScenario::new(
+                "mass",
+                "many_series_one_param",
+                "mass_cuda_many_series_one_param",
+                "64x120k",
+                prep_mass_many_series,
+            )
+            .with_inner_iters(2),
             CudaBenchScenario::new(
                 "mass",
                 "batch_dev",

@@ -70,12 +70,18 @@ pub enum BatchKernelPolicy {
     Plain {
         block_x: u32,
     },
+    Plain {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
+    OneD {
+        block_x: u32,
+    },
     OneD {
         block_x: u32,
     },
@@ -91,8 +97,14 @@ pub struct CudaKurtosisPolicy {
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 
 #[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -154,6 +166,18 @@ impl CudaKurtosis {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
+    pub fn set_policy(&mut self, policy: CudaKurtosisPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaKurtosisPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -166,8 +190,14 @@ impl CudaKurtosis {
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if !Self::mem_check_enabled() {
             return true;
         }
@@ -184,10 +214,16 @@ impl CudaKurtosis {
         if self.debug_batch_logged {
             return;
         }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] kurtosis batch selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaKurtosis)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaKurtosis)).debug_batch_logged = true;
@@ -202,10 +238,16 @@ impl CudaKurtosis {
         if self.debug_many_logged {
             return;
         }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] kurtosis many-series selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaKurtosis)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaKurtosis)).debug_many_logged = true;
@@ -244,6 +286,9 @@ impl CudaKurtosis {
             return Err(CudaKurtosisError::InvalidInput(
                 "no parameter combinations".into(),
             ));
+            return Err(CudaKurtosisError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         for c in &combos {
             let p = c.period.unwrap_or(0);
@@ -255,7 +300,18 @@ impl CudaKurtosis {
                     "period exceeds data length".into(),
                 ));
             }
+            if p == 0 {
+                return Err(CudaKurtosisError::InvalidInput("period must be > 0".into()));
+            }
+            if p > len {
+                return Err(CudaKurtosisError::InvalidInput(
+                    "period exceeds data length".into(),
+                ));
+            }
             if len - first_valid < p {
+                return Err(CudaKurtosisError::InvalidInput(
+                    "not enough valid data after first_valid".into(),
+                ));
                 return Err(CudaKurtosisError::InvalidInput(
                     "not enough valid data after first_valid".into(),
                 ));
@@ -361,6 +417,10 @@ impl CudaKurtosis {
             (*(self as *const _ as *mut CudaKurtosis)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
+        unsafe {
+            (*(self as *const _ as *mut CudaKurtosis)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
 
         // Chunk grid.y to <= 65_535
         let mut launched = 0usize;
@@ -379,8 +439,14 @@ impl CudaKurtosis {
                 let mut periods = d_periods
                     .as_device_ptr()
                     .as_raw()
+                let mut periods = d_periods
+                    .as_device_ptr()
+                    .as_raw()
                     .saturating_add((launched as u64) * (std::mem::size_of::<i32>() as u64));
                 let mut combos_i = chunk as i32;
+                let mut outp = d_out.as_device_ptr().as_raw().saturating_add(
+                    ((launched * len) as u64) * (std::mem::size_of::<f32>() as u64),
+                );
                 let mut outp = d_out.as_device_ptr().as_raw().saturating_add(
                     ((launched * len) as u64) * (std::mem::size_of::<f32>() as u64),
                 );
@@ -426,6 +492,7 @@ impl CudaKurtosis {
             return Err(CudaKurtosisError::Cuda(format!(
                 "insufficient VRAM (need ~{} MiB incl. headroom)",
                 (required + headroom + (1 << 20) - 1) / (1 << 20)
+                (required + headroom + (1 << 20) - 1) / (1 << 20)
             )));
         }
 
@@ -461,8 +528,31 @@ impl CudaKurtosis {
         self.stream
             .synchronize()
             .map_err(|e| CudaKurtosisError::Cuda(e.to_string()))?;
+        self.launch_batch(
+            &d_ps1,
+            &d_ps2,
+            &d_ps3,
+            &d_ps4,
+            &d_psn,
+            len,
+            first_valid,
+            &d_periods,
+            combos.len(),
+            &mut d_out,
+        )?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaKurtosisError::Cuda(e.to_string()))?;
         self.maybe_log_batch_debug();
 
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
+            combos,
+        ))
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -483,10 +573,19 @@ impl CudaKurtosis {
         if cols == 0 || rows == 0 {
             return Err(CudaKurtosisError::InvalidInput("empty matrix".into()));
         }
+        if cols == 0 || rows == 0 {
+            return Err(CudaKurtosisError::InvalidInput("empty matrix".into()));
+        }
         if data_tm_f32.len() != cols * rows {
             return Err(CudaKurtosisError::InvalidInput(
                 "time-major slice length mismatch".into(),
             ));
+            return Err(CudaKurtosisError::InvalidInput(
+                "time-major slice length mismatch".into(),
+            ));
+        }
+        if period == 0 {
+            return Err(CudaKurtosisError::InvalidInput("period must be > 0".into()));
         }
         if period == 0 {
             return Err(CudaKurtosisError::InvalidInput("period must be > 0".into()));
@@ -498,6 +597,10 @@ impl CudaKurtosis {
             let mut fv = -1i32;
             for t in 0..rows {
                 let v = data_tm_f32[t * cols + s];
+                if !v.is_nan() {
+                    fv = t as i32;
+                    break;
+                }
                 if !v.is_nan() {
                     fv = t as i32;
                     break;
@@ -538,6 +641,10 @@ impl CudaKurtosis {
             (*(self as *const _ as *mut CudaKurtosis)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
+        unsafe {
+            (*(self as *const _ as *mut CudaKurtosis)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
 
         unsafe {
             let mut in_ptr = d_in.as_device_ptr().as_raw();
@@ -561,8 +668,16 @@ impl CudaKurtosis {
         self.stream
             .synchronize()
             .map_err(|e| CudaKurtosisError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaKurtosisError::Cuda(e.to_string()))?;
         self.maybe_log_many_debug();
 
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -606,6 +721,9 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaKurtosis::new(0).expect("cuda kurtosis");
         let price = gen_series(ONE_SERIES_LEN);
+        let sweep = KurtosisBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
         let sweep = KurtosisBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };

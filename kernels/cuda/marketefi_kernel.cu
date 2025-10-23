@@ -10,68 +10,164 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
+#include <stdint.h>
 
+// ---- Small helpers ---------------------------------------------------------
+
+__device__ __forceinline__ float mfi_elem(float h, float l, float v, bool ok) {
+    if (!ok) return CUDART_NAN_F;
+    if (isnan(h) || isnan(l) || isnan(v) || v == 0.0f) return CUDART_NAN_F;
+    return (h - l) / v;
+}
+
+// ---- 1) Single-series, grid-stride with ILP --------------------------------
 extern "C" __global__ void marketefi_kernel_f32(const float* __restrict__ high,
                                                  const float* __restrict__ low,
                                                  const float* __restrict__ volume,
                                                  int len,
                                                  int first_valid,
                                                  float* __restrict__ out) {
-    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    const int stride = blockDim.x * gridDim.x;
-
     if (len <= 0) return;
-    const int first = first_valid < 0 ? 0 : first_valid;
 
-    for (int i = tid; i < len; i += stride) {
-        if (i < first) {
-            out[i] = CUDART_NAN_F;
-            continue;
-        }
+    const int tid    = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+    const int first  = first_valid < 0 ? 0 : first_valid;
 
-        const float h = high[i];
-        const float l = low[i];
-        const float v = volume[i];
-        if (isnan(h) || isnan(l) || isnan(v) || v == 0.0f) {
-            out[i] = CUDART_NAN_F;
-        } else {
-            out[i] = (h - l) / v;
+    // Process up to 4 items per iteration to hide latency
+    constexpr int ILP = 4;
+
+    for (int base = tid; base < len; base += stride * ILP) {
+#pragma unroll
+        for (int k = 0; k < ILP; ++k) {
+            int i = base + k * blockDim.x; // keeps coalescing for each k arm
+            if (i < len) {
+                const bool ok = (i >= first);
+                const float h = high[i];
+                const float l = low[i];
+                const float v = volume[i];
+                out[i] = mfi_elem(h, l, v, ok);
+            }
         }
     }
 }
 
-// Many-series × one-param (time-major). Paramless indicator; we still separate entry
-// for API parity. Each block handles one series; threads sweep the time dimension.
+// ---- 2) Many-series × one-param (time-major) --------------------------------
+// Layout: *_tm is [time][series], so consecutive series are contiguous.
+// Primary mapping (preferred): threads in X span series; grid.x tiles time.
+// Back-compat: if launched with grid=(num_series,1,1) and one block per series
+// (older wrappers), fall back to a 1D-per-series kernel to preserve behavior.
+
+#ifndef MKT_T_TILE
+#define MKT_T_TILE 128
+#endif
+
 extern "C" __global__ void marketefi_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ volume_tm,
-    const int* __restrict__ first_valids,
+    const int*   __restrict__ first_valids,  // may be null
     int num_series,
     int series_len,
     float* __restrict__ out_tm) {
-    const int s = blockIdx.x; // series index
-    if (s >= num_series || series_len <= 0) return;
-    const int stride_series = num_series; // time-major layout
-    const int first = first_valids ? max(0, first_valids[s]) : 0;
 
-    // Prefix NaNs up to first
-    for (int t = threadIdx.x; t < min(first, series_len); t += blockDim.x) {
-        out_tm[t * stride_series + s] = CUDART_NAN_F;
+    if (num_series <= 0 || series_len <= 0) return;
+
+    // Back-compat detection: legacy launch config uses one block per series
+    const bool legacy_1d = (gridDim.y == 1) && (gridDim.x == num_series);
+    if (legacy_1d) {
+        // Original mapping: blockIdx.x == series, threads sweep time.
+        const int s = blockIdx.x;
+        if (s >= num_series) return;
+        const int first = first_valids ? (first_valids[s] < 0 ? 0 : first_valids[s]) : 0;
+        const int stride_series = num_series; // [time][series]
+
+        // Prefix NaNs up to first
+        for (int t = threadIdx.x; t < min(first, series_len); t += blockDim.x) {
+            out_tm[t * stride_series + s] = CUDART_NAN_F;
+        }
+        // Process the rest
+        for (int t = threadIdx.x + first; t < series_len; t += blockDim.x) {
+            const int idx = t * stride_series + s;
+            const float h = high_tm[idx];
+            const float l = low_tm[idx];
+            const float v = volume_tm[idx];
+            out_tm[idx] = mfi_elem(h, l, v, true);
+        }
+        return;
     }
 
-    // Each thread processes every blockDim.x-th time index starting at its lane
-    for (int t = threadIdx.x + first; t < series_len; t += blockDim.x) {
-        const float h = high_tm[t * stride_series + s];
-        const float l = low_tm[t * stride_series + s];
-        const float v = volume_tm[t * stride_series + s];
-        float outv;
-        if (isnan(h) || isnan(l) || isnan(v) || v == 0.0f) {
-            outv = CUDART_NAN_F;
-        } else {
-            outv = (h - l) / v;
+    // Preferred mapping with optional vectorization
+    const uintptr_t mask16 = 0xF;
+    const bool aligned16 =
+        (((uintptr_t)high_tm   | (uintptr_t)low_tm |
+          (uintptr_t)volume_tm | (uintptr_t)out_tm |
+          (uintptr_t)first_valids) & mask16) == 0;
+    const bool vec_ok = aligned16 && ((num_series & 3) == 0);
+
+    if (vec_ok) {
+        // Vectorized path: operate on 4 series at a time (float4)
+        const int series4 = num_series >> 2; // number of float4 groups
+        const int s4 = blockIdx.y * blockDim.x + threadIdx.x; // group index across series
+        if (s4 >= series4) return;
+
+        // Preload first_valids for these 4 series
+        int4 fv4 = make_int4(0, 0, 0, 0);
+        if (first_valids) {
+            const int4* __restrict__ fv_ptr = reinterpret_cast<const int4*>(first_valids);
+            fv4 = fv_ptr[s4];
+            fv4.x = fv4.x < 0 ? 0 : fv4.x;
+            fv4.y = fv4.y < 0 ? 0 : fv4.y;
+            fv4.z = fv4.z < 0 ? 0 : fv4.z;
+            fv4.w = fv4.w < 0 ? 0 : fv4.w;
         }
-        out_tm[t * stride_series + s] = outv;
+
+        const float4* __restrict__ H = reinterpret_cast<const float4*>(high_tm);
+        const float4* __restrict__ L = reinterpret_cast<const float4*>(low_tm);
+        const float4* __restrict__ V = reinterpret_cast<const float4*>(volume_tm);
+        float4* __restrict__ O       = reinterpret_cast<float4*>(out_tm);
+
+        const int stride4_t = series4;
+
+        for (int t0 = blockIdx.x * MKT_T_TILE; t0 < series_len; t0 += gridDim.x * MKT_T_TILE) {
+            const int t_end = min(series_len, t0 + MKT_T_TILE);
+
+#pragma unroll 4
+            for (int t = t0; t < t_end; ++t) {
+                const int idx4 = t * stride4_t + s4;
+
+                const float4 h4 = H[idx4];
+                const float4 l4 = L[idx4];
+                const float4 v4 = V[idx4];
+
+                float4 out4;
+                out4.x = mfi_elem(h4.x, l4.x, v4.x, t >= fv4.x);
+                out4.y = mfi_elem(h4.y, l4.y, v4.y, t >= fv4.y);
+                out4.z = mfi_elem(h4.z, l4.z, v4.z, t >= fv4.z);
+                out4.w = mfi_elem(h4.w, l4.w, v4.w, t >= fv4.w);
+
+                O[idx4] = out4; // 128-bit store
+            }
+        }
+    } else {
+        // Scalar fallback with preferred mapping: threadIdx.x spans series
+        const int s = blockIdx.y * blockDim.x + threadIdx.x; // series index
+        if (s >= num_series) return;
+
+        const int first = first_valids ? (first_valids[s] < 0 ? 0 : first_valids[s]) : 0;
+        const int stride_series = num_series; // [time][series]
+
+        for (int t0 = blockIdx.x * MKT_T_TILE; t0 < series_len; t0 += gridDim.x * MKT_T_TILE) {
+            const int t_end = min(series_len, t0 + MKT_T_TILE);
+
+#pragma unroll 4
+            for (int t = t0; t < t_end; ++t) {
+                const int idx = t * stride_series + s;
+                const float h = high_tm[idx];
+                const float l = low_tm[idx];
+                const float v = volume_tm[idx];
+                out_tm[idx] = mfi_elem(h, l, v, t >= first);
+            }
+        }
     }
 }
 

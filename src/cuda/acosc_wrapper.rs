@@ -70,6 +70,8 @@ impl CudaAcosc {
         cust::init(CudaFlags::empty()).map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/acosc_kernel.ptx"));
         let jit = &[
@@ -78,9 +80,16 @@ impl CudaAcosc {
         ];
         let module = Module::from_ptx(ptx, jit)
             .or_else(|_| Module::from_ptx(ptx, &[]))
+        let module = Module::from_ptx(ptx, jit)
+            .or_else(|_| Module::from_ptx(ptx, &[]))
             .map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+        })
         Ok(Self {
             module,
             stream,
@@ -110,8 +119,14 @@ impl CudaAcosc {
         if !Self::mem_check_enabled() {
             return true;
         }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
         } else {
             true
         }
@@ -147,6 +162,10 @@ impl CudaAcosc {
             DeviceBuffer::from_slice(high_f32).map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
         let d_low =
             DeviceBuffer::from_slice(low_f32).map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
+        let d_high =
+            DeviceBuffer::from_slice(high_f32).map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
+        let d_low =
+            DeviceBuffer::from_slice(low_f32).map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
         let mut d_osc: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
             .map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
         let mut d_change: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
@@ -160,8 +179,26 @@ impl CudaAcosc {
             &mut d_osc,
             &mut d_change,
         )?;
+        self.launch_batch_kernel(
+            &d_high,
+            &d_low,
+            len as i32,
+            first_valid as i32,
+            &mut d_osc,
+            &mut d_change,
+        )?;
 
         Ok(DeviceAcoscPair {
+            osc: DeviceArrayF32 {
+                buf: d_osc,
+                rows: 1,
+                cols: len,
+            },
+            change: DeviceArrayF32 {
+                buf: d_change,
+                rows: 1,
+                cols: len,
+            },
             osc: DeviceArrayF32 {
                 buf: d_osc,
                 rows: 1,
@@ -184,6 +221,9 @@ impl CudaAcosc {
         d_osc: &mut DeviceBuffer<f32>,
         d_change: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAcoscError> {
+        if series_len <= 0 {
+            return Ok(());
+        }
         if series_len <= 0 {
             return Ok(());
         }
@@ -265,6 +305,12 @@ impl CudaAcosc {
             .map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
+        let mut d_osc: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(num_series * series_len) }
+                .map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
+        let mut d_change: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(num_series * series_len) }
+                .map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
         let mut d_osc: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(num_series * series_len) }
                 .map_err(|e| CudaAcoscError::Cuda(e.to_string()))?;
@@ -418,6 +464,7 @@ impl CudaAcosc {
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
+    use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
@@ -445,6 +492,9 @@ pub mod benches {
             if !v.is_finite() {
                 continue;
             }
+            if !v.is_finite() {
+                continue;
+            }
             let x = i as f32 * 0.0031;
             let off = (0.0049 * x.sin()).abs() + 0.13;
             high[i] = v + off;
@@ -458,7 +508,15 @@ pub mod benches {
         high: Vec<f32>,
         low: Vec<f32>,
     }
+    struct OneSeriesState {
+        cuda: CudaAcosc,
+        high: Vec<f32>,
+        low: Vec<f32>,
+    }
     impl CudaBenchState for OneSeriesState {
+        fn launch(&mut self) {
+            let _ = self.cuda.acosc_batch_dev(&self.high, &self.low).unwrap();
+        }
         fn launch(&mut self) {
             let _ = self.cuda.acosc_batch_dev(&self.high, &self.low).unwrap();
         }
@@ -475,8 +533,22 @@ pub mod benches {
         high_tm: Vec<f32>,
         low_tm: Vec<f32>,
     }
+    struct ManySeriesState {
+        cuda: CudaAcosc,
+        high_tm: Vec<f32>,
+        low_tm: Vec<f32>,
+    }
     impl CudaBenchState for ManySeriesState {
         fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .acosc_many_series_one_param_time_major_dev(
+                    &self.high_tm,
+                    &self.low_tm,
+                    NUM_SERIES,
+                    SERIES_LEN,
+                )
+                .unwrap();
             let _ = self
                 .cuda
                 .acosc_many_series_one_param_time_major_dev(
@@ -507,10 +579,33 @@ pub mod benches {
             high_tm,
             low_tm,
         })
+        Box::new(ManySeriesState {
+            cuda,
+            high_tm,
+            low_tm,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
+            CudaBenchScenario::new(
+                "acosc",
+                "one_series",
+                "acosc_cuda_batch_dev",
+                "1m",
+                prep_one_series,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series()),
+            CudaBenchScenario::new(
+                "acosc",
+                "many_series_one_param",
+                "acosc_cuda_many_series_one_param_dev",
+                "512x4096",
+                prep_many_series,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_many_series()),
             CudaBenchScenario::new(
                 "acosc",
                 "one_series",

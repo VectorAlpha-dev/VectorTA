@@ -148,7 +148,13 @@ impl CudaIftRsi {
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch
     }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
     #[inline]
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
@@ -164,8 +170,14 @@ impl CudaIftRsi {
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if !Self::mem_check_enabled() {
             return true;
         }
@@ -182,11 +194,22 @@ impl CudaIftRsi {
             if step == 0 || start == end {
                 return vec![start];
             }
+            if step == 0 || start == end {
+                return vec![start];
+            }
             (start..=end).step_by(step).collect()
         }
         let rsi = axis(r.rsi_period);
         let wma = axis(r.wma_period);
         let mut out = Vec::with_capacity(rsi.len() * wma.len());
+        for &rp in &rsi {
+            for &wp in &wma {
+                out.push(IftRsiParams {
+                    rsi_period: Some(rp),
+                    wma_period: Some(wp),
+                });
+            }
+        }
         for &rp in &rsi {
             for &wp in &wma {
                 out.push(IftRsiParams {
@@ -206,7 +229,19 @@ impl CudaIftRsi {
         if len == 0 {
             return Err(CudaIftRsiError::InvalidInput("empty input".into()));
         }
+        if len == 0 {
+            return Err(CudaIftRsiError::InvalidInput("empty input".into()));
+        }
         let mut first_valid: Option<usize> = None;
+        for i in 0..len {
+            let v = data_f32[i];
+            if v == v {
+                first_valid = Some(i);
+                break;
+            }
+        }
+        let first_valid = first_valid
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("all values are NaN".into()))?;
         for i in 0..len {
             let v = data_f32[i];
             if v == v {
@@ -222,9 +257,22 @@ impl CudaIftRsi {
                 "no parameter combinations".into(),
             ));
         }
+        if combos.is_empty() {
+            return Err(CudaIftRsiError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         let max_rp = combos.iter().map(|c| c.rsi_period.unwrap()).max().unwrap();
         let max_wp = combos.iter().map(|c| c.wma_period.unwrap()).max().unwrap();
         let need = core::cmp::max(max_rp, max_wp);
+        if need == 0 || need > len {
+            return Err(CudaIftRsiError::InvalidInput("invalid period".into()));
+        }
+        if len - first_valid < need {
+            return Err(CudaIftRsiError::InvalidInput(
+                "not enough valid data".into(),
+            ));
+        }
         if need == 0 || need > len {
             return Err(CudaIftRsiError::InvalidInput("invalid period".into()));
         }
@@ -266,10 +314,21 @@ impl CudaIftRsi {
             .iter()
             .map(|c| c.wma_period.unwrap() as i32)
             .collect();
+        let rsi_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.rsi_period.unwrap() as i32)
+            .collect();
+        let wma_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.wma_period.unwrap() as i32)
+            .collect();
         let d_rp = unsafe { DeviceBuffer::from_slice_async(&rsi_i32, &self.stream) }
             .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
         let d_wp = unsafe { DeviceBuffer::from_slice_async(&wma_i32, &self.stream) }
             .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
+                .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
                 .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
@@ -332,6 +391,11 @@ impl CudaIftRsi {
                 rows: combos.len(),
                 cols: len,
             },
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
             combos,
         ))
     }
@@ -343,6 +407,12 @@ impl CudaIftRsi {
         rows: usize,
         params: &IftRsiParams,
     ) -> Result<DeviceArrayF32, CudaIftRsiError> {
+        if cols == 0 || rows == 0 {
+            return Err(CudaIftRsiError::InvalidInput("empty matrix".into()));
+        }
+        if data_tm_f32.len() != cols * rows {
+            return Err(CudaIftRsiError::InvalidInput("bad shape".into()));
+        }
         if cols == 0 || rows == 0 {
             return Err(CudaIftRsiError::InvalidInput("empty matrix".into()));
         }
@@ -361,6 +431,10 @@ impl CudaIftRsi {
             let mut fv = -1i32;
             for r in 0..rows {
                 let v = data_tm_f32[r * cols + s];
+                if v == v {
+                    fv = r as i32;
+                    break;
+                }
                 if v == v {
                     fv = r as i32;
                     break;
@@ -386,6 +460,9 @@ impl CudaIftRsi {
             .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
         let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
             .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
                 .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
@@ -451,6 +528,11 @@ impl CudaIftRsi {
             rows,
             cols,
         })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     #[inline]
@@ -461,8 +543,17 @@ impl CudaIftRsi {
         if std::env::var("BENCH_DEBUG").ok().as_deref() != Some("1") {
             return;
         }
+        if self.debug_batch_logged {
+            return;
+        }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() != Some("1") {
+            return;
+        }
         if let Some(sel) = self.last_batch {
             eprintln!("[CudaIftRsi] batch kernel selected: {:?}", sel);
+        }
+        unsafe {
+            (*(self as *const _ as *mut CudaIftRsi)).debug_batch_logged = true;
         }
         unsafe {
             (*(self as *const _ as *mut CudaIftRsi)).debug_batch_logged = true;
@@ -476,8 +567,17 @@ impl CudaIftRsi {
         if std::env::var("BENCH_DEBUG").ok().as_deref() != Some("1") {
             return;
         }
+        if self.debug_many_logged {
+            return;
+        }
+        if std::env::var("BENCH_DEBUG").ok().as_deref() != Some("1") {
+            return;
+        }
         if let Some(sel) = self.last_many {
             eprintln!("[CudaIftRsi] many-series kernel selected: {:?}", sel);
+        }
+        unsafe {
+            (*(self as *const _ as *mut CudaIftRsi)).debug_many_logged = true;
         }
         unsafe {
             (*(self as *const _ as *mut CudaIftRsi)).debug_many_logged = true;
@@ -523,7 +623,14 @@ pub mod benches {
         for i in 0..16 {
             data[i] = f32::NAN;
         }
+        for i in 0..16 {
+            data[i] = f32::NAN;
+        }
         // Sweep rp in [5..(5+PARAM_SWEEP/2)], wp in [9..(9+PARAM_SWEEP/2)]
+        let sweep = IftRsiBatchRange {
+            rsi_period: (5, 5 + PARAM_SWEEP / 2 - 1, 1),
+            wma_period: (9, 9 + PARAM_SWEEP / 2 - 1, 1),
+        };
         let sweep = IftRsiBatchRange {
             rsi_period: (5, 5 + PARAM_SWEEP / 2 - 1, 1),
             wma_period: (9, 9 + PARAM_SWEEP / 2 - 1, 1),

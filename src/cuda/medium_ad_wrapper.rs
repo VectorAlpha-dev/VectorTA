@@ -21,6 +21,7 @@ use cust::device::Device;
 use cust::function::{BlockSize, GridSize, Function};
 use cust::launch;
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -122,6 +123,9 @@ impl CudaMediumAd {
             .ok_or_else(|| CudaMediumAdError::InvalidInput("all NaN/INF".into()))?;
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
+            return Err(CudaMediumAdError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
             return Err(CudaMediumAdError::InvalidInput(
                 "no parameter combinations".into(),
             ));
@@ -234,6 +238,8 @@ impl CudaMediumAd {
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
         let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
+            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
         unsafe { d_data.async_copy_from(&h_data, &self.stream) }
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
@@ -260,10 +266,23 @@ impl CudaMediumAd {
             combos.len(),
             &mut d_out,
         )?;
+        self.launch_batch_kernel(
+            &d_data,
+            len,
+            first_valid,
+            &d_periods,
+            combos.len(),
+            &mut d_out,
+        )?;
         self.stream
             .synchronize()
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: combos.len(),
@@ -399,6 +418,12 @@ impl CudaMediumAd {
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
+            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
         unsafe { d_prices.async_copy_from(&h_prices, &self.stream) }
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
@@ -406,11 +431,17 @@ impl CudaMediumAd {
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(&d_prices, cols, rows, period, &d_first, &mut d_out)?;
+        self.launch_many_series_kernel(&d_prices, cols, rows, period, &d_first, &mut d_out)?;
 
         self.stream
             .synchronize()
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -455,6 +486,9 @@ pub mod benches {
         let price = gen_series(ONE_SERIES_LEN);
         let start = 5usize;
         let end = start + PARAM_SWEEP - 1;
+        let sweep = MediumAdBatchRange {
+            period: (start, end, 1),
+        };
         let sweep = MediumAdBatchRange {
             period: (start, end, 1),
         };

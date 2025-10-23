@@ -74,9 +74,18 @@ impl CudaRsx {
             _context: context,
             policy: CudaRsxPolicy::default(),
         })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy: CudaRsxPolicy::default(),
+        })
     }
 
     #[inline]
+    pub fn set_policy(&mut self, p: CudaRsxPolicy) {
+        self.policy = p;
+    }
     pub fn set_policy(&mut self, p: CudaRsxPolicy) {
         self.policy = p;
     }
@@ -131,6 +140,19 @@ impl CudaRsx {
             rows: n_combos,
             cols: len,
         })
+        self.launch_batch(
+            &d_prices,
+            &d_periods,
+            len,
+            first_valid,
+            n_combos,
+            &mut d_out,
+        )?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: len,
+        })
     }
 
     fn launch_batch(
@@ -142,6 +164,9 @@ impl CudaRsx {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaRsxError> {
+        if n_combos == 0 {
+            return Ok(());
+        }
         if n_combos == 0 {
             return Ok(());
         }
@@ -196,6 +221,9 @@ impl CudaRsx {
             return Err(CudaRsxError::InvalidInput(
                 "time-major length mismatch".into(),
             ));
+            return Err(CudaRsxError::InvalidInput(
+                "time-major length mismatch".into(),
+            ));
         }
         if period == 0 {
             return Err(CudaRsxError::InvalidInput("period must be > 0".into()));
@@ -211,6 +239,10 @@ impl CudaRsx {
                     fv = t as i32;
                     break;
                 }
+                if !v.is_nan() {
+                    fv = t as i32;
+                    break;
+                }
             }
             if fv < 0 {
                 return Err(CudaRsxError::InvalidInput(format!("series {} all NaN", s)));
@@ -221,6 +253,8 @@ impl CudaRsx {
         // VRAM estimate
         if let Ok((free, _)) = mem_get_info() {
             let n = expected;
+            let bytes = (2 * n) * std::mem::size_of::<f32>()
+                + cols * std::mem::size_of::<i32>()
             let bytes = (2 * n) * std::mem::size_of::<f32>()
                 + cols * std::mem::size_of::<i32>()
                 + 64 * 1024 * 1024;
@@ -238,6 +272,11 @@ impl CudaRsx {
         };
 
         self.launch_many_series(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -302,6 +341,9 @@ impl CudaRsx {
             combos.push(RsxParams {
                 period: Some(start),
             });
+            combos.push(RsxParams {
+                period: Some(start),
+            });
         } else {
             let mut v = start;
             while v <= end {
@@ -316,6 +358,11 @@ impl CudaRsx {
         let first_valid = (0..len)
             .find(|&i| !prices[i].is_nan())
             .ok_or_else(|| CudaRsxError::InvalidInput("all values NaN".into()))?;
+        let max_p = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
         let max_p = combos
             .iter()
             .map(|c| c.period.unwrap_or(0))
@@ -369,6 +416,10 @@ pub mod benches {
                 .cuda
                 .rsx_batch_dev(&self.prices, &self.sweep)
                 .expect("rsx batch");
+            let _ = self
+                .cuda
+                .rsx_batch_dev(&self.prices, &self.sweep)
+                .expect("rsx batch");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -377,10 +428,21 @@ pub mod benches {
         for i in 0..8 {
             prices[i] = f32::NAN;
         }
+        for i in 0..8 {
+            prices[i] = f32::NAN;
+        }
         for i in 8..ONE_SERIES_LEN {
             let x = i as f32 * 0.0019;
             prices[i] += 0.0005 * x.sin();
         }
+        let sweep = RsxBatchRange {
+            period: (2, 1 + PARAM_SWEEP, 1),
+        };
+        Box::new(RsxBatchState {
+            cuda,
+            prices,
+            sweep,
+        })
         let sweep = RsxBatchRange {
             period: (2, 1 + PARAM_SWEEP, 1),
         };
@@ -415,6 +477,10 @@ pub mod benches {
                 prices[idx] = base[idx] + 0.05 * x.sin();
             }
         }
+        Box::new(RsxManyState {
+            cuda,
+            prices_tm: prices,
+        })
         Box::new(RsxManyState {
             cuda,
             prices_tm: prices,

@@ -14,17 +14,117 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include <stdint.h>
 
 // Helper to write an IEEE-754 quiet NaN as f32
 static __forceinline__ __device__ float f32_nan() { return __int_as_float(0x7fffffff); }
 
+// Double-single helpers (dual FP32) for improved precision without FP64
+struct dsf { float hi, lo; };
+
+static __forceinline__ __device__ dsf ds_from_f32(float x) { return dsf{x, 0.0f}; }
+
+static __forceinline__ __device__ void two_sum(float a, float b, float &s, float &e) {
+    s = a + b;
+    float v = s - a;
+    e = (a - (s - v)) + (b - v);
+}
+static __forceinline__ __device__ void two_prod(float a, float b, float &p, float &e) {
+    p = a * b;
+    // FMA gives the rounding error exactly in FP32
+    e = fmaf(a, b, -p);
+}
+static __forceinline__ __device__ dsf ds_add(dsf a, dsf b) {
+    float s, e; two_sum(a.hi, b.hi, s, e);
+    float t = a.lo + b.lo;
+    float hi, lo; two_sum(s, e + t, hi, lo);
+    return dsf{hi, lo};
+}
+static __forceinline__ __device__ dsf ds_sub(dsf a, dsf b) {
+    float s, e; two_sum(a.hi, -b.hi, s, e);
+    float t = a.lo - b.lo;
+    float hi, lo; two_sum(s, e + t, hi, lo);
+    return dsf{hi, lo};
+}
+static __forceinline__ __device__ dsf ds_mul(dsf a, dsf b) {
+    float p, pe; two_prod(a.hi, b.hi, p, pe);
+    // Cross terms a.hi*b.lo + a.lo*b.hi accumulate into error
+    float cross = fmaf(a.hi, b.lo, a.lo * b.hi);
+    float s, e; two_sum(p, pe + cross, s, e);
+    // Optional very small term a.lo*b.lo
+    e += a.lo * b.lo;
+    float hi, lo; two_sum(s, e, hi, lo);
+    return dsf{hi, lo};
+}
+static __forceinline__ __device__ dsf ds_fma(dsf a, dsf b, dsf c) {
+    dsf m = ds_mul(a, b);
+    return ds_add(m, c);
+}
+static __forceinline__ __device__ float ds_to_f32(dsf a) { return a.hi + a.lo; }
+static __forceinline__ __device__ bool float_lt_ds(float x, dsf a) {
+    if (x < a.hi) return true;
+    if (x > a.hi) return false;
+    return 0.0f < a.lo;
+}
+static __forceinline__ __device__ bool float_gt_ds(float x, dsf a) {
+    if (x > a.hi) return true;
+    if (x < a.hi) return false;
+    return 0.0f > a.lo;
+}
+static __forceinline__ __device__ bool ds_gt_float(dsf a, float x) {
+    if (a.hi > x) return true;
+    if (a.hi < x) return false;
+    return a.lo > 0.0f;
+}
+static __forceinline__ __device__ bool ds_lt_float(dsf a, float x) {
+    if (a.hi < x) return true;
+    if (a.hi > x) return false;
+    return a.lo < 0.0f;
+}
+static __forceinline__ __device__ dsf ds_min_float(dsf a, float x) {
+    // return min(a, x)
+    if (a.hi < x) return a;
+    if (a.hi > x) return ds_from_f32(x);
+    // Equal hi: choose the one with smaller total
+    return (a.lo <= 0.0f) ? a : ds_from_f32(x);
+}
+static __forceinline__ __device__ dsf ds_max_float(dsf a, float x) {
+    // return max(a, x)
+    if (a.hi > x) return a;
+    if (a.hi < x) return ds_from_f32(x);
+    return (a.lo >= 0.0f) ? a : ds_from_f32(x);
+}
+
+// Warp broadcast of a (hi, lo) pair loaded once by the warp "leader" lane.
+// Works even for partially active warps by using the active mask.
+static __forceinline__ __device__ void warp_broadcast_hilo(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    int i,
+    float &hi_out,
+    float &lo_out)
+{
+    unsigned mask   = __activemask();
+    int lane        = threadIdx.x & 31;
+    int leader_lane = __ffs(mask) - 1; // index of first active lane in this warp
+
+    float hi_lane = 0.0f, lo_lane = 0.0f;
+    if (lane == leader_lane) {
+        hi_lane = high[i];
+        lo_lane = low[i];
+    }
+    hi_out = __shfl_sync(mask, hi_lane, leader_lane);
+    lo_out = __shfl_sync(mask, lo_lane, leader_lane);
+}
+
 // --------------------- Batch: one series × many params ---------------------
 // Inputs:
-//  - high, low: series (length = len)
+//  - high, low: single series (length = len)
 //  - len: number of bars
 //  - first_valid: first index where both high and low are finite
 //  - accs, maxes: parameter arrays (length = n_rows)
 //  - out: row-major [row][t] (n_rows × len)
+// Launch: one thread per row; gridDim.x = ceil(n_rows / blockDim.x). Use blockDim.x multiple of 32.
 extern "C" __global__ void sar_batch_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
@@ -35,99 +135,124 @@ extern "C" __global__ void sar_batch_f32(
     int n_rows,
     float* __restrict__ out)
 {
-    const int row = blockIdx.y;
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= n_rows) return;
 
     const int base = row * len;
     const int warm = first_valid + 1; // per scalar semantics
 
-    // Fill warmup prefix with NaN cooperatively across block.x
-    for (int t = threadIdx.x; t < min(warm, len); t += blockDim.x) {
+    // Load params once per row
+    const float acceleration = accs[row];
+    const float maximum      = maxes[row];
+
+    // Warmup prefix: NaN up to and including index first_valid
+    const int warm_upto = (warm < len) ? warm : len;
+    for (int t = 0; t < warm_upto; ++t) {
         out[base + t] = f32_nan();
     }
-    __syncthreads();
-
-    if (threadIdx.x != 0) return; // sequential stateful scan
     if (warm >= len) return;
 
-    // Load params
-    float acceleration = accs[row];
-    float maximum = maxes[row];
-    if (!(acceleration > 0.0f) || !(maximum > 0.0f)) {
-        // keep row as NaN if params invalid (matches scalar error paths)
+    // If params invalid, fill the rest with NaN and return (defensive; host pre-validates)
+    if (acceleration <= 0.0f || maximum <= 0.0f) {
+        for (int t = warm; t < len; ++t) out[base + t] = f32_nan();
         return;
     }
 
+    // Bootstrap from bars first_valid (i0) and warm (i1)
     const int i0 = first_valid;
     const int i1 = warm;
 
-    float h0 = high[i0];
-    float h1 = high[i1];
-    float l0 = low[i0];
-    float l1 = low[i1];
+    const float h0 = high[i0];
+    const float h1 = high[i1];
+    const float l0 = low[i0];
+    const float l1 = low[i1];
 
-    // Initial trend and state (Wilder)
-    bool trend_up = (h1 > h0);
-    float sar = trend_up ? l0 : h0;
-    float ep = trend_up ? h1 : l1; // extreme point (highest high or lowest low)
-    float acc = acceleration;       // acceleration factor (AF)
+    bool  trend_up = (h1 > h0);
+    // Evolve state using dual-FP32 (double-single) arithmetic
+    dsf sar = ds_from_f32(trend_up ? l0 : h0);
+    dsf ep  = ds_from_f32(trend_up ? h1 : l1); // extreme point
+    dsf acc = ds_from_f32(acceleration);       // acceleration factor (AF)
+    const dsf acc_incr = ds_from_f32(acceleration);
+    const dsf acc_max  = ds_from_f32(maximum);
 
     // Write initial SAR at warm index
-    out[base + i1] = sar;
+    out[base + i1] = ds_to_f32(sar);
 
-    float low_prev2 = l0;
-    float low_prev  = l1;
+    // Previous two highs/lows to implement Wilder's clamp
+    float low_prev2  = l0;
+    float low_prev   = l1;
     float high_prev2 = h0;
     float high_prev  = h1;
 
-    // Main sequential loop
+    // Step time in lock‑step per block; broadcast hi/lo once per warp per step
+    #pragma unroll 1
     for (int i = i1 + 1; i < len; ++i) {
-        const float hi = high[i];
-        const float lo = low[i];
+        float hi, lo;
+        warp_broadcast_hilo(high, low, i, hi, lo);
 
-        // next_sar = sar + acc * (ep - sar)
-        float next_sar = fmaf(acc, (ep - sar), sar);
+        // next_sar = sar + acc * (ep - sar) in dual-FP32
+        dsf diff = ds_sub(ep, sar);
+        dsf prod = ds_mul(acc, diff);
+        dsf next_sar = ds_add(prod, sar);
+        // For comparisons, use double-single aware predicates against floats.
 
         if (trend_up) {
-            if (lo < next_sar) {
+            // Reversal to downtrend if price penetrates SAR
+            if (float_lt_ds(lo, next_sar)) {
                 // Reversal to downtrend
                 trend_up = false;
-                next_sar = ep; // per Wilder, prior EP becomes SAR at reversal
-                ep = lo;
-                acc = acceleration; // reset AF
+                next_sar = ep; // prior EP becomes SAR
+                ep       = ds_from_f32(lo);
+                acc      = acc_incr; // reset AF
             } else {
                 // Continue uptrend: extend EP/AF and clamp to prior lows
-                if (hi > ep) {
-                    ep = hi;
-                    acc = fminf(acc + acceleration, maximum);
+                if (float_gt_ds(hi, ep)) {
+                    ep  = ds_from_f32(hi);
+                    // acc = min(acc + acceleration, maximum)
+                    dsf acc_plus = ds_add(acc, acc_incr);
+                    // acc = min(acc_plus, acc_max)
+                    // Compare ds vs float using ds_gt_float/ds_min_float
+                    if (ds_gt_float(acc_plus, maximum)) {
+                        acc = acc_max;
+                    } else {
+                        acc = acc_plus;
+                    }
                 }
-                next_sar = fminf(next_sar, fminf(low_prev, low_prev2));
+                // Clamp to prior two lows
+                next_sar = ds_min_float(next_sar, low_prev);
+                next_sar = ds_min_float(next_sar, low_prev2);
             }
         } else { // downtrend
-            if (hi > next_sar) {
+            if (float_gt_ds(hi, next_sar)) {
                 // Reversal to uptrend
                 trend_up = true;
                 next_sar = ep;
-                ep = hi;
-                acc = acceleration;
+                ep       = ds_from_f32(hi);
+                acc      = acc_incr;
             } else {
                 // Continue downtrend: extend EP/AF and clamp to prior highs
-                if (lo < ep) {
-                    ep = lo;
-                    acc = fminf(acc + acceleration, maximum);
+                if (float_lt_ds(lo, ep)) {
+                    ep  = ds_from_f32(lo);
+                    dsf acc_plus = ds_add(acc, acc_incr);
+                    if (ds_gt_float(acc_plus, maximum)) {
+                        acc = acc_max;
+                    } else {
+                        acc = acc_plus;
+                    }
                 }
-                next_sar = fmaxf(next_sar, fmaxf(high_prev, high_prev2));
+                // Clamp to prior two highs
+                // max(next_sar, high_prev)
+                if (ds_lt_float(next_sar, high_prev)) next_sar = ds_from_f32(high_prev);
+                if (ds_lt_float(next_sar, high_prev2)) next_sar = ds_from_f32(high_prev2);
             }
         }
 
-        out[base + i] = next_sar;
-        sar = next_sar;
+        out[base + i] = ds_to_f32(next_sar);
+        sar           = next_sar;
 
         // Shift previous two highs/lows
-        low_prev2 = low_prev;
-        low_prev = lo;
-        high_prev2 = high_prev;
-        high_prev = hi;
+        low_prev2  = low_prev;   low_prev  = lo;
+        high_prev2 = high_prev;  high_prev = hi;
     }
 }
 
@@ -162,12 +287,11 @@ extern "C" __global__ void sar_many_series_one_param_time_major_f32(
 
     const int warm = fv + 1;
 
-    // Fill warmup prefix with NaN cooperatively across block.x
+    // Fill warmup prefix with NaN cooperatively across block.x (no barrier needed)
     for (int t = threadIdx.x; t < min(warm, rows); t += blockDim.x) {
         out_tm[t * cols + s] = f32_nan();
     }
-    __syncthreads();
-
+    // No __syncthreads(): threads write disjoint t < warm; thread 0 writes t >= warm
     if (threadIdx.x != 0) return;
     if (warm >= rows) return;
 

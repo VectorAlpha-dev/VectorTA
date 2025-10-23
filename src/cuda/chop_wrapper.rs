@@ -54,6 +54,8 @@ impl CudaChop {
         cust::init(CudaFlags::empty()).map_err(|e| CudaChopError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaChopError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaChopError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaChopError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/chop_kernel.ptx"));
@@ -140,6 +142,11 @@ impl CudaChop {
                         scalar: Some(s),
                         drift: Some(d),
                     });
+                    combos.push(ChopParams {
+                        period: Some(p),
+                        scalar: Some(s),
+                        drift: Some(d),
+                    });
                 }
             }
         }
@@ -165,6 +172,9 @@ impl CudaChop {
             return Err(CudaChopError::InvalidInput(
                 "no parameter combinations".into(),
             ));
+            return Err(CudaChopError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
 
         // first_valid where H/L/C are all finite (match scalar)
@@ -177,6 +187,13 @@ impl CudaChop {
                 first = i as isize;
                 break;
             }
+            if h == h && l == l && c == c {
+                first = i as isize;
+                break;
+            }
+        }
+        if first < 0 {
+            return Err(CudaChopError::InvalidInput("all values are NaN".into()));
         }
         if first < 0 {
             return Err(CudaChopError::InvalidInput("all values are NaN".into()));
@@ -187,6 +204,8 @@ impl CudaChop {
         if n - first < max_period {
             return Err(CudaChopError::InvalidInput(format!(
                 "not enough valid data: needed >= {}, have {}",
+                max_period,
+                n - first
                 max_period,
                 n - first
             )));
@@ -213,6 +232,9 @@ impl CudaChop {
             + out_elems * 4;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
+            return Err(CudaChopError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
             return Err(CudaChopError::InvalidInput(
                 "insufficient device memory".into(),
             ));
@@ -297,6 +319,14 @@ impl CudaChop {
             },
             combos,
         ))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: n,
+            },
+            combos,
+        ))
     }
 
     // ---------- Many-series × one param (time-major) ----------
@@ -325,6 +355,9 @@ impl CudaChop {
         if period == 0 || drift == 0 {
             return Err(CudaChopError::InvalidInput("invalid params".into()));
         }
+        if period == 0 || drift == 0 {
+            return Err(CudaChopError::InvalidInput("invalid params".into()));
+        }
 
         // first-valid per series: H/L/C all finite
         let mut first_valids: Vec<i32> = vec![-1; cols];
@@ -338,6 +371,10 @@ impl CudaChop {
                     fv = r as i32;
                     break;
                 }
+                if h == h && l == l && c == c {
+                    fv = r as i32;
+                    break;
+                }
             }
             first_valids[s] = fv;
         }
@@ -345,6 +382,9 @@ impl CudaChop {
         // Validate max tail
         for s in 0..cols {
             let fv = first_valids[s];
+            if fv < 0 {
+                return Err(CudaChopError::InvalidInput("all values are NaN".into()));
+            }
             if fv < 0 {
                 return Err(CudaChopError::InvalidInput("all values are NaN".into()));
             }
@@ -364,6 +404,7 @@ impl CudaChop {
                 let mut sum_tr = 0.0f64;
                 let mut acc = 0.0f64; // prefix
                                       // prefix psum[0..fv] already zero
+                                      // prefix psum[0..fv] already zero
                 for r in fv..rows {
                     let hi = high_tm_f32[r * cols + s] as f64;
                     let lo = low_tm_f32[r * cols + s] as f64;
@@ -374,8 +415,16 @@ impl CudaChop {
                     } else {
                         (hi - lo).max((hi - prev_close).abs().max((lo - prev_close).abs()))
                     };
+                    let tr = if rel == 0 {
+                        hi - lo
+                    } else {
+                        (hi - lo).max((hi - prev_close).abs().max((lo - prev_close).abs()))
+                    };
                     if rel < drift {
                         sum_tr += tr;
+                        if rel == drift - 1 {
+                            rma_atr = sum_tr * inv_drift;
+                        }
                         if rel == drift - 1 {
                             rma_atr = sum_tr * inv_drift;
                         }
@@ -383,6 +432,20 @@ impl CudaChop {
                         rma_atr += inv_drift * (tr - rma_atr);
                     }
                     prev_close = cl;
+                    let current_atr = if rel < drift {
+                        if rel == drift - 1 {
+                            rma_atr
+                        } else {
+                            f64::NAN
+                        }
+                    } else {
+                        rma_atr
+                    };
+                    let add = if current_atr.is_nan() {
+                        0.0
+                    } else {
+                        current_atr
+                    };
                     let current_atr = if rel < drift {
                         if rel == drift - 1 {
                             rma_atr
@@ -410,6 +473,9 @@ impl CudaChop {
             + n * 4;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
+            return Err(CudaChopError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
             return Err(CudaChopError::InvalidInput(
                 "insufficient device memory".into(),
             ));
@@ -459,6 +525,11 @@ impl CudaChop {
             rows,
             cols,
         })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     // ---------- Host-copy helpers (optional) ----------
@@ -484,6 +555,9 @@ impl CudaChop {
         self.stream
             .synchronize()
             .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
         out.copy_from_slice(pinned.as_slice());
         Ok((arr.rows, arr.cols, combos))
     }
@@ -500,6 +574,13 @@ pub mod benches {
         l: Vec<f32>,
         c: Vec<f32>,
         sweep: ChopBatchRange,
+    }
+    impl CudaBenchState for ChopBatchBench {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .chop_batch_dev(&self.h, &self.l, &self.c, &self.sweep);
+        }
     }
     impl CudaBenchState for ChopBatchBench {
         fn launch(&mut self) {
@@ -528,6 +609,13 @@ pub mod benches {
                 self.rows,
                 &self.params,
             );
+                &self.h_tm,
+                &self.l_tm,
+                &self.c_tm,
+                self.cols,
+                self.rows,
+                &self.params,
+            );
         }
     }
 
@@ -535,6 +623,16 @@ pub mod benches {
         let mut h = vec![f32::NAN; n];
         let mut l = vec![f32::NAN; n];
         let mut c = vec![f32::NAN; n];
+        for i in 1..n {
+            let x = i as f32 * 0.0013;
+            let base = x.sin() + 0.0002 * (i as f32);
+            let hi = base + 0.6 + 0.07 * (x * 2.4).cos();
+            let lo = base - 0.6 - 0.06 * (x * 1.7).sin();
+            h[i] = hi;
+            l[i] = lo;
+            c[i] = (hi + lo) * 0.5;
+        }
+        (h, l, c)
         for i in 1..n {
             let x = i as f32 * 0.0013;
             let base = x.sin() + 0.0002 * (i as f32);
@@ -554,7 +652,20 @@ pub mod benches {
             scalar: (100.0, 100.0, 0.0),
             drift: (1, 5, 2),
         };
+        let (h, l, c) = make_ohlc(50_000);
+        let sweep = ChopBatchRange {
+            period: (5, 55, 5),
+            scalar: (100.0, 100.0, 0.0),
+            drift: (1, 5, 2),
+        };
         let cuda = CudaChop::new(0).expect("cuda chop");
+        Box::new(ChopBatchBench {
+            cuda,
+            h,
+            l,
+            c,
+            sweep,
+        })
         Box::new(ChopBatchBench {
             cuda,
             h,
@@ -564,6 +675,14 @@ pub mod benches {
         })
     }
     fn prep_many() -> Box<dyn CudaBenchState> {
+        let cols = 128usize;
+        let rows = 8192usize;
+        let (mut h, mut l, mut c) = make_ohlc(cols * rows);
+        for s in 0..cols {
+            h[s] = f32::NAN;
+            l[s] = f32::NAN;
+            c[s] = f32::NAN;
+        }
         let cols = 128usize;
         let rows = 8192usize;
         let (mut h, mut l, mut c) = make_ohlc(cols * rows);
@@ -587,14 +706,38 @@ pub mod benches {
             rows,
             params,
         })
+        let params = ChopParams {
+            period: Some(14),
+            scalar: Some(100.0),
+            drift: Some(1),
+        };
+        Box::new(ChopManyBench {
+            cuda,
+            h_tm: h,
+            l_tm: l,
+            c_tm: c,
+            cols,
+            rows,
+            params,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let bytes_batch = (50_000usize * 3 + (1 + (55 - 5) / 5) * 50_000 + 50_000 * 8) * 4; // rough
         let bytes_many = 128usize * 8192usize * 4usize * 4usize; // 3 inputs + psum + out
+        let bytes_batch = (50_000usize * 3 + (1 + (55 - 5) / 5) * 50_000 + 50_000 * 8) * 4; // rough
+        let bytes_many = 128usize * 8192usize * 4usize * 4usize; // 3 inputs + psum + out
         vec![
             CudaBenchScenario::new("chop", "one_series", "chop_cuda_batch", "50k", prep_batch)
                 .with_mem_required(bytes_batch),
+            CudaBenchScenario::new(
+                "chop",
+                "many_series",
+                "chop_cuda_many_series",
+                "128x8k",
+                prep_many,
+            )
+            .with_mem_required(bytes_many),
             CudaBenchScenario::new(
                 "chop",
                 "many_series",

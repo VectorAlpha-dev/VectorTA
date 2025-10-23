@@ -16,6 +16,9 @@ fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
         return true;
     }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -44,11 +47,17 @@ fn dpo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let sweep = DpoBatchRange {
         period: (8, 8 + 63, 1),
     };
+    let sweep = DpoBatchRange {
+        period: (8, 8 + 63, 1),
+    };
 
     let cpu = dpo_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
 
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaDpo::new(0).expect("CudaDpo::new");
+    let dev = cuda
+        .dpo_batch_dev(&price_f32, &sweep)
+        .expect("dpo_batch_dev");
     let dev = cuda
         .dpo_batch_dev(&price_f32, &sweep)
         .expect("dpo_batch_dev");
@@ -62,6 +71,13 @@ fn dpo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
+        assert!(
+            approx_eq(c, g, tol),
+            "batch mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
         assert!(
             approx_eq(c, g, tol),
             "batch mismatch at {}: cpu={} gpu={}",
@@ -103,8 +119,17 @@ fn dpo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         let params = DpoParams {
             period: Some(period),
         };
+        for t in 0..rows {
+            p[t] = data_tm[t * cols + s];
+        }
+        let params = DpoParams {
+            period: Some(period),
+        };
         let input = DpoInput::from_slice(&p, params);
         let out = dpo_with_kernel(&input, Kernel::Scalar)?;
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out.values[t];
+        }
         for t in 0..rows {
             cpu_tm[t * cols + s] = out.values[t];
         }
@@ -113,6 +138,14 @@ fn dpo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaDpo::new(0).expect("CudaDpo::new");
     let dev = cuda
+        .dpo_many_series_one_param_time_major_dev(
+            &data_tm_f32,
+            cols,
+            rows,
+            &DpoParams {
+                period: Some(period),
+            },
+        )
         .dpo_many_series_one_param_time_major_dev(
             &data_tm_f32,
             cols,

@@ -74,6 +74,10 @@ impl Default for CudaCkspPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -105,6 +109,10 @@ impl CudaCksp {
         Ok(Self { module, stream, _context: context, policy: CudaCkspPolicy::default(), device_id: device_id as u32 })
     }
 
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaCkspPolicy,
+    ) -> Result<Self, CudaCkspError> {
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaCkspPolicy,
@@ -156,6 +164,9 @@ impl CudaCksp {
             return Err(CudaCkspError::InvalidInput(
                 "no parameter combinations".into(),
             ));
+            return Err(CudaCkspError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
 
         // Param sanity and gather host vectors
@@ -203,6 +214,8 @@ impl CudaCksp {
 
         // VRAM check (inputs + params + outputs + optional preTR buffer)
         let in_bytes = 3 * len * std::mem::size_of::<f32>();
+        let params_bytes =
+            combos.len() * (2 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let params_bytes =
             combos.len() * (2 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let out_bytes = 2 * combos.len() * len * std::mem::size_of::<f32>();
@@ -278,6 +291,16 @@ impl CudaCksp {
 
         Ok((
             DeviceArrayF32Pair {
+                long: DeviceArrayF32 {
+                    buf: d_long,
+                    rows: combos.len(),
+                    cols: len,
+                },
+                short: DeviceArrayF32 {
+                    buf: d_short,
+                    rows: combos.len(),
+                    cols: len,
+                },
                 long: DeviceArrayF32 {
                     buf: d_long,
                     rows: combos.len(),
@@ -410,6 +433,10 @@ impl CudaCksp {
             || low_tm.len() != rows * cols
             || close_tm.len() != rows * cols
         {
+        if high_tm.len() != rows * cols
+            || low_tm.len() != rows * cols
+            || close_tm.len() != rows * cols
+        {
             return Err(CudaCkspError::InvalidInput(
                 "time-major inputs must be rows*cols in length".into(),
             ));
@@ -420,12 +447,17 @@ impl CudaCksp {
         if p == 0 || q == 0 {
             return Err(CudaCkspError::InvalidInput("p/q must be > 0".into()));
         }
+        if p == 0 || q == 0 {
+            return Err(CudaCkspError::InvalidInput("p/q must be > 0".into()));
+        }
 
         // first_valid per series from inputs (high/low/close must be finite)
         let mut first_valids = vec![cols as i32; rows];
         for s in 0..rows {
             for t in 0..cols {
                 let idx = t * rows + s; // time-major stride = rows
+                if high_tm[idx].is_finite() && low_tm[idx].is_finite() && close_tm[idx].is_finite()
+                {
                 if high_tm[idx].is_finite() && low_tm[idx].is_finite() && close_tm[idx].is_finite()
                 {
                     first_valids[s] = t as i32;
@@ -439,6 +471,9 @@ impl CudaCksp {
         let aux_bytes = rows * std::mem::size_of::<i32>();
         let required = in_bytes + out_bytes + aux_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
+            return Err(CudaCkspError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
             return Err(CudaCkspError::InvalidInput(
                 "insufficient device memory".into(),
             ));
@@ -479,6 +514,16 @@ impl CudaCksp {
             .map_err(|e| CudaCkspError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32Pair {
+            long: DeviceArrayF32 {
+                buf: d_long,
+                rows,
+                cols,
+            },
+            short: DeviceArrayF32 {
+                buf: d_short,
+                rows,
+                cols,
+            },
             long: DeviceArrayF32 {
                 buf: d_long,
                 rows,
@@ -625,14 +670,24 @@ fn expand_cksp_combos(r: &CkspBatchRange) -> Vec<CkspParams> {
         if step == 0 || start == end {
             return vec![start];
         }
+        if step == 0 || start == end {
+            return vec![start];
+        }
         (start..=end).step_by(step).collect()
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
             return vec![start];
         }
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return vec![start];
+        }
         let mut v = Vec::new();
         let mut x = start;
+        while x <= end + 1e-12 {
+            v.push(x);
+            x += step;
+        }
         while x <= end + 1e-12 {
             v.push(x);
             x += step;
@@ -654,12 +709,24 @@ fn expand_cksp_combos(r: &CkspBatchRange) -> Vec<CkspParams> {
             }
         }
     }
+    for &p in &ps {
+        for &x in &xs {
+            for &q in &qs {
+                out.push(CkspParams {
+                    p: Some(p),
+                    x: Some(x),
+                    q: Some(q),
+                });
+            }
+        }
+    }
     out
 }
 
 // ---------- Benches ----------
 pub mod benches {
     use super::*;
+    use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
@@ -696,6 +763,9 @@ pub mod benches {
             if v.is_nan() {
                 continue;
             }
+            if v.is_nan() {
+                continue;
+            }
             let x = i as f32 * 0.0029;
             let off = (0.0015 * x.sin()).abs() + 0.35;
             high[i] = v + off;
@@ -708,6 +778,18 @@ pub mod benches {
         let cuda = CudaCksp::new(0).expect("cuda cksp");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low, close) = synth_hlc_from_close(&close);
+        let sweep = CkspBatchRange {
+            p: (10, 10 + PARAM_ROWS as usize - 1, 1),
+            x: (1.0, 1.0, 0.0),
+            q: (9, 9, 0),
+        };
+        Box::new(CkspBatchState {
+            cuda,
+            high,
+            low,
+            close,
+            sweep,
+        })
         let sweep = CkspBatchRange {
             p: (10, 10 + PARAM_ROWS as usize - 1, 1),
             x: (1.0, 1.0, 0.0),

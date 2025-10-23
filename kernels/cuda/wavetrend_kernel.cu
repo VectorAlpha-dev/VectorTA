@@ -1,12 +1,9 @@
-// CUDA kernels for the WaveTrend indicator.
+// CUDA kernels for the WaveTrend indicator (optimized FP32 hot path).
 //
-// Batch kernel: each thread processes one parameter combination (row) and
-// streams through the time series sequentially to match the scalar CPU
-// reference exactly. Outputs are laid out row-major with shape (rows, len).
-//
-// Many-series kernel (time-major): each thread processes one series (column)
-// for a single parameter set and scans forward in time. Inputs are stored in
-// time-major layout: index = t*cols + series.
+// Changes vs previous version:
+// - Eliminate FP64 in hot loops; use FMA-based EMA updates in float.
+// - Kahan-style compensated rolling sum for WT2 SMA to retain precision.
+// - Minimal prefill: only [0, first_valid) prefix; warmup cleared at end.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -16,14 +13,36 @@
 #include <math.h>
 #include <math_constants.h>
 
+// ---------- helpers ----------
 namespace {
-__device__ inline bool is_finite(float x) {
-    return !isnan(x) && !isinf(x);
-}
+
+__device__ __forceinline__ bool is_finite_f(float x) {
+    return !(isnan(x) || isinf(x));
 }
 
+// FMA-based EMA update: state <- state + alpha * (x - state)
+__device__ __forceinline__ float ema_update(float state, float x, float alpha) {
+    return fmaf(alpha, x - state, state);
+}
+
+// Simple Kahan-style compensated accumulator for float
+struct KahanSumF {
+    float s;  // running sum
+    float c;  // compensation
+    __device__ KahanSumF() : s(0.0f), c(0.0f) {}
+    __device__ void add(float x) {
+        float y = x - c;
+        float t = s + y;
+        c = (t - s) - y;
+        s = t;
+    }
+    __device__ void sub(float x) { add(-x); }
+};
+
+} // namespace
+
 extern "C" __global__ void wavetrend_batch_f32(
-    const float* __restrict__ prices,
+    const float* __restrict__ prices,   // len
     int len,
     int first_valid,
     int n_combos,
@@ -31,285 +50,260 @@ extern "C" __global__ void wavetrend_batch_f32(
     const int* __restrict__ average_lengths,
     const int* __restrict__ ma_lengths,
     const float* __restrict__ factors,
-    float* __restrict__ wt1_out,
-    float* __restrict__ wt2_out,
-    float* __restrict__ wt_diff_out
-) {
-    const int row0 = blockIdx.x * blockDim.x + threadIdx.x;
-    const int stride = blockDim.x * gridDim.x;
+    float* __restrict__ wt1_out,        // (rows, len) row-major
+    float* __restrict__ wt2_out,        // (rows, len) row-major
+    float* __restrict__ wt_diff_out     // (rows, len) row-major
+){
+    const int tid     = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride  = blockDim.x * gridDim.x;
 
-    for (int row = row0; row < n_combos; row += stride) {
-        const int ch = channel_lengths[row];
+    for (int row = tid; row < n_combos; row += stride) {
+        const int ch  = channel_lengths[row];
         const int avg = average_lengths[row];
-        const int ma = ma_lengths[row];
-        const double factor_d = static_cast<double>(factors[row]);
+        const int ma  = ma_lengths[row];
+        const float factor = factors[row];
 
-        float* wt1_row = wt1_out + static_cast<size_t>(row) * len;
-        float* wt2_row = wt2_out + static_cast<size_t>(row) * len;
-        float* diff_row = wt_diff_out + static_cast<size_t>(row) * len;
+        float* __restrict__ wt1_row  = wt1_out     + (size_t)row * (size_t)len;
+        float* __restrict__ wt2_row  = wt2_out     + (size_t)row * (size_t)len;
+        float* __restrict__ diff_row = wt_diff_out + (size_t)row * (size_t)len;
 
-        // Pre-fill outputs with NaN to cover warmup and invalid regions
-        for (int i = 0; i < len; ++i) {
-            wt1_row[i] = CUDART_NAN_F;
-            wt2_row[i] = CUDART_NAN_F;
+        // Early reject: invalid params -> write NaNs and continue
+        if (len <= 0 || ch <= 0 || avg <= 0 || ma <= 0) {
+            for (int i = 0; i < len; ++i) {
+                wt1_row[i]  = CUDART_NAN_F;
+                wt2_row[i]  = CUDART_NAN_F;
+                diff_row[i] = CUDART_NAN_F;
+            }
+            continue;
+        }
+
+        const float alpha_ch  = 2.0f / (float(ch) + 1.0f);
+        const float alpha_avg = 2.0f / (float(avg) + 1.0f);
+        const float inv_ma    = 1.0f / (float)ma;
+
+        // Warmup = first_valid + (ch-1) + (avg-1) + (ma-1)
+        int warmup = first_valid + (ch - 1) + (avg - 1) + (ma - 1);
+        if (warmup < 0)       warmup = 0;
+        if (warmup > len)     warmup = len;
+
+        // Prefill only the prefix before first_valid with NaNs
+        int prefill = first_valid;
+        if (prefill < 0) prefill = 0;
+        if (prefill > len) prefill = len;
+        for (int i = 0; i < prefill; ++i) {
+            wt1_row[i]  = CUDART_NAN_F;
+            wt2_row[i]  = CUDART_NAN_F;
             diff_row[i] = CUDART_NAN_F;
         }
 
-        const double alpha_ch = 2.0 / (static_cast<double>(ch) + 1.0);
-        const double beta_ch = 1.0 - alpha_ch;
-        const double alpha_avg = 2.0 / (static_cast<double>(avg) + 1.0);
-        const double beta_avg = 1.0 - alpha_avg;
-        const double inv_ma = ma > 0 ? 1.0 / static_cast<double>(ma) : 0.0;
+        // EMA states (float, initialized lazily when first finite arrives)
+        bool esa_init = false, de_init = false, wt1_init = false;
+        float esa = 0.0f, de = 0.0f, wt1_state = 0.0f;
 
-        int warmup = first_valid + ch - 1 + avg - 1 + ma - 1;
-        if (warmup < 0) {
-            warmup = 0;
-        }
-        if (warmup > len) {
-            warmup = len;
-        }
-
-        double esa_state = CUDART_NAN;
-        double de_state = CUDART_NAN;
-        double wt1_state = CUDART_NAN;
-
-        double sum_wt1 = 0.0;
+        // Rolling SMA for WT2 (compensated)
+        KahanSumF acc;
         int window_count = 0;
 
-        for (int i = first_valid; i < len; ++i) {
-            const double price = static_cast<double>(prices[i]);
+        int start = first_valid > 0 ? first_valid : 0;
+        for (int i = start; i < len; ++i) {
+            const float price = prices[i];
+            const bool price_ok = is_finite_f(price);
 
-            // Stage 1: ESA EMA(channel_lengths)
-            double esa_val = CUDART_NAN;
-            if (is_finite(price)) {
-                if (!isfinite(esa_state)) {
-                    esa_state = price;
+            // ESA = EMA(price, ch)
+            if (!esa_init) {
+                if (price_ok) {
+                    esa = price;
+                    esa_init = true;
+                }
+            } else if (price_ok) {
+                esa = ema_update(esa, price, alpha_ch);
+            }
+
+            // DE = EMA(|price - ESA|, ch)
+            if (esa_init && price_ok) {
+                const float absdiff = fabsf(price - esa);
+                if (!de_init) {
+                    de = absdiff;
+                    de_init = true;
                 } else {
-                    esa_state = fma(beta_ch, esa_state, alpha_ch * price);
-                }
-                esa_val = esa_state;
-            }
-
-            // Stage 2: DE EMA(channel_lengths) on |price - ESA|
-            double absdiff = CUDART_NAN;
-            if (is_finite(price) && isfinite(esa_val)) {
-                absdiff = fabs(price - esa_val);
-            }
-
-            double de_val = CUDART_NAN;
-            if (isfinite(absdiff)) {
-                if (!isfinite(de_state)) {
-                    de_state = absdiff;
-                } else {
-                    de_state = fma(beta_ch, de_state, alpha_ch * absdiff);
-                }
-                de_val = de_state;
-            }
-
-            // Stage 3: CI and WT1 = EMA(average_length)
-            double ci_val = CUDART_NAN;
-            if (is_finite(price) && isfinite(esa_val) && isfinite(de_val)) {
-                const double denom = factor_d * de_val;
-                if (denom != 0.0 && isfinite(denom)) {
-                    ci_val = (price - esa_val) / denom;
+                    de = ema_update(de, absdiff, alpha_ch);
                 }
             }
 
-            double wt1_val_d = CUDART_NAN;
-            if (isfinite(ci_val)) {
-                if (!isfinite(wt1_state)) {
-                    wt1_state = ci_val;
-                } else {
-                    wt1_state = fma(beta_avg, wt1_state, alpha_avg * ci_val);
+            // CI and WT1 = EMA(CI, avg)
+            float wt1_val = CUDART_NAN_F;
+            if (esa_init && de_init && price_ok) {
+                const float denom = factor * de;
+                if (denom != 0.0f && is_finite_f(denom)) {
+                    const float ci = (price - esa) / denom;
+                    if (!wt1_init) {
+                        if (is_finite_f(ci)) {
+                            wt1_state = ci;
+                            wt1_init = true;
+                        }
+                    } else if (is_finite_f(ci)) {
+                        wt1_state = ema_update(wt1_state, ci, alpha_avg);
+                    }
                 }
-                wt1_val_d = wt1_state;
             }
+            if (wt1_init) wt1_val = wt1_state;
 
-            wt1_row[i] = static_cast<float>(wt1_val_d);
+            // Store WT1 (always write, warmup cleared later)
+            wt1_row[i] = wt1_val;
 
-            if (isfinite(wt1_val_d)) {
-                sum_wt1 += wt1_val_d;
-                window_count += 1;
-            }
+            // Maintain rolling WT2 window (compensated sum over valid WT1)
+            if (is_finite_f(wt1_val)) { acc.add(wt1_val); ++window_count; }
 
-            if (ma > 0 && i >= ma) {
+            if (i >= ma) {
                 const float old = wt1_row[i - ma];
-                if (is_finite(old)) {
-                    sum_wt1 -= old;
-                    window_count -= 1;
-                }
+                if (is_finite_f(old)) { acc.sub(old); --window_count; }
             }
 
+            // WT2 (mean of last 'ma' valid WT1 samples in window)
             float wt2_val = CUDART_NAN_F;
-            if (ma > 0 && window_count >= ma) {
-                wt2_val = static_cast<float>(sum_wt1 * inv_ma);
+            if (window_count >= ma) {
+                wt2_val = acc.s * inv_ma;
             }
             wt2_row[i] = wt2_val;
 
-            if (i >= warmup && isfinite(wt2_val) && isfinite(static_cast<float>(wt1_val_d))) {
-                diff_row[i] = wt2_val - static_cast<float>(wt1_val_d);
+            // DIFF (after warmup)
+            if (i >= warmup && is_finite_f(wt2_val) && is_finite_f(wt1_val)) {
+                diff_row[i] = wt2_val - wt1_val;
             } else {
                 diff_row[i] = CUDART_NAN_F;
             }
         }
 
+        // Clear warmup prefix to NaNs to mirror scalar semantics
         for (int i = 0; i < warmup; ++i) {
-            wt1_row[i] = CUDART_NAN_F;
-            wt2_row[i] = CUDART_NAN_F;
+            wt1_row[i]  = CUDART_NAN_F;
+            wt2_row[i]  = CUDART_NAN_F;
             diff_row[i] = CUDART_NAN_F;
         }
     }
 }
 
-// Many-series × one-param (time-major layout)
-//
-// Arg order mirrors other wrappers (e.g., WTO):
-//   prices_tm: time-major input of shape (rows, cols)
-//   cols: number of series (columns)
-//   rows: number of timesteps (rows)
-//   channel_length, average_length, ma_length, factor: parameters
-//   first_valids: per-series first finite index (len = cols)
-//   wt1_tm, wt2_tm, wt_diff_tm: time-major outputs of shape (rows, cols)
+// Many-series × one-param (time-major layout), grid-stride over series
 extern "C" __global__ void wavetrend_many_series_one_param_time_major_f32(
-    const float* __restrict__ prices_tm,
+    const float* __restrict__ prices_tm, // (rows, cols), time-major
     int cols,
     int rows,
     int channel_length,
     int average_length,
     int ma_length,
     float factor,
-    const int* __restrict__ first_valids,
-    float* __restrict__ wt1_tm,
-    float* __restrict__ wt2_tm,
-    float* __restrict__ wt_diff_tm)
-{
-    const int series = blockIdx.x * blockDim.x + threadIdx.x;
-    if (series >= cols) {
-        return;
-    }
+    const int* __restrict__ first_valids, // [cols]
+    float* __restrict__ wt1_tm,           // (rows, cols), time-major
+    float* __restrict__ wt2_tm,           // (rows, cols), time-major
+    float* __restrict__ wt_diff_tm        // (rows, cols), time-major
+){
+    const int tid    = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
 
-    float* wt1_col = wt1_tm + series;
-    float* wt2_col = wt2_tm + series;
-    float* diff_col = wt_diff_tm + series;
+    if (rows <= 0 || cols <= 0 || channel_length <= 0 || average_length <= 0 || ma_length <= 0) return;
 
-    // Prefill with NaNs
-    for (int t = 0; t < rows; ++t) {
-        const int idx = t * cols;
-        wt1_col[idx] = CUDART_NAN_F;
-        wt2_col[idx] = CUDART_NAN_F;
-        diff_col[idx] = CUDART_NAN_F;
-    }
+    const float alpha_ch  = 2.0f / (float(channel_length) + 1.0f);
+    const float alpha_avg = 2.0f / (float(average_length) + 1.0f);
+    const float inv_ma    = 1.0f / (float)ma_length;
 
-    if (channel_length <= 0 || average_length <= 0 || ma_length <= 0) {
-        return;
-    }
+    for (int series = tid; series < cols; series += stride) {
+        float* __restrict__ wt1_col  = wt1_tm     + series;
+        float* __restrict__ wt2_col  = wt2_tm     + series;
+        float* __restrict__ diff_col = wt_diff_tm + series;
 
-    const int first_valid = first_valids[series];
-    const int start_ci = first_valid + channel_length - 1;
-    const int warmup = first_valid + channel_length - 1 + average_length - 1 + ma_length - 1;
+        const int first_valid = first_valids[series];
+        int warmup = first_valid + (channel_length - 1) + (average_length - 1) + (ma_length - 1);
+        if (warmup < 0) warmup = 0;
+        if (warmup > rows) warmup = rows;
 
-    const double alpha_ch = 2.0 / (static_cast<double>(channel_length) + 1.0);
-    const double beta_ch = 1.0 - alpha_ch;
-    const double alpha_avg = 2.0 / (static_cast<double>(average_length) + 1.0);
-    const double beta_avg = 1.0 - alpha_avg;
-    const double inv_ma = 1.0 / static_cast<double>(ma_length);
-    const double factor_d = static_cast<double>(factor);
-
-    bool esa_init = false;
-    bool de_init = false;
-    bool wt1_init = false;
-    double esa = 0.0;
-    double de = 0.0;
-    double wt1_state = 0.0;
-
-    double sum_wt1 = 0.0;
-    int window_count = 0;
-
-    for (int t = first_valid; t < rows; ++t) {
-        const double price = static_cast<double>(prices_tm[t * cols + series]);
-        const bool price_finite = isfinite(price);
-
-        // ESA EMA(channel_length)
-        if (!esa_init) {
-            if (!price_finite) {
-                continue;
-            }
-            esa = price;
-            esa_init = true;
-        } else if (price_finite) {
-            esa = fma(alpha_ch, price, beta_ch * esa);
-        }
-
-        // DE EMA(channel_length) on |price - ESA|
-        const double absdiff = fabs(price - esa);
-        if (!de_init) {
-            if (isfinite(absdiff)) {
-                de = absdiff;
-                de_init = true;
-            } else {
-                continue;
-            }
-        } else if (isfinite(absdiff)) {
-            de = fma(alpha_ch, absdiff, beta_ch * de);
-        }
-
-        if (!de_init) {
-            continue;
-        }
-
-        // CI and WT1 EMA(average_length)
-        const double denom = factor_d * de;
-        double ci_val = NAN;
-        if (denom != 0.0 && isfinite(denom) && price_finite) {
-            ci_val = (price - esa) / denom;
-        }
-        if (!wt1_init) {
-            if (isfinite(ci_val)) {
-                wt1_state = ci_val;
-                wt1_init = true;
-            }
-        } else if (isfinite(ci_val)) {
-            wt1_state = fma(alpha_avg, ci_val, beta_avg * wt1_state);
-        }
-
-        const int idx = t * cols;
-        float wt1_val_f = CUDART_NAN_F;
-        if (wt1_init) {
-            wt1_val_f = static_cast<float>(wt1_state);
-        }
-
-        // Maintain rolling window counters regardless; commit outputs only after warmup
-        if (isfinite(static_cast<double>(wt1_val_f))) {
-            sum_wt1 += wt1_state;
-            window_count += 1;
-        }
-        if (t >= ma_length) {
-            const float old = wt1_col[(t - ma_length) * cols];
-            if (isfinite(static_cast<double>(old))) {
-                sum_wt1 -= static_cast<double>(old);
-                window_count -= 1;
-            }
-        }
-
-        // Write current step values; clean warmup prefix afterwards
-        wt1_col[idx] = wt1_val_f;
-        float wt2_val_f = CUDART_NAN_F;
-        if (window_count >= ma_length) {
-            wt2_val_f = static_cast<float>(sum_wt1 * inv_ma);
-        }
-        wt2_col[idx] = wt2_val_f;
-        if (t >= warmup && isfinite(static_cast<double>(wt1_val_f)) && isfinite(static_cast<double>(wt2_val_f))) {
-            diff_col[idx] = wt2_val_f - wt1_val_f;
-        } else {
+        // Prefill only prefix before first_valid
+        int pre = first_valid;
+        if (pre < 0) pre = 0;
+        if (pre > rows) pre = rows;
+        for (int t = 0; t < pre; ++t) {
+            const int idx = t * cols;
+            wt1_col[idx]  = CUDART_NAN_F;
+            wt2_col[idx]  = CUDART_NAN_F;
             diff_col[idx] = CUDART_NAN_F;
         }
-    }
 
-    // Explicitly clear warmup prefix to NaNs to mirror scalar semantics
-    for (int t = 0; t < rows && t < warmup; ++t) {
-        const int idx = t * cols;
-        wt1_col[idx] = CUDART_NAN_F;
-        wt2_col[idx] = CUDART_NAN_F;
-        diff_col[idx] = CUDART_NAN_F;
+        // EMA states in FP64 to match CPU/previous GPU semantics more closely
+        bool esa_init = false, de_init = false, wt1_init = false;
+        double esa = 0.0, de = 0.0, wt1_state = 0.0;
+
+        // Rolling WT2 window as plain FP64 sum (close to CPU)
+        double sum_wt1 = 0.0;
+        int window_count = 0;
+
+        int start = first_valid > 0 ? first_valid : 0;
+        for (int t = start; t < rows; ++t) {
+            const int idx = t * cols;
+            const double price = static_cast<double>(prices_tm[idx + series]);
+            const bool price_ok = isfinite(price);
+
+            // ESA
+            if (!esa_init) {
+                if (price_ok) { esa = price; esa_init = true; }
+            } else if (price_ok) {
+                const double alpha_ch_d = static_cast<double>(alpha_ch);
+                const double beta_ch_d  = 1.0 - alpha_ch_d;
+                esa = fma(alpha_ch_d, price, beta_ch_d * esa);
+            }
+
+            // DE
+            if (esa_init && price_ok) {
+                const double absdiff = fabs(price - esa);
+                if (!de_init) { de = absdiff; de_init = isfinite(de); }
+                else if (isfinite(absdiff)) {
+                    const double alpha_ch_d = static_cast<double>(alpha_ch);
+                    const double beta_ch_d  = 1.0 - alpha_ch_d;
+                    de = fma(alpha_ch_d, absdiff, beta_ch_d * de);
+                }
+            }
+
+            // CI & WT1
+            float wt1_val = CUDART_NAN_F;
+            if (esa_init && de_init && price_ok) {
+                const double denom = static_cast<double>(factor) * de;
+                if (denom != 0.0 && isfinite(denom)) {
+                    const double ci = (price - esa) / denom;
+                    if (!wt1_init) {
+                        if (isfinite(ci)) { wt1_state = ci; wt1_init = true; }
+                    } else if (isfinite(ci)) {
+                        const double alpha_avg_d = static_cast<double>(alpha_avg);
+                        const double beta_avg_d  = 1.0 - alpha_avg_d;
+                        wt1_state = fma(alpha_avg_d, ci, beta_avg_d * wt1_state);
+                    }
+                }
+            }
+            if (wt1_init) wt1_val = static_cast<float>(wt1_state);
+            wt1_col[idx] = wt1_val;
+
+            // Rolling WT2 window
+            if (isfinite(static_cast<double>(wt1_val))) { sum_wt1 += wt1_state; ++window_count; }
+            if (t >= ma_length) {
+                const float old = wt1_col[(t - ma_length) * cols];
+                if (isfinite(static_cast<double>(old))) { sum_wt1 -= static_cast<double>(old); --window_count; }
+            }
+
+            float wt2_val = CUDART_NAN_F;
+            if (window_count >= ma_length) wt2_val = static_cast<float>(sum_wt1 * inv_ma);
+            wt2_col[idx] = wt2_val;
+
+            // DIFF
+            if (t >= warmup && isfinite(static_cast<double>(wt1_val)) && isfinite(static_cast<double>(wt2_val))) {
+                diff_col[idx] = wt2_val - wt1_val;
+            } else {
+                diff_col[idx] = CUDART_NAN_F;
+            }
+        }
+
+        // Clear warmup prefix
+        for (int t = 0; t < rows && t < warmup; ++t) {
+            const int idx = t * cols;
+            wt1_col[idx]  = CUDART_NAN_F;
+            wt2_col[idx]  = CUDART_NAN_F;
+            diff_col[idx] = CUDART_NAN_F;
+        }
     }
 }

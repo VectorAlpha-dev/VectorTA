@@ -44,12 +44,18 @@ pub enum BatchKernelPolicy {
     Plain {
         block_x: u32,
     },
+    Plain {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
+    OneD {
+        block_x: u32,
+    },
     OneD {
         block_x: u32,
     },
@@ -267,6 +273,11 @@ impl CudaRocr {
             rows: combos.len(),
             cols: len,
         })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -308,8 +319,15 @@ impl CudaRocr {
                 .debug_once
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
             {
+            if !self
+                .debug_once
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
                 eprintln!(
                     "[DEBUG] ROCR batch kernel: rocr_batch_f32, block_x={}, grid_x={}, n_combos={}",
+                    block_x,
+                    grid_x.max(1),
+                    n_combos
                     block_x,
                     grid_x.max(1),
                     n_combos
@@ -328,6 +346,9 @@ impl CudaRocr {
             unsafe {
                 let mut data_ptr = d_data.as_device_ptr().as_raw();
                 let null_f32: u64 = 0;
+                let mut inv_ptr = d_inv_opt
+                    .map(|b| b.as_device_ptr().as_raw())
+                    .unwrap_or(null_f32);
                 let mut inv_ptr = d_inv_opt
                     .map(|b| b.as_device_ptr().as_raw())
                     .unwrap_or(null_f32);
@@ -389,12 +410,21 @@ impl CudaRocr {
                     fv = Some(t as i32);
                     break;
                 }
+                if !v.is_nan() {
+                    fv = Some(t as i32);
+                    break;
+                }
             }
+            let fv =
+                fv.ok_or_else(|| CudaRocrError::InvalidInput(format!("series {} all NaN", s)))?;
             let fv =
                 fv.ok_or_else(|| CudaRocrError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - (fv as usize) < period {
                 return Err(CudaRocrError::InvalidInput(format!(
                     "series {} not enough valid data (needed>={}, valid={})",
+                    s,
+                    period,
+                    rows - (fv as usize)
                     s,
                     period,
                     rows - (fv as usize)
@@ -432,6 +462,11 @@ impl CudaRocr {
             rows,
             cols,
         })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -458,6 +493,10 @@ impl CudaRocr {
         let mut grid_y = ((rows as u32) + block_y - 1) / block_y;
         if grid_y > 65_535 { grid_y = 65_535; } // hardware limit; kernel grid-strides across time
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+            if !self
+                .debug_once
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
             if !self
                 .debug_once
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
@@ -535,6 +574,7 @@ pub mod benches {
     impl CudaBenchState for RocrBatchState {
         fn launch(&mut self) {
             self.cuda
+            self.cuda
                 .rocr_batch_device(
                     &self.d_prices,
                     Some(&self.d_inv),
@@ -583,6 +623,16 @@ pub mod benches {
             first,
             n_combos,
         })
+        Box::new(RocrBatchState {
+            cuda,
+            d_prices,
+            d_inv,
+            d_periods,
+            d_out,
+            len,
+            first,
+            n_combos,
+        })
     }
 
     struct RocrManySeriesState {
@@ -596,6 +646,7 @@ pub mod benches {
     }
     impl CudaBenchState for RocrManySeriesState {
         fn launch(&mut self) {
+            self.cuda
             self.cuda
                 .rocr_many_series_one_param_device(
                     &self.d_data_tm,
@@ -621,8 +672,17 @@ pub mod benches {
                 tm[t * cols + s] = (x * 0.0023).sin() + 0.00011 * x;
             }
         }
+        for s in 0..cols {
+            for t in s..rows {
+                let x = (t as f32) + (s as f32) * 0.3;
+                tm[t * cols + s] = (x * 0.0023).sin() + 0.00011 * x;
+            }
+        }
         let period = 21usize;
         let mut first = vec![0i32; cols];
+        for s in 0..cols {
+            first[s] = s as i32;
+        }
         for s in 0..cols {
             first[s] = s as i32;
         }
@@ -630,6 +690,15 @@ pub mod benches {
         let d_first = DeviceBuffer::from_slice(&first).expect("d_first");
         let d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        Box::new(RocrManySeriesState {
+            cuda,
+            d_data_tm,
+            d_first,
+            d_out_tm,
+            cols,
+            rows,
+            period,
+        })
         Box::new(RocrManySeriesState {
             cuda,
             d_data_tm,

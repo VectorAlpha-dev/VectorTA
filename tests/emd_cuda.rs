@@ -178,12 +178,6 @@ fn emd_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let tol = 2e-3;
     for idx in 0..(rows * cols) {
-        if !approx_eq(cpu_middle_tm[idx], g_middle[idx] as f64, tol) && idx < 400 {
-            eprintln!(
-                "diff idx {}: cpu_m={} gpu_m={}",
-                idx, cpu_middle_tm[idx], g_middle[idx]
-            );
-        }
         assert!(
             approx_eq(cpu_upper_tm[idx], g_upper[idx] as f64, tol),
             "upper mismatch at {}",

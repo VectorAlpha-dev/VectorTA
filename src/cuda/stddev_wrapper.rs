@@ -45,7 +45,21 @@ pub enum BatchKernelPolicy {
         block_x: u32,
     },
 }
+pub enum BatchKernelPolicy {
+    #[default]
+    Auto,
+    Plain {
+        block_x: u32,
+    },
+}
 #[derive(Clone, Copy, Debug, Default)]
+pub enum ManySeriesKernelPolicy {
+    #[default]
+    Auto,
+    OneD {
+        block_x: u32,
+    },
+}
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
@@ -59,11 +73,21 @@ pub struct CudaStddevPolicy {
     pub batch: BatchKernelPolicy,
     pub many_series: ManySeriesKernelPolicy,
 }
+pub struct CudaStddevPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -131,7 +155,39 @@ impl CudaStddev {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
+    pub fn set_policy(&mut self, policy: CudaStddevPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaStddevPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        env::var("CUDA_MEM_CHECK")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true)
+    }
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
     #[inline]
     fn mem_check_enabled() -> bool {
         env::var("CUDA_MEM_CHECK")
@@ -159,10 +215,16 @@ impl CudaStddev {
         if self.debug_batch_logged {
             return;
         }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] stddev batch selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaStddev)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaStddev)).debug_batch_logged = true;
@@ -176,10 +238,16 @@ impl CudaStddev {
         if self.debug_many_logged {
             return;
         }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] stddev many-series selected kernel: {:?}", sel);
+                }
+                unsafe {
+                    (*(self as *const _ as *mut CudaStddev)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaStddev)).debug_many_logged = true;
@@ -196,7 +264,24 @@ impl CudaStddev {
                 (s..=e).step_by(st).collect()
             }
         }
+        fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
+            if st == 0 || s == e {
+                vec![s]
+            } else {
+                (s..=e).step_by(st).collect()
+            }
+        }
         fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
+            if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+                return vec![s];
+            }
+            let mut v = Vec::new();
+            let mut x = s;
+            while x <= e + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            v
             if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
                 return vec![s];
             }
@@ -219,6 +304,14 @@ impl CudaStddev {
                 });
             }
         }
+        for &p in &periods {
+            for &n in &nbdevs {
+                out.push(StdDevParams {
+                    period: Some(p),
+                    nbdev: Some(n),
+                });
+            }
+        }
         out
     }
 
@@ -226,6 +319,9 @@ impl CudaStddev {
         data_f32: &[f32],
         sweep: &StdDevBatchRange,
     ) -> Result<(Vec<(usize, f32)>, usize, usize), CudaStddevError> {
+        if data_f32.is_empty() {
+            return Err(CudaStddevError::InvalidInput("empty data".into()));
+        }
         if data_f32.is_empty() {
             return Err(CudaStddevError::InvalidInput("empty data".into()));
         }
@@ -240,8 +336,33 @@ impl CudaStddev {
                 "no parameter combinations".into(),
             ));
         }
+        if combos.is_empty() {
+            return Err(CudaStddevError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         let mut out = Vec::with_capacity(combos.len());
         for c in combos {
+            let p = c.period.unwrap_or(0);
+            if p == 0 {
+                return Err(CudaStddevError::InvalidInput("period must be > 0".into()));
+            }
+            if p > len {
+                return Err(CudaStddevError::InvalidInput(
+                    "period exceeds data length".into(),
+                ));
+            }
+            if len - first_valid < p {
+                return Err(CudaStddevError::InvalidInput(
+                    "not enough valid data after first_valid".into(),
+                ));
+            }
+            let nb = c.nbdev.unwrap_or(1.0) as f32;
+            if !nb.is_finite() || nb < 0.0 {
+                return Err(CudaStddevError::InvalidInput(
+                    "nbdev must be non-negative and finite".into(),
+                ));
+            }
             let p = c.period.unwrap_or(0);
             if p == 0 {
                 return Err(CudaStddevError::InvalidInput("period must be > 0".into()));
@@ -335,6 +456,10 @@ impl CudaStddev {
             (*(self as *const _ as *mut CudaStddev)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
+        unsafe {
+            (*(self as *const _ as *mut CudaStddev)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
 
         let mut launched = 0usize;
         while launched < combos {
@@ -349,12 +474,21 @@ impl CudaStddev {
                 let mut periods = d_periods
                     .as_device_ptr()
                     .as_raw()
+                let mut periods = d_periods
+                    .as_device_ptr()
+                    .as_raw()
                     .saturating_add((launched as u64) * (std::mem::size_of::<i32>() as u64));
+                let mut nbdevs = d_nbdevs
+                    .as_device_ptr()
+                    .as_raw()
                 let mut nbdevs = d_nbdevs
                     .as_device_ptr()
                     .as_raw()
                     .saturating_add((launched as u64) * (std::mem::size_of::<f32>() as u64));
                 let mut combos_i = chunk as i32;
+                let mut outp = d_out.as_device_ptr().as_raw().saturating_add(
+                    ((launched * len) as u64) * (std::mem::size_of::<f32>() as u64),
+                );
                 let mut outp = d_out.as_device_ptr().as_raw().saturating_add(
                     ((launched * len) as u64) * (std::mem::size_of::<f32>() as u64),
                 );
@@ -400,6 +534,7 @@ impl CudaStddev {
             return Err(CudaStddevError::Cuda(format!(
                 "insufficient VRAM (need ~{} MiB incl. headroom)",
                 (required + headroom + (1 << 20) - 1) / (1 << 20)
+                (required + headroom + (1 << 20) - 1) / (1 << 20)
             )));
         }
 
@@ -434,6 +569,20 @@ impl CudaStddev {
         self.stream
             .synchronize()
             .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+        self.launch_batch(
+            &d_ps1,
+            &d_ps2,
+            &d_psn,
+            len,
+            first_valid,
+            &d_periods,
+            &d_nbdevs,
+            combos.len(),
+            &mut d_out,
+        )?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
         self.maybe_log_batch_debug();
 
         let params: Vec<StdDevParams> = combos
@@ -442,7 +591,19 @@ impl CudaStddev {
                 period: Some(*p),
                 nbdev: Some(*nb as f64),
             })
+            .map(|(p, nb)| StdDevParams {
+                period: Some(*p),
+                nbdev: Some(*nb as f64),
+            })
             .collect();
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: params.len(),
+                cols: len,
+            },
+            params,
+        ))
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -469,6 +630,9 @@ impl CudaStddev {
             )));
         }
         let (dev, params) = self.stddev_batch_dev(data_f32, sweep)?;
+        dev.buf
+            .copy_to(out)
+            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
         dev.buf
             .copy_to(out)
             .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
@@ -499,9 +663,36 @@ impl CudaStddev {
                 "nbdev must be non-negative and finite".into(),
             ));
         }
+        if cols == 0 || rows == 0 {
+            return Err(CudaStddevError::InvalidInput("empty matrix".into()));
+        }
+        if data_tm_f32.len() != cols * rows {
+            return Err(CudaStddevError::InvalidInput(
+                "time-major slice length mismatch".into(),
+            ));
+        }
+        if period == 0 {
+            return Err(CudaStddevError::InvalidInput("period must be > 0".into()));
+        }
+        if !nbdev.is_finite() || nbdev < 0.0 {
+            return Err(CudaStddevError::InvalidInput(
+                "nbdev must be non-negative and finite".into(),
+            ));
+        }
 
         // Per-series first_valid
         let mut first_valids = vec![-1i32; cols];
+        for s in 0..cols {
+            let mut fv = -1;
+            for t in 0..rows {
+                let v = data_tm_f32[t * cols + s];
+                if !v.is_nan() {
+                    fv = t as i32;
+                    break;
+                }
+            }
+            first_valids[s] = fv;
+        }
         for s in 0..cols {
             let mut fv = -1;
             for t in 0..rows {
@@ -522,7 +713,16 @@ impl CudaStddev {
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaStddevError::Cuda("insufficient VRAM".into()));
         }
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
+            return Err(CudaStddevError::Cuda("insufficient VRAM".into()));
+        }
 
+        let d_in = DeviceBuffer::from_slice(data_tm_f32)
+            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
+            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
         let d_in = DeviceBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
         let d_fv = DeviceBuffer::from_slice(&first_valids)
@@ -538,8 +738,16 @@ impl CudaStddev {
             ManySeriesKernelPolicy::Auto => 128,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
         };
+        let block_x: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 128,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+        };
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        unsafe {
+            (*(self as *const _ as *mut CudaStddev)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         unsafe {
             (*(self as *const _ as *mut CudaStddev)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -569,8 +777,16 @@ impl CudaStddev {
         self.stream
             .synchronize()
             .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
         self.maybe_log_many_debug();
 
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -609,10 +825,27 @@ pub mod benches {
                 .expect("stddev batch");
         }
     }
+    struct StddevBatchState {
+        cuda: CudaStddev,
+        price: Vec<f32>,
+        sweep: StdDevBatchRange,
+    }
+    impl CudaBenchState for StddevBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .stddev_batch_dev(&self.price, &self.sweep)
+                .expect("stddev batch");
+        }
+    }
 
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaStddev::new(0).expect("cuda stddev");
         let price = gen_series(ONE_SERIES_LEN);
+        let sweep = StdDevBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            nbdev: (2.0, 2.0, 0.0),
+        };
         let sweep = StdDevBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             nbdev: (2.0, 2.0, 0.0),

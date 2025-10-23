@@ -3,8 +3,13 @@
 use my_project::indicators::srsi::{
     srsi_batch_with_kernel, SrsiBatchRange, SrsiBuilder, SrsiParams,
 };
+use my_project::indicators::srsi::{
+    srsi_batch_with_kernel, SrsiBatchRange, SrsiBuilder, SrsiParams,
+};
 use my_project::utilities::enums::Kernel;
 
+#[cfg(feature = "cuda")]
+use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
@@ -13,6 +18,9 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::oscillators::CudaSrsi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     if a.is_nan() && b.is_nan() {
         return true;
     }
@@ -25,11 +33,18 @@ fn cuda_feature_off_noop() {
     {
         assert!(true);
     }
+    {
+        assert!(true);
+    }
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 fn srsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[srsi_cuda_batch_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
     if !cuda_available() {
         eprintln!("[srsi_cuda_batch_matches_cpu] skipped - no CUDA device");
         return Ok(());
@@ -46,10 +61,23 @@ fn srsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         k: (3, 5, 1),
         d: (3, 5, 1),
     };
+    for i in 8..len {
+        let x = i as f64;
+        price[i] = (x * 0.00123).sin() + 0.00031 * x.cos();
+    }
+    let sweep = SrsiBatchRange {
+        rsi_period: (4, 22, 3),
+        stoch_period: (4, 20, 4),
+        k: (3, 5, 1),
+        d: (3, 5, 1),
+    };
 
     let cpu = srsi_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaSrsi::new(0).expect("CudaSrsi::new");
+    let (dev_pair, combos) = cuda
+        .srsi_batch_dev(&price_f32, &sweep)
+        .expect("srsi_cuda_batch_dev");
     let (dev_pair, combos) = cuda
         .srsi_batch_dev(&price_f32, &sweep)
         .expect("srsi_cuda_batch_dev");
@@ -84,6 +112,16 @@ fn srsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             "D mismatch at {}",
             idx
         );
+        assert!(
+            approx_eq(cpu.k[idx], gk[idx] as f64, tol),
+            "K mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu.d[idx], gd[idx] as f64, tol),
+            "D mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }
@@ -97,7 +135,24 @@ fn srsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     }
     let cols = 8usize;
     let rows = 2048usize;
+    if !cuda_available() {
+        eprintln!("[srsi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut prices_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        for t in s..rows {
+            let idx = t * cols + s;
+            let x = (t as f64) * 0.002 + (s as f64) * 0.01;
+            prices_tm[idx] = (x.sin() * 0.7 + x * 0.0009).into();
+        }
+    }
+    let rp = 14usize;
+    let sp = 14usize;
+    let kp = 3usize;
+    let dp = 3usize;
     for s in 0..cols {
         for t in s..rows {
             let idx = t * cols + s;
@@ -125,7 +180,21 @@ fn srsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             d: Some(dp),
             source: None,
         };
+        for t in 0..rows {
+            series[t] = prices_tm[t * cols + s];
+        }
+        let params = SrsiParams {
+            rsi_period: Some(rp),
+            stoch_period: Some(sp),
+            k: Some(kp),
+            d: Some(dp),
+            source: None,
+        };
         let out = SrsiBuilder::new()
+            .rsi_period(rp)
+            .stoch_period(sp)
+            .k(kp)
+            .d(dp)
             .rsi_period(rp)
             .stoch_period(sp)
             .k(kp)
@@ -135,11 +204,27 @@ fn srsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             cpu_k[t * cols + s] = out.k[t];
             cpu_d[t * cols + s] = out.d[t];
         }
+        for t in 0..rows {
+            cpu_k[t * cols + s] = out.k[t];
+            cpu_d[t * cols + s] = out.d[t];
+        }
     }
 
     let prices_tm_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaSrsi::new(0).expect("CudaSrsi::new");
     let dev_pair = cuda
+        .srsi_many_series_one_param_time_major_dev(
+            &prices_tm_f32,
+            cols,
+            rows,
+            &SrsiParams {
+                rsi_period: Some(rp),
+                stoch_period: Some(sp),
+                k: Some(kp),
+                d: Some(dp),
+                source: None,
+            },
+        )
         .srsi_many_series_one_param_time_major_dev(
             &prices_tm_f32,
             cols,

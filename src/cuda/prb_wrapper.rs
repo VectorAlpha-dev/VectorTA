@@ -80,10 +80,9 @@ impl CudaPrb {
             Device::get_device(device_id as u32).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/prb_kernel.ptx"));
-        let jit_opts = &[
-            ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
-        ];
+        // Let the JIT run at its default maximum optimization and
+        // target the active context's architecture.
+        let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))
@@ -369,7 +368,24 @@ impl CudaPrb {
         let mut d_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }
             .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
 
+        // Persistent device staging (reused per group)
+        let mut d_src: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        let mut d_contig: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+
+        // Keep pinned host buffers alive until the final synchronize()
+        // to satisfy async copy lifetime guarantees for page-locked memory.
+        let mut h_src_keepalive: Vec<LockedBuffer<f32>> = Vec::new();
+        let mut h_contig_keepalive: Vec<LockedBuffer<i32>> = Vec::new();
+
         // For each smoothing group: build source, contig, and rows slice; then launch
+        // Keep device parameter buffers alive until the final synchronize
+        let mut keep_periods: Vec<DeviceBuffer<i32>> = Vec::new();
+        let mut keep_orders: Vec<DeviceBuffer<i32>> = Vec::new();
+        let mut keep_offsets: Vec<DeviceBuffer<i32>> = Vec::new();
+        let mut keep_ainv: Vec<DeviceBuffer<f32>> = Vec::new();
+        let mut keep_rowmap: Vec<DeviceBuffer<i32>> = Vec::new();
         for (sp, rows_idx) in groups.iter() {
             // Build source series (possibly smoothed)
             let source: Vec<f32> = if smooth_data {
@@ -377,16 +393,17 @@ impl CudaPrb {
             } else {
                 data_f32.to_vec()
             };
-            let contig = Self::contig_valid(&source);
+            let contig = if smooth_data {
+                Self::contig_valid(&source)
+            } else {
+                // avoid recomputing from a cloned vector; compute directly on original input
+                Self::contig_valid(data_f32)
+            };
 
-            // H2D for this group
-            let h_src =
-                LockedBuffer::from_slice(&source).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-            let h_contig =
-                LockedBuffer::from_slice(&contig).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-            let mut d_src: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            // H2D for this group using pinned host buffers for async copies
+            let h_src = LockedBuffer::from_slice(&source)
                 .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-            let mut d_contig: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len) }
+            let h_contig = LockedBuffer::from_slice(&contig)
                 .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
             unsafe {
                 d_src
@@ -396,6 +413,9 @@ impl CudaPrb {
                     .async_copy_from(h_contig.as_slice(), &self.stream)
                     .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
             }
+            // keep pinned buffers alive until final stream synchronize
+            h_src_keepalive.push(h_src);
+            h_contig_keepalive.push(h_contig);
 
             // Row-wise parameters for this group
             let mut periods: Vec<i32> = Vec::with_capacity(rows_idx.len());
@@ -404,6 +424,7 @@ impl CudaPrb {
             let mut a_invs: Vec<f32> = Vec::with_capacity(rows_idx.len() * 64);
             let mut row_map: Vec<i32> = Vec::with_capacity(rows_idx.len());
             let max_m: i32 = 8;
+            let ainv_stride_elems = (max_m as usize) * (max_m as usize);
             for &row in rows_idx {
                 let c = &combos[row];
                 let n = c.regression_period.unwrap();
@@ -439,7 +460,7 @@ impl CudaPrb {
             let grid_x: u32 = 1;
             let block: BlockSize = (block_x, 1, 1).into();
 
-            const MAX_GRID_Y: usize = 65_535;
+            const MAX_GRID_Y: usize = 65_535; // y/z limited to 65,535
             let mut start = 0usize;
             while start < rows_idx.len() {
                 let chunk = (rows_idx.len() - start).min(MAX_GRID_Y);
@@ -462,11 +483,11 @@ impl CudaPrb {
                         .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
                     let mut combos_i = chunk as i32;
                     let mut max_m_i = max_m;
-                    let mut stride_i = (8 * 8) as i32; // using 8x8 padded storage
                     let mut p_ainv = d_ainv
                         .as_device_ptr()
                         .as_raw()
-                        .wrapping_add((start * (8 * 8) * std::mem::size_of::<f32>()) as u64);
+                        .wrapping_add((start * ainv_stride_elems * std::mem::size_of::<f32>()) as u64);
+                    let mut stride_i = ainv_stride_elems as i32;
                     let mut p_contig = d_contig.as_device_ptr().as_raw();
                     let mut ndev_f = 2.0f32; // fixed for batch (as in CPU batch grid)
                     let mut p_rowmap = d_rowmap
@@ -500,11 +521,21 @@ impl CudaPrb {
                 }
                 start += chunk;
             }
-            // sync group copies before next group
-            self.stream
-                .synchronize()
-                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+            // Move device param buffers into keepalive vectors so they outlive the in-flight kernels
+            keep_periods.push(d_periods);
+            keep_orders.push(d_orders);
+            keep_offsets.push(d_offsets);
+            keep_ainv.push(d_ainv);
+            keep_rowmap.push(d_rowmap);
+            // no per-group synchronize; stream ordering preserves correctness
         }
+
+        // Single end-of-path synchronize; safe to drop pinned keepalive buffers afterwards
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        drop(h_src_keepalive);
+        drop(h_contig_keepalive);
 
         Ok((
             DeviceArrayF32 {
@@ -605,10 +636,25 @@ impl CudaPrb {
         };
 
         let ainv = Self::build_a_inv(n, k);
-        let d_prices_tm =
-            DeviceBuffer::from_slice(&sm_tm).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
-        let d_contig_tm =
-            DeviceBuffer::from_slice(&contig_tm).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        // Use pinned+async copies for the big time-major grids
+        let mut d_prices_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }
+                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        let mut d_contig_tm: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }
+                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        let h_prices_tm = LockedBuffer::from_slice(&sm_tm)
+            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        let h_contig_tm = LockedBuffer::from_slice(&contig_tm)
+            .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        unsafe {
+            d_prices_tm
+                .async_copy_from(h_prices_tm.as_slice(), &self.stream)
+                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+            d_contig_tm
+                .async_copy_from(h_contig_tm.as_slice(), &self.stream)
+                .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        }
         let d_ainv =
             DeviceBuffer::from_slice(&ainv).map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
         let mut d_m: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
@@ -670,6 +716,8 @@ impl CudaPrb {
         self.stream
             .synchronize()
             .map_err(|e| CudaPrbError::Cuda(e.to_string()))?;
+        drop(h_prices_tm);
+        drop(h_contig_tm);
         Ok((
             DeviceArrayF32 {
                 buf: d_m,

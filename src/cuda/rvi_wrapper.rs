@@ -49,6 +49,10 @@ impl Default for CudaRviPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -81,6 +85,8 @@ impl CudaRvi {
         cust::init(CudaFlags::empty()).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/rvi_kernel.ptx"));
         let jit = &[
@@ -93,6 +99,14 @@ impl CudaRvi {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy: CudaRviPolicy::default(),
+            debug_batch_logged: false,
+            debug_many_logged: false,
+        })
         Ok(Self {
             module,
             stream,
@@ -114,9 +128,24 @@ impl CudaRvi {
             .synchronize()
             .map_err(|e| CudaRviError::Cuda(e.to_string()))
     }
+    pub fn set_policy(&mut self, policy: CudaRviPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaRviPolicy {
+        &self.policy
+    }
+    pub fn synchronize(&self) -> Result<(), CudaRviError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaRviError::Cuda(e.to_string()))
+    }
 
     #[inline]
     fn device_mem_ok(bytes: usize) -> bool {
+        match mem_get_info() {
+            Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
+            Err(_) => true,
+        }
         match mem_get_info() {
             Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
             Err(_) => true,
@@ -133,6 +162,11 @@ impl CudaRvi {
     }
 
     fn expand_axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        if step == 0 || start == end {
+            vec![start]
+        } else {
+            (start..=end).step_by(step).collect()
+        }
         if step == 0 || start == end {
             vec![start]
         } else {
@@ -160,9 +194,32 @@ impl CudaRvi {
                 }
             }
         }
+        let mut out =
+            Vec::with_capacity(periods.len() * ma_lens.len() * matypes.len() * devtypes.len());
+        for &p in &periods {
+            for &m in &ma_lens {
+                for &t in &matypes {
+                    for &d in &devtypes {
+                        out.push(RviParams {
+                            period: Some(p),
+                            ma_len: Some(m),
+                            matype: Some(t),
+                            devtype: Some(d),
+                        });
+                    }
+                }
+            }
+        }
         out
     }
 
+    fn prepare_batch(
+        data: &[f32],
+        sweep: &RviBatchRange,
+    ) -> Result<(Vec<RviParams>, usize, usize, usize, usize), CudaRviError> {
+        if data.is_empty() {
+            return Err(CudaRviError::InvalidInput("empty data".into()));
+        }
     fn prepare_batch(
         data: &[f32],
         sweep: &RviBatchRange,
@@ -174,8 +231,16 @@ impl CudaRvi {
         let first_valid = data
             .iter()
             .position(|v| !v.is_nan())
+        let first_valid = data
+            .iter()
+            .position(|v| !v.is_nan())
             .ok_or_else(|| CudaRviError::InvalidInput("all values are NaN".into()))?;
         let combos = Self::expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaRviError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         if combos.is_empty() {
             return Err(CudaRviError::InvalidInput(
                 "no parameter combinations".into(),
@@ -184,6 +249,9 @@ impl CudaRvi {
 
         // Reject unsupported devtype=2 for now (median abs dev)
         if combos.iter().any(|c| c.devtype.unwrap_or(0) == 2) {
+            return Err(CudaRviError::InvalidInput(
+                "devtype=2 (median abs dev) not supported by CUDA kernel yet".into(),
+            ));
             return Err(CudaRviError::InvalidInput(
                 "devtype=2 (median abs dev) not supported by CUDA kernel yet".into(),
             ));
@@ -202,7 +270,23 @@ impl CudaRvi {
         if max_period == 0 || max_ma_len == 0 {
             return Err(CudaRviError::InvalidInput("invalid period/ma_len".into()));
         }
+        let max_period = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        let max_ma_len = combos
+            .iter()
+            .map(|c| c.ma_len.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if max_period == 0 || max_ma_len == 0 {
+            return Err(CudaRviError::InvalidInput("invalid period/ma_len".into()));
+        }
         if len - first_valid <= (max_period - 1) + (max_ma_len - 1) {
+            return Err(CudaRviError::InvalidInput(
+                "not enough valid data for warmup".into(),
+            ));
             return Err(CudaRviError::InvalidInput(
                 "not enough valid data for warmup".into(),
             ));
@@ -210,6 +294,11 @@ impl CudaRvi {
         Ok((combos, first_valid, len, max_period, max_ma_len))
     }
 
+    pub fn rvi_batch_dev(
+        &self,
+        data: &[f32],
+        sweep: &RviBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<RviParams>), CudaRviError> {
     pub fn rvi_batch_dev(
         &self,
         data: &[f32],
@@ -520,6 +609,8 @@ impl CudaRvi {
             ];
             self.stream
                 .launch(&func, grid, block, (shmem_bytes as u32), &mut args)
+            self.stream
+                .launch(&func, grid, block, (shmem_bytes as u32), &mut args)
                 .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         }
         Ok(())
@@ -556,8 +647,20 @@ impl CudaRvi {
                 }
             }
         }
+        for s in 0..cols {
+            for t in 0..rows {
+                let v = data_tm[t * cols + s];
+                if !v.is_nan() {
+                    firsts[s] = t as i32;
+                    break;
+                }
+            }
+        }
         let max_first = *firsts.iter().max().unwrap_or(&0);
         if (rows as i32) - max_first <= (period as i32 - 1 + ma_len as i32 - 1) {
+            return Err(CudaRviError::InvalidInput(
+                "not enough valid data for warmup".into(),
+            ));
             return Err(CudaRviError::InvalidInput(
                 "not enough valid data for warmup".into(),
             ));
@@ -565,6 +668,11 @@ impl CudaRvi {
 
         // VRAM estimate
         let req = ((cols * rows) * 2 + cols) * std::mem::size_of::<f32>();
+        if !Self::device_mem_ok(req) {
+            return Err(CudaRviError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
+        }
         if !Self::device_mem_ok(req) {
             return Err(CudaRviError::InvalidInput(
                 "insufficient device memory".into(),
@@ -584,7 +692,25 @@ impl CudaRvi {
         let mut d_out =
             unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
                 .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        let h_data =
+            LockedBuffer::from_slice(data_tm).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        let h_firsts =
+            LockedBuffer::from_slice(&firsts).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        let mut d_data =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        let mut d_firsts = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
+            .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        let mut d_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         unsafe {
+            d_data
+                .async_copy_from(&h_data, &self.stream)
+                .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+            d_firsts
+                .async_copy_from(&h_firsts, &self.stream)
+                .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
             d_data
                 .async_copy_from(&h_data, &self.stream)
                 .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
@@ -593,6 +719,17 @@ impl CudaRvi {
                 .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         }
 
+        self.launch_many_series(
+            &d_data, &d_firsts, cols, rows, period, ma_len, matype, devtype, &mut d_out,
+        )?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
         self.launch_many_series(
             &d_data, &d_firsts, cols, rows, period, ma_len, matype, devtype, &mut d_out,
         )?;
@@ -626,8 +763,19 @@ impl CudaRvi {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
         };
+        let func = self
+            .module
+            .get_function("rvi_many_series_one_param_f32")
+            .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+        };
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_many_logged {
             eprintln!("[rvi] many-series kernel: block_x={} cols={} rows={} period={} ma_len={} matype={} devtype= {}", block_x, cols, rows, period, ma_len, matype, devtype);
+            unsafe {
+                (*(self as *const _ as *mut CudaRvi)).debug_many_logged = true;
+            }
             unsafe {
                 (*(self as *const _ as *mut CudaRvi)).debug_many_logged = true;
             }
@@ -657,6 +805,9 @@ impl CudaRvi {
                 &mut o_ptr as *mut _ as *mut c_void,
                 std::ptr::null_mut(), // placeholder to keep array length stable if modified
             ];
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
+                .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
@@ -711,8 +862,96 @@ pub mod benches {
             )
             .with_sample_size(20),
         );
+        v.push(
+            CudaBenchScenario::new(
+                "rvi",
+                "one_series_many_params",
+                "rvi/batch",
+                "100k x 128",
+                || {
+                    struct State {
+                        cuda: CudaRvi,
+                        data: Vec<f32>,
+                        sweep: RviBatchRange,
+                    }
+                    impl CudaBenchState for State {
+                        fn launch(&mut self) {
+                            let _ = self.cuda.rvi_batch_dev(&self.data, &self.sweep);
+                        }
+                    }
+                    let n = 100_000usize;
+                    let mut data = vec![f32::NAN; n];
+                    for i in 500..n {
+                        let x = i as f32;
+                        data[i] = (x * 0.00123).sin() + 0.0002 * x;
+                    }
+                    let sweep = RviBatchRange {
+                        period: (10, 25, 1),
+                        ma_len: (14, 14, 0),
+                        matype: (1, 1, 0),
+                        devtype: (0, 0, 0),
+                    };
+                    Box::new(State {
+                        cuda: CudaRvi::new(0).unwrap(),
+                        data,
+                        sweep,
+                    })
+                },
+            )
+            .with_sample_size(20),
+        );
 
         // Many-series: 512 series x 2048 rows
+        v.push(
+            CudaBenchScenario::new(
+                "rvi",
+                "many_series_one_param",
+                "rvi/many_series",
+                "2048r x 512c",
+                || {
+                    struct State {
+                        cuda: CudaRvi,
+                        data_tm: Vec<f32>,
+                        cols: usize,
+                        rows: usize,
+                        params: RviParams,
+                    }
+                    impl CudaBenchState for State {
+                        fn launch(&mut self) {
+                            let _ = self.cuda.rvi_many_series_one_param_time_major_dev(
+                                &self.data_tm,
+                                self.cols,
+                                self.rows,
+                                &self.params,
+                            );
+                        }
+                    }
+                    let cols = 512usize;
+                    let rows = 2048usize;
+                    let mut tm = vec![f32::NAN; cols * rows];
+                    for s in 0..cols {
+                        for t in s..rows {
+                            let x = t as f32 + (s as f32) * 0.1;
+                            tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+                        }
+                    }
+                    let params = RviParams {
+                        period: Some(10),
+                        ma_len: Some(14),
+                        matype: Some(1),
+                        devtype: Some(0),
+                    };
+                    Box::new(State {
+                        cuda: CudaRvi::new(0).unwrap(),
+                        data_tm: tm,
+                        cols,
+                        rows,
+                        params,
+                    })
+                },
+            )
+            .with_sample_size(20),
+        );
         v.push(
             CudaBenchScenario::new(
                 "rvi",

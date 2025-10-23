@@ -41,7 +41,15 @@ pub enum BatchKernelPolicy {
     Auto,
     OneD { block_x: u32 },
 }
+pub enum BatchKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelPolicy {
+    Auto,
+    OneD { block_x: u32 },
+}
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
@@ -60,8 +68,23 @@ impl Default for CudaTtmSqueezePolicy {
         }
     }
 }
+pub struct CudaTtmSqueezePolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
+impl Default for CudaTtmSqueezePolicy {
+    fn default() -> Self {
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
+pub enum BatchKernelSelected {
+    OneD { block_x: u32 },
+}
 pub enum BatchKernelSelected {
     OneD { block_x: u32 },
 }
@@ -69,8 +92,18 @@ pub enum BatchKernelSelected {
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 
 #[derive(Clone, Debug)]
+struct Combo {
+    length: i32,
+    bb_mult: f32,
+    kc_high: f32,
+    kc_mid: f32,
+    kc_low: f32,
+}
 struct Combo {
     length: i32,
     bb_mult: f32,
@@ -92,6 +125,8 @@ pub struct CudaTtmSqueeze {
 impl CudaTtmSqueeze {
     pub fn new(device_id: usize) -> Result<Self, CudaTtmSqueezeError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
@@ -149,12 +184,29 @@ impl CudaTtmSqueeze {
             Err(_) => true,
         }
     }
+    fn mem_check_enabled() -> bool {
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
+    }
     #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required_bytes.saturating_add(headroom_bytes) <= free
+        } else {
+            true
+        }
         if !Self::mem_check_enabled() {
             return true;
         }
@@ -173,7 +225,25 @@ impl CudaTtmSqueeze {
                 (s..=e).step_by(st).collect()
             }
         }
+        fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
+            if st == 0 || s == e {
+                vec![s]
+            } else {
+                (s..=e).step_by(st).collect()
+            }
+        }
         fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
+            if (st.abs() < 1e-12) || ((s - e).abs() < 1e-12) {
+                vec![s]
+            } else {
+                let mut v = Vec::new();
+                let mut x = s;
+                while x <= e + 1e-12 {
+                    v.push(x);
+                    x += st;
+                }
+                v
+            }
             if (st.abs() < 1e-12) || ((s - e).abs() < 1e-12) {
                 vec![s]
             } else {
@@ -209,10 +279,36 @@ impl CudaTtmSqueeze {
                 }
             }
         }
+        let bb = axis_f64(range.bb_mult);
+        let kh = axis_f64(range.kc_high);
+        let km = axis_f64(range.kc_mid);
+        let kl = axis_f64(range.kc_low);
+        let mut out = Vec::with_capacity(lengths.len() * bb.len() * kh.len() * km.len() * kl.len());
+        for &l in &lengths {
+            for &b in &bb {
+                for &h in &kh {
+                    for &m in &km {
+                        for &lo in &kl {
+                            out.push(Combo {
+                                length: l as i32,
+                                bb_mult: b as f32,
+                                kc_high: h as f32,
+                                kc_mid: m as f32,
+                                kc_low: lo as f32,
+                            });
+                        }
+                    }
+                }
+            }
+        }
         out
     }
 
     fn prepare_batch_inputs(
+        high_f32: &[f32],
+        low_f32: &[f32],
+        close_f32: &[f32],
+        sweep: &TtmSqueezeBatchRange,
         high_f32: &[f32],
         low_f32: &[f32],
         close_f32: &[f32],
@@ -224,7 +320,14 @@ impl CudaTtmSqueeze {
                 high_f32.len(),
                 low_f32.len(),
                 close_f32.len()
+                "inconsistent lengths: high={}, low={}, close={}",
+                high_f32.len(),
+                low_f32.len(),
+                close_f32.len()
             )));
+        }
+        if close_f32.is_empty() {
+            return Err(CudaTtmSqueezeError::InvalidInput("empty series".into()));
         }
         if close_f32.is_empty() {
             return Err(CudaTtmSqueezeError::InvalidInput("empty series".into()));
@@ -234,7 +337,23 @@ impl CudaTtmSqueeze {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("all values are NaN".into()))?;
+        let first_valid = close_f32
+            .iter()
+            .position(|v| !v.is_nan())
+            .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("all values are NaN".into()))?;
         let combos = Self::expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaTtmSqueezeError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        for c in &combos {
+            if c.length <= 0 || (len - first_valid) < (c.length as usize) {
+                return Err(CudaTtmSqueezeError::InvalidInput(
+                    "invalid length or insufficient data".into(),
+                ));
+            }
+        }
         if combos.is_empty() {
             return Err(CudaTtmSqueezeError::InvalidInput(
                 "no parameter combinations".into(),
@@ -281,7 +400,15 @@ impl CudaTtmSqueeze {
             let mut p_kh = d_kh.as_device_ptr().as_raw();
             let mut p_km = d_km.as_device_ptr().as_raw();
             let mut p_kl = d_kl.as_device_ptr().as_raw();
+            let mut p_bb = d_bb.as_device_ptr().as_raw();
+            let mut p_kh = d_kh.as_device_ptr().as_raw();
+            let mut p_km = d_km.as_device_ptr().as_raw();
+            let mut p_kl = d_kl.as_device_ptr().as_raw();
             let mut len_i = len as i32;
+            let mut n_i = n_combos as i32;
+            let mut fv_i = first_valid as i32;
+            let mut p_mo = d_mo.as_device_ptr().as_raw();
+            let mut p_sq = d_sq.as_device_ptr().as_raw();
             let mut n_i = n_combos as i32;
             let mut fv_i = first_valid as i32;
             let mut p_mo = d_mo.as_device_ptr().as_raw();
@@ -295,7 +422,15 @@ impl CudaTtmSqueeze {
                 &mut p_kh as *mut _ as *mut c_void,
                 &mut p_km as *mut _ as *mut c_void,
                 &mut p_kl as *mut _ as *mut c_void,
+                &mut p_bb as *mut _ as *mut c_void,
+                &mut p_kh as *mut _ as *mut c_void,
+                &mut p_km as *mut _ as *mut c_void,
+                &mut p_kl as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+                &mut fv_i as *mut _ as *mut c_void,
+                &mut p_mo as *mut _ as *mut c_void,
+                &mut p_sq as *mut _ as *mut c_void,
                 &mut n_i as *mut _ as *mut c_void,
                 &mut fv_i as *mut _ as *mut c_void,
                 &mut p_mo as *mut _ as *mut c_void,
@@ -303,6 +438,10 @@ impl CudaTtmSqueeze {
                 std::ptr::null_mut(),
             ];
             self.stream.launch(&func, grid, block, smem_bytes as u32, &mut args).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        }
+        unsafe {
+            (*(self as *const _ as *mut CudaTtmSqueeze)).last_batch =
+                Some(BatchKernelSelected::OneD { block_x });
         }
         unsafe {
             (*(self as *const _ as *mut CudaTtmSqueeze)).last_batch =
@@ -316,8 +455,13 @@ impl CudaTtmSqueeze {
         high_f32: &[f32],
         low_f32: &[f32],
         close_f32: &[f32],
+        high_f32: &[f32],
+        low_f32: &[f32],
+        close_f32: &[f32],
         sweep: &TtmSqueezeBatchRange,
     ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaTtmSqueezeError> {
+        let (combos, first_valid, len) =
+            Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
         let (combos, first_valid, len) =
             Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
 
@@ -325,10 +469,14 @@ impl CudaTtmSqueeze {
         let in_bytes = 3 * len * std::mem::size_of::<f32>();
         let params_bytes =
             combos.len() * (std::mem::size_of::<i32>() + 4 * std::mem::size_of::<f32>());
+        let params_bytes =
+            combos.len() * (std::mem::size_of::<i32>() + 4 * std::mem::size_of::<f32>());
         let out_bytes = 2 * combos.len() * len * std::mem::size_of::<f32>();
         let required = in_bytes + params_bytes + out_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaTtmSqueezeError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
                 "estimated device memory {:.2} MB exceeds free VRAM",
                 (required as f64) / (1024.0 * 1024.0)
             )));
@@ -370,6 +518,10 @@ impl CudaTtmSqueeze {
             .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
         let mut d_sq: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_mo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_sq: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
             &d_h, &d_l, &d_c,
@@ -407,6 +559,9 @@ impl CudaTtmSqueeze {
             let mut p_h = d_h_tm.as_device_ptr().as_raw();
             let mut p_l = d_l_tm.as_device_ptr().as_raw();
             let mut p_c = d_c_tm.as_device_ptr().as_raw();
+            let mut p_h = d_h_tm.as_device_ptr().as_raw();
+            let mut p_l = d_l_tm.as_device_ptr().as_raw();
+            let mut p_c = d_c_tm.as_device_ptr().as_raw();
             let mut p_fv = d_first.as_device_ptr().as_raw();
             let mut nser = cols as i32; // num_series
             let mut slen = rows as i32; // series_len
@@ -429,11 +584,20 @@ impl CudaTtmSqueeze {
                 &mut khf as *mut _ as *mut c_void,
                 &mut kmf as *mut _ as *mut c_void,
                 &mut klf as *mut _ as *mut c_void,
+                &mut l_i as *mut _ as *mut c_void,
+                &mut bb as *mut _ as *mut c_void,
+                &mut khf as *mut _ as *mut c_void,
+                &mut kmf as *mut _ as *mut c_void,
+                &mut klf as *mut _ as *mut c_void,
                 &mut p_mo as *mut _ as *mut c_void,
                 &mut p_sq as *mut _ as *mut c_void,
                 std::ptr::null_mut(),
             ];
             self.stream.launch(&func, grid, block, smem_bytes as u32, &mut args).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        }
+        unsafe {
+            (*(self as *const _ as *mut CudaTtmSqueeze)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
         }
         unsafe {
             (*(self as *const _ as *mut CudaTtmSqueeze)).last_many =
@@ -454,10 +618,31 @@ impl CudaTtmSqueeze {
         kc_high: f32,
         kc_mid: f32,
         kc_low: f32,
+        high_tm_f32: &[f32],
+        low_tm_f32: &[f32],
+        close_tm_f32: &[f32],
+        cols: usize,
+        rows: usize,
+        length: usize,
+        bb_mult: f32,
+        kc_high: f32,
+        kc_mid: f32,
+        kc_low: f32,
     ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaTtmSqueezeError> {
         if high_tm_f32.len() != low_tm_f32.len() || low_tm_f32.len() != close_tm_f32.len() {
             return Err(CudaTtmSqueezeError::InvalidInput(
                 "inconsistent time-major inputs".into(),
+            ));
+            return Err(CudaTtmSqueezeError::InvalidInput(
+                "inconsistent time-major inputs".into(),
+            ));
+        }
+        if cols == 0 || rows == 0 {
+            return Err(CudaTtmSqueezeError::InvalidInput("zero dims".into()));
+        }
+        if high_tm_f32.len() != cols * rows {
+            return Err(CudaTtmSqueezeError::InvalidInput(
+                "dims mismatch with buffer length".into(),
             ));
         }
         if cols == 0 || rows == 0 {
@@ -491,6 +676,24 @@ impl CudaTtmSqueeze {
                     "insufficient valid data for length".into(),
                 ));
             }
+            for t in 0..rows {
+                let v = close_tm_f32[t * cols + s];
+                if !v.is_nan() {
+                    fv = t as i32;
+                    break;
+                }
+            }
+            if fv < 0 {
+                return Err(CudaTtmSqueezeError::InvalidInput(format!(
+                    "series {} all NaN",
+                    s
+                )));
+            }
+            if (rows as i32 - fv) < (length as i32) {
+                return Err(CudaTtmSqueezeError::InvalidInput(
+                    "insufficient valid data for length".into(),
+                ));
+            }
             first_valids[s] = fv;
         }
 
@@ -502,6 +705,8 @@ impl CudaTtmSqueeze {
         let required = in_bytes + out_bytes + params;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaTtmSqueezeError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                (required as f64) / (1024.0 * 1024.0)
                 "estimated device memory {:.2} MB exceeds free VRAM",
                 (required as f64) / (1024.0 * 1024.0)
             )));
@@ -523,7 +728,27 @@ impl CudaTtmSqueeze {
             .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
         let mut d_sq: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_mo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_sq: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
 
+        self.launch_many_series_kernel(
+            &d_h, &d_l, &d_c, &d_fv, cols, rows, length, bb_mult, kc_high, kc_mid, kc_low,
+            &mut d_mo, &mut d_sq,
+        )?;
+        Ok((
+            DeviceArrayF32 {
+                buf: d_mo,
+                rows,
+                cols,
+            },
+            DeviceArrayF32 {
+                buf: d_sq,
+                rows,
+                cols,
+            },
+        ))
         self.launch_many_series_kernel(
             &d_h, &d_l, &d_c, &d_fv, cols, rows, length, bb_mult, kc_high, kc_mid, kc_low,
             &mut d_mo, &mut d_sq,
@@ -573,9 +798,46 @@ pub mod benches {
                 .unwrap();
         }
     }
+    struct TtmBatchState {
+        cuda: CudaTtmSqueeze,
+        h: Vec<f32>,
+        l: Vec<f32>,
+        c: Vec<f32>,
+        sweep: TtmSqueezeBatchRange,
+    }
+    impl CudaBenchState for TtmBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .ttm_squeeze_batch_dev(&self.h, &self.l, &self.c, &self.sweep)
+                .unwrap();
+        }
+    }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaTtmSqueeze::new(0).expect("cuda ttm squeeze");
         let h = gen_series(ONE_SERIES_LEN);
+        let mut l = h.clone();
+        for v in &mut l {
+            *v -= 0.5;
+        }
+        let mut c = h.clone();
+        for v in &mut c {
+            *v -= 0.25;
+        }
+        let sweep = TtmSqueezeBatchRange {
+            length: (10, 10 + PARAM_SWEEP - 1, 1),
+            bb_mult: (2.0, 2.0, 0.0),
+            kc_high: (1.0, 1.0, 0.0),
+            kc_mid: (1.5, 1.5, 0.0),
+            kc_low: (2.0, 2.0, 0.0),
+        };
+        Box::new(TtmBatchState {
+            cuda,
+            h,
+            l,
+            c,
+            sweep,
+        })
         let mut l = h.clone();
         for v in &mut l {
             *v -= 0.5;
@@ -607,6 +869,9 @@ pub mod benches {
             "ttm_squeeze_cuda_batch_dev",
             "100k_x_128",
             prep_one_series_many_params,
+        )
+        .with_sample_size(10)
+        .with_mem_required(bytes_one_series_many_params())]
         )
         .with_sample_size(10)
         .with_mem_required(bytes_one_series_many_params())]

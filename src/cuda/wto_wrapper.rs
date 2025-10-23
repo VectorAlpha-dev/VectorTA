@@ -72,6 +72,9 @@ impl Default for BatchKernelPolicy {
     fn default() -> Self {
         BatchKernelPolicy::Auto
     }
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -81,6 +84,9 @@ pub enum ManySeriesKernelPolicy {
 }
 
 impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
     fn default() -> Self {
         ManySeriesKernelPolicy::Auto
     }
@@ -117,6 +123,9 @@ impl CudaWto {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
+                Err(_) => {
+                    Module::from_ptx(ptx, &[]).map_err(|e| CudaWtoError::Cuda(e.to_string()))?
+                }
                 Err(_) => {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaWtoError::Cuda(e.to_string()))?
                 }

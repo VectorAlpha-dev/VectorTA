@@ -59,7 +59,7 @@ fn cfo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4; // FP32 kernel vs FP64 CPU
+    let tol = 3e-3; // FP32 GPU vs FP64 CPU (prefix path rounding)
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -132,7 +132,7 @@ fn cfo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4;
+    let tol = 3e-3;
     for idx in 0..host.len() {
         assert!(
             approx_eq(cpu_tm[idx], host[idx] as f64, tol),

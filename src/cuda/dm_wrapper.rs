@@ -15,12 +15,13 @@ use crate::indicators::dm::{DmBatchRange, DmParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -84,8 +85,8 @@ pub struct CudaDm {
     stream: Stream,
     _context: Context,
     policy: CudaDmPolicy,
-    debug_batch_logged: bool,
-    debug_many_logged: bool,
+    debug_batch_logged: AtomicBool,
+    debug_many_logged: AtomicBool,
 }
 
 impl CudaDm {
@@ -111,8 +112,8 @@ impl CudaDm {
             stream,
             _context: context,
             policy: CudaDmPolicy::default(),
-            debug_batch_logged: false,
-            debug_many_logged: false,
+            debug_batch_logged: AtomicBool::new(false),
+            debug_many_logged: AtomicBool::new(false),
         })
     }
 
@@ -178,7 +179,8 @@ impl CudaDm {
     ) -> Result<(DeviceDmPair, Vec<DmParams>), CudaDmError> {
         let (combos, first_valid, len) = Self::prepare_batch(high, low, sweep)?;
         let rows = combos.len();
-        let req = (2 * len + rows + 2 * rows * len) * std::mem::size_of::<f32>();
+        let req = std::mem::size_of::<f32>() * (2 * len + 2 * rows * len)
+            + std::mem::size_of::<i32>() * rows;
         if !Self::device_mem_ok(req) {
             return Err(CudaDmError::InvalidInput(
                 "insufficient device memory".into(),
@@ -190,7 +192,7 @@ impl CudaDm {
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..len], &self.stream) }
             .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods_host)
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_host, &self.stream) }
             .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
         let mut d_plus: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
@@ -244,19 +246,18 @@ impl CudaDm {
             .get_function("dm_batch_f32")
             .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => match func.suggested_launch_configuration(0, (1024, 1, 1).into()) {
+                Ok((_min_grid, suggested_block)) => suggested_block.clamp(32, 1024),
+                Err(_) => 256,
+            },
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
         if cfg!(debug_assertions) || std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
-            if !self.debug_batch_logged {
+            if !self.debug_batch_logged.swap(true, Ordering::Relaxed) {
                 eprintln!(
                     "[dm] batch kernel: block_x={} rows={} len={}",
                     block_x, n_combos, series_len
                 );
-                // mark as logged once
-                unsafe {
-                    (*(self as *const _ as *mut CudaDm)).debug_batch_logged = true;
-                }
             }
         }
         unsafe {
@@ -322,7 +323,8 @@ impl CudaDm {
             }
         }
 
-        let req = (2 * cols * rows + cols + 2 * cols * rows) * std::mem::size_of::<f32>();
+        let req = std::mem::size_of::<f32>() * (4 * cols * rows)
+            + std::mem::size_of::<i32>() * cols;
         if !Self::device_mem_ok(req) {
             return Err(CudaDmError::InvalidInput(
                 "insufficient device memory".into(),
@@ -333,7 +335,7 @@ impl CudaDm {
             .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }
             .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
             .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
         let mut d_plus: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
@@ -384,27 +386,15 @@ impl CudaDm {
         }
         let pair =
             self.dm_many_series_one_param_time_major_dev(high_tm, low_tm, cols, rows, period)?;
-        let mut pinned_plus: LockedBuffer<f32> =
-            unsafe { LockedBuffer::uninitialized(pair.plus.len()) }
-                .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
-        let mut pinned_minus: LockedBuffer<f32> =
-            unsafe { LockedBuffer::uninitialized(pair.minus.len()) }
-                .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
-        unsafe {
-            pair.plus
-                .buf
-                .async_copy_to(pinned_plus.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
-            pair.minus
-                .buf
-                .async_copy_to(pinned_minus.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
-        }
-        self.stream
-            .synchronize()
+        // Single blocking D→H copy per output – no extra pinned stage.
+        pair.plus
+            .buf
+            .copy_to(plus_tm_out)
             .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
-        plus_tm_out.copy_from_slice(pinned_plus.as_slice());
-        minus_tm_out.copy_from_slice(pinned_minus.as_slice());
+        pair.minus
+            .buf
+            .copy_to(minus_tm_out)
+            .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
         Ok(())
     }
 
@@ -424,18 +414,18 @@ impl CudaDm {
             .get_function("dm_many_series_one_param_time_major_f32")
             .map_err(|e| CudaDmError::Cuda(e.to_string()))?;
         let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::Auto => match func.suggested_launch_configuration(0, (1024, 1, 1).into()) {
+                Ok((_min_grid, suggested_block)) => suggested_block.clamp(32, 1024),
+                Err(_) => 256,
+            },
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
         };
         if cfg!(debug_assertions) || std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
-            if !self.debug_many_logged {
+            if !self.debug_many_logged.swap(true, Ordering::Relaxed) {
                 eprintln!(
                     "[dm] many-series kernel: block_x={} cols={} rows={} period={}",
                     block_x, cols, rows, period
                 );
-                unsafe {
-                    (*(self as *const _ as *mut CudaDm)).debug_many_logged = true;
-                }
             }
         }
         unsafe {

@@ -16,16 +16,19 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::emd::{EmdBatchRange, EmdParams};
-use cust::context::Context;
-use cust::device::Device;
-use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::context::{CacheConfig, Context, SharedMemoryConfig};
+use cust::function::{BlockSize, Function, GridSize};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use cust::device::{Device, DeviceAttribute};
+use cust::sys::{
+    cuDeviceGetAttribute, cuFuncSetAttribute, CUdevice_attribute, CUfunction_attribute,
+};
 
 #[derive(Debug)]
 pub enum CudaEmdError {
@@ -95,7 +98,72 @@ pub struct CudaEmd {
     module: Module,
     stream: Stream,
     _context: Context,
+    device_id: u32,
     policy: CudaEmdPolicy,
+}
+
+// ----- Helpers: dynamic shared memory attribute and cache preference -----
+fn opt_in_dynamic_smem(func: &Function, bytes: u32) -> Result<(), CudaEmdError> {
+    let res = unsafe {
+        cuFuncSetAttribute(
+            func.to_raw(),
+            CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+            bytes as i32,
+        )
+    };
+    if res != cust::sys::CUresult::CUDA_SUCCESS {
+        return Err(CudaEmdError::Cuda(format!(
+            "cuFuncSetAttribute(MAX_DYNAMIC_SHARED) failed: {:?}",
+            res
+        )));
+    }
+    Ok(())
+}
+
+fn prefer_shared(func: &mut Function) -> Result<(), CudaEmdError> {
+    func.set_cache_config(CacheConfig::PreferShared)
+        .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+    func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)
+        .map_err(|e| CudaEmdError::Cuda(e.to_string()))
+}
+
+// ---- Shared-memory sizing and device limits ----
+const PER_UP_LOW: usize = 50;
+const RINGS_PER_BLOCK: usize = 2; // ub + lb
+
+#[inline]
+fn smem_for(block_x: u32) -> usize {
+    RINGS_PER_BLOCK * PER_UP_LOW * (block_x as usize) * core::mem::size_of::<f32>()
+}
+
+#[inline]
+fn query_optin_smem_limit(device: Device) -> usize {
+    // Fallback to legacy per-block limit first
+    let default = device
+        .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)
+        .unwrap_or(48 * 1024) as usize;
+    let mut optin = default as i32;
+    unsafe {
+        let _ = cuDeviceGetAttribute(
+            &mut optin as *mut _,
+            CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+            device.as_raw(),
+        );
+    }
+    optin.max(default as i32) as usize
+}
+
+#[inline]
+fn clamp_block_x_for_smem(device: Device, requested: u32) -> u32 {
+    let limit = query_optin_smem_limit(device);
+    let mut bx = requested.max(64).min(1024);
+    while smem_for(bx) > limit && bx > 32 {
+        bx -= 32; // step down by a warp
+    }
+    let max_tpb = device
+        .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+        .unwrap_or(1024) as u32;
+    bx.min(max_tpb).max(32)
 }
 
 impl CudaEmd {
@@ -106,9 +174,10 @@ impl CudaEmd {
         let context = Context::new(device).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/emd_kernel.ptx"));
+        // Prefer most aggressive JIT optimization level explicitly
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[]))
@@ -120,6 +189,7 @@ impl CudaEmd {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
             policy: CudaEmdPolicy::default(),
         })
     }
@@ -260,15 +330,38 @@ impl CudaEmd {
             ));
         }
 
-        // H2D
-        let d_prices =
-            DeviceBuffer::from_slice(&prices).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let d_p = DeviceBuffer::from_slice(&periods_i32)
+        // H2D (pinned host + async copies on our NON_BLOCKING stream)
+        let h_prices = LockedBuffer::from_slice(&prices)
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let d_d =
-            DeviceBuffer::from_slice(&deltas_f32).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let d_f =
-            DeviceBuffer::from_slice(&fracs_f32).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let h_p = LockedBuffer::from_slice(&periods_i32)
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let h_d = LockedBuffer::from_slice(&deltas_f32)
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let h_f = LockedBuffer::from_slice(&fracs_f32)
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+
+        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let mut d_p: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(n) }
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let mut d_d: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let mut d_f: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        unsafe {
+            d_prices
+                .async_copy_from(h_prices.as_slice(), &self.stream)
+                .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+            d_p
+                .async_copy_from(h_p.as_slice(), &self.stream)
+                .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+            d_d
+                .async_copy_from(h_d.as_slice(), &self.stream)
+                .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+            d_f
+                .async_copy_from(h_f.as_slice(), &self.stream)
+                .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        }
 
         let elems = n * len;
         let mut d_ub: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
@@ -290,18 +383,35 @@ impl CudaEmd {
             DeviceBuffer::from_slice(&zero_bp).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
         // Chunk grid.y to <= 65_535 if needed (rows == combos). Use x dimension like other wrappers.
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(64).min(1024),
+        // Kernel uses dynamic shared memory for 2*50 rings; choose safe block size
+        let req_block = match self.policy.batch {
+            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Plain { block_x } => block_x,
         } as u32;
+        let device = Device::get_device(self.device_id)
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let block_x = clamp_block_x_for_smem(device, req_block);
         let grid_x = ((n as u32) + block_x - 1) / block_x;
 
         // Single launch is fine (x-dimension only) — kernels index combos along x.
         unsafe {
-            let func = self
+            let mut func = self
                 .module
                 .get_function("emd_batch_f32")
                 .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+
+            // Configure for dynamic shared memory and prefer shared cache
+            let dyn_smem_bytes: u32 = smem_for(block_x) as u32;
+            opt_in_dynamic_smem(&func, dyn_smem_bytes)?;
+            prefer_shared(&mut func)?;
+            // Additionally hint carve-out preference to shared
+            unsafe {
+                let _ = cuFuncSetAttribute(
+                    func.to_raw(),
+                    CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                    100,
+                );
+            }
 
             let mut p_prices = d_prices.as_device_ptr().as_raw();
             let mut p_p = d_p.as_device_ptr().as_raw();
@@ -313,10 +423,6 @@ impl CudaEmd {
             let mut p_ub = d_ub.as_device_ptr().as_raw();
             let mut p_mb = d_mb.as_device_ptr().as_raw();
             let mut p_lb = d_lb.as_device_ptr().as_raw();
-            let mut ring_stride_i = ring_stride_mid as i32; // fits i32 for typical sizes
-            let mut p_sp = d_sp_ring.as_device_ptr().as_raw();
-            let mut p_sv = d_sv_ring.as_device_ptr().as_raw();
-            let mut p_bp = d_bp_ring.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut p_prices as *mut _ as *mut c_void,
                 &mut p_p as *mut _ as *mut c_void,
@@ -336,7 +442,7 @@ impl CudaEmd {
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             self.stream
-                .launch(&func, grid, block, 0, args)
+                .launch(&func, grid, block, dyn_smem_bytes as u32, args)
                 .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
         }
 
@@ -400,10 +506,24 @@ impl CudaEmd {
             ));
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(first_valids)
+        let h_prices = LockedBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let h_fv = LockedBuffer::from_slice(first_valids)
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let mut d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }
+                .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let mut d_fv: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized(cols) }
+                .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        unsafe {
+            d_prices
+                .async_copy_from(h_prices.as_slice(), &self.stream)
+                .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+            d_fv
+                .async_copy_from(h_fv.as_slice(), &self.stream)
+                .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        }
         let mut d_ub: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
         let mut d_mb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
@@ -411,27 +531,30 @@ impl CudaEmd {
         let mut d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
-        // Zeroed ring buffers
-        let zero_sp = vec![0f32; cols * 50];
-        let zero_sv = vec![0f32; cols * 50];
-        let zero_bp = vec![0f32; cols * per_mid];
-        let mut d_sp_ring =
-            DeviceBuffer::from_slice(&zero_sp).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let mut d_sv_ring =
-            DeviceBuffer::from_slice(&zero_sv).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let mut d_bp_ring =
-            DeviceBuffer::from_slice(&zero_bp).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 256,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(1024),
+        // Needs dynamic shared memory like batch path
+        let req_block = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 128,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
         } as u32;
+        let device = Device::get_device(self.device_id)
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let block_x = clamp_block_x_for_smem(device, req_block);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         unsafe {
-            let func = self
+            let mut func = self
                 .module
                 .get_function("emd_many_series_one_param_time_major_f32")
                 .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+            let dyn_smem_bytes: u32 = smem_for(block_x) as u32;
+            opt_in_dynamic_smem(&func, dyn_smem_bytes)?;
+            prefer_shared(&mut func)?;
+            unsafe {
+                let _ = cuFuncSetAttribute(
+                    func.to_raw(),
+                    CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                    100,
+                );
+            }
             let mut p_prices = d_prices.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut rows_i = rows as i32;
@@ -442,10 +565,6 @@ impl CudaEmd {
             let mut p_ub = d_ub.as_device_ptr().as_raw();
             let mut p_mb = d_mb.as_device_ptr().as_raw();
             let mut p_lb = d_lb.as_device_ptr().as_raw();
-            let mut ring_stride_i = per_mid as i32;
-            let mut p_sp = d_sp_ring.as_device_ptr().as_raw();
-            let mut p_sv = d_sv_ring.as_device_ptr().as_raw();
-            let mut p_bp = d_bp_ring.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut p_prices as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
@@ -465,7 +584,7 @@ impl CudaEmd {
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             self.stream
-                .launch(&func, grid, block, 0, args)
+                .launch(&func, grid, block, dyn_smem_bytes as u32, args)
                 .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
         }
         self.stream

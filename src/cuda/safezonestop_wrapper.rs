@@ -52,6 +52,8 @@ impl CudaSafeZoneStop {
             .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
         let context =
             Context::new(device).map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+        let context =
+            Context::new(device).map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/safezonestop_kernel.ptx"));
         let jit = &[
@@ -65,6 +67,11 @@ impl CudaSafeZoneStop {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
 
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+        })
         Ok(Self {
             module,
             stream,
@@ -102,6 +109,9 @@ impl CudaSafeZoneStop {
             if h.is_finite() && l.is_finite() {
                 return Some(i);
             }
+            if h.is_finite() && l.is_finite() {
+                return Some(i);
+            }
         }
         None
     }
@@ -111,14 +121,24 @@ impl CudaSafeZoneStop {
             if step == 0 || start == end {
                 return vec![start];
             }
+            if step == 0 || start == end {
+                return vec![start];
+            }
             (start..=end).step_by(step).collect()
         }
         fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
             if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
                 return vec![start];
             }
+            if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+                return vec![start];
+            }
             let mut out = Vec::new();
             let mut x = start;
+            while x <= end + 1e-12 {
+                out.push(x);
+                x += step;
+            }
             while x <= end + 1e-12 {
                 out.push(x);
                 x += step;
@@ -140,12 +160,26 @@ impl CudaSafeZoneStop {
                 }
             }
         }
+        for &p in &periods {
+            for &m in &mults {
+                for &lb in &looks {
+                    out.push(SafeZoneStopParams {
+                        period: Some(p),
+                        mult: Some(m),
+                        max_lookback: Some(lb),
+                    });
+                }
+            }
+        }
         out
     }
 
     fn compute_dm_raw_f32(high: &[f32], low: &[f32], first: usize, dir_long: bool) -> Vec<f32> {
         let len = high.len();
         let mut dm = vec![0.0f32; len];
+        if len == 0 {
+            return dm;
+        }
         if len == 0 {
             return dm;
         }
@@ -164,7 +198,17 @@ impl CudaSafeZoneStop {
                 } else {
                     0.0
                 }
+                if dn_pos > up_pos {
+                    dn_pos
+                } else {
+                    0.0
+                }
             } else {
+                if up_pos > dn_pos {
+                    up_pos
+                } else {
+                    0.0
+                }
                 if up_pos > dn_pos {
                     up_pos
                 } else {
@@ -201,7 +245,15 @@ impl CudaSafeZoneStop {
             return Err(CudaSafeZoneStopError::InvalidInput(
                 "empty or mismatched inputs".into(),
             ));
+            return Err(CudaSafeZoneStopError::InvalidInput(
+                "empty or mismatched inputs".into(),
+            ));
         }
+        let dir_long = match direction.as_bytes().get(0) {
+            Some(b'l') => true,
+            Some(b's') => false,
+            _ => true,
+        };
         let dir_long = match direction.as_bytes().get(0) {
             Some(b'l') => true,
             Some(b's') => false,
@@ -212,6 +264,9 @@ impl CudaSafeZoneStop {
 
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
+            return Err(CudaSafeZoneStopError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
             return Err(CudaSafeZoneStopError::InvalidInput(
                 "no parameter combinations".into(),
             ));
@@ -235,9 +290,23 @@ impl CudaSafeZoneStop {
                     "period/lookback exceed length".into(),
                 ));
             }
+            if p == 0 || lb == 0 {
+                return Err(CudaSafeZoneStopError::InvalidInput(
+                    "period/lookback must be > 0".into(),
+                ));
+            }
+            if p > n || lb > n {
+                return Err(CudaSafeZoneStopError::InvalidInput(
+                    "period/lookback exceed length".into(),
+                ));
+            }
             if n - first < (p + 1).max(lb) {
                 return Err(CudaSafeZoneStopError::InvalidInput(format!(
                     "not enough valid data for period={}, lb={} (valid after first={} is {})",
+                    p,
+                    lb,
+                    first,
+                    n - first
                     p,
                     lb,
                     first,
@@ -266,6 +335,9 @@ impl CudaSafeZoneStop {
             bytes += combos.len() * (max_look + 1) * (4 + 4); // q_idx + q_val
         }
         if !Self::will_fit(bytes, headroom) {
+            return Err(CudaSafeZoneStopError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
             return Err(CudaSafeZoneStopError::InvalidInput(
                 "insufficient device memory".into(),
             ));
@@ -376,6 +448,14 @@ impl CudaSafeZoneStop {
             },
             combos,
         ))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: n,
+            },
+            combos,
+        ))
     }
 
     /// Many-series × one-param (time-major)
@@ -393,12 +473,28 @@ impl CudaSafeZoneStop {
         if cols == 0 || rows == 0 {
             return Err(CudaSafeZoneStopError::InvalidInput("empty matrix".into()));
         }
+        if cols == 0 || rows == 0 {
+            return Err(CudaSafeZoneStopError::InvalidInput("empty matrix".into()));
+        }
         let n = cols * rows;
         if high_tm_f32.len() != n || low_tm_f32.len() != n {
             return Err(CudaSafeZoneStopError::InvalidInput(
                 "matrix inputs mismatch".into(),
             ));
+            return Err(CudaSafeZoneStopError::InvalidInput(
+                "matrix inputs mismatch".into(),
+            ));
         }
+        if period == 0 || max_lookback == 0 {
+            return Err(CudaSafeZoneStopError::InvalidInput(
+                "period/lookback must be > 0".into(),
+            ));
+        }
+        let dir_long = match direction.as_bytes().get(0) {
+            Some(b'l') => true,
+            Some(b's') => false,
+            _ => true,
+        };
         if period == 0 || max_lookback == 0 {
             return Err(CudaSafeZoneStopError::InvalidInput(
                 "period/lookback must be > 0".into(),
@@ -420,8 +516,16 @@ impl CudaSafeZoneStop {
                     first_valids[s] = t as i32;
                     break;
                 }
+                if h.is_finite() && l.is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
             }
             if first_valids[s] < 0 {
+                return Err(CudaSafeZoneStopError::InvalidInput(format!(
+                    "series {} all NaN",
+                    s
+                )));
                 return Err(CudaSafeZoneStopError::InvalidInput(format!(
                     "series {} all NaN",
                     s
@@ -431,6 +535,9 @@ impl CudaSafeZoneStop {
             if rows - f < (period + 1).max(max_lookback) {
                 return Err(CudaSafeZoneStopError::InvalidInput(format!(
                     "series {} not enough valid data (need >= {}, have {})",
+                    s,
+                    (period + 1).max(max_lookback),
+                    rows - f
                     s,
                     (period + 1).max(max_lookback),
                     rows - f
@@ -444,6 +551,9 @@ impl CudaSafeZoneStop {
         let mut bytes = n * 4 * 2 + cols * 4 + n * 4;
         if need_deque { bytes += cols * (max_lookback + 1) * (4 + 4); }
         if !Self::will_fit(bytes, headroom) {
+            return Err(CudaSafeZoneStopError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
             return Err(CudaSafeZoneStopError::InvalidInput(
                 "insufficient device memory".into(),
             ));
@@ -539,6 +649,11 @@ impl CudaSafeZoneStop {
             rows,
             cols,
         })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
 
@@ -604,6 +719,21 @@ pub mod benches {
             sweep,
             dir: "long",
         }
+        let sweep = SafeZoneStopBatchRange {
+            period: (10, 22, 6),
+            mult: (1.5, 3.0, 0.75),
+            max_lookback: (3, 5, 1),
+        };
+        BatchState {
+            cuda,
+            high,
+            low,
+            sweep,
+            dir: "long",
+        }
+    }
+    fn prep_batch_box() -> Box<dyn CudaBenchState> {
+        Box::new(prep_batch())
     }
     fn prep_batch_box() -> Box<dyn CudaBenchState> {
         Box::new(prep_batch())
@@ -657,6 +787,27 @@ pub mod benches {
             mult: 2.5,
             lb: 3,
         }
+        for s in 0..cols {
+            for t in s..rows {
+                let x = (t as f32) + (s as f32) * 0.17;
+                let base = (x * 0.001).sin() + 0.0002 * x;
+                high_tm[t * cols + s] = base + 0.5;
+                low_tm[t * cols + s] = base - 0.5;
+            }
+        }
+        ManySeriesState {
+            cuda,
+            high_tm,
+            low_tm,
+            cols,
+            rows,
+            period: 22,
+            mult: 2.5,
+            lb: 3,
+        }
+    }
+    fn prep_many_series_box() -> Box<dyn CudaBenchState> {
+        Box::new(prep_many_series())
     }
     fn prep_many_series_box() -> Box<dyn CudaBenchState> {
         Box::new(prep_many_series())

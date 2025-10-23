@@ -9,6 +9,7 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::cci_cycle::{CciCycleBatchRange, CciCycleParams};
+use crate::indicators::cci_cycle::{CciCycleBatchRange, CciCycleParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
@@ -50,6 +51,8 @@ impl CudaCciCycle {
         cust::init(CudaFlags::empty()).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cci_cycle_kernel.ptx"));
@@ -60,6 +63,9 @@ impl CudaCciCycle {
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
+            Err(_) => {
+                Module::from_ptx(ptx, &[]).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
+            }
             Err(_) => {
                 Module::from_ptx(ptx, &[]).map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?
             }
@@ -99,12 +105,20 @@ impl CudaCciCycle {
                 "no parameter combinations".into(),
             ));
         }
+        if rows == 0 {
+            return Err(CudaCciCycleError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
 
         let prices_bytes = series_len * std::mem::size_of::<f32>();
         let params_bytes = rows * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let out_bytes = rows * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + params_bytes + out_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
+            return Err(CudaCciCycleError::InvalidInput(
+                "insufficient VRAM for batch".into(),
+            ));
             return Err(CudaCciCycleError::InvalidInput(
                 "insufficient VRAM for batch".into(),
             ));
@@ -146,6 +160,14 @@ impl CudaCciCycle {
             &mut d_out,
         )?;
 
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols: series_len,
+        })
         self.stream
             .synchronize()
             .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
@@ -215,9 +237,15 @@ impl CudaCciCycle {
             return Err(CudaCciCycleError::InvalidInput(
                 "time-major matrix size mismatch".into(),
             ));
+            return Err(CudaCciCycleError::InvalidInput(
+                "time-major matrix size mismatch".into(),
+            ));
         }
         let length = params.length.unwrap_or(10);
         let factor = params.factor.unwrap_or(0.5) as f32;
+        if length == 0 {
+            return Err(CudaCciCycleError::InvalidInput("length must be > 0".into()));
+        }
         if length == 0 {
             return Err(CudaCciCycleError::InvalidInput("length must be > 0".into()));
         }
@@ -231,6 +259,9 @@ impl CudaCciCycle {
                 if !v.is_nan() {
                     break;
                 }
+                if !v.is_nan() {
+                    break;
+                }
                 fv += 1;
             }
             first_valids[r] = fv as i32;
@@ -241,6 +272,9 @@ impl CudaCciCycle {
             + rows * std::mem::size_of::<i32>()
             + data_tm_f32.len() * std::mem::size_of::<f32>();
         if !Self::will_fit(bytes, 64 * 1024 * 1024) {
+            return Err(CudaCciCycleError::InvalidInput(
+                "insufficient VRAM for many-series".into(),
+            ));
             return Err(CudaCciCycleError::InvalidInput(
                 "insufficient VRAM for many-series".into(),
             ));
@@ -301,6 +335,14 @@ impl CudaCciCycle {
             rows,
             cols,
         })
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     fn prepare_batch_inputs(
@@ -315,8 +357,30 @@ impl CudaCciCycle {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaCciCycleError::InvalidInput("all values NaN".into()))?;
+        if len == 0 {
+            return Err(CudaCciCycleError::InvalidInput("empty input".into()));
+        }
+        let first_valid = data
+            .iter()
+            .position(|v| !v.is_nan())
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("all values NaN".into()))?;
         let combos = expand_grid(sweep);
         // Validate max length
+        let max_len = combos
+            .iter()
+            .map(|p| p.length.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if max_len == 0 || max_len > len {
+            return Err(CudaCciCycleError::InvalidInput(
+                "invalid length in sweep".into(),
+            ));
+        }
+        if len - first_valid < max_len * 2 {
+            return Err(CudaCciCycleError::InvalidInput(
+                "not enough valid data for largest window".into(),
+            ));
+        }
         let max_len = combos
             .iter()
             .map(|p| p.length.unwrap_or(0))
@@ -349,7 +413,28 @@ fn expand_grid(r: &CciCycleBatchRange) -> Vec<CciCycleParams> {
             v = v.saturating_add(ld);
         }
     }
+    if ld == 0 || ls == le {
+        len_vals.push(ls);
+    } else {
+        let mut v = ls;
+        while v <= le {
+            len_vals.push(v);
+            v = v.saturating_add(ld);
+        }
+    }
     let mut fac_vals = Vec::new();
+    if fd == 0.0 || (fs == fe) {
+        fac_vals.push(fs);
+    } else {
+        let mut v = fs;
+        while v <= fe + 1e-12 {
+            fac_vals.push(v);
+            v += fd;
+            if fd.abs() < 1e-12 {
+                break;
+            }
+        }
+    }
     if fd == 0.0 || (fs == fe) {
         fac_vals.push(fs);
     } else {
@@ -364,6 +449,14 @@ fn expand_grid(r: &CciCycleBatchRange) -> Vec<CciCycleParams> {
     }
 
     let mut out = Vec::with_capacity(len_vals.len() * fac_vals.len());
+    for &l in &len_vals {
+        for &f in &fac_vals {
+            out.push(CciCycleParams {
+                length: Some(l),
+                factor: Some(f),
+            });
+        }
+    }
     for &l in &len_vals {
         for &f in &fac_vals {
             out.push(CciCycleParams {
@@ -401,10 +494,31 @@ pub mod benches {
                 .expect("cci_cycle batch");
         }
     }
+    struct CciCycleBatchState {
+        cuda: CudaCciCycle,
+        data: Vec<f32>,
+        sweep: CciCycleBatchRange,
+    }
+    impl CudaBenchState for CciCycleBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .cci_cycle_batch_dev(&self.data, &self.sweep)
+                .expect("cci_cycle batch");
+        }
+    }
 
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaCciCycle::new(0).expect("cuda cci_cycle");
         let mut data = vec![f32::NAN; ONE_SERIES_LEN];
+        for i in 128..ONE_SERIES_LEN {
+            let x = i as f32;
+            data[i] = (x * 0.0013).sin() * 0.8 + (x * 0.00077).cos();
+        }
+        let sweep = CciCycleBatchRange {
+            length: (10, 10 + PARAM_SWEEP as usize - 1, 1),
+            factor: (0.3, 0.7, 0.0016),
+        };
         for i in 128..ONE_SERIES_LEN {
             let x = i as f32;
             data[i] = (x * 0.0013).sin() * 0.8 + (x * 0.00077).cos();
@@ -423,6 +537,9 @@ pub mod benches {
             "cci_cycle_cuda_batch_dev",
             "1m_x_250",
             prep_one_series_many_params,
+        )
+        .with_sample_size(10)
+        .with_mem_required(mem_bytes())]
         )
         .with_sample_size(10)
         .with_mem_required(mem_bytes())]

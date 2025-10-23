@@ -63,6 +63,8 @@ pub struct CudaTsi {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+    // Device scratch reused across invocations (fast path)
+    scratch: Option<TsiScratch>,
 }
 
 impl CudaTsi {
@@ -98,6 +100,7 @@ impl CudaTsi {
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
+            scratch: None,
         })
     }
 
@@ -125,8 +128,8 @@ impl CudaTsi {
         let len = prices_f32.len();
         let first_valid = prices_f32
             .iter()
-            .position(|v| !v.is_nan())
-            .ok_or_else(|| CudaTsiError::InvalidInput("all values are NaN".into()))?;
+            .position(|v| v.is_finite())
+            .ok_or_else(|| CudaTsiError::InvalidInput("all values are NaN/inf".into()))?;
 
         let combos = expand_grid(sweep);
         if combos.is_empty() {
@@ -155,14 +158,19 @@ impl CudaTsi {
             shorts_i32.push(s as i32);
         }
 
-        // VRAM estimate (inputs + params + outputs) + headroom
+        // VRAM estimates: choose between plain row-major path and fast path (TM + transpose)
         let in_bytes = len * std::mem::size_of::<f32>();
         let params_bytes = 2 * combos.len() * std::mem::size_of::<i32>();
         let out_bytes = combos.len() * len * std::mem::size_of::<f32>();
+        let plain_required = in_bytes + params_bytes + out_bytes;
+        let fast_extra = (2 * len + (len * combos.len())) * std::mem::size_of::<f32>(); // mom, amom, out_tm
+        let fast_required = plain_required + fast_extra;
+        let head = 64usize * 1024 * 1024;
+        let (mut free_ok_plain, mut free_ok_fast) = (true, true);
         if let Ok((free, _)) = mem_get_info() {
-            let required = in_bytes + params_bytes + out_bytes;
-            let head = 64usize * 1024 * 1024;
-            if required.saturating_add(head) > free {
+            free_ok_plain = plain_required.saturating_add(head) <= free;
+            free_ok_fast = fast_required.saturating_add(head) <= free;
+            if !free_ok_plain {
                 return Err(CudaTsiError::InvalidInput("insufficient VRAM".into()));
             }
         }
@@ -178,16 +186,59 @@ impl CudaTsi {
                 .map_err(|e| CudaTsiError::Cuda(e.to_string()))?
         };
 
-        self.launch_batch_kernel(
-            &d_prices,
-            &d_longs,
-            &d_shorts,
-            len,
-            first_valid,
-            combos.len(),
-            &mut d_out,
-        )?;
-        self.synchronize()?;
+        // Heuristic: prefer fast param-parallel path on larger sweeps if VRAM allows
+        let prefer_fast = combos.len() >= 32 && len >= 4_096 && free_ok_fast;
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
+            _ => 256,
+        };
+
+        if prefer_fast {
+            self.ensure_scratch(len, combos.len())?;
+            if self.scratch.is_some() {
+                // Temporarily take scratch to avoid simultaneous &mut borrows of self
+                let mut s = self.scratch.take().unwrap();
+                // 1) momentum precompute
+                self.launch_prepare_momentum(
+                    &d_prices,
+                    len,
+                    first_valid,
+                    &mut s.mom,
+                    &mut s.amom,
+                )?;
+                // 2) param-parallel time-major compute
+                self.launch_param_parallel_tm(
+                    &s.mom,
+                    &s.amom,
+                    &d_longs,
+                    &d_shorts,
+                    len,
+                    first_valid,
+                    combos.len(),
+                    &mut s.out_tm,
+                    block_x,
+                )?;
+                // 3) transpose into row-major layout expected by callers
+                self.launch_transpose_tm_to_rm(&s.out_tm, len, combos.len(), &mut d_out)?;
+                // Put scratch back
+                self.scratch = Some(s);
+            }
+            self.last_batch = Some(BatchKernelSelected::Plain { block_x });
+            self.maybe_log_batch_debug();
+            self.synchronize()?;
+        } else {
+            // Fallback: legacy row-major kernel
+            self.launch_batch_kernel(
+                &d_prices,
+                &d_longs,
+                &d_shorts,
+                len,
+                first_valid,
+                combos.len(),
+                &mut d_out,
+            )?;
+            self.synchronize()?;
+        }
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -300,10 +351,10 @@ impl CudaTsi {
             let mut fv = rows as i32;
             for t in 0..rows {
                 let v = prices_tm_f32[t * cols + s];
-                if v == v {
+                if v.is_finite() {
                     fv = t as i32;
                     break;
-                } // is_finite
+                }
             }
             if (rows as i32) - fv < (1 + long_period + short_period) as i32 {
                 return Err(CudaTsiError::InvalidInput(format!(
@@ -406,6 +457,154 @@ impl CudaTsi {
                 &mut fv_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+// -------- Scratch arena and new kernel launchers --------
+
+struct TsiScratch {
+    mom: DeviceBuffer<f32>,
+    amom: DeviceBuffer<f32>,
+    out_tm: DeviceBuffer<f32>,
+    len_cap: usize,
+    combos_cap: usize,
+}
+
+impl CudaTsi {
+    fn ensure_scratch(&mut self, len: usize, combos: usize) -> Result<(), CudaTsiError> {
+        let need_new = match &self.scratch {
+            None => true,
+            Some(s) => s.len_cap < len || s.combos_cap < combos,
+        };
+        if !need_new {
+            return Ok(());
+        }
+        let mom = unsafe { DeviceBuffer::<f32>::uninitialized(len) }
+            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        let amom = unsafe { DeviceBuffer::<f32>::uninitialized(len) }
+            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        let out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(len * combos) }
+            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        self.scratch = Some(TsiScratch {
+            mom,
+            amom,
+            out_tm,
+            len_cap: len,
+            combos_cap: combos,
+        });
+        Ok(())
+    }
+
+    fn launch_prepare_momentum(
+        &mut self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_mom: &mut DeviceBuffer<f32>,
+        d_amom: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaTsiError> {
+        let func = self
+            .module
+            .get_function("tsi_prepare_momentum_f32")
+            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        unsafe {
+            let mut p_ptr = d_prices.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut mom_ptr = d_mom.as_device_ptr().as_raw();
+            let mut amom_ptr = d_amom.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut p_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut mom_ptr as *mut _ as *mut c_void,
+                &mut amom_ptr as *mut _ as *mut c_void,
+            ];
+            let grid: GridSize = (1u32, 1u32, 1u32).into();
+            let block: BlockSize = (1u32, 1u32, 1u32).into();
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn launch_param_parallel_tm(
+        &mut self,
+        d_mom: &DeviceBuffer<f32>,
+        d_amom: &DeviceBuffer<f32>,
+        d_longs: &DeviceBuffer<i32>,
+        d_shorts: &DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out_tm: &mut DeviceBuffer<f32>,
+        block_x: u32,
+    ) -> Result<(), CudaTsiError> {
+        let func = self
+            .module
+            .get_function("tsi_one_series_many_params_tm_f32")
+            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        unsafe {
+            let mut mom_ptr = d_mom.as_device_ptr().as_raw();
+            let mut amom_ptr = d_amom.as_device_ptr().as_raw();
+            let mut l_ptr = d_longs.as_device_ptr().as_raw();
+            let mut s_ptr = d_shorts.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut combos_i = n_combos as i32;
+            let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut mom_ptr as *mut _ as *mut c_void,
+                &mut amom_ptr as *mut _ as *mut c_void,
+                &mut l_ptr as *mut _ as *mut c_void,
+                &mut s_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            let grid: GridSize = (grid_x.max(1), 1u32, 1u32).into();
+            let block: BlockSize = (block_x, 1u32, 1u32).into();
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn launch_transpose_tm_to_rm(
+        &mut self,
+        d_in_tm: &DeviceBuffer<f32>,
+        rows: usize,
+        cols: usize,
+        d_out_rm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaTsiError> {
+        let func = self
+            .module
+            .get_function("transpose_tm_to_rm_f32")
+            .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;
+        let grid_x = ((cols as u32) + 31) / 32;
+        let grid_y = ((rows as u32) + 31) / 32;
+        let block: BlockSize = (32u32, 8u32, 1u32).into();
+        unsafe {
+            let mut in_ptr = d_in_tm.as_device_ptr().as_raw();
+            let mut r_i = rows as i32;
+            let mut c_i = cols as i32;
+            let mut out_ptr = d_out_rm.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut in_ptr as *mut _ as *mut c_void,
+                &mut r_i as *mut _ as *mut c_void,
+                &mut c_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1u32).into();
             self.stream
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaTsiError::Cuda(e.to_string()))?;

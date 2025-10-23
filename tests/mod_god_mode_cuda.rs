@@ -34,6 +34,9 @@ fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
         return true;
     }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     (a - b).abs() <= tol
 }
 
@@ -63,8 +66,22 @@ fn mod_god_mode_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
         n3: (4, 4, 0),
         mode: ModGodModeMode::TraditionMg,
     };
+    let sweep = ModGodModeBatchRange {
+        n1: (10, 14, 2),
+        n2: (6, 6, 0),
+        n3: (4, 4, 0),
+        mode: ModGodModeMode::TraditionMg,
+    };
 
     // CPU baseline (scalar batch kernel)
+    let cpu = mod_god_mode_batch_with_kernel(
+        &candles.high,
+        &candles.low,
+        &candles.close,
+        None,
+        &sweep,
+        Kernel::ScalarBatch,
+    )?;
     let cpu = mod_god_mode_batch_with_kernel(
         &candles.high,
         &candles.low,
@@ -76,6 +93,9 @@ fn mod_god_mode_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
 
     // GPU
     let cuda = CudaModGodMode::new(0).expect("CudaModGodMode");
+    let res = cuda
+        .mod_god_mode_batch_dev(&h, &l, &c, None, &sweep)
+        .expect("cuda batch");
     let res = cuda
         .mod_god_mode_batch_dev(&h, &l, &c, None, &sweep)
         .expect("cuda batch");
@@ -106,6 +126,21 @@ fn mod_god_mode_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
             "hist mismatch @{}",
             i
         );
+        assert!(
+            approx_eq(cpu.wavetrend[i], wt_host[i] as f64, tol),
+            "wavetrend mismatch @{}",
+            i
+        );
+        assert!(
+            approx_eq(cpu.signal[i], sig_host[i] as f64, tol),
+            "signal mismatch @{}",
+            i
+        );
+        assert!(
+            approx_eq(cpu.histogram[i], hist_host[i] as f64, tol),
+            "hist mismatch @{}",
+            i
+        );
     }
     Ok(())
 }
@@ -120,9 +155,19 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
     let cols = 4usize; // number of series
     let rows = 1024usize; // time
                           // build time-major inputs
+                          // build time-major inputs
     let mut h_tm = vec![f64::NAN; cols * rows];
     let mut l_tm = vec![f64::NAN; cols * rows];
     let mut c_tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        for t in 4..rows {
+            let x = (t as f64) + (s as f64) * 0.11;
+            let c = (x * 0.0021).sin() + 0.0005 * x;
+            h_tm[t * cols + s] = c + 0.5;
+            l_tm[t * cols + s] = c - 0.5;
+            c_tm[t * cols + s] = c;
+        }
+    }
     for s in 0..cols {
         for t in 4..rows {
             let x = (t as f64) + (s as f64) * 0.11;
@@ -161,7 +206,32 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
                 use_volume: Some(false),
             },
         };
+        for t in 0..rows {
+            h[t] = h_tm[t * cols + s];
+            l[t] = l_tm[t * cols + s];
+            c[t] = c_tm[t * cols + s];
+        }
+        let input = ModGodModeInput {
+            data: ModGodModeData::Slices {
+                high: &h,
+                low: &l,
+                close: &c,
+                volume: None,
+            },
+            params: ModGodModeParams {
+                n1: Some(17),
+                n2: Some(6),
+                n3: Some(4),
+                mode: Some(ModGodModeMode::TraditionMg),
+                use_volume: Some(false),
+            },
+        };
         let out = mod_god_mode(&input)?;
+        for t in 0..rows {
+            wt_cpu[t * cols + s] = out.wavetrend[t];
+            sig_cpu[t * cols + s] = out.signal[t];
+            hist_cpu[t * cols + s] = out.histogram[t];
+        }
         for t in 0..rows {
             wt_cpu[t * cols + s] = out.wavetrend[t];
             sig_cpu[t * cols + s] = out.signal[t];
@@ -184,6 +254,15 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
             rows,
             &ModGodModeParams::default(),
         )
+        .mod_god_mode_many_series_one_param_time_major_dev(
+            &h_tm_f32,
+            &l_tm_f32,
+            &c_tm_f32,
+            None,
+            cols,
+            rows,
+            &ModGodModeParams::default(),
+        )
         .expect("cuda many-series");
     assert_eq!(out.rows(), rows);
     assert_eq!(out.cols(), cols);
@@ -193,9 +272,27 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
     out.wt1.buf.copy_to(&mut wt_g)?;
     out.wt2.buf.copy_to(&mut sig_g)?;
     out.hist.buf.copy_to(&mut hist_g)?;
+    out.wt1.buf.copy_to(&mut wt_g)?;
+    out.wt2.buf.copy_to(&mut sig_g)?;
+    out.hist.buf.copy_to(&mut hist_g)?;
 
     let tol = 8e-3;
     for i in 0..wt_g.len() {
+        assert!(
+            approx_eq(wt_cpu[i], wt_g[i] as f64, tol),
+            "wt mismatch @{}",
+            i
+        );
+        assert!(
+            approx_eq(sig_cpu[i], sig_g[i] as f64, tol),
+            "sig mismatch @{}",
+            i
+        );
+        assert!(
+            approx_eq(hist_cpu[i], hist_g[i] as f64, tol),
+            "hist mismatch @{}",
+            i
+        );
         assert!(
             approx_eq(wt_cpu[i], wt_g[i] as f64, tol),
             "wt mismatch @{}",

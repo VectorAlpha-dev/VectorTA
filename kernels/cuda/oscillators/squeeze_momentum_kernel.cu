@@ -248,6 +248,274 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
     }
 }
 
+// -----------------------------------------------------------------------------
+// Optimized path: shared precompute (prefix sums + sparse tables) and FP32 O(N)
+// -----------------------------------------------------------------------------
+
+#ifndef SMI_QNAN_F
+#define SMI_QNAN_F (__int_as_float(0x7fffffff))
+#endif
+
+// Kahan–Babuška–Neumaier compensated accumulation in float
+static __device__ __forceinline__ void kbn_add(float x, float &sum, float &c) {
+    float t = sum + x;
+    if (fabsf(sum) >= fabsf(x)) c += (sum - t) + x;
+    else                        c += (x - t) + sum;
+    sum = t;
+}
+
+static __device__ __forceinline__ float fmaxf2(float a, float b){ return fmaxf(a,b); }
+static __device__ __forceinline__ float fminf2(float a, float b){ return fminf(a,b); }
+
+// Precompute TR, prefix sums (close, close^2, TR), log2 table, and sparse tables
+extern "C" __global__ void smi_precompute_shared_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    int series_len,
+    // outputs
+    float* __restrict__ tr,         // [N]
+    float* __restrict__ ps_close,   // [N]  (prefix: inclusive)
+    float* __restrict__ ps_close2,  // [N]
+    float* __restrict__ ps_tr,      // [N]
+    int*   __restrict__ log2_tbl,   // [N+1]
+    float* __restrict__ st_max,     // [K * N], row-major by level
+    float* __restrict__ st_min,     // [K * N], row-major by level
+    int K                           // expected = floor(log2(N)) + 1
+){
+    const int N = series_len;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+
+    // Phase 1: True Range
+    for (int i = tid; i < N; i += nthreads) {
+        float h = high[i], l = low[i];
+        float tr1 = fabsf(h - l);
+        float tr2 = (i>0) ? fabsf(h - close[i-1]) : 0.0f;
+        float tr3 = (i>0) ? fabsf(l - close[i-1]) : 0.0f;
+        tr[i] = fmaxf(tr1, fmaxf(tr2, tr3));
+    }
+    __syncthreads();
+
+    // Phase 2: prefix sums via KBN (single thread)
+    if (tid == 0) {
+        log2_tbl[0] = 0;
+        log2_tbl[1] = 0;
+        for (int i = 2; i <= N; ++i) log2_tbl[i] = log2_tbl[i >> 1] + 1;
+
+        float s1=0.0f,c1=0.0f; // close
+        float s2=0.0f,c2=0.0f; // close^2
+        float s3=0.0f,c3=0.0f; // tr
+        for (int i = 0; i < N; ++i) {
+            const float ci = close[i];
+            const float ci2 = ci * ci;
+            const float tri = tr[i];
+            kbn_add(ci,  s1, c1); ps_close[i]  = s1 + c1;
+            kbn_add(ci2, s2, c2); ps_close2[i] = s2 + c2;
+            kbn_add(tri, s3, c3); ps_tr[i]     = s3 + c3;
+        }
+    }
+    __syncthreads();
+
+    // Phase 3: level-0 sparse tables
+    for (int i = tid; i < N; i += nthreads) {
+        st_max[0 * N + i] = high[i];
+        st_min[0 * N + i] = low[i];
+    }
+    __syncthreads();
+
+    // Phase 4: higher levels
+    for (int k = 1; k < K; ++k) {
+        const int span = 1 << k;
+        const int half = span >> 1;
+        for (int i = tid; i + span - 1 < N; i += nthreads) {
+            const int off0 = (k-1) * N + i;
+            const int off1 = (k-1) * N + i + half;
+            st_max[k * N + i] = fmaxf2(st_max[off0], st_max[off1]);
+            st_min[k * N + i] = fminf2(st_min[off0], st_min[off1]);
+        }
+        __syncthreads();
+    }
+}
+
+// RMQ helpers
+static __device__ __forceinline__ float rmq_max(
+    const float* __restrict__ st_max, const int* __restrict__ log2_tbl,
+    int N, int /*K*/, int l, int r)
+{
+    const int len = r - l + 1;
+    const int k = log2_tbl[len];
+    const float a = st_max[k * N + l];
+    const float b = st_max[k * N + (r - (1 << k) + 1)];
+    return fmaxf(a, b);
+}
+static __device__ __forceinline__ float rmq_min(
+    const float* __restrict__ st_min, const int* __restrict__ log2_tbl,
+    int N, int /*K*/, int l, int r)
+{
+    const int len = r - l + 1;
+    const int k = log2_tbl[len];
+    const float a = st_min[k * N + l];
+    const float b = st_min[k * N + (r - (1 << k) + 1)];
+    return fminf(a, b);
+}
+
+static __device__ __forceinline__ float win_sum_ps(
+    const float* __restrict__ ps, int i, int len)
+{
+    const int j = i - len;
+    const float si = ps[i];
+    return (j >= 0) ? (si - ps[j]) : si;
+}
+
+// One series × many params optimized kernel (FP32 + precompute)
+extern "C" __global__ void squeeze_momentum_batch_f32_opt(
+    // Inputs (one series)
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    const int*   __restrict__ lbb_arr,
+    const float* __restrict__ mbb_arr,
+    const int*   __restrict__ lkc_arr,
+    const float* __restrict__ mkc_arr,
+    int series_len,
+    int n_combos,
+    int first_valid,
+    // Shared precompute
+    const float* __restrict__ tr,        // [N]
+    const float* __restrict__ ps_close,  // [N]
+    const float* __restrict__ ps_close2, // [N]
+    const float* __restrict__ ps_tr,     // [N]
+    const int*   __restrict__ log2_tbl,  // [N+1]
+    const float* __restrict__ st_max,    // [K * N]
+    const float* __restrict__ st_min,    // [K * N]
+    int K,
+    // Outputs (row-major)
+    float* __restrict__ out_sq,
+    float* __restrict__ out_mo,
+    float* __restrict__ out_si
+){
+    const int combo = blockIdx.x;
+    if (combo >= n_combos) return;
+
+    const int base = combo * series_len;
+
+    // Parallel prefill with NaNs
+    for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+        out_sq[base + i] = SMI_QNAN_F;
+        out_mo[base + i] = SMI_QNAN_F;
+        out_si[base + i] = SMI_QNAN_F;
+    }
+    __syncthreads();
+    if (threadIdx.x != 0) return;
+
+    if (first_valid < 0 || first_valid >= series_len) return;
+
+    const int   lbb = lbb_arr[combo];
+    const float mbb = mbb_arr[combo];
+    const int   lkc = lkc_arr[combo];
+    const float mkc = mkc_arr[combo];
+    if (lbb <= 0 || lkc <= 0) return;
+
+    const int N = series_len;
+    const int warm_sq = max(lbb, lkc) - 1;
+    const int warm_mo = lkc - 1;
+    const int warm_si = warm_mo + 1;
+
+    const float inv_lbb = 1.0f / float(lbb);
+    const float inv_lkc = 1.0f / float(lkc);
+    const float p       = float(lkc);
+    const float sum_x   = 0.5f * p * (p + 1.0f);
+    const float sum_x2  = p * (p + 1.0f) * (2.0f * p + 1.0f) / 6.0f;
+    const float denom   = fmaf(p, sum_x2, -sum_x * sum_x);
+    const float inv_den = 1.0f / denom;
+    const float x_last_minus_xbar = p - sum_x * inv_lkc;
+
+    const int start_bb = first_valid + lbb - 1;
+    const int start_kc = first_valid + lkc - 1;
+
+    bool bb_seed_ok = true; for (int j = 0; j < lbb && j < N; ++j) { if (!is_finite_f(close[j])) { bb_seed_ok = false; break; } }
+    bool kc_seed_ok = true; for (int j = 0; j < lkc && j < N; ++j) { if (!is_finite_f(close[j]) || !is_finite_f(high[j]) || !is_finite_f(low[j])) { kc_seed_ok = false; break; } }
+
+    extern __shared__ float s_ring[]; // size >= max(lkc)
+    float* raw_ring = s_ring;
+
+    float S0 = 0.0f, S1 = 0.0f; // for OLS
+    bool   ols_seeded = false;
+
+    for (int i = first_valid; i < N; ++i) {
+        if (i >= start_bb && i >= start_kc && i >= warm_sq) {
+            if (bb_seed_ok && kc_seed_ok) {
+                const float sum_bb   = win_sum_ps(ps_close,  i, lbb);
+                const float sum2_bb  = win_sum_ps(ps_close2, i, lbb);
+                const float mean_bb  = sum_bb * inv_lbb;
+                float var_bb = fmaf(sum2_bb * inv_lbb, 1.0f, -mean_bb * mean_bb);
+                var_bb = fmaxf(0.0f, var_bb);
+                const float dev_bb = sqrtf(var_bb);
+                const float upper_bb = mean_bb + mbb * dev_bb;
+                const float lower_bb = mean_bb - mbb * dev_bb;
+
+                const float kc_mid = win_sum_ps(ps_close, i, lkc) * inv_lkc;
+                const float tr_avg = win_sum_ps(ps_tr,    i, lkc) * inv_lkc;
+                const float upper_kc = kc_mid + mkc * tr_avg;
+                const float lower_kc = kc_mid - mkc * tr_avg;
+
+                const bool on  = (lower_bb > lower_kc) && (upper_bb < upper_kc);
+                const bool off = (lower_bb < lower_kc) && (upper_bb > upper_kc);
+                out_sq[base + i] = on ? -1.0f : (off ? 1.0f : 0.0f);
+            } else {
+                out_sq[base + i] = SMI_QNAN_F;
+            }
+        }
+
+        if (i >= start_kc && kc_seed_ok) {
+            const int l = i - lkc + 1;
+            const float highest = rmq_max(st_max, log2_tbl, N, K, l, i);
+            const float lowest  = rmq_min(st_min, log2_tbl, N, K, l, i);
+            const float kc_mid_i= win_sum_ps(ps_close, i, lkc) * inv_lkc;
+            const float raw_i   = close[i] - 0.25f * (highest + lowest) - 0.5f * kc_mid_i;
+
+            if (!ols_seeded) {
+                float j = 1.0f;
+                for (int t = l; t <= i; ++t, j += 1.0f) {
+                    const int lt = t - lkc + 1;
+                    const float h = rmq_max(st_max, log2_tbl, N, K, lt, t);
+                    const float lw= rmq_min(st_min, log2_tbl, N, K, lt, t);
+                    const float kc_mid_t = win_sum_ps(ps_close, t, lkc) * inv_lkc;
+                    const float raw_t = close[t] - 0.25f * (h + lw) - 0.5f * kc_mid_t;
+                    raw_ring[(t - l) % lkc] = raw_t;
+                    S0 += raw_t;
+                    S1 = fmaf(j, raw_t, S1);
+                }
+                ols_seeded = true;
+            } else {
+                const float y_new = raw_i;
+                const float y_old = raw_ring[(i - lkc) % lkc];
+                S1 = fmaf(p, y_new, (S1 - S0));
+                S0 = fmaf(1.0f, y_new, S0 - y_old);
+                raw_ring[i % lkc] = y_new;
+            }
+
+            const float b    = fmaf(-sum_x, S0, p * S1) * inv_den;
+            const float ybar = S0 * inv_lkc;
+            const float yhat = fmaf(b, x_last_minus_xbar, ybar);
+            out_mo[base + i] = yhat;
+
+            if (i >= 1) {
+                const float prev = out_mo[base + (i - 1)];
+                if (is_finite_f(prev) && is_finite_f(yhat)) {
+                    float sig = 0.0f;
+                    if (yhat > 0.0f) sig = (yhat > prev) ?  1.0f :  2.0f;
+                    else             sig = (yhat < prev) ? -1.0f : -2.0f;
+                    out_si[base + i] = sig;
+                } else if (i >= warm_si) {
+                    out_si[base + i] = SMI_QNAN_F;
+                }
+            }
+        }
+    }
+}
+
 // Many-series × one param (time-major). Grid.y = num_series, block.x processes rows.
 extern "C" __global__ void squeeze_momentum_many_series_one_param_f32(
     const float* __restrict__ high_tm,

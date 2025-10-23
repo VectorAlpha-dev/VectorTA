@@ -13,15 +13,13 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use cust::context::Context;
-use cust::device::Device;
-use cust::function::{BlockSize, GridSize};
+use cust::device::{Device, DeviceAttribute};
 use cust::launch;
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::error::Error;
-use std::ffi::c_void;
 use std::fmt;
 
 #[derive(Debug)]
@@ -44,6 +42,8 @@ pub struct CudaVpt {
     module: Module,
     stream: Stream,
     _ctx: Context,
+    sm_count: u32,
+    block_x: u32,
 }
 
 impl CudaVpt {
@@ -63,11 +63,14 @@ impl CudaVpt {
             .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
-        Ok(Self {
-            module,
-            stream,
-            _ctx: ctx,
-        })
+
+        // Query SM count to cap grid size heuristically for large GPUs.
+        let sm_count = device
+            .get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map_err(|e| CudaVptError::Cuda(e.to_string()))? as u32;
+        let block_x = 256u32;
+
+        Ok(Self { module, stream, _ctx: ctx, sm_count, block_x })
     }
 
     #[inline]
@@ -133,24 +136,16 @@ impl CudaVpt {
             .module
             .get_function("vpt_batch_f32")
             .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        let stream = &self.stream;
         unsafe {
-            let mut price_ptr = d_price.as_device_ptr().as_raw();
-            let mut volume_ptr = d_volume.as_device_ptr().as_raw();
-            let mut len_i = len as i32;
-            let mut first_i = first as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut price_ptr as *mut _ as *mut c_void,
-                &mut volume_ptr as *mut _ as *mut c_void,
-                &mut len_i as *mut _ as *mut c_void,
-                &mut first_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            let grid: GridSize = (1, 1, 1).into();
-            let block: BlockSize = (1, 1, 1).into();
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+            launch!(func<<<(1, 1, 1), (1, 1, 1), 0, stream>>>(
+                d_price.as_device_ptr(),
+                d_volume.as_device_ptr(),
+                len as i32,
+                first as i32,
+                d_out.as_device_ptr()
+            ))
+            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
         }
 
         self.stream
@@ -195,19 +190,16 @@ impl CudaVpt {
                     break;
                 }
             }
-            if (rows as i32 - first_valids[s]) < 2 {
-                return Err(CudaVptError::InvalidInput(format!(
-                    "series {}: not enough valid data (need >= 2 after first valid pair)",
-                    s
-                )));
-            }
+            // Do not error if a series never finds a valid pair; kernel writes NaNs.
         }
 
-        // VRAM: 2 inputs + first_valids + output
-        let bytes = (3 * expected * std::mem::size_of::<f32>())
-            .saturating_add(cols * std::mem::size_of::<i32>())
-            + (64 << 20);
-        if !Self::will_fit(bytes, 0) {
+        // VRAM: 2 inputs + output + first_valids
+        let bytes_inputs_outputs = (3usize)
+            .saturating_mul(expected)
+            .saturating_mul(std::mem::size_of::<f32>());
+        let bytes_first = cols.saturating_mul(std::mem::size_of::<i32>());
+        let required = bytes_inputs_outputs.saturating_add(bytes_first);
+        if !Self::will_fit(required, 64 << 20) {
             return Err(CudaVptError::Cuda("insufficient free VRAM".into()));
         }
 
@@ -224,28 +216,24 @@ impl CudaVpt {
             .module
             .get_function("vpt_many_series_one_param_f32")
             .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+        // Launch with grid capped by SMs*16 for scalable occupancy on large GPUs.
+        let block_x = self.block_x;
+        let mut grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let max_blocks = self.sm_count.saturating_mul(16);
+        if grid_x > max_blocks {
+            grid_x = max_blocks.max(1);
+        }
+        let stream = &self.stream;
         unsafe {
-            let mut price_ptr = d_price.as_device_ptr().as_raw();
-            let mut volume_ptr = d_volume.as_device_ptr().as_raw();
-            let mut cols_i = cols as i32;
-            let mut rows_i = rows as i32;
-            let mut first_ptr = d_first.as_device_ptr().as_raw();
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut price_ptr as *mut _ as *mut c_void,
-                &mut volume_ptr as *mut _ as *mut c_void,
-                &mut cols_i as *mut _ as *mut c_void,
-                &mut rows_i as *mut _ as *mut c_void,
-                &mut first_ptr as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            let block_x: u32 = 256;
-            let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
-            let grid: GridSize = (grid_x.max(1), 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
+            launch!(func<<<(grid_x, 1, 1), (block_x, 1, 1), 0, stream>>>(
+                d_price.as_device_ptr(),
+                d_volume.as_device_ptr(),
+                cols as i32,
+                rows as i32,
+                d_first.as_device_ptr(),
+                d_out.as_device_ptr()
+            ))
+            .map_err(|e| CudaVptError::Cuda(e.to_string()))?;
         }
 
         self.stream

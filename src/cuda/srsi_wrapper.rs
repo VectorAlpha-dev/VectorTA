@@ -68,6 +68,8 @@ impl CudaSrsi {
         cust::init(CudaFlags::empty()).map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
         let dev =
             Device::get_device(device_id as u32).map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
+        let dev =
+            Device::get_device(device_id as u32).map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
         let ctx = Context::new(dev).map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/srsi_kernel.ptx"));
         let jit = &[
@@ -91,6 +93,9 @@ impl CudaSrsi {
     pub fn set_policy(&mut self, p: CudaSrsiPolicy) {
         self.policy = p;
     }
+    pub fn set_policy(&mut self, p: CudaSrsiPolicy) {
+        self.policy = p;
+    }
 
     // --------- Batch (one series × many params) ---------
     pub fn srsi_batch_dev(
@@ -102,12 +107,18 @@ impl CudaSrsi {
         if len == 0 {
             return Err(CudaSrsiError::InvalidInput("empty series".into()));
         }
+        if len == 0 {
+            return Err(CudaSrsiError::InvalidInput("empty series".into()));
+        }
         let first_valid = (0..len)
             .find(|&i| !prices_f32[i].is_nan())
             .ok_or_else(|| CudaSrsiError::InvalidInput("all values are NaN".into()))?;
 
         let combos = expand_grid_srsi(sweep);
         if combos.is_empty() {
+            return Err(CudaSrsiError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
             return Err(CudaSrsiError::InvalidInput(
                 "no parameter combinations".into(),
             ));
@@ -137,10 +148,16 @@ impl CudaSrsi {
                 return Err(CudaSrsiError::InvalidInput(
                     "estimated device memory exceeds free VRAM".into(),
                 ));
+                return Err(CudaSrsiError::InvalidInput(
+                    "estimated device memory exceeds free VRAM".into(),
+                ));
             }
         }
         // Group by rsi_period but preserve original row order
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (i, p) in combos.iter().enumerate() {
+            groups.entry(p.rsi_period.unwrap()).or_default().push(i);
+        }
         for (i, p) in combos.iter().enumerate() {
             groups.entry(p.rsi_period.unwrap()).or_default().push(i);
         }
@@ -170,6 +187,8 @@ impl CudaSrsi {
             let rsi_f32: Vec<f32> = rsi_out.values.into_iter().map(|v| v as f32).collect();
             let d_rsi = DeviceBuffer::from_slice(&rsi_f32)
                 .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
+            let d_rsi = DeviceBuffer::from_slice(&rsi_f32)
+                .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
 
             // Per-group parameter arrays following original index order
             let mut sp: Vec<i32> = Vec::with_capacity(idxs.len());
@@ -178,8 +197,20 @@ impl CudaSrsi {
             let mut max_sp = 0usize;
             let mut max_k = 0usize;
             let mut max_d = 0usize;
+            let mut max_sp = 0usize;
+            let mut max_k = 0usize;
+            let mut max_d = 0usize;
             for &row in &idxs {
                 let p = &combos[row];
+                let s = p.stoch_period.unwrap();
+                let k = p.k.unwrap();
+                let d = p.d.unwrap();
+                sp.push(s as i32);
+                kp.push(k as i32);
+                dp.push(d as i32);
+                max_sp = max_sp.max(s);
+                max_k = max_k.max(k);
+                max_d = max_d.max(d);
                 let s = p.stoch_period.unwrap();
                 let k = p.k.unwrap();
                 let d = p.d.unwrap();
@@ -199,6 +230,8 @@ impl CudaSrsi {
 
             // Dynamic shared memory per block
             let smem_bytes = (2 * max_sp * std::mem::size_of::<i32>()
+                + (2 * max_sp + max_k + max_d) * std::mem::size_of::<f32>())
+                as u32;
                 + (2 * max_sp + max_k + max_d) * std::mem::size_of::<f32>())
                 as u32;
 
@@ -263,10 +296,19 @@ impl CudaSrsi {
         if prices_tm.len() != cols * rows {
             return Err(CudaSrsiError::InvalidInput("size mismatch".into()));
         }
+        if cols == 0 || rows == 0 {
+            return Err(CudaSrsiError::InvalidInput("empty matrix".into()));
+        }
+        if prices_tm.len() != cols * rows {
+            return Err(CudaSrsiError::InvalidInput("size mismatch".into()));
+        }
         let rp = params.rsi_period.unwrap_or(14) as i32;
         let sp = params.stoch_period.unwrap_or(14) as i32;
         let kp = params.k.unwrap_or(3) as i32;
         let dp = params.d.unwrap_or(3) as i32;
+        if rp <= 0 || sp <= 0 || kp <= 0 || dp <= 0 {
+            return Err(CudaSrsiError::InvalidInput("non-positive periods".into()));
+        }
         if rp <= 0 || sp <= 0 || kp <= 0 || dp <= 0 {
             return Err(CudaSrsiError::InvalidInput("non-positive periods".into()));
         }
@@ -280,11 +322,24 @@ impl CudaSrsi {
                     firsts[s] = t as i32;
                     break;
                 }
+                if v == v {
+                    firsts[s] = t as i32;
+                    break;
+                }
             }
         }
 
         // VRAM estimate
         if let Ok((free, _)) = mem_get_info() {
+            let n = cols * rows;
+            let bytes = n * std::mem::size_of::<f32>() * 3
+                + cols * std::mem::size_of::<i32>()
+                + 64 * 1024 * 1024;
+            if bytes > free {
+                return Err(CudaSrsiError::InvalidInput(
+                    "estimated device memory exceeds free VRAM".into(),
+                ));
+            }
             let n = cols * rows;
             let bytes = n * std::mem::size_of::<f32>() * 3
                 + cols * std::mem::size_of::<i32>()
@@ -308,7 +363,22 @@ impl CudaSrsi {
             DeviceBuffer::uninitialized(cols * rows)
                 .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?
         };
+        let d_prices =
+            DeviceBuffer::from_slice(prices_tm).map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
+        let d_firsts =
+            DeviceBuffer::from_slice(&firsts).map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
+        let mut d_k: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(cols * rows)
+                .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?
+        };
+        let mut d_d: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(cols * rows)
+                .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?
+        };
 
+        let func = self
+            .module
+            .get_function("srsi_many_series_one_param_f32")
         let func = self
             .module
             .get_function("srsi_many_series_one_param_f32")
@@ -316,6 +386,8 @@ impl CudaSrsi {
         let block_x = self.policy.many_block_x.unwrap_or(128).min(1024);
         let grid_cap = self.max_grid_x.max(1);
         let smem_bytes = (2 * (sp as usize) * std::mem::size_of::<i32>()
+            + (2 * (sp as usize) + (kp as usize) + (dp as usize)) * std::mem::size_of::<f32>())
+            as u32;
             + (2 * (sp as usize) + (kp as usize) + (dp as usize)) * std::mem::size_of::<f32>())
             as u32;
 
@@ -363,6 +435,18 @@ impl CudaSrsi {
                 cols,
             },
         })
+        Ok(DeviceSrsiPair {
+            k: DeviceArrayF32 {
+                buf: d_k,
+                rows,
+                cols,
+            },
+            d: DeviceArrayF32 {
+                buf: d_d,
+                rows,
+                cols,
+            },
+        })
     }
 }
 
@@ -386,8 +470,26 @@ pub mod benches {
         let in_b = n * std::mem::size_of::<f32>();
         let out_b = n * std::mem::size_of::<f32>() * 2;
         in_b + out_b + 64 * 1024 * 1024
+        let n = MANY_COLS * MANY_ROWS;
+        let in_b = n * std::mem::size_of::<f32>();
+        let out_b = n * std::mem::size_of::<f32>() * 2;
+        in_b + out_b + 64 * 1024 * 1024
     }
 
+    struct SrsiBatchState {
+        cuda: CudaSrsi,
+        prices: Vec<f32>,
+        sweep: SrsiBatchRange,
+        rows: usize,
+    }
+    impl CudaBenchState for SrsiBatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .srsi_batch_dev(&self.prices, &self.sweep)
+                .expect("srsi batch");
+        }
+    }
     struct SrsiBatchState {
         cuda: CudaSrsi,
         prices: Vec<f32>,
@@ -418,6 +520,19 @@ pub mod benches {
             k: (3, 5, 1),
             d: (3, 5, 1),
         };
+        for i in 0..16 {
+            prices[i] = f32::NAN;
+        }
+        for i in 16..ONE_SERIES_LEN {
+            let x = i as f32 * 0.0031;
+            prices[i] += 0.001 * x.sin();
+        }
+        let sweep = SrsiBatchRange {
+            rsi_period: (2, 50, 1),
+            stoch_period: (2, 32, 1),
+            k: (3, 5, 1),
+            d: (3, 5, 1),
+        };
         let rows = (sweep.rsi_period.1 - sweep.rsi_period.0 + 1)
             * (sweep.stoch_period.1 - sweep.stoch_period.0 + 1)
             * (sweep.k.1 - sweep.k.0 + 1)
@@ -428,8 +543,31 @@ pub mod benches {
             sweep,
             rows,
         })
+        Box::new(SrsiBatchState {
+            cuda,
+            prices,
+            sweep,
+            rows,
+        })
     }
 
+    struct SrsiManyState {
+        cuda: CudaSrsi,
+        prices_tm: Vec<f32>,
+    }
+    impl CudaBenchState for SrsiManyState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .srsi_many_series_one_param_time_major_dev(
+                    &self.prices_tm,
+                    MANY_COLS,
+                    MANY_ROWS,
+                    &SrsiParams::default(),
+                )
+                .expect("srsi many");
+        }
+    }
     struct SrsiManyState {
         cuda: CudaSrsi,
         prices_tm: Vec<f32>,
@@ -463,11 +601,43 @@ pub mod benches {
             cuda,
             prices_tm: prices,
         })
+        let n = MANY_COLS * MANY_ROWS;
+        let mut base = gen_series(n);
+        let mut prices = vec![f32::NAN; n];
+        for s in 0..MANY_COLS {
+            for t in s..MANY_ROWS {
+                let idx = t * MANY_COLS + s;
+                let x = (t as f32) * 0.002 + (s as f32) * 0.01;
+                prices[idx] = base[idx] + 0.02 * x.cos();
+            }
+        }
+        Box::new(SrsiManyState {
+            cuda,
+            prices_tm: prices,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let rows = (50 - 2 + 1) * (32 - 2 + 1) * (5 - 3 + 1) * (5 - 3 + 1);
         vec![
+            CudaBenchScenario::new(
+                "srsi",
+                "one_series_many_params",
+                "srsi_cuda_batch_dev",
+                "1m_param_sweep",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params(rows)),
+            CudaBenchScenario::new(
+                "srsi",
+                "many_series_one_param",
+                "srsi_cuda_many_series_one_param_dev",
+                "1024x8192",
+                prep_many_series,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_many_series()),
             CudaBenchScenario::new(
                 "srsi",
                 "one_series_many_params",

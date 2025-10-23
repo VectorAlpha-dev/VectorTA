@@ -3,6 +3,9 @@
 use my_project::indicators::rocp::{
     rocp_batch_with_kernel, rocp_with_kernel, RocpBatchRange, RocpInput, RocpParams,
 };
+use my_project::indicators::rocp::{
+    rocp_batch_with_kernel, rocp_with_kernel, RocpBatchRange, RocpInput, RocpParams,
+};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -27,11 +30,18 @@ fn cuda_feature_off_noop() {
     {
         assert!(true);
     }
+    {
+        assert!(true);
+    }
 }
 
 #[cfg(feature = "cuda")]
 #[test]
 fn rocp_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[rocp_cuda_batch_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
     if !cuda_available() {
         eprintln!("[rocp_cuda_batch_matches_cpu] skipped - no CUDA device");
         return Ok(());
@@ -46,11 +56,21 @@ fn rocp_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let sweep = RocpBatchRange {
         period: (4, 128, 5),
     };
+    for i in 100..len {
+        let x = i as f64;
+        data[i] = (x * 0.00123).sin() + 0.00017 * x;
+    }
+    let sweep = RocpBatchRange {
+        period: (4, 128, 5),
+    };
 
     let cpu = rocp_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
 
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let cuda = CudaRocp::new(0).expect("CudaRocp::new");
+    let (dev, combos) = cuda
+        .rocp_batch_dev(&data_f32, &sweep)
+        .expect("rocp_batch_dev");
     let (dev, combos) = cuda
         .rocp_batch_dev(&data_f32, &sweep)
         .expect("rocp_batch_dev");
@@ -68,6 +88,11 @@ fn rocp_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             "mismatch at {}",
             idx
         );
+        assert!(
+            approx_eq(cpu.values[idx], gpu[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
     }
     Ok(())
 }
@@ -79,10 +104,20 @@ fn rocp_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         eprintln!("[rocp_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
+    if !cuda_available() {
+        eprintln!("[rocp_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
 
     let cols = 16usize; // series
     let rows = 4096usize; // time
     let mut tm = vec![f64::NAN; cols * rows];
+    for s in 0..cols {
+        for t in s..rows {
+            let x = t as f64 + (s as f64) * 0.25;
+            tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+        }
+    }
     for s in 0..cols {
         for t in s..rows {
             let x = t as f64 + (s as f64) * 0.25;
@@ -104,7 +139,19 @@ fn rocp_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
                 period: Some(period),
             },
         );
+        for t in 0..rows {
+            series[t] = tm[t * cols + s];
+        }
+        let input = RocpInput::from_slice(
+            &series,
+            RocpParams {
+                period: Some(period),
+            },
+        );
         let out = rocp_with_kernel(&input, Kernel::Scalar)?.values;
+        for t in 0..rows {
+            cpu_tm[t * cols + s] = out[t];
+        }
         for t in 0..rows {
             cpu_tm[t * cols + s] = out[t];
         }
@@ -123,6 +170,11 @@ fn rocp_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let tol = 1e-4;
     for idx in 0..gpu_tm.len() {
+        assert!(
+            approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, tol),
+            "mismatch at {}",
+            idx
+        );
         assert!(
             approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, tol),
             "mismatch at {}",

@@ -1,7 +1,7 @@
 // Integration tests for CUDA MinMax kernels
 
 use my_project::indicators::minmax::{
-    minmax_batch_with_kernel, MinmaxBatchRange,
+    minmax_batch_with_kernel, MinmaxBatchRange, MinmaxParams, MinmaxInput, minmax_with_kernel,
 };
 // Minimal import fixes: tests use these items below
 use my_project::indicators::minmax::{

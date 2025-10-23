@@ -49,6 +49,9 @@ impl Error for CudaErError {}
 struct ErCombo {
     period: i32,
 }
+struct ErCombo {
+    period: i32,
+}
 
 pub struct CudaEr {
     module: Module,
@@ -59,6 +62,8 @@ pub struct CudaEr {
 impl CudaEr {
     pub fn new(device_id: usize) -> Result<Self, CudaErError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let ctx = Context::new(device).map_err(|e| CudaErError::Cuda(e.to_string()))?;
@@ -73,6 +78,11 @@ impl CudaEr {
             .map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        Ok(Self {
+            module,
+            stream,
+            _ctx: ctx,
+        })
         Ok(Self {
             module,
             stream,
@@ -100,8 +110,19 @@ impl CudaEr {
             .into_iter()
             .map(|p| ErCombo { period: p as i32 })
             .collect()
+        periods
+            .into_iter()
+            .map(|p| ErCombo { period: p as i32 })
+            .collect()
     }
 
+    fn prepare_batch_inputs(
+        data_f32: &[f32],
+        sweep: &ErBatchRange,
+    ) -> Result<(Vec<ErCombo>, usize), CudaErError> {
+        if data_f32.is_empty() {
+            return Err(CudaErError::InvalidInput("empty data".into()));
+        }
     fn prepare_batch_inputs(
         data_f32: &[f32],
         sweep: &ErBatchRange,
@@ -114,7 +135,16 @@ impl CudaEr {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaErError::InvalidInput("all NaN".into()))?;
+        let first_valid = data_f32
+            .iter()
+            .position(|v| !v.is_nan())
+            .ok_or_else(|| CudaErError::InvalidInput("all NaN".into()))?;
         let combos = Self::expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaErError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         if combos.is_empty() {
             return Err(CudaErError::InvalidInput(
                 "no parameter combinations".into(),
@@ -123,6 +153,19 @@ impl CudaEr {
         // Validate periods
         for c in &combos {
             let p = c.period as usize;
+            if p == 0 || p > len {
+                return Err(CudaErError::InvalidInput(format!(
+                    "invalid period {} for len {}",
+                    p, len
+                )));
+            }
+            if len - first_valid < p {
+                return Err(CudaErError::InvalidInput(format!(
+                    "not enough valid data: needed >= {}, valid = {}",
+                    p,
+                    len - first_valid
+                )));
+            }
             if p == 0 || p > len {
                 return Err(CudaErError::InvalidInput(format!(
                     "invalid period {} for len {}",
@@ -173,8 +216,17 @@ impl CudaEr {
         let out_bytes = n_rows
             .saturating_mul(len)
             .saturating_mul(std::mem::size_of::<f32>());
+        let out_bytes = n_rows
+            .saturating_mul(len)
+            .saturating_mul(std::mem::size_of::<f32>());
         if let Ok((free, _)) = mem_get_info() {
             let headroom = 64usize << 20; // ~64MB
+            if free > headroom {
+                return (free - headroom)
+                    .saturating_div(len * std::mem::size_of::<f32>())
+                    .max(1)
+                    .min(max_grid_y);
+            }
             if free > headroom {
                 return (free - headroom)
                     .saturating_div(len * std::mem::size_of::<f32>())
@@ -185,6 +237,11 @@ impl CudaEr {
         max_grid_y.min(n_rows).max(1)
     }
 
+    pub fn er_batch_dev(
+        &self,
+        data_f32: &[f32],
+        sweep: &ErBatchRange,
+    ) -> Result<DeviceArrayF32, CudaErError> {
     pub fn er_batch_dev(
         &self,
         data_f32: &[f32],
@@ -207,6 +264,8 @@ impl CudaEr {
         }
 
         // Device buffers
+        let d_data =
+            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let d_data =
             DeviceBuffer::from_slice(data_f32).map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
@@ -309,6 +368,20 @@ impl CudaEr {
         if period == 0 || period > rows {
             return Err(CudaErError::InvalidInput("invalid period".into()));
         }
+        if cols == 0 || rows == 0 {
+            return Err(CudaErError::InvalidInput("cols/rows must be > 0".into()));
+        }
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaErError::InvalidInput("rows*cols overflow".into()))?;
+        if data_tm_f32.len() != expected {
+            return Err(CudaErError::InvalidInput(
+                "time-major input length mismatch".into(),
+            ));
+        }
+        if period == 0 || period > rows {
+            return Err(CudaErError::InvalidInput("invalid period".into()));
+        }
 
         // First-valid per series
         let mut first_valids = vec![0i32; cols];
@@ -320,6 +393,18 @@ impl CudaEr {
                     fv = Some(t as i32);
                     break;
                 }
+                if !v.is_nan() {
+                    fv = Some(t as i32);
+                    break;
+                }
+            }
+            let fv =
+                fv.ok_or_else(|| CudaErError::InvalidInput(format!("series {} all NaN", s)))?;
+            if rows - (fv as usize) < period {
+                return Err(CudaErError::InvalidInput(format!(
+                    "series {} not enough valid data",
+                    s
+                )));
             }
             let fv =
                 fv.ok_or_else(|| CudaErError::InvalidInput(format!("series {} all NaN", s)))?;
@@ -339,7 +424,17 @@ impl CudaEr {
             .map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
             .map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        let d_data =
+            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
+            .map_err(|e| CudaErError::Cuda(e.to_string()))?;
 
+        let func = self
+            .module
+            .get_function("er_many_series_one_param_time_major_f32")
+            .map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let func = self
             .module
             .get_function("er_many_series_one_param_time_major_f32")
@@ -365,8 +460,18 @@ impl CudaEr {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
+            self.stream
+                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaErError::Cuda(e.to_string()))?;
         }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
         self.stream
             .synchronize()
             .map_err(|e| CudaErError::Cuda(e.to_string()))?;
@@ -381,6 +486,9 @@ impl CudaEr {
         self.stream
             .synchronize()
             .map_err(|e| CudaErError::Cuda(e.to_string()))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaErError::Cuda(e.to_string()))
     }
 }
 
@@ -390,6 +498,13 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
+            CudaBenchScenario::new(
+                "er",
+                "batch_dev",
+                "er_cuda_batch_dev",
+                "60k_x_49",
+                prep_er_batch_box,
+            ),
             CudaBenchScenario::new(
                 "er",
                 "batch_dev",
@@ -425,6 +540,11 @@ pub mod benches {
                 .module
                 .get_function("er_batch_prefix_f32")
                 .expect("func");
+            let func = self
+                .cuda
+                .module
+                .get_function("er_batch_prefix_f32")
+                .expect("func");
             let block_x: u32 = 256;
             let grid_x: u32 = ((self.len as u32) + block_x - 1) / block_x;
             let grid: GridSize = (grid_x.max(1), self.n_combos as u32, 1).into();
@@ -450,6 +570,10 @@ pub mod benches {
                     .stream
                     .launch(&func, grid, block, 0, args)
                     .expect("launch");
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, args)
+                    .expect("launch");
             }
             self.cuda.synchronize().expect("sync");
         }
@@ -463,7 +587,16 @@ pub mod benches {
             let x = i as f32;
             price[i] = (x * 0.001).sin() + 0.0002 * x;
         }
+        for i in 5..len {
+            let x = i as f32;
+            price[i] = (x * 0.001).sin() + 0.0002 * x;
+        }
         let sweep = ErBatchRange { period: (5, 49, 1) };
+        let combos: Vec<i32> = (5..=49)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|p| p as i32)
+            .collect();
         let combos: Vec<i32> = (5..=49)
             .collect::<Vec<_>>()
             .into_iter()
@@ -486,8 +619,23 @@ pub mod benches {
             n_combos: combos.len(),
             first_valid,
         }
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(combos.len() * len) }.expect("d_out");
+        ErBatchState {
+            cuda,
+            d_data,
+            d_periods,
+            d_prefix,
+            d_out,
+            len,
+            n_combos: combos.len(),
+            first_valid,
+        }
     }
 
+    fn prep_er_batch_box() -> Box<dyn CudaBenchState> {
+        Box::new(prep_er_batch())
+    }
     fn prep_er_batch_box() -> Box<dyn CudaBenchState> {
         Box::new(prep_er_batch())
     }
@@ -503,6 +651,11 @@ pub mod benches {
     }
     impl CudaBenchState for ErManySeriesState {
         fn launch(&mut self) {
+            let func = self
+                .cuda
+                .module
+                .get_function("er_many_series_one_param_time_major_f32")
+                .expect("func");
             let func = self
                 .cuda
                 .module
@@ -531,6 +684,10 @@ pub mod benches {
                     .stream
                     .launch(&func, grid, block, 0, args)
                     .expect("launch");
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, args)
+                    .expect("launch");
             }
             self.cuda.synchronize().expect("sync");
         }
@@ -541,6 +698,9 @@ pub mod benches {
         let cols = 250usize;
         let rows = 1_000_000usize;
         let period = 20usize;
+        let cols = 250usize;
+        let rows = 1_000_000usize;
+        let period = 20usize;
         let mut tm = vec![f32::NAN; cols * rows];
         for s in 0..cols {
             for t in s..rows {
@@ -548,7 +708,20 @@ pub mod benches {
                 tm[t * cols + s] = (x * 0.002).sin() + 0.0002 * x;
             }
         }
+        for s in 0..cols {
+            for t in s..rows {
+                let x = (t as f32) + (s as f32) * 0.1;
+                tm[t * cols + s] = (x * 0.002).sin() + 0.0002 * x;
+            }
+        }
         let mut fvs = vec![0i32; cols];
+        for s in 0..cols {
+            let mut fv = 0usize;
+            while fv < rows && tm[fv * cols + s].is_nan() {
+                fv += 1;
+            }
+            fvs[s] = fv as i32;
+        }
         for s in 0..cols {
             let mut fv = 0usize;
             while fv < rows && tm[fv * cols + s].is_nan() {
@@ -569,8 +742,22 @@ pub mod benches {
             rows,
             period,
         }
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
+        ErManySeriesState {
+            cuda,
+            d_tm,
+            d_fv,
+            d_out,
+            cols,
+            rows,
+            period,
+        }
     }
 
+    fn prep_er_many_series_box() -> Box<dyn CudaBenchState> {
+        Box::new(prep_er_many_series())
+    }
     fn prep_er_many_series_box() -> Box<dyn CudaBenchState> {
         Box::new(prep_er_many_series())
     }

@@ -87,6 +87,9 @@ impl CudaRsi {
     pub fn set_policy(&mut self, p: CudaRsiPolicy) {
         self.policy = p;
     }
+    pub fn set_policy(&mut self, p: CudaRsiPolicy) {
+        self.policy = p;
+    }
 
     // ---------- Batch (one series × many params) ----------
     pub fn rsi_batch_dev(
@@ -234,6 +237,9 @@ impl CudaRsi {
             return Err(CudaRsiError::InvalidInput(
                 "time-major length mismatch".into(),
             ));
+            return Err(CudaRsiError::InvalidInput(
+                "time-major length mismatch".into(),
+            ));
         }
         if period == 0 {
             return Err(CudaRsiError::InvalidInput("period must be > 0".into()));
@@ -249,6 +255,10 @@ impl CudaRsi {
                     fv = t as i32;
                     break;
                 }
+                if !v.is_nan() {
+                    fv = t as i32;
+                    break;
+                }
             }
             if fv < 0 {
                 return Err(CudaRsiError::InvalidInput(format!("series {} all NaN", s)));
@@ -259,6 +269,8 @@ impl CudaRsi {
         // VRAM estimate
         if let Ok((free, _)) = mem_get_info() {
             let n = expected;
+            let bytes = (2 * n) * std::mem::size_of::<f32>()
+                + cols * std::mem::size_of::<i32>()
             let bytes = (2 * n) * std::mem::size_of::<f32>()
                 + cols * std::mem::size_of::<i32>()
                 + 64 * 1024 * 1024;
@@ -344,6 +356,9 @@ impl CudaRsi {
             combos.push(RsiParams {
                 period: Some(start),
             });
+            combos.push(RsiParams {
+                period: Some(start),
+            });
         } else {
             let mut v = start;
             while v <= end {
@@ -358,6 +373,11 @@ impl CudaRsi {
         let first_valid = (0..len)
             .find(|&i| !prices[i].is_nan())
             .ok_or_else(|| CudaRsiError::InvalidInput("all values NaN".into()))?;
+        let max_p = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
         let max_p = combos
             .iter()
             .map(|c| c.period.unwrap_or(0))
@@ -411,6 +431,10 @@ pub mod benches {
                 .cuda
                 .rsi_batch_dev(&self.prices, &self.sweep)
                 .expect("rsi batch");
+            let _ = self
+                .cuda
+                .rsi_batch_dev(&self.prices, &self.sweep)
+                .expect("rsi batch");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -419,10 +443,21 @@ pub mod benches {
         for i in 0..8 {
             prices[i] = f32::NAN;
         }
+        for i in 0..8 {
+            prices[i] = f32::NAN;
+        }
         for i in 8..ONE_SERIES_LEN {
             let x = i as f32 * 0.0019;
             prices[i] += 0.0005 * x.sin();
         }
+        let sweep = RsiBatchRange {
+            period: (2, 1 + PARAM_SWEEP, 1),
+        };
+        Box::new(RsiBatchState {
+            cuda,
+            prices,
+            sweep,
+        })
         let sweep = RsiBatchRange {
             period: (2, 1 + PARAM_SWEEP, 1),
         };
@@ -457,6 +492,10 @@ pub mod benches {
                 prices[idx] = base[idx] + 0.05 * x.sin();
             }
         }
+        Box::new(RsiManyState {
+            cuda,
+            prices_tm: prices,
+        })
         Box::new(RsiManyState {
             cuda,
             prices_tm: prices,

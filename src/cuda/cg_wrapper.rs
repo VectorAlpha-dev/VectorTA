@@ -97,6 +97,8 @@ impl CudaCg {
         cust::init(CudaFlags::empty()).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
 
         // Hint: prefer L1 for read-mostly kernels like CG.
@@ -371,6 +373,11 @@ impl CudaCg {
             rows: combos.len(),
             cols: len,
         })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
     }
 
     // -------- Many-series × one param (time-major) --------
@@ -385,6 +392,9 @@ impl CudaCg {
             return Err(CudaCgError::InvalidInput("empty matrix shape".into()));
         }
         if prices_tm_f32.len() != cols * rows {
+            return Err(CudaCgError::InvalidInput(
+                "time-major input size mismatch".into(),
+            ));
             return Err(CudaCgError::InvalidInput(
                 "time-major input size mismatch".into(),
             ));
@@ -717,8 +727,89 @@ pub mod benches {
             .with_sample_size(20)
             .with_inner_iters(1),
         );
+        v.push(
+            CudaBenchScenario::new(
+                "cg",
+                "one_series_many_params",
+                "cg",
+                "cg_batch/1x-many",
+                || {
+                    struct St {
+                        cuda: CudaCg,
+                        prices: Vec<f32>,
+                        sweep: CgBatchRange,
+                    }
+                    impl CudaBenchState for St {
+                        fn launch(&mut self) {
+                            let _ = self
+                                .cuda
+                                .cg_batch_dev(&self.prices, &self.sweep)
+                                .expect("cg_batch_dev");
+                        }
+                    }
+                    let prices = (0..100_000).map(|i| (i as f32).sin()).collect::<Vec<_>>();
+                    let sweep = CgBatchRange {
+                        period: (10, 40, 10),
+                    };
+                    let cuda = CudaCg::new(0).expect("cuda cg");
+                    Box::new(St {
+                        cuda,
+                        prices,
+                        sweep,
+                    })
+                },
+            )
+            .with_sample_size(20)
+            .with_inner_iters(1),
+        );
 
         // Many-series: 512 series × 8192 rows, single param
+        v.push(
+            CudaBenchScenario::new(
+                "cg",
+                "many_series_one_param",
+                "cg",
+                "cg_many/series-major",
+                || {
+                    struct St {
+                        cuda: CudaCg,
+                        tm: Vec<f32>,
+                        cols: usize,
+                        rows: usize,
+                        p: CgParams,
+                    }
+                    impl CudaBenchState for St {
+                        fn launch(&mut self) {
+                            let _ = self
+                                .cuda
+                                .cg_many_series_one_param_time_major_dev(
+                                    &self.tm, self.cols, self.rows, &self.p,
+                                )
+                                .expect("cg_many_series_one_param_time_major_dev");
+                        }
+                    }
+                    let cols = 512usize;
+                    let rows = 8_192usize;
+                    let mut tm = vec![f32::NAN; cols * rows];
+                    for r in 0..rows {
+                        for c in 0..cols {
+                            tm[r * cols + c] = ((r as f32) * 0.001 + (c as f32) * 0.0001).sin();
+                        }
+                    }
+                    let cuda = CudaCg::new(0).expect("cuda cg");
+                    let p = CgParams { period: Some(20) };
+                    Box::new(St {
+                        cuda,
+                        tm,
+                        cols,
+                        rows,
+                        p,
+                    })
+                },
+            )
+            .with_sample_size(20)
+            .with_inner_iters(1),
+        );
         v.push(
             CudaBenchScenario::new(
                 "cg",

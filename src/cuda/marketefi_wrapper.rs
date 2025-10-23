@@ -333,8 +333,8 @@ impl CudaMarketefi {
             first_valids[s] = if found { fv } else { rows as i32 };
         }
 
-        // VRAM check: 3 inputs + first_valids + output
-        let bytes = (3 * n + n + cols) * std::mem::size_of::<f32>();
+        // VRAM check: 3 inputs + output (all f32) + first_valids (i32)
+        let bytes = (4 * n) * std::mem::size_of::<f32>() + cols * std::mem::size_of::<i32>();
         if !Self::will_fit(bytes, 64 * 1024 * 1024) {
             return Err(CudaMarketefiError::InvalidInput(
                 "insufficient device memory".into(),
@@ -385,31 +385,48 @@ impl CudaMarketefi {
             ));
         }
         if d_first_valids.len() != cols {
-            return Err(CudaMarketefiError::InvalidInput(
-                "first_valids length mismatch".into(),
-            ));
+            return Err(CudaMarketefiError::InvalidInput("first_valids length mismatch".into()));
         }
 
+        // --- Kernel entry ---
         let func = self
             .module
             .get_function("marketefi_many_series_one_param_f32")
             .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
 
+        // --- Launch policy (2D grid: time tiles × series tiles) ---
+        // block.x spans series; grid.x tiles time; grid.y tiles series.
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
         };
-        let grid_x = cols as u32; // one block per series
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+
+        // Must match the CUDA kernel's MKT_T_TILE (default 128)
+        const T_TILE: u32 = 128;
+
+        // Host-side precheck for vectorization: need cols % 4 == 0 and 16B alignment.
+        let mut h_ptr = d_high_tm.as_device_ptr().as_raw();
+        let mut l_ptr = d_low_tm.as_device_ptr().as_raw();
+        let mut v_ptr = d_vol_tm.as_device_ptr().as_raw();
+        let mut fv_ptr = d_first_valids.as_device_ptr().as_raw();
+        let mut o_ptr = d_out_tm.as_device_ptr().as_raw();
+
+        let aligned16 = ((h_ptr | l_ptr | v_ptr | o_ptr | fv_ptr) & 0xF) == 0;
+        let host_vec4_ok = aligned16 && ((cols & 3) == 0);
+
+        // Series groups: 1 per series in scalar path, 1 per 4 series in vector path.
+        let series_groups: u32 = if host_vec4_ok { (cols as u32) >> 2 } else { cols as u32 };
+
+        // grid.x: number of time tiles; grid.y: number of series tiles
+        let grid_x = ((rows as u32) + T_TILE - 1) / T_TILE;
+        let grid_y = (series_groups + block_x - 1) / block_x;
+
+        let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
         unsafe {
-            let mut h_ptr = d_high_tm.as_device_ptr().as_raw();
-            let mut l_ptr = d_low_tm.as_device_ptr().as_raw();
-            let mut v_ptr = d_vol_tm.as_device_ptr().as_raw();
-            let mut fv_ptr = d_first_valids.as_device_ptr().as_raw();
             let mut num_series_i = cols as i32;
             let mut series_len_i = rows as i32;
-            let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
             let mut args: [*mut c_void; 7] = [
                 &mut h_ptr as *mut _ as *mut c_void,
                 &mut l_ptr as *mut _ as *mut c_void,
@@ -417,12 +434,14 @@ impl CudaMarketefi {
                 &mut fv_ptr as *mut _ as *mut c_void,
                 &mut num_series_i as *mut _ as *mut c_void,
                 &mut series_len_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
+                &mut o_ptr as *mut _ as *mut c_void,
             ];
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaMarketefiError::Cuda(e.to_string()))?;
         }
+
+        // Keep the API the same; record chosen block size
         unsafe {
             (*(self as *const _ as *mut CudaMarketefi)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });

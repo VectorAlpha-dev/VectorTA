@@ -43,12 +43,20 @@ impl Default for BatchKernelPolicy {
     fn default() -> Self {
         BatchKernelPolicy::Auto
     }
+    fn default() -> Self {
+        BatchKernelPolicy::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
+}
+impl Default for ManySeriesKernelPolicy {
+    fn default() -> Self {
+        ManySeriesKernelPolicy::Auto
+    }
 }
 impl Default for ManySeriesKernelPolicy {
     fn default() -> Self {
@@ -66,7 +74,13 @@ pub struct CudaWadPolicy {
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -86,6 +100,8 @@ pub struct CudaWad {
 impl CudaWad {
     pub fn new(device_id: usize) -> Result<Self, CudaWadError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaWadError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaWadError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaWadError::Cuda(e.to_string()))?;
@@ -129,7 +145,22 @@ impl CudaWad {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
+    pub fn set_policy(&mut self, p: CudaWadPolicy) {
+        self.policy = p;
+    }
+    pub fn policy(&self) -> &CudaWadPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaWadError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaWadError::Cuda(e.to_string()))
         self.stream
             .synchronize()
             .map_err(|e| CudaWadError::Cuda(e.to_string()))
@@ -140,9 +171,15 @@ impl CudaWad {
         if self.debug_batch_logged {
             return;
         }
+        if self.debug_batch_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 eprintln!("[DEBUG] WAD batch selected kernel: {:?}", sel);
+                unsafe {
+                    (*(self as *const _ as *mut CudaWad)).debug_batch_logged = true;
+                }
                 unsafe {
                     (*(self as *const _ as *mut CudaWad)).debug_batch_logged = true;
                 }
@@ -154,9 +191,15 @@ impl CudaWad {
         if self.debug_many_logged {
             return;
         }
+        if self.debug_many_logged {
+            return;
+        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 eprintln!("[DEBUG] WAD many-series selected kernel: {:?}", sel);
+                unsafe {
+                    (*(self as *const _ as *mut CudaWad)).debug_many_logged = true;
+                }
                 unsafe {
                     (*(self as *const _ as *mut CudaWad)).debug_many_logged = true;
                 }
@@ -182,10 +225,21 @@ impl CudaWad {
         } else {
             true
         }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Ok((free, _)) = mem_get_info() {
+            required_bytes.saturating_add(headroom) <= free
+        } else {
+            true
+        }
     }
 
     // -------- Batch (one-series × many-params) --------
     fn prepare_batch_inputs(
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
         high: &[f32],
         low: &[f32],
         close: &[f32],
@@ -198,7 +252,14 @@ impl CudaWad {
             return Err(CudaWadError::InvalidInput(
                 "input slice length mismatch".into(),
             ));
+            return Err(CudaWadError::InvalidInput(
+                "input slice length mismatch".into(),
+            ));
         }
+        if high.iter().all(|x| x.is_nan())
+            || low.iter().all(|x| x.is_nan())
+            || close.iter().all(|x| x.is_nan())
+        {
         if high.iter().all(|x| x.is_nan())
             || low.iter().all(|x| x.is_nan())
             || close.iter().all(|x| x.is_nan())
@@ -258,6 +319,9 @@ impl CudaWad {
         high: &[f32],
         low: &[f32],
         close: &[f32],
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
         n_combos: usize,
     ) -> Result<DeviceArrayF32, CudaWadError> {
         let series_len = Self::prepare_batch_inputs(high, low, close)?;
@@ -314,6 +378,9 @@ impl CudaWad {
         high: &[f32],
         low: &[f32],
         close: &[f32],
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
     ) -> Result<DeviceArrayF32, CudaWadError> {
         // WAD has no parameters; batch rows=1 for parity
         self.run_batch(high, low, close, 1)
@@ -325,6 +392,10 @@ impl CudaWad {
         low: &[f32],
         close: &[f32],
         out: &mut [f32],
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+        out: &mut [f32],
     ) -> Result<(usize, usize), CudaWadError> {
         let arr = self.wad_batch_dev(high, low, close)?;
         if out.len() != arr.cols * arr.rows {
@@ -332,9 +403,14 @@ impl CudaWad {
                 "out slice length {} != expected {}",
                 out.len(),
                 arr.cols * arr.rows
+                out.len(),
+                arr.cols * arr.rows
             )));
         }
         unsafe { arr.buf.async_copy_to(out, &self.stream) }
+            .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
             .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
         self.stream
             .synchronize()
@@ -348,6 +424,9 @@ impl CudaWad {
         high: &[f32],
         low: &[f32],
         close: &[f32],
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
     ) -> Result<DeviceArrayF32, CudaWadError> {
         self.wad_batch_dev(high, low, close)
     }
@@ -355,6 +434,10 @@ impl CudaWad {
     // Back-compat: original API expected length on success
     pub fn wad_into_host_f32(
         &self,
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+        out: &mut [f32],
         high: &[f32],
         low: &[f32],
         close: &[f32],
@@ -371,7 +454,22 @@ impl CudaWad {
         close_tm: &[f32],
         cols: usize,
         rows: usize,
+        high_tm: &[f32],
+        low_tm: &[f32],
+        close_tm: &[f32],
+        cols: usize,
+        rows: usize,
     ) -> Result<(), CudaWadError> {
+        if cols == 0 || rows == 0 {
+            return Err(CudaWadError::InvalidInput("cols/rows must be > 0".into()));
+        }
+        if high_tm.len() != cols * rows
+            || low_tm.len() != cols * rows
+            || close_tm.len() != cols * rows
+        {
+            return Err(CudaWadError::InvalidInput(
+                "input length != cols*rows".into(),
+            ));
         if cols == 0 || rows == 0 {
             return Err(CudaWadError::InvalidInput("cols/rows must be > 0".into()));
         }
@@ -393,6 +491,8 @@ impl CudaWad {
         d_close_tm: &DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
+        cols: usize,
+        rows: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWadError> {
         let func = self
@@ -409,8 +509,14 @@ impl CudaWad {
             (*(self as *const _ as *mut CudaWad)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
+        unsafe {
+            (*(self as *const _ as *mut CudaWad)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
 
         unsafe {
+            let mut high_ptr = d_high_tm.as_device_ptr().as_raw();
+            let mut low_ptr = d_low_tm.as_device_ptr().as_raw();
             let mut high_ptr = d_high_tm.as_device_ptr().as_raw();
             let mut low_ptr = d_low_tm.as_device_ptr().as_raw();
             let mut close_ptr = d_close_tm.as_device_ptr().as_raw();
@@ -547,6 +653,11 @@ impl CudaWad {
         close_tm: &[f32],
         cols: usize,
         rows: usize,
+        high_tm: &[f32],
+        low_tm: &[f32],
+        close_tm: &[f32],
+        cols: usize,
+        rows: usize,
     ) -> Result<DeviceArrayF32, CudaWadError> {
         Self::prepare_many_series_inputs(high_tm, low_tm, close_tm, cols, rows)?;
 
@@ -560,7 +671,9 @@ impl CudaWad {
         }
 
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }
             .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }
         let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }
             .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
         let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }
@@ -568,8 +681,19 @@ impl CudaWad {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
                 .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(&d_high, &d_low, &d_close, cols, rows, &mut d_out)?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
         self.stream
             .synchronize()
             .map_err(|e| CudaWadError::Cuda(e.to_string()))?;
@@ -606,6 +730,14 @@ pub mod benches {
             let off = (0.0031 * x.cos()).abs() + 0.12;
             high[i] = v + off;
             low[i] = v - off;
+            let v = close[i];
+            if v.is_nan() {
+                continue;
+            }
+            let x = i as f32 * 0.0027;
+            let off = (0.0031 * x.cos()).abs() + 0.12;
+            high[i] = v + off;
+            low[i] = v - off;
         }
         (high, low)
     }
@@ -616,8 +748,18 @@ pub mod benches {
         low: Vec<f32>,
         close: Vec<f32>,
     }
+    struct WadState {
+        cuda: CudaWad,
+        high: Vec<f32>,
+        low: Vec<f32>,
+        close: Vec<f32>,
+    }
     impl CudaBenchState for WadState {
         fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .wad_batch_dev(&self.high, &self.low, &self.close)
+                .expect("wad kernel");
             let _ = self
                 .cuda
                 .wad_batch_dev(&self.high, &self.low, &self.close)
@@ -634,9 +776,24 @@ pub mod benches {
             low,
             close,
         })
+        Box::new(WadState {
+            cuda,
+            high,
+            low,
+            close,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![CudaBenchScenario::new(
+            "wad",
+            "one_series",
+            "wad_cuda_series",
+            "1m",
+            prep_one_series,
+        )
+        .with_sample_size(10)
+        .with_mem_required(bytes_one_series())]
         vec![CudaBenchScenario::new(
             "wad",
             "one_series",

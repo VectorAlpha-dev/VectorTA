@@ -48,6 +48,16 @@ impl Default for UiManySeriesKernelPolicy {
         UiManySeriesKernelPolicy::Auto
     }
 }
+impl Default for UiBatchKernelPolicy {
+    fn default() -> Self {
+        UiBatchKernelPolicy::Auto
+    }
+}
+impl Default for UiManySeriesKernelPolicy {
+    fn default() -> Self {
+        UiManySeriesKernelPolicy::Auto
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CudaUiPolicy {
@@ -130,6 +140,17 @@ impl CudaUi {
             .synchronize()
             .map_err(|e| CudaUiError::Cuda(e.to_string()))
     }
+    pub fn set_policy(&mut self, policy: CudaUiPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaUiPolicy {
+        &self.policy
+    }
+    pub fn synchronize(&self) -> Result<(), CudaUiError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaUiError::Cuda(e.to_string()))
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -142,8 +163,14 @@ impl CudaUi {
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if !Self::mem_check_enabled() {
             return true;
         }
@@ -206,6 +233,11 @@ impl CudaUi {
         } else {
             (ps..=pe).step_by(pst).collect()
         };
+        let periods: Vec<usize> = if pst == 0 || ps == pe {
+            vec![ps]
+        } else {
+            (ps..=pe).step_by(pst).collect()
+        };
         let scalars: Vec<f32> = if sst.abs() < 1e-12 || (ss - se).abs() < 1e-12 {
             vec![ss as f32]
         } else {
@@ -216,6 +248,9 @@ impl CudaUi {
                 v.push(x as f32);
                 x += sst;
                 iters += 1;
+            }
+            if v.is_empty() {
+                v.push(ss as f32);
             }
             if v.is_empty() {
                 v.push(ss as f32);
@@ -233,7 +268,12 @@ impl CudaUi {
         if prices.is_empty() {
             return Err(CudaUiError::InvalidInput("empty input".into()));
         }
+        if prices.is_empty() {
+            return Err(CudaUiError::InvalidInput("empty input".into()));
+        }
         let len = prices.len();
+        let first_valid = (0..len)
+            .find(|&i| prices[i].is_finite())
         let first_valid = (0..len)
             .find(|&i| prices[i].is_finite())
             .ok_or_else(|| CudaUiError::InvalidInput("all values are NaN".into()))?;
@@ -253,9 +293,20 @@ impl CudaUi {
                 });
             }
         }
+        for &p in &periods {
+            for &s in &scalars {
+                combos.push(UiParams {
+                    period: Some(p),
+                    scalar: Some(s as f64),
+                });
+            }
+        }
         let rows = combos.len();
         let max_p = *periods.iter().max().unwrap();
         let max_warm = first_valid + (max_p * 2 - 2);
+        if len <= max_warm {
+            return Err(CudaUiError::InvalidInput("not enough valid data".into()));
+        }
         if len <= max_warm {
             return Err(CudaUiError::InvalidInput("not enough valid data".into()));
         }
@@ -435,6 +486,12 @@ impl CudaUi {
         if prices_tm.len() != cols * rows {
             return Err(CudaUiError::InvalidInput("matrix shape mismatch".into()));
         }
+        if cols == 0 || rows == 0 {
+            return Err(CudaUiError::InvalidInput("empty dims".into()));
+        }
+        if prices_tm.len() != cols * rows {
+            return Err(CudaUiError::InvalidInput("matrix shape mismatch".into()));
+        }
         let period = params.period.unwrap_or(14);
         let scalar_f32 = params.scalar.unwrap_or(100.0) as f32;
 
@@ -447,6 +504,17 @@ impl CudaUi {
                     first_valids[s] = t as i32;
                     break;
                 }
+                if prices_tm[idx].is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        for &fv in &first_valids {
+            if (fv as usize) + (2 * period).saturating_sub(2) >= rows {
+                return Err(CudaUiError::InvalidInput(
+                    "not enough valid data for at least one series".into(),
+                ));
             }
         }
         for &fv in &first_valids {
@@ -463,6 +531,10 @@ impl CudaUi {
         let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
         if !Self::will_fit(required, headroom) { return Err(CudaUiError::InvalidInput("insufficient VRAM for many-series".into())); }
 
+        let d_prices =
+            DeviceBuffer::from_slice(prices_tm).map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)
+            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
         let d_prices =
             DeviceBuffer::from_slice(prices_tm).map_err(|e| CudaUiError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
@@ -519,6 +591,14 @@ impl CudaUi {
             rows,
             cols,
         })
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     // Convenience: copy back to host (used by tests)
@@ -530,6 +610,15 @@ impl CudaUi {
     ) -> Result<(usize, usize, Vec<UiParams>), CudaUiError> {
         let (dev, combos) = self.ui_batch_dev(prices, sweep)?;
         let expected = dev.len();
+        if out_host.len() != expected {
+            return Err(CudaUiError::InvalidInput(format!(
+                "output slice must be len {}",
+                expected
+            )));
+        }
+        dev.buf
+            .copy_to(out_host)
+            .map_err(|e| CudaUiError::Cuda(e.to_string()))?;
         if out_host.len() != expected {
             return Err(CudaUiError::InvalidInput(format!(
                 "output slice must be len {}",
@@ -558,7 +647,23 @@ pub mod benches {
     fn bytes_many_series() -> usize {
         (MANY_COLS * MANY_ROWS * 2 + MANY_COLS) * std::mem::size_of::<f32>()
     }
+    fn bytes_one_series() -> usize {
+        (ONE_SERIES_LEN * 2) * std::mem::size_of::<f32>()
+    }
+    fn bytes_many_series() -> usize {
+        (MANY_COLS * MANY_ROWS * 2 + MANY_COLS) * std::mem::size_of::<f32>()
+    }
 
+    struct BatchState {
+        cuda: CudaUi,
+        prices: Vec<f32>,
+        sweep: UiBatchRange,
+    }
+    impl CudaBenchState for BatchState {
+        fn launch(&mut self) {
+            let _ = self.cuda.ui_batch_dev(&self.prices, &self.sweep).unwrap();
+        }
+    }
     struct BatchState {
         cuda: CudaUi,
         prices: Vec<f32>,
@@ -572,6 +677,19 @@ pub mod benches {
     fn prep_one_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaUi::new(0).expect("cuda ui");
         let mut prices = vec![f32::NAN; ONE_SERIES_LEN];
+        for i in 0..ONE_SERIES_LEN {
+            let x = i as f32 * 0.00123;
+            prices[i] = (x * 0.91).sin() + 0.0007 * x;
+        }
+        let sweep = UiBatchRange {
+            period: (10, 60, 5),
+            scalar: (100.0, 100.0, 0.0),
+        };
+        Box::new(BatchState {
+            cuda,
+            prices,
+            sweep,
+        })
         for i in 0..ONE_SERIES_LEN {
             let x = i as f32 * 0.00123;
             prices[i] = (x * 0.91).sin() + 0.0007 * x;
@@ -608,9 +726,36 @@ pub mod benches {
                 .unwrap();
         }
     }
+    struct ManyState {
+        cuda: CudaUi,
+        prices_tm: Vec<f32>,
+    }
+    impl CudaBenchState for ManyState {
+        fn launch(&mut self) {
+            let params = UiParams {
+                period: Some(14),
+                scalar: Some(100.0),
+            };
+            let _ = self
+                .cuda
+                .ui_many_series_one_param_time_major_dev(
+                    &self.prices_tm,
+                    MANY_COLS,
+                    MANY_ROWS,
+                    &params,
+                )
+                .unwrap();
+        }
+    }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaUi::new(0).expect("cuda ui");
         let mut prices_tm = vec![f32::NAN; MANY_COLS * MANY_ROWS];
+        for s in 0..MANY_COLS {
+            for t in 0..MANY_ROWS {
+                let x = t as f32 * 0.002 + s as f32 * 0.01;
+                prices_tm[t * MANY_COLS + s] = (x * 0.73).sin() + 0.0009 * x;
+            }
+        }
         for s in 0..MANY_COLS {
             for t in 0..MANY_ROWS {
                 let x = t as f32 * 0.002 + s as f32 * 0.01;
@@ -622,6 +767,24 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
+            CudaBenchScenario::new(
+                "ui",
+                "one_series_many_params",
+                "ui_cuda_batch",
+                "1m",
+                prep_one_series,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series()),
+            CudaBenchScenario::new(
+                "ui",
+                "many_series_one_param",
+                "ui_cuda_many_series_tm",
+                "200k x 128",
+                prep_many_series,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_many_series()),
             CudaBenchScenario::new(
                 "ui",
                 "one_series_many_params",

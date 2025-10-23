@@ -78,6 +78,8 @@ impl CudaAdx {
         cust::init(CudaFlags::empty()).map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/adx_kernel.ptx"));
@@ -106,6 +108,9 @@ impl CudaAdx {
         })
     }
 
+    pub fn set_policy(&mut self, policy: CudaAdxPolicy) {
+        self.policy = policy;
+    }
     pub fn set_policy(&mut self, policy: CudaAdxPolicy) {
         self.policy = policy;
     }
@@ -142,6 +147,9 @@ impl CudaAdx {
             return Err(CudaAdxError::InvalidInput(
                 "no parameter combinations".into(),
             ));
+            return Err(CudaAdxError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         let combos: Vec<AdxParams> = periods
             .iter()
@@ -174,6 +182,9 @@ impl CudaAdx {
             return Err(CudaAdxError::InvalidInput(
                 "insufficient device memory".into(),
             ));
+            return Err(CudaAdxError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
         }
 
         // Upload inputs
@@ -190,7 +201,20 @@ impl CudaAdx {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
                 .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
+                .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
 
+        self.launch_batch(
+            &d_high,
+            &d_low,
+            &d_close,
+            &d_periods,
+            len,
+            rows,
+            first_valid,
+            &mut d_out,
+        )?;
         self.launch_batch(
             &d_high,
             &d_low,
@@ -205,6 +229,14 @@ impl CudaAdx {
             .synchronize()
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
 
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            },
+            combos,
+        ))
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -228,6 +260,8 @@ impl CudaAdx {
         if out.len() != expected {
             return Err(CudaAdxError::InvalidInput(format!(
                 "output slice wrong length: got {}, need {}",
+                out.len(),
+                expected
                 out.len(),
                 expected
             )));
@@ -321,11 +355,18 @@ impl CudaAdx {
                     first_valids[s] = t as i32;
                     break;
                 }
+                if ok {
+                    first_valids[s] = t as i32;
+                    break;
+                }
             }
         }
         // Ensure each series has enough data
         for &fv in &first_valids {
             if fv as usize + period >= rows {
+                return Err(CudaAdxError::InvalidInput(
+                    "not enough valid data for at least one series".into(),
+                ));
                 return Err(CudaAdxError::InvalidInput(
                     "not enough valid data for at least one series".into(),
                 ));
@@ -337,6 +378,9 @@ impl CudaAdx {
         let bytes_out    = cols * rows * std::mem::size_of::<f32>();
         let req = bytes_inputs + bytes_first + bytes_out;
         if !Self::device_mem_ok(req) {
+            return Err(CudaAdxError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
             return Err(CudaAdxError::InvalidInput(
                 "insufficient device memory".into(),
             ));
@@ -353,7 +397,13 @@ impl CudaAdx {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
                 .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
 
+        self.launch_many_series(
+            &d_high, &d_low, &d_close, cols, rows, period, &d_first, &mut d_out,
+        )?;
         self.launch_many_series(
             &d_high, &d_low, &d_close, cols, rows, period, &d_first, &mut d_out,
         )?;
@@ -361,6 +411,11 @@ impl CudaAdx {
             .synchronize()
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
 
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -385,6 +440,9 @@ impl CudaAdx {
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
         unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream) }
+            .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
             .map_err(|e| CudaAdxError::Cuda(e.to_string()))?;
         self.stream
             .synchronize()
@@ -457,6 +515,9 @@ pub mod benches {
             if v.is_nan() {
                 continue;
             }
+            if v.is_nan() {
+                continue;
+            }
             let x = i as f32 * 0.0025;
             let off = (0.002 * x.sin()).abs() + 0.15;
             high[i] = v + off;
@@ -465,6 +526,21 @@ pub mod benches {
         (high, low)
     }
 
+    struct BatchState {
+        cuda: CudaAdx,
+        high: Vec<f32>,
+        low: Vec<f32>,
+        close: Vec<f32>,
+        sweep: AdxBatchRange,
+    }
+    impl CudaBenchState for BatchState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .adx_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
+                .unwrap();
+        }
+    }
     struct BatchState {
         cuda: CudaAdx,
         high: Vec<f32>,
@@ -505,12 +581,43 @@ pub mod benches {
                 .unwrap();
         }
     }
+    struct ManySeriesState {
+        cuda: CudaAdx,
+        high_tm: Vec<f32>,
+        low_tm: Vec<f32>,
+        close_tm: Vec<f32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+    }
+    impl CudaBenchState for ManySeriesState {
+        fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .adx_many_series_one_param_time_major_dev(
+                    &self.high_tm,
+                    &self.low_tm,
+                    &self.close_tm,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                )
+                .unwrap();
+        }
+    }
 
     fn prep_batch() -> Box<dyn CudaBenchState> {
         let cuda = CudaAdx::new(0).expect("cuda adx");
         let close = gen_series(LEN_1M);
         let (high, low) = synth_hlc_from_close(&close);
         let sweep = AdxBatchRange { period: (8, 64, 8) };
+        Box::new(BatchState {
+            cuda,
+            high,
+            low,
+            close,
+            sweep,
+        })
         Box::new(BatchState {
             cuda,
             high,
@@ -525,8 +632,16 @@ pub mod benches {
         // Build time-major matrices
         let cols = COLS_512;
         let rows = ROWS_16K;
+        let cols = COLS_512;
+        let rows = ROWS_16K;
         let close_tm = {
             let mut v = vec![f32::NAN; cols * rows];
+            for s in 0..cols {
+                for t in s..rows {
+                    let x = (t as f32) + (s as f32) * 0.2;
+                    v[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+                }
+            }
             for s in 0..cols {
                 for t in s..rows {
                     let x = (t as f32) + (s as f32) * 0.2;
@@ -546,13 +661,26 @@ pub mod benches {
             rows,
             period,
         })
+        Box::new(ManySeriesState {
+            cuda,
+            high_tm,
+            low_tm,
+            close_tm,
+            cols,
+            rows,
+            period,
+        })
     }
 
     fn bytes_batch() -> usize {
         (3 * LEN_1M + (LEN_1M / 8) + (LEN_1M * ((64 - 8) / 8 + 1))) * std::mem::size_of::<f32>()
             + 64 * 1024 * 1024
+        (3 * LEN_1M + (LEN_1M / 8) + (LEN_1M * ((64 - 8) / 8 + 1))) * std::mem::size_of::<f32>()
+            + 64 * 1024 * 1024
     }
     fn bytes_many() -> usize {
+        (3 * COLS_512 * ROWS_16K + COLS_512 * ROWS_16K) * std::mem::size_of::<f32>()
+            + 64 * 1024 * 1024
         (3 * COLS_512 * ROWS_16K + COLS_512 * ROWS_16K) * std::mem::size_of::<f32>()
             + 64 * 1024 * 1024
     }
@@ -561,6 +689,14 @@ pub mod benches {
         vec![
             CudaBenchScenario::new("adx", "batch", "adx_cuda_batch", "1m", prep_batch)
                 .with_mem_required(bytes_batch()),
+            CudaBenchScenario::new(
+                "adx",
+                "many_series_one_param",
+                "adx_cuda_many_series",
+                "16k x 512",
+                prep_many,
+            )
+            .with_mem_required(bytes_many()),
             CudaBenchScenario::new(
                 "adx",
                 "many_series_one_param",

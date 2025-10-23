@@ -109,7 +109,14 @@ impl CudaAdosc {
         device_id: usize,
         policy: CudaAdoscPolicy,
     ) -> Result<Self, CudaAdoscError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaAdoscPolicy,
+    ) -> Result<Self, CudaAdoscError> {
         let mut s = Self::new(device_id)?;
+        unsafe {
+            (*(&s as *const _ as *mut CudaAdosc)).policy = policy;
+        }
         unsafe {
             (*(&s as *const _ as *mut CudaAdosc)).policy = policy;
         }
@@ -119,7 +126,13 @@ impl CudaAdosc {
     pub fn set_policy(&mut self, policy: CudaAdoscPolicy) {
         self.policy = policy;
     }
+    pub fn set_policy(&mut self, policy: CudaAdoscPolicy) {
+        self.policy = policy;
+    }
     #[inline]
+    pub fn policy(&self) -> &CudaAdoscPolicy {
+        &self.policy
+    }
     pub fn policy(&self) -> &CudaAdoscPolicy {
         &self.policy
     }
@@ -313,6 +326,7 @@ impl CudaAdosc {
             ));
         }
         if short == 0 || long == 0 || short >= long {
+            return Err(CudaAdoscError::InvalidInput("invalid short/long".into()));
             return Err(CudaAdoscError::InvalidInput("invalid short/long".into()));
         }
 
@@ -526,6 +540,10 @@ impl Default for CudaAdoscPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -616,6 +634,13 @@ pub mod benches {
         fn launch(&mut self) {
             let _ = self
                 .cuda
+                .adosc_batch_dev(
+                    &self.high,
+                    &self.low,
+                    &self.close,
+                    &self.volume,
+                    &self.sweep,
+                )
                 .adosc_batch_dev(
                     &self.high,
                     &self.low,

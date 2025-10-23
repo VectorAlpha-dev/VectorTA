@@ -10,8 +10,8 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::mom::{MomBatchRange, MomParams};
-use cust::context::Context;
-use cust::device::Device;
+use cust::context::{Context, ContextFlags};
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -47,6 +47,8 @@ pub struct CudaMom {
     stream: Stream,
     _context: Context,
     policy: CudaMomPolicy,
+    sm_count: u32,
+    max_grid_x: u32,
 }
 
 impl CudaMom {
@@ -56,10 +58,18 @@ impl CudaMom {
             Device::get_device(device_id as u32).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
 
+        // Enable recommended primary-context flags to support mapped/pinned host memory
+        // and let the driver choose appropriate scheduling.
+        // SCHED_AUTO is accepted after context creation; MAP_HOST must be set at
+        // creation time for legacy contexts, so we do not set it here.
+        context
+            .set_flags(ContextFlags::SCHED_AUTO)
+            .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/mom_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -68,11 +78,21 @@ impl CudaMom {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
 
+        // Device properties used for better launch sizing & chunking.
+        let sm_count = device
+            .get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map_err(|e| CudaMomError::Cuda(e.to_string()))? as u32;
+        let max_grid_x = device
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(|e| CudaMomError::Cuda(e.to_string()))? as u32;
+
         Ok(Self {
             module,
             stream,
             _context: context,
             policy: CudaMomPolicy::default(),
+            sm_count,
+            max_grid_x,
         })
     }
 
@@ -154,7 +174,8 @@ impl CudaMom {
 
         // Chunk across combos if needed to respect grid limits
         let block_x = self.policy.batch_block_x.unwrap_or(256);
-        let max_blocks: u32 = 65_535;
+        // Use actual device limit (Ada: ~2.1B), not legacy 65,535.
+        let max_blocks: u32 = self.max_grid_x.max(1);
         let mut launched = 0usize;
         while launched < n_combos {
             let this_chunk = (n_combos - launched).min(max_blocks as usize);
@@ -219,21 +240,23 @@ impl CudaMom {
             return Err(CudaMomError::InvalidInput("period must be > 0".into()));
         }
 
-        // Per-series first_valid
-        let mut first_valids = vec![0i32; cols];
-        for s in 0..cols {
-            let mut fv = -1i32;
-            for t in 0..rows {
-                let v = prices_tm_f32[t * cols + s];
-                if !v.is_nan() {
-                    fv = t as i32;
-                    break;
+        // Per-series first_valid (row-major scan, early exit per series)
+        let mut first_valids = vec![i32::MAX; cols];
+        let mut remaining = cols;
+        for t in 0..rows {
+            let row = &prices_tm_f32[t * cols..(t + 1) * cols];
+            for s in 0..cols {
+                if first_valids[s] == i32::MAX && !row[s].is_nan() {
+                    first_valids[s] = t as i32;
+                    remaining -= 1;
                 }
             }
-            if fv < 0 {
-                return Err(CudaMomError::InvalidInput(format!("series {} all NaN", s)));
+            if remaining == 0 {
+                break;
             }
-            first_valids[s] = fv;
+        }
+        if let Some(s_bad) = first_valids.iter().position(|&fv| fv == i32::MAX) {
+            return Err(CudaMomError::InvalidInput(format!("series {} all NaN", s_bad)));
         }
 
         // VRAM estimate
@@ -278,8 +301,12 @@ impl CudaMom {
             .module
             .get_function("mom_many_series_one_param_f32")
             .map_err(|e| CudaMomError::Cuda(e.to_string()))?;
-        let block_x = self.policy.many_block_x.unwrap_or(128);
-        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        // Kernel is grid-stride across series; we don't need to launch one block per column.
+        let block_x = self.policy.many_block_x.unwrap_or(256);
+        let needed = ((cols as u32) + block_x - 1) / block_x;
+        // Heuristic: ~8 blocks per SM keeps the GPU busy without overlaunch.
+        let cap = self.sm_count.saturating_mul(8).max(1);
+        let grid_x = needed.min(cap).max(1);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
@@ -344,14 +371,78 @@ impl CudaMom {
         if max_p == 0 {
             return Err(CudaMomError::InvalidInput("period must be > 0".into()));
         }
-        let valid = len - first_valid;
-        if valid < max_p {
-            return Err(CudaMomError::InvalidInput(format!(
-                "not enough valid data: need >= {}, have {}",
-                max_p, valid
-            )));
-        }
+        // If some periods exceed available valid tail, we let the kernel mark those rows as NaN
+        // (scalar parity). Other rows still compute.
         Ok((combos, first_valid, len))
+    }
+
+    /// Copy a host series once and get its first_valid (host-scan).
+    pub fn copy_series_to_device_with_first_valid(
+        &self,
+        prices_f32: &[f32],
+    ) -> Result<(DeviceBuffer<f32>, usize), CudaMomError> {
+        let len = prices_f32.len();
+        if len == 0 {
+            return Err(CudaMomError::InvalidInput("empty prices".into()));
+        }
+        let first_valid = (0..len)
+            .find(|&i| !prices_f32[i].is_nan())
+            .ok_or_else(|| CudaMomError::InvalidInput("all values NaN".into()))?;
+        let d_prices =
+            DeviceBuffer::from_slice(prices_f32).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+        Ok((d_prices, first_valid))
+    }
+
+    /// Fast path: reuse a device-resident series across many parameter sweeps (no H→D for prices).
+    pub fn mom_batch_dev_with_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &MomBatchRange,
+    ) -> Result<DeviceArrayF32, CudaMomError> {
+        // Build period list from the sweep (lightweight helper – same expansion, skips host scan).
+        let (start, end, step) = sweep.period;
+        let mut combos = Vec::new();
+        if step == 0 || start == end {
+            combos.push(MomParams { period: Some(start) });
+        } else {
+            let mut v = start;
+            while v <= end {
+                combos.push(MomParams { period: Some(v) });
+                v = v.saturating_add(step);
+            }
+        }
+        if combos.is_empty() {
+            return Err(CudaMomError::InvalidInput("no period combos".into()));
+        }
+        let n_combos = combos.len();
+        let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap_or(0) as i32).collect();
+
+        // VRAM estimate (no input duplication)
+        if let Ok((free, _)) = mem_get_info() {
+            let params_bytes = periods_i32.len() * std::mem::size_of::<i32>();
+            let out_bytes = n_combos
+                .checked_mul(len)
+                .ok_or_else(|| CudaMomError::InvalidInput("rows*cols overflow".into()))?
+                * std::mem::size_of::<f32>();
+            let headroom = 64usize * 1024 * 1024;
+            let need = params_bytes + out_bytes + headroom;
+            if need > free {
+                return Err(CudaMomError::InvalidInput(
+                    "estimated device memory exceeds free VRAM".into(),
+                ));
+            }
+        }
+
+        let d_periods =
+            DeviceBuffer::from_slice(&periods_i32).map_err(|e| CudaMomError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(len * n_combos)
+                .map_err(|e| CudaMomError::Cuda(e.to_string()))?
+        };
+        self.launch_batch(d_prices, &d_periods, len, first_valid, n_combos, &mut d_out)?;
+        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
     }
 }
 

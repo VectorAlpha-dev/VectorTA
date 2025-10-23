@@ -15,7 +15,7 @@ use crate::indicators::ultosc::{UltOscBatchRange, UltOscParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, DeviceCopy};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -37,6 +37,26 @@ impl fmt::Display for CudaUltoscError {
     }
 }
 impl std::error::Error for CudaUltoscError {}
+
+// ---- PODs mirroring CUDA float2/int3 for coalesced vector IO ----
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Default)]
+struct Float2 {
+    x: f32,
+    y: f32,
+}
+// SAFETY: Plain-old-data suitable for device copy
+unsafe impl DeviceCopy for Float2 {}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Int3 {
+    x: i32,
+    y: i32,
+    z: i32,
+}
+// SAFETY: Plain-old-data suitable for device copy
+unsafe impl DeviceCopy for Int3 {}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum BatchKernelPolicy {
@@ -208,8 +228,8 @@ impl CudaUltosc {
 
         // VRAM estimate + headroom (~64MB)
         let headroom = 64 * 1024 * 1024usize;
-        let bytes_required = 2 * (len + 1) * std::mem::size_of::<f64>() // pcmtl + ptr
-            + 3 * combos.len() * std::mem::size_of::<i32>() // p1/p2/p3
+        let bytes_required = 2 * (len + 1) * std::mem::size_of::<Float2>() // pcmtl + ptr
+            + combos.len() * std::mem::size_of::<Int3>() // packed periods
             + combos.len() * len * std::mem::size_of::<f32>(); // out
         if !Self::will_fit(bytes_required, headroom) {
             return Err(CudaUltoscError::Cuda(format!(
@@ -218,43 +238,42 @@ impl CudaUltosc {
             )));
         }
 
-        // Device staging
-        let d_pcmtl =
-            DeviceBuffer::from_slice(&pcmtl).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_ptr =
-            DeviceBuffer::from_slice(&ptr).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let p1s: Vec<i32> = combos
-            .iter()
-            .map(|c| c.timeperiod1.unwrap_or(7) as i32)
-            .collect();
-        let p2s: Vec<i32> = combos
-            .iter()
-            .map(|c| c.timeperiod2.unwrap_or(14) as i32)
-            .collect();
-        let p3s: Vec<i32> = combos
-            .iter()
-            .map(|c| c.timeperiod3.unwrap_or(28) as i32)
-            .collect();
-        let d_p1 =
-            DeviceBuffer::from_slice(&p1s).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_p2 =
-            DeviceBuffer::from_slice(&p2s).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_p3 =
-            DeviceBuffer::from_slice(&p3s).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        // Device staging (async)
+        let d_pcmtl: DeviceBuffer<Float2> = unsafe {
+            DeviceBuffer::from_slice_async(&pcmtl, &self.stream)
+        }
+        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let d_ptr: DeviceBuffer<Float2> = unsafe {
+            DeviceBuffer::from_slice_async(&ptr, &self.stream)
+        }
+        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
 
-        // VRAM estimate + headroom (~64MB)
+        // pack periods into Int3
+        let mut periods = Vec::with_capacity(combos.len());
+        for c in &combos {
+            periods.push(Int3 {
+                x: c.timeperiod1.unwrap_or(7) as i32,
+                y: c.timeperiod2.unwrap_or(14) as i32,
+                z: c.timeperiod3.unwrap_or(28) as i32,
+            });
+        }
+        let d_periods: DeviceBuffer<Int3> = unsafe {
+            DeviceBuffer::from_slice_async(&periods, &self.stream)
+        }
+        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+
         let out_elems = combos.len() * len;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }
-            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(out_elems, &self.stream)
+        }
+        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
 
         self.launch_batch(
             &d_pcmtl,
             &d_ptr,
             len,
             first_valid,
-            &d_p1,
-            &d_p2,
-            &d_p3,
+            &d_periods,
             combos.len(),
             &mut d_out,
         )?;
@@ -269,13 +288,11 @@ impl CudaUltosc {
     #[allow(clippy::too_many_arguments)]
     fn launch_batch(
         &self,
-        d_pcmtl: &DeviceBuffer<f64>,
-        d_ptr: &DeviceBuffer<f64>,
+        d_pcmtl: &DeviceBuffer<Float2>,
+        d_ptr: &DeviceBuffer<Float2>,
         len: usize,
         first_valid: usize,
-        d_p1: &DeviceBuffer<i32>,
-        d_p2: &DeviceBuffer<i32>,
-        d_p3: &DeviceBuffer<i32>,
+        d_periods: &DeviceBuffer<Int3>,
         nrows: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaUltoscError> {
@@ -310,12 +327,8 @@ impl CudaUltosc {
                 let mut ptr_ptr = d_ptr.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
-                let mut p1_ptr = d_p1.as_device_ptr().as_raw()
-                    + (launched as u64) * std::mem::size_of::<i32>() as u64;
-                let mut p2_ptr = d_p2.as_device_ptr().as_raw()
-                    + (launched as u64) * std::mem::size_of::<i32>() as u64;
-                let mut p3_ptr = d_p3.as_device_ptr().as_raw()
-                    + (launched as u64) * std::mem::size_of::<i32>() as u64;
+                let mut periods_ptr = d_periods.as_device_ptr().as_raw()
+                    + (launched as u64) * std::mem::size_of::<Int3>() as u64;
                 let mut nrows_i = chunk as i32;
                 let mut out_ptr = d_out.as_device_ptr().as_raw()
                     + (launched as u64) * (len as u64) * std::mem::size_of::<f32>() as u64;
@@ -324,9 +337,7 @@ impl CudaUltosc {
                     &mut ptr_ptr as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
                     &mut first_i as *mut _ as *mut c_void,
-                    &mut p1_ptr as *mut _ as *mut c_void,
-                    &mut p2_ptr as *mut _ as *mut c_void,
-                    &mut p3_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
                     &mut nrows_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
@@ -432,14 +443,20 @@ impl CudaUltosc {
             rows,
             &prep.first_valids,
         );
-        let d_pcmtl_tm = DeviceBuffer::from_slice(&pcmtl_tm)
-            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let d_ptr_tm =
-            DeviceBuffer::from_slice(&ptr_tm).map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let d_pcmtl_tm: DeviceBuffer<Float2> = unsafe {
+            DeviceBuffer::from_slice_async(&pcmtl_tm, &self.stream)
+        }
+        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let d_ptr_tm: DeviceBuffer<Float2> = unsafe {
+            DeviceBuffer::from_slice_async(&ptr_tm, &self.stream)
+        }
+        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&prep.first_valids)
             .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(cols * rows, &self.stream)
+        }
+        .map_err(|e| CudaUltoscError::Cuda(e.to_string()))?;
 
         self.launch_many_series(
             &d_pcmtl_tm,
@@ -463,8 +480,8 @@ impl CudaUltosc {
     #[allow(clippy::too_many_arguments)]
     fn launch_many_series(
         &self,
-        d_pcmtl_tm: &DeviceBuffer<f64>,
-        d_ptr_tm: &DeviceBuffer<f64>,
+        d_pcmtl_tm: &DeviceBuffer<Float2>,
+        d_ptr_tm: &DeviceBuffer<Float2>,
         cols: usize,
         rows: usize,
         p1: usize,
@@ -628,16 +645,27 @@ struct PreparedManySeries {
 
 // ---------------- Prefix builders ----------------
 
-// Build prefix sums for CMTL and TR on a single series (len+1 each) in f64
+#[inline]
+fn split_f64_to_float2_vec(src: &[f64]) -> Vec<Float2> {
+    let mut v = Vec::with_capacity(src.len());
+    for &d in src {
+        let hi = d as f32;
+        let lo = (d - (hi as f64)) as f32;
+        v.push(Float2 { x: hi, y: lo });
+    }
+    v
+}
+
+// Build prefix sums for CMTL and TR on a single series (len+1 each) as Float2 (hi,lo)
 fn build_prefix_sums_ulthlc(
     high: &[f32],
     low: &[f32],
     close: &[f32],
     first_valid: usize,
-) -> (Vec<f64>, Vec<f64>) {
+) -> (Vec<Float2>, Vec<Float2>) {
     let len = high.len();
-    let mut pcmtl = vec![0.0f64; len + 1];
-    let mut ptr = vec![0.0f64; len + 1];
+    let mut pcmtl64 = vec![0.0f64; len + 1];
+    let mut ptr64 = vec![0.0f64; len + 1];
     for i in 0..len {
         let (mut add_c, mut add_t) = (0.0f64, 0.0f64);
         if i >= first_valid {
@@ -645,9 +673,7 @@ fn build_prefix_sums_ulthlc(
             let lo = low[i] as f64;
             let ci = close[i] as f64;
             let pc = close[i - 1] as f64;
-            // tl = min(low, prev_close)
             let tl = if lo < pc { lo } else { pc };
-            // tr = max( hi - low, |hi - pc|, |low - pc| )
             let mut trv = hi - lo;
             let d1 = (hi - pc).abs();
             if d1 > trv {
@@ -660,10 +686,10 @@ fn build_prefix_sums_ulthlc(
             add_c = ci - tl;
             add_t = trv;
         }
-        pcmtl[i + 1] = pcmtl[i] + add_c;
-        ptr[i + 1] = ptr[i] + add_t;
+        pcmtl64[i + 1] = pcmtl64[i] + add_c;
+        ptr64[i + 1] = ptr64[i] + add_t;
     }
-    (pcmtl, ptr)
+    (split_f64_to_float2_vec(&pcmtl64), split_f64_to_float2_vec(&ptr64))
 }
 
 // Build time-major prefixes for many-series. Shapes: [(rows+1) x cols]
@@ -674,10 +700,9 @@ fn build_prefix_sums_time_major_ulthlc(
     cols: usize,
     rows: usize,
     first_valids: &[i32],
-) -> (Vec<f64>, Vec<f64>) {
-    let mut pcmtl_tm = vec![0.0f64; (rows + 1) * cols];
-    let mut ptr_tm = vec![0.0f64; (rows + 1) * cols];
-    // Row 0 remains zeros (prefix base)
+) -> (Vec<Float2>, Vec<Float2>) {
+    let mut pcmtl_tm64 = vec![0.0f64; (rows + 1) * cols];
+    let mut ptr_tm64 = vec![0.0f64; (rows + 1) * cols];
     for t in 0..rows {
         for s in 0..cols {
             let fv = first_valids[s] as usize;
@@ -701,13 +726,16 @@ fn build_prefix_sums_time_major_ulthlc(
                 add_c = ci - tl;
                 add_t = trv;
             }
-            let prev = t * cols + s; // prefix index at row t (already has t entries summed)
+            let prev = t * cols + s; // prefix at row t
             let cur = (t + 1) * cols + s;
-            pcmtl_tm[cur] = pcmtl_tm[prev] + add_c;
-            ptr_tm[cur] = ptr_tm[prev] + add_t;
+            pcmtl_tm64[cur] = pcmtl_tm64[prev] + add_c;
+            ptr_tm64[cur] = ptr_tm64[prev] + add_t;
         }
     }
-    (pcmtl_tm, ptr_tm)
+    (
+        split_f64_to_float2_vec(&pcmtl_tm64),
+        split_f64_to_float2_vec(&ptr_tm64),
+    )
 }
 
 // Local copy of expand_grid to avoid relying on private items in the indicator
@@ -749,15 +777,15 @@ pub mod benches {
     const MS_ROWS: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
-        // two f64 prefixes + 3*i32 vectors + f32 output + headroom
-        let in_bytes = 2 * (ONE_SERIES_LEN + 1) * std::mem::size_of::<f64>();
-        let params_bytes = 3 * PARAM_SWEEP * std::mem::size_of::<i32>();
+        // two Float2 prefixes + Int3 vector + f32 output + headroom
+        let in_bytes = 2 * (ONE_SERIES_LEN + 1) * std::mem::size_of::<Float2>();
+        let params_bytes = PARAM_SWEEP * std::mem::size_of::<Int3>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
-        // two f64 prefixes in TM + first_valids + f32 output + headroom
-        let in_bytes = 2 * (MS_ROWS + 1) * MS_COLS * std::mem::size_of::<f64>();
+        // two Float2 prefixes in TM + first_valids + f32 output + headroom
+        let in_bytes = 2 * (MS_ROWS + 1) * MS_COLS * std::mem::size_of::<Float2>();
         let meta = MS_COLS * std::mem::size_of::<i32>();
         let out_bytes = MS_ROWS * MS_COLS * std::mem::size_of::<f32>();
         in_bytes + meta + out_bytes + 64 * 1024 * 1024
@@ -765,11 +793,9 @@ pub mod benches {
 
     struct UltoscBatchState {
         cuda: CudaUltosc,
-        d_pcmtl: DeviceBuffer<f64>,
-        d_ptr: DeviceBuffer<f64>,
-        d_p1: DeviceBuffer<i32>,
-        d_p2: DeviceBuffer<i32>,
-        d_p3: DeviceBuffer<i32>,
+        d_pcmtl: DeviceBuffer<Float2>,
+        d_ptr: DeviceBuffer<Float2>,
+        d_periods: DeviceBuffer<Int3>,
         d_out: DeviceBuffer<f32>,
         len: usize,
         first: usize,
@@ -783,9 +809,7 @@ pub mod benches {
                     &self.d_ptr,
                     self.len,
                     self.first,
-                    &self.d_p1,
-                    &self.d_p2,
-                    &self.d_p3,
+                    &self.d_periods,
                     self.nrows,
                     &mut self.d_out,
                 )
@@ -813,32 +837,24 @@ pub mod benches {
         let (combos, first, len) =
             CudaUltosc::prepare_batch_inputs(&high, &low, &close, &sweep).expect("prep");
         let (pcmtl, ptr) = build_prefix_sums_ulthlc(&high, &low, &close, first);
-        let p1s: Vec<i32> = combos
-            .iter()
-            .map(|c| c.timeperiod1.unwrap() as i32)
-            .collect();
-        let p2s: Vec<i32> = combos
-            .iter()
-            .map(|c| c.timeperiod2.unwrap() as i32)
-            .collect();
-        let p3s: Vec<i32> = combos
-            .iter()
-            .map(|c| c.timeperiod3.unwrap() as i32)
-            .collect();
-        let d_pcmtl = DeviceBuffer::from_slice(&pcmtl).expect("d_pcmtl");
-        let d_ptr = DeviceBuffer::from_slice(&ptr).expect("d_ptr");
-        let d_p1 = DeviceBuffer::from_slice(&p1s).expect("d_p1");
-        let d_p2 = DeviceBuffer::from_slice(&p2s).expect("d_p2");
-        let d_p3 = DeviceBuffer::from_slice(&p3s).expect("d_p3");
+        let mut periods = Vec::with_capacity(combos.len());
+        for c in &combos {
+            periods.push(Int3 {
+                x: c.timeperiod1.unwrap() as i32,
+                y: c.timeperiod2.unwrap() as i32,
+                z: c.timeperiod3.unwrap() as i32,
+            });
+        }
+        let d_pcmtl: DeviceBuffer<Float2> = DeviceBuffer::from_slice(&pcmtl).expect("d_pcmtl");
+        let d_ptr: DeviceBuffer<Float2> = DeviceBuffer::from_slice(&ptr).expect("d_ptr");
+        let d_periods: DeviceBuffer<Int3> = DeviceBuffer::from_slice(&periods).expect("d_periods");
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(combos.len() * len) }.expect("d_out");
         Box::new(UltoscBatchState {
             cuda,
             d_pcmtl,
             d_ptr,
-            d_p1,
-            d_p2,
-            d_p3,
+            d_periods,
             d_out,
             len,
             first,
@@ -848,8 +864,8 @@ pub mod benches {
 
     struct UltoscManySeriesState {
         cuda: CudaUltosc,
-        d_pcmtl_tm: DeviceBuffer<f64>,
-        d_ptr_tm: DeviceBuffer<f64>,
+        d_pcmtl_tm: DeviceBuffer<Float2>,
+        d_ptr_tm: DeviceBuffer<Float2>,
         d_first: DeviceBuffer<i32>,
         d_out_tm: DeviceBuffer<f32>,
         cols: usize,

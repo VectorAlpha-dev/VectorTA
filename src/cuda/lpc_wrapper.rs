@@ -62,7 +62,21 @@ pub enum BatchKernelPolicy {
         block_x: u32,
     },
 }
+pub enum BatchKernelPolicy {
+    #[default]
+    Auto,
+    Plain {
+        block_x: u32,
+    },
+}
 #[derive(Clone, Copy, Debug, Default)]
+pub enum ManySeriesKernelPolicy {
+    #[default]
+    Auto,
+    OneD {
+        block_x: u32,
+    },
+}
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
@@ -76,12 +90,22 @@ pub struct CudaLpcPolicy {
     pub batch: BatchKernelPolicy,
     pub many_series: ManySeriesKernelPolicy,
 }
+pub struct CudaLpcPolicy {
+    pub batch: BatchKernelPolicy,
+    pub many_series: ManySeriesKernelPolicy,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
+pub enum BatchKernelSelected {
+    Plain { block_x: u32 },
+}
 #[derive(Clone, Copy, Debug)]
+pub enum ManySeriesKernelSelected {
+    OneD { block_x: u32 },
+}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -100,6 +124,8 @@ pub struct CudaLpc {
 impl CudaLpc {
     pub fn new(device_id: usize) -> Result<Self, CudaLpcError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
@@ -140,7 +166,25 @@ impl CudaLpc {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
+    pub fn set_policy(&mut self, p: CudaLpcPolicy) {
+        self.policy = p;
+    }
+    pub fn policy(&self) -> &CudaLpcPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -162,6 +206,20 @@ impl CudaLpc {
         } else {
             true
         }
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
+    #[inline]
+    fn will_fit(required: usize, headroom: usize) -> bool {
+        if !Self::mem_check_enabled() {
+            return true;
+        }
+        if let Some((free, _)) = Self::device_mem_info() {
+            required.saturating_add(headroom) <= free
+        } else {
+            true
+        }
     }
 
     fn expand_grid(range: &LpcBatchRange) -> Vec<LpcParams> {
@@ -169,9 +227,22 @@ impl CudaLpc {
             if st == 0 || s == e {
                 return vec![s];
             }
+            if st == 0 || s == e {
+                return vec![s];
+            }
             (s..=e).step_by(st).collect()
         }
         fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
+            if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+                return vec![s];
+            }
+            let mut v = Vec::new();
+            let mut x = s;
+            while x <= e + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            v
             if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
                 return vec![s];
             }
@@ -200,16 +271,35 @@ impl CudaLpc {
                 }
             }
         }
+        for &p in &ps {
+            for &cm in &cms {
+                for &tm in &tms {
+                    out.push(LpcParams {
+                        cutoff_type: Some(range.cutoff_type.clone()),
+                        fixed_period: Some(p),
+                        max_cycle_limit: Some(range.max_cycle_limit),
+                        cycle_mult: Some(cm),
+                        tr_mult: Some(tm),
+                    });
+                }
+            }
+        }
         out
     }
 
     fn first_valid_ohlc4(h: &[f32], l: &[f32], c: &[f32], s: &[f32]) -> Option<usize> {
         (0..s.len())
             .find(|&i| h[i].is_finite() && l[i].is_finite() && c[i].is_finite() && s[i].is_finite())
+        (0..s.len())
+            .find(|&i| h[i].is_finite() && l[i].is_finite() && c[i].is_finite() && s[i].is_finite())
     }
 
     pub fn lpc_batch_dev(
         &self,
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+        src: &[f32],
         high: &[f32],
         low: &[f32],
         close: &[f32],
@@ -222,10 +312,16 @@ impl CudaLpc {
         if src.is_empty() {
             return Err(CudaLpcError::InvalidInput("empty input".into()));
         }
+        if src.is_empty() {
+            return Err(CudaLpcError::InvalidInput("empty input".into()));
+        }
         let len = src.len();
         let first = Self::first_valid_ohlc4(high, low, close, src)
             .ok_or_else(|| CudaLpcError::InvalidInput("all values are NaN".into()))?;
         if len.saturating_sub(first) < 2 {
+            return Err(CudaLpcError::InvalidInput(
+                "not enough valid data after first".into(),
+            ));
             return Err(CudaLpcError::InvalidInput(
                 "not enough valid data after first".into(),
             ));
@@ -238,8 +334,16 @@ impl CudaLpc {
                 "no parameter combinations".into(),
             ));
         }
+        if combos.is_empty() {
+            return Err(CudaLpcError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         for p in &combos {
             let fp = p.fixed_period.unwrap_or(0);
+            if fp == 0 || fp > len {
+                return Err(CudaLpcError::InvalidInput("invalid fixed_period".into()));
+            }
             if fp == 0 || fp > len {
                 return Err(CudaLpcError::InvalidInput("invalid fixed_period".into()));
             }
@@ -264,8 +368,14 @@ impl CudaLpc {
         } else {
             None
         };
+        } else {
+            None
+        };
         let required = bytes_inputs + bytes_params + bytes_outputs + bytes_dom;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
+            return Err(CudaLpcError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
             return Err(CudaLpcError::InvalidInput(
                 "insufficient device memory".into(),
             ));
@@ -284,6 +394,9 @@ impl CudaLpc {
             if n == 0 {
                 return tr;
             }
+            if n == 0 {
+                return tr;
+            }
             tr[0] = h[0] - l[0];
             for i in 1..n {
                 let hl = h[i] - l[i];
@@ -294,6 +407,8 @@ impl CudaLpc {
             tr
         }
         let tr_host = host_true_range_f32(high, low, close);
+        let d_tr =
+            DeviceBuffer::from_slice(&tr_host).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
         let d_tr =
             DeviceBuffer::from_slice(&tr_host).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
 
@@ -307,8 +422,17 @@ impl CudaLpc {
             DeviceBuffer::from_slice(&cms).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
         let d_tms =
             DeviceBuffer::from_slice(&tms).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let d_periods =
+            DeviceBuffer::from_slice(&periods).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let d_cms =
+            DeviceBuffer::from_slice(&cms).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let d_tms =
+            DeviceBuffer::from_slice(&tms).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
         let d_dom = if let Some(v) = &dom_host_f32 {
             Some(DeviceBuffer::from_slice(v).map_err(|e| CudaLpcError::Cuda(e.to_string()))?)
+        } else {
+            None
+        };
         } else {
             None
         };
@@ -402,8 +526,26 @@ impl CudaLpc {
         self.stream
             .synchronize()
             .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
 
         let triplet = DeviceArrayF32Triplet {
+            wt1: DeviceArrayF32 {
+                buf: d_f,
+                rows,
+                cols: n,
+            },
+            wt2: DeviceArrayF32 {
+                buf: d_hi,
+                rows,
+                cols: n,
+            },
+            hist: DeviceArrayF32 {
+                buf: d_lo,
+                rows,
+                cols: n,
+            },
             wt1: DeviceArrayF32 {
                 buf: d_f,
                 rows,
@@ -424,8 +566,15 @@ impl CudaLpc {
             (*(self as *const _ as *mut CudaLpc)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
+        unsafe {
+            (*(self as *const _ as *mut CudaLpc)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
             eprintln!("[DEBUG] lpc batch selected kernel: {:?}", self.last_batch);
+            unsafe {
+                (*(self as *const _ as *mut CudaLpc)).debug_batch_logged = true;
+            }
             unsafe {
                 (*(self as *const _ as *mut CudaLpc)).debug_batch_logged = true;
             }
@@ -435,6 +584,12 @@ impl CudaLpc {
 
     pub fn lpc_many_series_one_param_time_major_dev(
         &self,
+        high_tm: &[f32],
+        low_tm: &[f32],
+        close_tm: &[f32],
+        src_tm: &[f32],
+        cols: usize,
+        rows: usize,
         high_tm: &[f32],
         low_tm: &[f32],
         close_tm: &[f32],
@@ -451,8 +606,20 @@ impl CudaLpc {
             .copied()
             .any(|n| n != cols * rows)
         {
+        if cols == 0 || rows == 0 {
+            return Err(CudaLpcError::InvalidInput("empty matrix".into()));
+        }
+        if [high_tm.len(), low_tm.len(), close_tm.len(), src_tm.len()]
+            .iter()
+            .copied()
+            .any(|n| n != cols * rows)
+        {
             return Err(CudaLpcError::InvalidInput("length mismatch".into()));
         }
+        let cutoff_type = params
+            .cutoff_type
+            .clone()
+            .unwrap_or_else(|| "adaptive".to_string());
         let cutoff_type = params
             .cutoff_type
             .clone()
@@ -461,8 +628,14 @@ impl CudaLpc {
             return Err(CudaLpcError::InvalidInput(
                 "many-series CUDA supports fixed cutoff only".into(),
             ));
+            return Err(CudaLpcError::InvalidInput(
+                "many-series CUDA supports fixed cutoff only".into(),
+            ));
         }
         let fixed_period = params.fixed_period.unwrap_or(20);
+        if fixed_period == 0 || fixed_period > rows {
+            return Err(CudaLpcError::InvalidInput("invalid period".into()));
+        }
         if fixed_period == 0 || fixed_period > rows {
             return Err(CudaLpcError::InvalidInput("invalid period".into()));
         }
@@ -481,7 +654,17 @@ impl CudaLpc {
                 {
                     fv = t as i32;
                     break;
+                if high_tm[i].is_finite()
+                    && low_tm[i].is_finite()
+                    && close_tm[i].is_finite()
+                    && src_tm[i].is_finite()
+                {
+                    fv = t as i32;
+                    break;
                 }
+            }
+            if fv >= rows as i32 {
+                fv = 0;
             }
             if fv >= rows as i32 {
                 fv = 0;
@@ -500,7 +683,23 @@ impl CudaLpc {
             DeviceBuffer::from_slice(src_tm).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
         let d_firsts =
             DeviceBuffer::from_slice(&firsts).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let d_h =
+            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let d_l =
+            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let d_c =
+            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let d_s =
+            DeviceBuffer::from_slice(src_tm).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let d_firsts =
+            DeviceBuffer::from_slice(&firsts).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
 
+        let mut d_f = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
+            .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let mut d_hi = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
+            .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let mut d_lo = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
+            .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
         let mut d_f = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
             .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
         let mut d_hi = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
@@ -511,7 +710,14 @@ impl CudaLpc {
         let func = self
             .module
             .get_function("lpc_many_series_one_param_time_major_f32")
+        let func = self
+            .module
+            .get_function("lpc_many_series_one_param_time_major_f32")
             .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+        };
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -533,7 +739,25 @@ impl CudaLpc {
         self.stream
             .synchronize()
             .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
         let triplet = DeviceArrayF32Triplet {
+            wt1: DeviceArrayF32 {
+                buf: d_f,
+                rows,
+                cols,
+            },
+            wt2: DeviceArrayF32 {
+                buf: d_hi,
+                rows,
+                cols,
+            },
+            hist: DeviceArrayF32 {
+                buf: d_lo,
+                rows,
+                cols,
+            },
             wt1: DeviceArrayF32 {
                 buf: d_f,
                 rows,
@@ -554,7 +778,18 @@ impl CudaLpc {
             (*(self as *const _ as *mut CudaLpc)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
+        unsafe {
+            (*(self as *const _ as *mut CudaLpc)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_many_logged {
+            eprintln!(
+                "[DEBUG] lpc many-series selected kernel: {:?}",
+                self.last_many
+            );
+            unsafe {
+                (*(self as *const _ as *mut CudaLpc)).debug_many_logged = true;
+            }
             eprintln!(
                 "[DEBUG] lpc many-series selected kernel: {:?}",
                 self.last_many
@@ -583,8 +818,19 @@ pub mod benches {
         s: Vec<f32>,
         range: LpcBatchRange,
     }
+    struct LpcBatchState {
+        cuda: CudaLpc,
+        h: Vec<f32>,
+        l: Vec<f32>,
+        c: Vec<f32>,
+        s: Vec<f32>,
+        range: LpcBatchRange,
+    }
     impl CudaBenchState for LpcBatchState {
         fn launch(&mut self) {
+            let _ = self
+                .cuda
+                .lpc_batch_dev(&self.h, &self.l, &self.c, &self.s, &self.range);
             let _ = self
                 .cuda
                 .lpc_batch_dev(&self.h, &self.l, &self.c, &self.s, &self.range);
@@ -610,7 +856,28 @@ pub mod benches {
             cutoff_type: "fixed".to_string(),
             max_cycle_limit: 60,
         };
+        for i in 0..n {
+            if s[i].is_finite() {
+                h[i] = s[i] + 0.5;
+                l[i] = s[i] - 0.5;
+            }
+        }
+        let range = LpcBatchRange {
+            fixed_period: (20, 60, 10),
+            cycle_mult: (1.0, 1.0, 0.0),
+            tr_mult: (1.0, 1.0, 0.0),
+            cutoff_type: "fixed".to_string(),
+            max_cycle_limit: 60,
+        };
         let cuda = CudaLpc::new(0).expect("cuda lpc");
+        Box::new(LpcBatchState {
+            cuda,
+            h,
+            l,
+            c,
+            s,
+            range,
+        })
         Box::new(LpcBatchState {
             cuda,
             h,

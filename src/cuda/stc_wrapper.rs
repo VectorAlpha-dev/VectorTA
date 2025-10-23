@@ -51,6 +51,10 @@ impl Default for CudaStcPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -86,6 +90,8 @@ impl CudaStc {
         cust::init(CudaFlags::empty()).map_err(|e| CudaStcError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaStcError::Cuda(e.to_string()))?;
+        let device =
+            Device::get_device(device_id as u32).map_err(|e| CudaStcError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaStcError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/stc_kernel.ptx"));
@@ -106,8 +112,25 @@ impl CudaStc {
             _context: context,
             policy: CudaStcPolicy::default(),
         })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            policy: CudaStcPolicy::default(),
+        })
     }
 
+    pub fn set_policy(&mut self, policy: CudaStcPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaStcPolicy {
+        &self.policy
+    }
+    pub fn synchronize(&self) -> Result<(), CudaStcError> {
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaStcError::Cuda(e.to_string()))
+    }
     pub fn set_policy(&mut self, policy: CudaStcPolicy) {
         self.policy = policy;
     }
@@ -143,12 +166,34 @@ impl CudaStc {
         } else {
             (start..=end).step_by(step).collect()
         }
+        if step == 0 || start == end {
+            vec![start]
+        } else {
+            (start..=end).step_by(step).collect()
+        }
     }
     fn expand_grid(sweep: &StcBatchRange) -> Vec<StcParams> {
         let fs = Self::expand_axis(sweep.fast_period);
         let ss = Self::expand_axis(sweep.slow_period);
         let ks = Self::expand_axis(sweep.k_period);
         let ds = Self::expand_axis(sweep.d_period);
+        let mut out = Vec::with_capacity(fs.len() * ss.len() * ks.len() * ds.len());
+        for &f in &fs {
+            for &s in &ss {
+                for &k in &ks {
+                    for &d in &ds {
+                        out.push(StcParams {
+                            fast_period: Some(f),
+                            slow_period: Some(s),
+                            k_period: Some(k),
+                            d_period: Some(d),
+                            fast_ma_type: None,
+                            slow_ma_type: None,
+                        });
+                    }
+                }
+            }
+        }
         let mut out = Vec::with_capacity(fs.len() * ss.len() * ks.len() * ds.len());
         for &f in &fs {
             for &s in &ss {
@@ -176,6 +221,12 @@ impl CudaStc {
         let first = data
             .iter()
             .position(|v| v.is_finite())
+        if data.is_empty() {
+            return Err(CudaStcError::InvalidInput("empty data".into()));
+        }
+        let first = data
+            .iter()
+            .position(|v| v.is_finite())
             .ok_or_else(|| CudaStcError::InvalidInput("all values are NaN".into()))?;
         if data.len() - first < max_needed {
             return Err(CudaStcError::InvalidInput("not enough valid data".into()));
@@ -193,8 +244,22 @@ impl CudaStc {
         if combos.is_empty() {
             return Err(CudaStcError::InvalidInput("empty sweep".into()));
         }
+        if combos.is_empty() {
+            return Err(CudaStcError::InvalidInput("empty sweep".into()));
+        }
 
         let len = data.len();
+        let max_needed = combos
+            .iter()
+            .map(|c| {
+                c.fast_period
+                    .unwrap()
+                    .max(c.slow_period.unwrap())
+                    .max(c.k_period.unwrap())
+                    .max(c.d_period.unwrap())
+            })
+            .max()
+            .unwrap();
         let max_needed = combos
             .iter()
             .map(|c| {
@@ -212,7 +277,12 @@ impl CudaStc {
         let rows = combos.len();
         let req =
             (len + rows * len) * std::mem::size_of::<f32>() + rows * 4 * std::mem::size_of::<i32>();
+        let req =
+            (len + rows * len) * std::mem::size_of::<f32>() + rows * 4 * std::mem::size_of::<i32>();
         if !Self::device_mem_ok(req) {
+            return Err(CudaStcError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
             return Err(CudaStcError::InvalidInput(
                 "insufficient device memory".into(),
             ));
@@ -278,6 +348,9 @@ impl CudaStc {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
                 .map_err(|e| CudaStcError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
+                .map_err(|e| CudaStcError::Cuda(e.to_string()))?;
 
         // Launch in chunks to respect grid limit
         let mut func = self
@@ -340,7 +413,9 @@ impl CudaStc {
                     &mut k_ptr as *mut _ as *mut c_void,
                     &mut d_ptr as *mut _ as *mut c_void,
                     &mut n_i as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
                     &mut fv_i as *mut _ as *mut c_void,
+                    &mut r_i as *mut _ as *mut c_void,
                     &mut r_i as *mut _ as *mut c_void,
                     &mut mk_i as *mut _ as *mut c_void,
                     &mut o_ptr as *mut _ as *mut c_void,
@@ -353,10 +428,29 @@ impl CudaStc {
                         shmem_bytes.try_into().unwrap_or(u32::MAX),
                         &mut args,
                     )
+                self.stream
+                    .launch(
+                        &func,
+                        grid,
+                        block,
+                        shmem_bytes.try_into().unwrap_or(u32::MAX),
+                        &mut args,
+                    )
                     .map_err(|e| CudaStcError::Cuda(e.to_string()))?;
             }
         }
 
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaStcError::Cuda(e.to_string()))?;
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            },
+            combos,
+        ))
         self.stream
             .synchronize()
             .map_err(|e| CudaStcError::Cuda(e.to_string()))?;
@@ -384,9 +478,17 @@ impl CudaStc {
         if data_tm.len() != cols * rows {
             return Err(CudaStcError::InvalidInput("matrix shape mismatch".into()));
         }
+        if cols == 0 || rows == 0 {
+            return Err(CudaStcError::InvalidInput("empty matrix".into()));
+        }
+        if data_tm.len() != cols * rows {
+            return Err(CudaStcError::InvalidInput("matrix shape mismatch".into()));
+        }
 
         let fast = params.fast_period.unwrap_or(23);
         let slow = params.slow_period.unwrap_or(50);
+        let k = params.k_period.unwrap_or(10);
+        let d = params.d_period.unwrap_or(3);
         let k = params.k_period.unwrap_or(10);
         let d = params.d_period.unwrap_or(3);
 
@@ -399,9 +501,18 @@ impl CudaStc {
                     first_valids[s] = t as i32;
                     break;
                 }
+                if data_tm[idx].is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
             }
             let fv = first_valids[s] as usize;
             let warm = fv + fast.max(slow).max(k).max(d) - 1;
+            if warm >= rows {
+                return Err(CudaStcError::InvalidInput(
+                    "not enough valid data for at least one series".into(),
+                ));
+            }
             if warm >= rows {
                 return Err(CudaStcError::InvalidInput(
                     "not enough valid data for at least one series".into(),
@@ -411,6 +522,11 @@ impl CudaStc {
 
         // VRAM estimate: inputs + first_valids + outputs
         let req = (cols * rows + cols + cols * rows) * std::mem::size_of::<f32>();
+        if !Self::device_mem_ok(req) {
+            return Err(CudaStcError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
+        }
         if !Self::device_mem_ok(req) {
             return Err(CudaStcError::InvalidInput(
                 "insufficient device memory".into(),
@@ -449,12 +565,26 @@ impl CudaStc {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
         };
+        let func = self
+            .module
+            .get_function("stc_many_series_one_param_f32")
+            .map_err(|e| CudaStcError::Cuda(e.to_string()))?;
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+        };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         unsafe {
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             let mut d_ptr = d_data.as_device_ptr().as_raw();
             let mut f_ptr = d_first.as_device_ptr().as_raw();
+            let mut c_i = cols as i32;
+            let mut r_i = rows as i32;
+            let mut fast_i = fast as i32;
+            let mut slow_i = slow as i32;
+            let mut k_i = k as i32;
+            let mut d_i = d as i32;
             let mut c_i = cols as i32;
             let mut r_i = rows as i32;
             let mut fast_i = fast as i32;
@@ -477,8 +607,19 @@ impl CudaStc {
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaStcError::Cuda(e.to_string()))?;
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
+                .map_err(|e| CudaStcError::Cuda(e.to_string()))?;
         }
 
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaStcError::Cuda(e.to_string()))?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
         self.stream
             .synchronize()
             .map_err(|e| CudaStcError::Cuda(e.to_string()))?;
@@ -536,8 +677,98 @@ pub mod benches {
             )
             .with_sample_size(20),
         );
+        v.push(
+            CudaBenchScenario::new(
+                "stc",
+                "one_series_many_params",
+                "stc/batch",
+                "100k x 64",
+                || {
+                    struct State {
+                        cuda: CudaStc,
+                        data: Vec<f32>,
+                        sweep: StcBatchRange,
+                    }
+                    impl CudaBenchState for State {
+                        fn launch(&mut self) {
+                            let _ = self.cuda.stc_batch_dev(&self.data, &self.sweep);
+                        }
+                    }
+                    let n = 100_000usize;
+                    let mut data = vec![f32::NAN; n];
+                    for i in 200..n {
+                        let x = i as f32;
+                        data[i] = (x * 0.0013).sin() + 0.0002 * x;
+                    }
+                    let sweep = StcBatchRange {
+                        fast_period: (10, 25, 5),
+                        slow_period: (30, 60, 10),
+                        k_period: (10, 10, 0),
+                        d_period: (3, 3, 0),
+                    };
+                    Box::new(State {
+                        cuda: CudaStc::new(0).unwrap(),
+                        data,
+                        sweep,
+                    })
+                },
+            )
+            .with_sample_size(20),
+        );
 
         // Many-series: 512 series x 2048 rows
+        v.push(
+            CudaBenchScenario::new(
+                "stc",
+                "many_series_one_param",
+                "stc/many_series",
+                "2048r x 512c",
+                || {
+                    struct State {
+                        cuda: CudaStc,
+                        data_tm: Vec<f32>,
+                        cols: usize,
+                        rows: usize,
+                        params: StcParams,
+                    }
+                    impl CudaBenchState for State {
+                        fn launch(&mut self) {
+                            let _ = self.cuda.stc_many_series_one_param_time_major_dev(
+                                &self.data_tm,
+                                self.cols,
+                                self.rows,
+                                &self.params,
+                            );
+                        }
+                    }
+                    let cols = 512usize;
+                    let rows = 2048usize;
+                    let mut tm = vec![f32::NAN; cols * rows];
+                    for s in 0..cols {
+                        for t in s..rows {
+                            let x = t as f32 + (s as f32) * 0.1;
+                            tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+                        }
+                    }
+                    let params = StcParams {
+                        fast_period: Some(23),
+                        slow_period: Some(50),
+                        k_period: Some(10),
+                        d_period: Some(3),
+                        fast_ma_type: None,
+                        slow_ma_type: None,
+                    };
+                    Box::new(State {
+                        cuda: CudaStc::new(0).unwrap(),
+                        data_tm: tm,
+                        cols,
+                        rows,
+                        params,
+                    })
+                },
+            )
+            .with_sample_size(20),
+        );
         v.push(
             CudaBenchScenario::new(
                 "stc",

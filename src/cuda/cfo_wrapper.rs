@@ -132,7 +132,7 @@ impl CudaCfo {
 
         // VRAM: data + prefixes (2*f64 arrays) + params + out + headroom
         let bytes = len * 4
-            + (len + 1) * 8 * 2
+            + (len + 1) * std::mem::size_of::<f64>() * 2
             + n_combos * (4 + 4)
             + len * n_combos * 4
             + 64 * 1024 * 1024;
@@ -145,10 +145,12 @@ impl CudaCfo {
             }
         }
 
-        let d_data =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_ps = DeviceBuffer::from_slice(&ps).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_pw = DeviceBuffer::from_slice(&pw).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_data = DeviceBuffer::from_slice(data_f32)
+            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_ps: DeviceBuffer<f64> = DeviceBuffer::from_slice(&ps)
+            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_pw: DeviceBuffer<f64> = DeviceBuffer::from_slice(&pw)
+            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
         let d_periods =
             DeviceBuffer::from_slice(&periods).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
         let d_scalars =
@@ -248,12 +250,16 @@ impl CudaCfo {
         let (first_valids, period, scalar) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // Build time-major prefixes P/Q per series
+        // Build time-major f64 prefixes P/Q per series
         let (ps_tm, pw_tm) = build_prefixes_time_major(data_tm_f32, cols, rows, &first_valids);
 
         // VRAM estimate
         let elems = cols * rows;
-        let bytes = elems * 4 + (elems + 1) * 8 * 2 + cols * 4 + rows * cols * 4 + 64 * 1024 * 1024;
+        let bytes = elems * 4
+            + (elems + 1) * std::mem::size_of::<f64>() * 2
+            + cols * 4
+            + rows * cols * 4
+            + 64 * 1024 * 1024;
         if let Ok((free, _)) = mem_get_info() {
             if bytes > free {
                 return Err(CudaCfoError::InvalidInput(format!(
@@ -263,12 +269,12 @@ impl CudaCfo {
             }
         }
 
-        let d_data =
-            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_ps =
-            DeviceBuffer::from_slice(&ps_tm).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
-        let d_pw =
-            DeviceBuffer::from_slice(&pw_tm).map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_data = DeviceBuffer::from_slice(data_tm_f32)
+            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_ps: DeviceBuffer<f64> = DeviceBuffer::from_slice(&ps_tm)
+            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
+        let d_pw: DeviceBuffer<f64> = DeviceBuffer::from_slice(&pw_tm)
+            .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
         let d_fv = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
@@ -315,11 +321,11 @@ impl CudaCfo {
             .get_function("cfo_many_series_one_param_time_major_f32")
             .map_err(|e| CudaCfoError::Cuda(e.to_string()))?;
 
+        // Original mapping: stride over time (x), grid.y enumerates series
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        // Use 1D over time and y-dim over series for modest sizes
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -449,17 +455,14 @@ impl CudaCfo {
     }
 }
 
-// ---- Prefix builders ----
-
+// ---- Prefix builders (f64) ----
 fn build_prefixes_from_first(data: &[f32], first_valid: usize) -> (Vec<f64>, Vec<f64>) {
     let len = data.len();
-    // Store length+1 array aligned to absolute indices: prefix[i] holds sum over [first_valid..i-1]
-    // For i <= first_valid, value remains 0.
     let mut ps = vec![0.0f64; len + 1];
     let mut pw = vec![0.0f64; len + 1];
     let mut acc_s = 0.0f64;
     let mut acc_w = 0.0f64;
-    let mut weight = 0.0f64; // j-1; j starts at 1 at first_valid
+    let mut weight = 0.0f64;
     for i in 0..len {
         if i >= first_valid {
             let v = data[i] as f64;
@@ -495,9 +498,9 @@ fn build_prefixes_time_major(
                 acc_s += v;
                 acc_w += v * weight;
             }
-            let w = (t * cols + s) + 1;
-            ps[w] = acc_s;
-            pw[w] = acc_w;
+            let idx = (t * cols + s) + 1;
+            ps[idx] = acc_s;
+            pw[idx] = acc_w;
         }
     }
     (ps, pw)
@@ -575,7 +578,7 @@ pub mod benches {
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        // prefixes dominate but amortized; still include ~2x f64 prefix
+        // include ~2x f64 prefix
         let prefix_bytes = (ONE_SERIES_LEN + 1) * 2 * std::mem::size_of::<f64>();
         in_bytes + out_bytes + prefix_bytes + 64 * 1024 * 1024
     }

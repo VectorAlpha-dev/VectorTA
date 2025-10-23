@@ -23,6 +23,30 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 
+// ---- Helpers (RMQ sizing) ----------------------------------------------------
+#[inline]
+fn floor_log2_usize(mut n: usize) -> usize {
+    debug_assert!(n > 0);
+    let mut p = 0usize;
+    while n > 1 {
+        n >>= 1;
+        p += 1;
+    }
+    p
+}
+
+#[inline]
+fn sparse_table_levels(n: usize) -> usize {
+    if n == 0 { 0 } else { floor_log2_usize(n) + 1 }
+}
+
+/// Bytes for RMQ scratch (low_min + high_max + valid_low + valid_high)
+/// = K * N * (4 + 4 + 1 + 1) = 10 * K * N.
+#[inline]
+fn rmq_scratch_bytes(n: usize) -> usize {
+    10usize.saturating_mul(sparse_table_levels(n)).saturating_mul(n)
+}
+
 #[derive(Debug)]
 pub enum CudaMinmaxError {
     Cuda(String),
@@ -163,6 +187,7 @@ impl CudaMinmax {
             ));
         }
         let len = high.len();
+
         // first index where both high and low are finite
         let mut first_valid: Option<i32> = None;
         for (i, (&h, &l)) in high.iter().zip(low.iter()).enumerate() {
@@ -196,18 +221,19 @@ impl CudaMinmax {
             )));
         }
 
-        // VRAM check: inputs + params + four outputs
+        // VRAM check: inputs + params + four outputs (common to either path)
         let in_bytes = 2 * len * std::mem::size_of::<f32>();
         let params_bytes = combos.len() * std::mem::size_of::<i32>();
         let out_bytes = 4 * combos.len() * len * std::mem::size_of::<f32>();
-        let required = in_bytes + params_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
+        let base_required = in_bytes + params_bytes + out_bytes;
+
+        if !Self::will_fit(base_required, 64 * 1024 * 1024) {
             return Err(CudaMinmaxError::InvalidInput(
                 "insufficient device memory for minmax batch".into(),
             ));
         }
 
-        // H2D
+        // H2D inputs and params
         let d_high =
             DeviceBuffer::from_slice(high).map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
         let d_low =
@@ -216,7 +242,7 @@ impl CudaMinmax {
         let d_orders = DeviceBuffer::from_slice(&orders_i32)
             .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
 
-        // Outputs
+        // Device outputs
         let elems = combos.len() * len;
         let mut d_is_min: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
@@ -227,20 +253,218 @@ impl CudaMinmax {
         let mut d_last_max: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
 
-        // Launch policy (plain)
+        // ---------- Decide path (Auto heuristic) ----------
+        let k_levels = sparse_table_levels(len);
+        let rmq_bytes = rmq_scratch_bytes(len);
+        let avg_k = {
+            let s: f64 = combos
+                .iter()
+                .map(|c| c.order.unwrap_or(3) as f64)
+                .sum();
+            s / (combos.len() as f64)
+        };
+        // Cost model (rough): O(N log N + C*N) vs O(C*N*avg_k).
+        // Pick RMQ only when C*avg_k clearly dominates: use a higher factor for stability.
+        // This avoids small-workload drift relative to the plain kernel and keeps tests stable.
+        let use_rmq_by_cost = (combos.len() as f64) * avg_k
+            >= 16.0 * (len as f64).log2().max(1.0);
+
+        let want_rmq = match self.policy.batch {
+            BatchKernelPolicy::Plain { .. } => false,
+            BatchKernelPolicy::Auto => {
+                use_rmq_by_cost && Self::will_fit(base_required + rmq_bytes, 64 * 1024 * 1024)
+            }
+        };
+
+        let mut series_len_i = len as i32;
+        let mut first_valid_i = first_valid as i32;
+
+        if want_rmq {
+            // Sparse tables: K*N elements each (float,float,u8,u8)
+            let st_elems = k_levels * len;
+            let mut st_low_min: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(st_elems) }
+                    .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+            let mut st_high_max: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(st_elems) }
+                    .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+            let mut st_valid_low: DeviceBuffer<u8> =
+                unsafe { DeviceBuffer::uninitialized(st_elems) }
+                    .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+            let mut st_valid_high: DeviceBuffer<u8> =
+                unsafe { DeviceBuffer::uninitialized(st_elems) }
+                    .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+
+            // Kernels
+            let f_init = self
+                .module
+                .get_function("st_init_level0_minmax_valid_f32")
+                .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+            let f_build = self
+                .module
+                .get_function("st_build_level_k_minmax_valid_f32")
+                .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+            let f_rmq = self
+                .module
+                .get_function("minmax_batch_rmq_f32")
+                .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+            let f_ff = self
+                .module
+                .get_function("forward_fill_two_streams_f32")
+                .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+
+            // --- Build ST level 0
+            let block_x = 256u32;
+            let grid_x = ((len as u32) + block_x - 1) / block_x;
+            let grid: GridSize = (grid_x, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            unsafe {
+                let mut low_ptr = d_low.as_device_ptr().as_raw();
+                let mut high_ptr = d_high.as_device_ptr().as_raw();
+                let mut low_min_ptr = st_low_min.as_device_ptr().as_raw();
+                let mut high_max_ptr = st_high_max.as_device_ptr().as_raw();
+                let mut vlow_ptr = st_valid_low.as_device_ptr().as_raw();
+                let mut vhigh_ptr = st_valid_high.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut low_ptr as *mut _ as *mut c_void,
+                    &mut high_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut low_min_ptr as *mut _ as *mut c_void,
+                    &mut high_max_ptr as *mut _ as *mut c_void,
+                    &mut vlow_ptr as *mut _ as *mut c_void,
+                    &mut vhigh_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&f_init, grid, block, 0, args)
+                    .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+            }
+
+            // --- Build ST levels k>=1
+            for k in 1..k_levels {
+                let span = 1usize << k;
+                if len < span {
+                    break;
+                }
+                let valid_pos = len - span + 1;
+                let grid_kx = ((valid_pos as u32) + block_x - 1) / block_x;
+                let gridk: GridSize = (grid_kx, 1, 1).into();
+                unsafe {
+                    let mut k_i = k as i32;
+                    let mut low_min_ptr = st_low_min.as_device_ptr().as_raw();
+                    let mut high_max_ptr = st_high_max.as_device_ptr().as_raw();
+                    let mut vlow_ptr = st_valid_low.as_device_ptr().as_raw();
+                    let mut vhigh_ptr = st_valid_high.as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut k_i as *mut _ as *mut c_void,
+                        &mut low_min_ptr as *mut _ as *mut c_void,
+                        &mut high_max_ptr as *mut _ as *mut c_void,
+                        &mut vlow_ptr as *mut _ as *mut c_void,
+                        &mut vhigh_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.stream
+                        .launch(&f_build, gridk, block, 0, args)
+                        .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+                }
+            }
+
+            // --- RMQ compute: grid.x sweeps time; grid.y is row-chunked (<=65,535)
+            let block_x = match self.policy.batch {
+                BatchKernelPolicy::Plain { block_x } => block_x.max(64),
+                _ => 256,
+            };
+            let grid_x = ((len as u32) + block_x - 1) / block_x;
+
+            const MAX_GRID_Y: usize = 65_535;
+            let mut start = 0usize;
+            while start < combos.len() {
+                let count = (combos.len() - start).min(MAX_GRID_Y);
+                let grid: GridSize = (grid_x, count as u32, 1).into();
+                let block: BlockSize = (block_x, 1, 1).into();
+                unsafe {
+                    let mut high_ptr = d_high.as_device_ptr().as_raw();
+                    let mut low_ptr = d_low.as_device_ptr().as_raw();
+                    let mut orders_ptr = d_orders.as_device_ptr().add(start).as_raw();
+                    let mut nrows_i = count as i32;
+                    let mut low_min_ptr = st_low_min.as_device_ptr().as_raw();
+                    let mut high_max_ptr = st_high_max.as_device_ptr().as_raw();
+                    let mut vlow_ptr = st_valid_low.as_device_ptr().as_raw();
+                    let mut vhigh_ptr = st_valid_high.as_device_ptr().as_raw();
+                    let mut is_min_ptr = d_is_min.as_device_ptr().add(start * len).as_raw();
+                    let mut is_max_ptr = d_is_max.as_device_ptr().add(start * len).as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut high_ptr as *mut _ as *mut c_void,
+                        &mut low_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut first_valid_i as *mut _ as *mut c_void,
+                        &mut orders_ptr as *mut _ as *mut c_void,
+                        &mut nrows_i as *mut _ as *mut c_void,
+                        &mut low_min_ptr as *mut _ as *mut c_void,
+                        &mut high_max_ptr as *mut _ as *mut c_void,
+                        &mut vlow_ptr as *mut _ as *mut c_void,
+                        &mut vhigh_ptr as *mut _ as *mut c_void,
+                        &mut is_min_ptr as *mut _ as *mut c_void,
+                        &mut is_max_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.stream
+                        .launch(&f_rmq, grid, block, 0, args)
+                        .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+                }
+
+                // Forward-fill for this chunk (one block per row)
+                let ff_grid: GridSize = (count as u32, 1, 1).into();
+                let ff_block: BlockSize = (256u32, 1, 1).into();
+                unsafe {
+                    let mut is_min_ptr = d_is_min.as_device_ptr().add(start * len).as_raw();
+                    let mut is_max_ptr = d_is_max.as_device_ptr().add(start * len).as_raw();
+                    let mut rows_i = count as i32;
+                    let mut last_min_ptr = d_last_min.as_device_ptr().add(start * len).as_raw();
+                    let mut last_max_ptr = d_last_max.as_device_ptr().add(start * len).as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut is_min_ptr as *mut _ as *mut c_void,
+                        &mut is_max_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut rows_i as *mut _ as *mut c_void,
+                        &mut last_min_ptr as *mut _ as *mut c_void,
+                        &mut last_max_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.stream
+                        .launch(&f_ff, ff_grid, ff_block, 0, args)
+                        .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+                }
+
+                start += count;
+            }
+
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+            return Ok((
+                DeviceMinmaxQuad {
+                    is_min: d_is_min,
+                    is_max: d_is_max,
+                    last_min: d_last_min,
+                    last_max: d_last_max,
+                    rows: combos.len(),
+                    cols: len,
+                },
+                combos,
+            ));
+        }
+
+        // ---------- Fallback: original plain kernel ----------
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
             _ => 256,
         };
-        let grid_x = 1u32; // single producer per row; use threads only for init
-
-        // y-chunk to <= 65_535 rows per launch
-        let mut start = 0usize;
-        const MAX_GRID_Y: usize = 65_535;
+        let grid_x = 1u32; // one producer per row; threads for init
         let func = self
             .module
             .get_function("minmax_batch_f32")
             .map_err(|e| CudaMinmaxError::Cuda(e.to_string()))?;
+
+        let mut start = 0usize;
+        const MAX_GRID_Y: usize = 65_535;
         while start < combos.len() {
             let count = (combos.len() - start).min(MAX_GRID_Y);
             let grid: GridSize = (grid_x, count as u32, 1).into();
@@ -248,8 +472,6 @@ impl CudaMinmax {
             unsafe {
                 let mut high_ptr = d_high.as_device_ptr().as_raw();
                 let mut low_ptr = d_low.as_device_ptr().as_raw();
-                let mut series_len_i = len as i32;
-                let mut first_valid_i = first_valid as i32;
                 let mut orders_ptr = d_orders.as_device_ptr().add(start).as_raw();
                 let mut nrows_i = count as i32;
                 let mut is_min_ptr = d_is_min.as_device_ptr().add(start * len).as_raw();
