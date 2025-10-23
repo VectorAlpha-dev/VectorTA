@@ -2345,7 +2345,7 @@ pub fn chande_cuda_batch_dev_py(
     };
 
     let inner = py.allow_threads(|| {
-        let cuda = CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut cuda = CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.chande_batch_dev(high_slice, low_slice, close_slice, &sweep, direction)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

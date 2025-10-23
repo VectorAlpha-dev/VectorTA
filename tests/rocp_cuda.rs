@@ -13,8 +13,10 @@ use my_project::cuda::cuda_available;
 use my_project::cuda::oscillators::CudaRocp;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() {
-        return true;
+    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_infinite() || b.is_infinite() {
+        // Treat matching signed infinities as equal for CUDA vs CPU parity
+        return a.is_infinite() && b.is_infinite() && a.is_sign_positive() == b.is_sign_positive();
     }
     (a - b).abs() <= tol
 }

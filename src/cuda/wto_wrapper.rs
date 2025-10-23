@@ -12,11 +12,12 @@ use crate::indicators::wto::{WtoBatchRange, WtoParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
@@ -97,8 +98,8 @@ pub struct CudaWto {
     _context: Context,
     device_id: u32,
     policy: CudaWtoPolicy,
-    debug_batch_logged: bool,
-    debug_many_logged: bool,
+    debug_batch_logged: AtomicBool,
+    debug_many_logged: AtomicBool,
 }
 
 impl CudaWto {
@@ -108,13 +109,10 @@ impl CudaWto {
             Device::get_device(device_id as u32).map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/wto_kernel.ptx"));
-        // Prefer context-targeted JIT with moderate opt level, fallback to simpler modes
+        // Prefer context-targeted JIT with highest opt level, fallback to simpler modes
         let module = match Module::from_ptx(
             ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
+            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O4)],
         ) {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
@@ -131,12 +129,9 @@ impl CudaWto {
             stream,
             _context: context,
             device_id: device_id as u32,
-            policy: CudaWtoPolicy {
-                batch: BatchKernelPolicy::Auto,
-                many_series: ManySeriesKernelPolicy::Auto,
-            },
-            debug_batch_logged: false,
-            debug_many_logged: false,
+            policy: CudaWtoPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto },
+            debug_batch_logged: AtomicBool::new(false),
+            debug_many_logged: AtomicBool::new(false),
         })
     }
 
@@ -147,17 +142,33 @@ impl CudaWto {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> {
+    #[inline] fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+
+    // Prefill outputs with canonical qNaN via driver memset (async, ordered on the stream)
+    #[inline]
+    fn prefill_nan_triplet(
+        &self,
+        d_wt1: &mut DeviceBuffer<f32>,
+        d_wt2: &mut DeviceBuffer<f32>,
+        d_hist: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaWtoError> {
+        const QNAN_BITS: u32 = 0x7FC0_0000u32;
         unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
+            let st: cu::CUstream = self.stream.as_inner();
+            let p1: cu::CUdeviceptr = d_wt1.as_device_ptr().as_raw();
+            let p2: cu::CUdeviceptr = d_wt2.as_device_ptr().as_raw();
+            let p3: cu::CUdeviceptr = d_hist.as_device_ptr().as_raw();
+            let n1 = d_wt1.len();
+            let n2 = d_wt2.len();
+            let n3 = d_hist.len();
+            let r1 = cu::cuMemsetD32Async(p1, QNAN_BITS, n1, st);
+            if r1 != cu::CUresult::CUDA_SUCCESS { return Err(CudaWtoError::Cuda(format!("cuMemsetD32Async wt1 failed: {:?}", r1))); }
+            let r2 = cu::cuMemsetD32Async(p2, QNAN_BITS, n2, st);
+            if r2 != cu::CUresult::CUDA_SUCCESS { return Err(CudaWtoError::Cuda(format!("cuMemsetD32Async wt2 failed: {:?}", r2))); }
+            let r3 = cu::cuMemsetD32Async(p3, QNAN_BITS, n3, st);
+            if r3 != cu::CUresult::CUDA_SUCCESS { return Err(CudaWtoError::Cuda(format!("cuMemsetD32Async hist failed: {:?}", r3))); }
         }
+        Ok(())
     }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -213,6 +224,9 @@ impl CudaWto {
         let mut d_hist: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
                 .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
+
+        // Prefill outputs with NaN (async)
+        self.prefill_nan_triplet(&mut d_wt1, &mut d_wt2, &mut d_hist)?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -314,6 +328,9 @@ impl CudaWto {
         let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaWtoError::Cuda(e.to_string()))?;
 
+        // Prefill outputs with NaN (async)
+        self.prefill_nan_triplet(&mut d_wt1, &mut d_wt2, &mut d_hist)?;
+
         self.launch_many_series_kernel(
             &d_prices,
             cols,
@@ -397,6 +414,8 @@ impl CudaWto {
                 "series_len and n_combos must be positive".into(),
             ));
         }
+        // Ensure outputs are prefilled in device-only path as well
+        self.prefill_nan_triplet(d_wt1, d_wt2, d_hist)?;
         self.launch_batch_kernel(
             d_prices,
             d_channel,
@@ -432,6 +451,8 @@ impl CudaWto {
                 "channel_length and average_length must be positive".into(),
             ));
         }
+        // Ensure outputs are prefilled in device-only path as well
+        self.prefill_nan_triplet(d_wt1, d_wt2, d_hist)?;
         self.launch_many_series_kernel(
             d_prices_tm,
             cols as usize,
@@ -571,12 +592,13 @@ impl CudaWto {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        if !self.debug_batch_logged && std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1")
+            && !self.debug_batch_logged.swap(true, Ordering::Relaxed)
+        {
             eprintln!(
                 "[wto] batch kernel: block_x={}, grid_x={}, device={}",
                 block_x, grid_x, self.device_id
             );
-            // NOTE: best-effort one-time logging; keep immutable self for simple API parity.
         }
 
         let func = self
@@ -632,7 +654,9 @@ impl CudaWto {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        if !self.debug_many_logged && std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
+        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1")
+            && !self.debug_many_logged.swap(true, Ordering::Relaxed)
+        {
             eprintln!(
                 "[wto] many-series kernel: block_x={}, grid_x={}, device={}",
                 block_x, grid_x, self.device_id

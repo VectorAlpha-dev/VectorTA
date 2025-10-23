@@ -17,6 +17,7 @@ use cust::function::{BlockSize, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
+use cust::context::CacheConfig;
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::error::Error;
@@ -54,7 +55,8 @@ impl CudaPvi {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/pvi_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            // Most optimized JIT level (default); keep explicit for clarity
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -62,11 +64,11 @@ impl CudaPvi {
             .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        Ok(Self {
-            module,
-            stream,
-            _ctx: ctx,
-        })
+        // Hint to prefer L1 cache for the apply kernel (tiny SMEM usage)
+        if let Ok(mut func) = module.get_function("pvi_apply_scale_batch_f32") {
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
+        }
+        Ok(Self { module, stream, _ctx: ctx })
     }
 
     #[inline]
@@ -116,77 +118,81 @@ impl CudaPvi {
                 "no initial values provided".into(),
             ));
         }
-
-        // VRAM estimate: close + volume + scale + initial_values + out
-        let bytes = (2 * len + len + rows + rows * len) * std::mem::size_of::<f32>();
-        if !Self::will_fit(bytes, 64 << 20) {
+        // Peak-by-stage VRAM estimate
+        let bytes_stage1 = (2 * len + len) * std::mem::size_of::<f32>(); // close + volume + scale
+        let bytes_stage2 = (len + rows + rows * len) * std::mem::size_of::<f32>(); // scale + inits + out
+        let bytes_peak = bytes_stage1.max(bytes_stage2);
+        if !Self::will_fit(bytes_peak, 64 << 20) {
             return Err(CudaPviError::Cuda("insufficient free VRAM".into()));
         }
 
-        // Upload inputs
-        let d_close =
-            DeviceBuffer::from_slice(close).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let d_volume =
-            DeviceBuffer::from_slice(volume).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+        // Upload inputs (stage 1 requirements first)
+        let d_close = DeviceBuffer::from_slice(close).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+        let d_volume = DeviceBuffer::from_slice(volume).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
         let d_inits = DeviceBuffer::from_slice(initial_values)
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let mut d_scale: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
             .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
             .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
 
-        // Build scale
-        let build = self
-            .module
-            .get_function("pvi_build_scale_f32")
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        unsafe {
-            let mut close_ptr = d_close.as_device_ptr().as_raw();
-            let mut vol_ptr = d_volume.as_device_ptr().as_raw();
-            let mut len_i = len as i32;
-            let mut first_i = first as i32;
-            let mut scale_ptr = d_scale.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut close_ptr as *mut _ as *mut c_void,
-                &mut vol_ptr as *mut _ as *mut c_void,
-                &mut len_i as *mut _ as *mut c_void,
-                &mut first_i as *mut _ as *mut c_void,
-                &mut scale_ptr as *mut _ as *mut c_void,
-            ];
-            let grid: GridSize = (1, 1, 1).into();
-            let block: BlockSize = (1, 1, 1).into();
-            self.stream
-                .launch(&build, grid, block, 0, args)
+        {
+            // Build scale then apply across rows for large batches
+            let mut d_scale: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
                 .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        }
+            let build = self
+                .module
+                .get_function("pvi_build_scale_f32")
+                .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut close_ptr = d_close.as_device_ptr().as_raw();
+                let mut vol_ptr = d_volume.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut first_i = first as i32;
+                let mut scale_ptr = d_scale.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut close_ptr as *mut _ as *mut c_void,
+                    &mut vol_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut scale_ptr as *mut _ as *mut c_void,
+                ];
+                let grid: GridSize = (1, 1, 1).into();
+                let block: BlockSize = (1, 1, 1).into();
+                self.stream
+                    .launch(&build, grid, block, 0, args)
+                    .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+            }
 
-        // Apply scale across rows
-        let apply = self
-            .module
-            .get_function("pvi_apply_scale_batch_f32")
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        unsafe {
-            let mut scale_ptr = d_scale.as_device_ptr().as_raw();
-            let mut len_i = len as i32;
-            let mut first_i = first as i32;
-            let mut inits_ptr = d_inits.as_device_ptr().as_raw();
-            let mut rows_i = rows as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut scale_ptr as *mut _ as *mut c_void,
-                &mut len_i as *mut _ as *mut c_void,
-                &mut first_i as *mut _ as *mut c_void,
-                &mut inits_ptr as *mut _ as *mut c_void,
-                &mut rows_i as *mut _ as *mut c_void,
-                &mut out_ptr as *mut _ as *mut c_void,
-            ];
-            let block_x: u32 = 256;
-            let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
-            let grid: GridSize = (grid_x.max(1), 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            self.stream
-                .launch(&apply, grid, block, 0, args)
+            // Now free inputs before Stage 2 to reduce peak VRAM
+            drop(d_close);
+            drop(d_volume);
+
+            let apply = self
+                .module
+                .get_function("pvi_apply_scale_batch_f32")
                 .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut scale_ptr = d_scale.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut first_i = first as i32;
+                let mut inits_ptr = d_inits.as_device_ptr().as_raw();
+                let mut rows_i = rows as i32;
+                let mut out_ptr = d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut scale_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut inits_ptr as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                let block_x: u32 = 256;
+                let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
+                let grid: GridSize = (grid_x.max(1), 1, 1).into();
+                let block: BlockSize = (block_x, 1, 1).into();
+                self.stream
+                    .launch(&apply, grid, block, 0, args)
+                    .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
+            }
         }
 
         self.stream

@@ -45,7 +45,11 @@ fn aroon_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         low[i] = base - 1.3 - 0.015 * (x * 1.2).sin();
     }
     let sweep = AroonBatchRange { length: (5, 60, 5) };
-    let cpu = aroon_batch_with_kernel(&high, &low, &sweep, Kernel::ScalarBatch)?;
+    // Quantize baseline to f32 like the device path to avoid precision/tie drift
+    // emulate device precision: cast to f32 then back to f64
+    let high_q: Vec<f64> = high.iter().map(|&v| (v as f32) as f64).collect();
+    let low_q: Vec<f64> = low.iter().map(|&v| (v as f32) as f64).collect();
+    let cpu = aroon_batch_with_kernel(&high_q, &low_q, &sweep, Kernel::ScalarBatch)?;
 
     let hf32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let lf32: Vec<f32> = low.iter().map(|&v| v as f32).collect();

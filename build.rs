@@ -1014,6 +1014,7 @@ fn compile_wto_kernel(cuda_path: &str) {
     compile_kernel(cuda_path, "kernels/cuda/wto_kernel.cu", "wto_kernel.ptx");
 }
 
+
 fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
     use std::process::Command;
 

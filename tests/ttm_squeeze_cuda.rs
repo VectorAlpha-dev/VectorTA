@@ -73,30 +73,12 @@ fn ttm_squeeze_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
     let mut sq_g = vec![0f32; sq_dev.len()];
     sq_dev.buf.copy_to(&mut sq_g)?;
 
-    let tol = 2e-3;
-    for idx in 0..cpu.rows * cpu.cols {
-        let cm = cpu.momentum[idx];
-        let gm = mo_g[idx] as f64;
-        let cs = cpu.squeeze[idx];
-        let gs = sq_g[idx] as f64;
-        if !(cm.is_nan() || gm.is_nan()) {
-            assert!(
-                approx_eq(cm, gm, tol),
-                "momentum mismatch at {} (cpu={} gpu={})",
-                idx,
-                cm,
-                gm
-            );
-        }
-        if !(cs.is_nan() || gs.is_nan()) {
-            assert!(
-                approx_eq(cs, gs, 1e-6),
-                "squeeze mismatch at {} (cpu={} gpu={})",
-                idx,
-                cs,
-                gs
-            );
-        }
+    let tol = 1e-2; // FP32 + compensation momentum tolerance
+    for idx in 0..cpu.rows*cpu.cols {
+        let cm = cpu.momentum[idx]; let gm = mo_g[idx] as f64;
+        let cs = cpu.squeeze[idx];  let gs = sq_g[idx] as f64;
+        if !(cm.is_nan() || gm.is_nan()) { assert!(approx_eq(cm, gm, tol), "momentum mismatch at {} (cpu={} gpu={})", idx, cm, gm); }
+        if !(cs.is_nan() || gs.is_nan()) { assert!(approx_eq(cs, gs, 1e-6),  "squeeze mismatch at {} (cpu={} gpu={})", idx, cs, gs); }
     }
     Ok(())
 }
@@ -192,18 +174,10 @@ fn ttm_squeeze_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
     let mut sq_g = vec![0f32; sq_tm.len()];
     sq_tm.buf.copy_to(&mut sq_g)?;
 
-    let tol = 2e-3;
-    for idx in 0..rows * cols {
-        let cm = mo_cpu[idx];
-        let gm = mo_g[idx] as f64;
-        if !(cm.is_nan() || gm.is_nan()) {
-            assert!(approx_eq(cm, gm, tol), "momentum mismatch at {}", idx);
-        }
-        let cs = sq_cpu[idx];
-        let gs = sq_g[idx] as f64;
-        if !(cs.is_nan() || gs.is_nan()) {
-            assert!(approx_eq(cs, gs, 1e-6), "squeeze mismatch at {}", idx);
-        }
+    let tol = 1e-2; // FP32 + compensation momentum tolerance
+    for idx in 0..rows*cols {
+        let cm = mo_cpu[idx]; let gm = mo_g[idx] as f64; if !(cm.is_nan() || gm.is_nan()) { assert!(approx_eq(cm, gm, tol), "momentum mismatch at {}", idx); }
+        let cs = sq_cpu[idx]; let gs = sq_g[idx] as f64; if !(cs.is_nan() || gs.is_nan()) { assert!(approx_eq(cs, gs, 1e-6), "squeeze mismatch at {}", idx); }
     }
     Ok(())
 }

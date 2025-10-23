@@ -14,7 +14,7 @@ use crate::indicators::stddev::{StdDevBatchRange, StdDevParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer, DeviceCopy};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -78,6 +78,12 @@ pub struct CudaStddev {
     debug_batch_logged: bool,
     debug_many_logged: bool,
 }
+
+// CUDA vector equivalent for float2 (hi, lo) compensated prefix sums
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Float2 { pub x: f32, pub y: f32 }
+unsafe impl DeviceCopy for Float2 {}
 
 impl CudaStddev {
     pub fn new(device_id: usize) -> Result<Self, CudaStddevError> {
@@ -261,31 +267,49 @@ impl CudaStddev {
         Ok((out, first_valid, len))
     }
 
-    fn build_prefixes(data: &[f32]) -> (Vec<f64>, Vec<f64>, Vec<i32>) {
+    #[inline(always)]
+    fn f64_to_float2(v: f64) -> Float2 {
+        let hi = v as f32;
+        let lo = (v - hi as f64) as f32;
+        Float2 { x: hi, y: lo }
+    }
+
+    // Build DS (hi, lo) prefix sums directly into page-locked host buffers.
+    fn build_prefixes_ds_locked(
+        data: &[f32],
+    ) -> cust::error::CudaResult<(LockedBuffer<Float2>, LockedBuffer<Float2>, LockedBuffer<i32>)> {
         let n = data.len();
-        let mut ps1 = vec![0.0f64; n + 1];
-        let mut ps2 = vec![0.0f64; n + 1];
-        let mut psn = vec![0i32; n + 1];
+        let mut ps1: LockedBuffer<Float2> = unsafe { LockedBuffer::uninitialized(n + 1)? };
+        let mut ps2: LockedBuffer<Float2> = unsafe { LockedBuffer::uninitialized(n + 1)? };
+        let mut psn: LockedBuffer<i32> = unsafe { LockedBuffer::uninitialized(n + 1)? };
+
+        ps1.as_mut_slice()[0] = Float2 { x: 0.0, y: 0.0 };
+        ps2.as_mut_slice()[0] = Float2 { x: 0.0, y: 0.0 };
+        psn.as_mut_slice()[0] = 0;
+
+        let (mut s1, mut s2) = (0.0f64, 0.0f64);
+        let mut nan = 0i32;
         for i in 0..n {
             let v = data[i];
             if v.is_nan() {
-                ps1[i + 1] = ps1[i];
-                ps2[i + 1] = ps2[i];
-                psn[i + 1] = psn[i] + 1;
+                nan += 1;
             } else {
                 let d = v as f64;
-                ps1[i + 1] = ps1[i] + d;
-                ps2[i + 1] = ps2[i] + d * d;
-                psn[i + 1] = psn[i];
+                s1 += d;
+                s2 += d * d;
             }
+            ps1.as_mut_slice()[i + 1] = Self::f64_to_float2(s1);
+            ps2.as_mut_slice()[i + 1] = Self::f64_to_float2(s2);
+            psn.as_mut_slice()[i + 1] = nan;
         }
-        (ps1, ps2, psn)
+
+        Ok((ps1, ps2, psn))
     }
 
     fn launch_batch(
         &self,
-        d_ps1: &DeviceBuffer<f64>,
-        d_ps2: &DeviceBuffer<f64>,
+        d_ps1: &DeviceBuffer<Float2>,
+        d_ps2: &DeviceBuffer<Float2>,
         d_psn: &DeviceBuffer<i32>,
         len: usize,
         first_valid: usize,
@@ -299,10 +323,11 @@ impl CudaStddev {
             .get_function("stddev_batch_f32")
             .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
 
-        let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(64),
-        };
+        #[inline(always)]
+        fn pick_block_x(len: usize) -> u32 {
+            if len >= (1usize << 20) { 512 } else if len >= (1usize << 14) { 256 } else { 128 }
+        }
+        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Auto => pick_block_x(len), BatchKernelPolicy::Plain { block_x } => block_x.max(64) };
         let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
         let grid_base: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -359,15 +384,15 @@ impl CudaStddev {
         sweep: &StdDevBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<StdDevParams>), CudaStddevError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        let (ps1, ps2, psn) = Self::build_prefixes(data_f32);
         let periods: Vec<i32> = combos.iter().map(|c| c.0 as i32).collect();
         let nbdevs: Vec<f32> = combos.iter().map(|c| c.1).collect();
+        // Build DS prefixes in pinned memory
+        let (h_ps1, h_ps2, h_psn) = Self::build_prefixes_ds_locked(data_f32)
+            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
 
         // VRAM estimate
-        let bytes_prefix = (ps1.len() + ps2.len()) * std::mem::size_of::<f64>()
-            + psn.len() * std::mem::size_of::<i32>();
-        let bytes_params =
-            periods.len() * std::mem::size_of::<i32>() + nbdevs.len() * std::mem::size_of::<f32>();
+        let bytes_prefix = (h_ps1.len() + h_ps2.len()) * std::mem::size_of::<Float2>() + h_psn.len() * std::mem::size_of::<i32>();
+        let bytes_params = periods.len() * std::mem::size_of::<i32>() + nbdevs.len() * std::mem::size_of::<f32>();
         let bytes_out = combos.len() * len * std::mem::size_of::<f32>();
         let required = bytes_prefix + bytes_params + bytes_out;
         let headroom = 64 * 1024 * 1024;
@@ -378,18 +403,21 @@ impl CudaStddev {
             )));
         }
 
-        // Device allocations/copies (async where beneficial)
-        let d_ps1 =
-            DeviceBuffer::from_slice(&ps1).map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
-        let d_ps2 =
-            DeviceBuffer::from_slice(&ps2).map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
-        let d_psn =
-            DeviceBuffer::from_slice(&psn).map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
-        let d_periods =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
-        let d_nbdevs =
-            DeviceBuffer::from_slice(&nbdevs).map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(combos.len() * len) }
+        // Device allocations + async H->D from pinned
+        let mut d_ps1: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized_async(h_ps1.len(), &self.stream) }
+            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+        let mut d_ps2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized_async(h_ps2.len(), &self.stream) }
+            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+        let mut d_psn: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized_async(h_psn.len(), &self.stream) }
+            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+        unsafe {
+            d_ps1.async_copy_from(&h_ps1, &self.stream).map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+            d_ps2.async_copy_from(&h_ps2, &self.stream).map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+            d_psn.async_copy_from(&h_psn, &self.stream).map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+        }
+        let d_periods = DeviceBuffer::from_slice(&periods).map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+        let d_nbdevs = DeviceBuffer::from_slice(&nbdevs).map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
             .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
 
         self.launch_batch(
@@ -561,7 +589,7 @@ pub mod benches {
     const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
-        let prefixes = 2 * (ONE_SERIES_LEN + 1) * std::mem::size_of::<f64>()
+        let prefixes = 2 * (ONE_SERIES_LEN + 1) * std::mem::size_of::<Float2>()
             + (ONE_SERIES_LEN + 1) * std::mem::size_of::<i32>();
         let params = PARAM_SWEEP * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let out = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();

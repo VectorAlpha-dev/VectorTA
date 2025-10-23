@@ -40,6 +40,7 @@ numpy = { version = "0.25.0", optional = true }
 smallvec = "1.15.1"
 float-cmp = "0.10.0"
 cust = { version = "0.3.2", optional = true }
+cust_derive = { version = "0.2.0", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 proptest = { version = "1.7.0", optional = true }
@@ -113,7 +114,7 @@ default = ["proptest"]
 nightly-avx = []
 wasm = ["wasm-bindgen", "serde-wasm-bindgen", "js-sys"]
 python = ["pyo3", "numpy"]
-cuda = ["cust"]
+cuda = ["cust", "cust_derive"]
 
 [package.metadata.wasm-pack]
 "wasm-opt" = ["-O4", "--enable-simd"]

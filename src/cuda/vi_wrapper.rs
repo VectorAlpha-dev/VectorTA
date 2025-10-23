@@ -14,7 +14,7 @@ use crate::indicators::vi::{ViBatchRange, ViParams};
 use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, Function, GridSize};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer, DeviceCopy};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -130,9 +130,40 @@ impl CudaVi {
         {
             return true;
         }
-        mem_get_info()
-            .map(|(free, _)| bytes.saturating_add(headroom) <= free)
-            .unwrap_or(true)
+        mem_get_info().map(|(free, _)| bytes.saturating_add(headroom) <= free).unwrap_or(true)
+    }
+
+    /// Heuristic: prefer pinned host memory for >= 1 MiB transfers
+    #[inline(always)]
+    fn use_pinned(bytes: usize) -> bool { bytes >= (1 << 20) }
+
+    /// Upload a host slice to device with a safe and fast path:
+    /// - small: DeviceBuffer::from_slice (synchronous)
+    /// - large: LockedBuffer (pinned) + DeviceBuffer::uninitialized + copy_from (synchronous)
+    /// Keeps bandwidth benefits of pinned memory without async lifetime hazards.
+    fn h2d_upload<T: DeviceCopy>(&self, src: &[T]) -> Result<DeviceBuffer<T>, CudaViError> {
+        let bytes = src.len() * std::mem::size_of::<T>();
+        if Self::use_pinned(bytes) {
+            let h = LockedBuffer::from_slice(src).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let mut d = unsafe { DeviceBuffer::<T>::uninitialized(src.len()) }
+                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            d.copy_from(&h).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            Ok(d)
+        } else {
+            DeviceBuffer::from_slice(src).map_err(|e| CudaViError::Cuda(e.to_string()))
+        }
+    }
+
+    /// Ask the driver for an occupancy-friendly (grid, block), then clamp to work size.
+    #[inline]
+    fn choose_launch_1d(&self, func: &Function, n_items: usize) -> (GridSize, BlockSize) {
+        let (min_grid_suggest, block_suggest) = func
+            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+            .unwrap_or((0, 256));
+        let block_x = block_suggest.clamp(64, 1024);
+        let mut grid_x = ((n_items as u32) + block_x - 1) / block_x;
+        if min_grid_suggest > 0 { grid_x = grid_x.max(min_grid_suggest); }
+        ((grid_x.max(1), 1, 1).into(), (block_x, 1, 1).into())
     }
 
     // ---------------- Host prefix sums (single series) ----------------
@@ -323,38 +354,13 @@ impl CudaVi {
             )));
         }
 
-        // Upload inputs (use pinned buffers for large arrays)
-        let (d_tr, d_vp, d_vm) = if len >= 131072 {
-            let h_tr =
-                LockedBuffer::from_slice(&pfx_tr).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let h_vp =
-                LockedBuffer::from_slice(&pfx_vp).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let h_vm =
-                LockedBuffer::from_slice(&pfx_vm).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_tr = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_vp = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_vm = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_tr.async_copy_from(&h_tr, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_vp.async_copy_from(&h_vp, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_vm.async_copy_from(&h_vm, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            (d_tr, d_vp, d_vm)
-        } else {
-            (
-                DeviceBuffer::from_slice(&pfx_tr).map_err(|e| CudaViError::Cuda(e.to_string()))?,
-                DeviceBuffer::from_slice(&pfx_vp).map_err(|e| CudaViError::Cuda(e.to_string()))?,
-                DeviceBuffer::from_slice(&pfx_vm).map_err(|e| CudaViError::Cuda(e.to_string()))?,
-            )
-        };
+        // Upload inputs (safe pinned-or-pageable synchronous path)
+        let d_tr = self.h2d_upload(&pfx_tr)?;
+        let d_vp = self.h2d_upload(&pfx_vp)?;
+        let d_vm = self.h2d_upload(&pfx_vm)?;
 
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods_host)
-            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let d_periods = self.h2d_upload(&periods_host)?;
 
         // Allocate outputs
         let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }
@@ -368,13 +374,14 @@ impl CudaVi {
             .get_function("vi_batch_f32")
             .map_err(|e| CudaViError::Cuda(e.to_string()))?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
-            _ => 256,
+        let (grid, block) = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => {
+                let bx = block_x.max(32).min(1024);
+                let gx = ((rows as u32) + bx - 1) / bx;
+                ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
+            }
+            _ => self.choose_launch_1d(&func, rows),
         };
-        let grid_x = ((rows as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut tr_ptr = d_tr.as_device_ptr().as_raw();
@@ -463,36 +470,11 @@ impl CudaVi {
             )));
         }
 
-        // Upload inputs
-        let (d_tr, d_vp, d_vm) = if n >= 131072 {
-            let h_tr =
-                LockedBuffer::from_slice(&pfx_tr).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let h_vp =
-                LockedBuffer::from_slice(&pfx_vp).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let h_vm =
-                LockedBuffer::from_slice(&pfx_vm).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_tr = unsafe { DeviceBuffer::<f32>::uninitialized_async(n, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_vp = unsafe { DeviceBuffer::<f32>::uninitialized_async(n, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d_vm = unsafe { DeviceBuffer::<f32>::uninitialized_async(n, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_tr.async_copy_from(&h_tr, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_vp.async_copy_from(&h_vp, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            unsafe { d_vm.async_copy_from(&h_vm, &self.stream) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            (d_tr, d_vp, d_vm)
-        } else {
-            (
-                DeviceBuffer::from_slice(&pfx_tr).map_err(|e| CudaViError::Cuda(e.to_string()))?,
-                DeviceBuffer::from_slice(&pfx_vp).map_err(|e| CudaViError::Cuda(e.to_string()))?,
-                DeviceBuffer::from_slice(&pfx_vm).map_err(|e| CudaViError::Cuda(e.to_string()))?,
-            )
-        };
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        // Upload inputs (safe pinned-or-pageable synchronous path)
+        let d_tr = self.h2d_upload(&pfx_tr)?;
+        let d_vp = self.h2d_upload(&pfx_vp)?;
+        let d_vm = self.h2d_upload(&pfx_vm)?;
+        let d_first = self.h2d_upload(&first_valids)?;
 
         // Allocate outputs
         let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }
@@ -506,13 +488,14 @@ impl CudaVi {
             .get_function("vi_many_series_one_param_f32")
             .map_err(|e| CudaViError::Cuda(e.to_string()))?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
-            _ => 256,
+        let (grid, block) = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => {
+                let bx = block_x.max(32).min(1024);
+                let gx = ((cols as u32) + bx - 1) / bx;
+                ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
+            }
+            _ => self.choose_launch_1d(&func, cols),
         };
-        let grid_x = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut tr_ptr = d_tr.as_device_ptr().as_raw();

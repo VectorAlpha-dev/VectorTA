@@ -2,7 +2,7 @@
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::indicators::aroon::{AroonBatchRange, AroonParams};
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
@@ -10,6 +10,7 @@ use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffe
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cuda_sys;
 use std::ffi::c_void;
 use std::fmt;
 
@@ -160,7 +161,7 @@ impl CudaAroon {
             .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }
             .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
-        let d_lengths = DeviceBuffer::from_slice(&lengths_i32)
+        let d_lengths = unsafe { DeviceBuffer::from_slice_async(&lengths_i32, &self.stream) }
             .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
         let mut d_up: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
@@ -170,14 +171,21 @@ impl CudaAroon {
                 .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
 
         // Launch kernel with y-chunking if needed
-        let func = self
+        let mut func = self
             .module
             .get_function("aroon_batch_f32")
             .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
-        let (_, suggested) = func
-            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-            .unwrap_or((0, 0));
-        let block_x = if suggested > 0 { suggested } else { 128 };
+        let _ = func.set_cache_config(CacheConfig::PreferShared);
+        // Dynamic shared memory: two int deques of capacity (max_len+1)
+        let shmem_bytes_usize: usize = 2 * (max_len + 1) * std::mem::size_of::<i32>();
+        // Ask occupancy suggester using our dynamic smem needs
+        let (suggested_block, _min_grid) = func
+            .suggested_launch_configuration(shmem_bytes_usize, BlockSize::xyz(0, 0, 0))
+            .unwrap_or((128, 0));
+        let block_x: u32 = if suggested_block > 0 { suggested_block } else { 128 } as u32;
+        // Optional: opt-in to larger dynamic shared memory if supported
+        // Optional large dynamic shared memory opt-in removed: requires raw CUfunction access
+        let shmem_bytes: u32 = shmem_bytes_usize as u32;
         let max_grid_y = 65_535usize;
         let mut launched = 0usize;
         while launched < combos.len() {
@@ -187,7 +195,7 @@ impl CudaAroon {
             let stream = &self.stream;
             unsafe {
                 launch!(
-                    func<<<grid, block, 0, stream>>>(
+                    func<<<grid, block, shmem_bytes, stream>>>(
                         d_high.as_device_ptr(),
                         d_low.as_device_ptr(),
                         d_lengths.as_device_ptr().add(launched),
@@ -279,17 +287,24 @@ impl CudaAroon {
             unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
                 .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
 
-        let func = self
+        let mut func = self
             .module
             .get_function("aroon_many_series_one_param_f32")
             .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
-
+        let _ = func.set_cache_config(CacheConfig::PreferShared);
+        // Dynamic shared memory: two int deques of capacity (length+1)
+        let shmem_bytes_usize: usize = 2 * (length + 1) * std::mem::size_of::<i32>();
+        let (suggested_block, _min_grid) = func
+            .suggested_launch_configuration(shmem_bytes_usize, BlockSize::xyz(0, 0, 0))
+            .unwrap_or((128, 0));
+        let block_x: u32 = if suggested_block > 0 { suggested_block } else { 128 } as u32;
         let grid: GridSize = (cols as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        let shmem_bytes: u32 = shmem_bytes_usize as u32;
         let stream = &self.stream;
         unsafe {
             launch!(
-                func<<<grid, block, 0, stream>>>(
+                func<<<grid, block, shmem_bytes, stream>>>(
                     d_high.as_device_ptr(),
                     d_low.as_device_ptr(),
                     d_first.as_device_ptr(),
@@ -340,6 +355,22 @@ impl CudaAroon {
                 "output length mismatch".into(),
             ));
         }
+        outputs.first.buf.copy_to(out_up).map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
+        outputs.second.buf.copy_to(out_down).map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
+        Ok((rows, cols, combos))
+    }
+
+    /// Optional: return page-locked host buffers to overlap D->H without extra copies
+    pub fn aroon_batch_into_pinned_host_f32(
+        &self,
+        high_f32: &[f32],
+        low_f32: &[f32],
+        sweep: &AroonBatchRange,
+    ) -> Result<(LockedBuffer<f32>, LockedBuffer<f32>, usize, usize, Vec<AroonParams>), CudaAroonError> {
+        let CudaAroonBatchResult { outputs, combos } = self.aroon_batch_dev(high_f32, low_f32, sweep)?;
+        let rows = outputs.rows();
+        let cols = outputs.cols();
+        let expected = rows * cols;
         let mut pinned_up: LockedBuffer<f32> = unsafe {
             LockedBuffer::uninitialized(expected)
                 .map_err(|e| CudaAroonError::Cuda(e.to_string()))?
@@ -360,12 +391,8 @@ impl CudaAroon {
                 .async_copy_to(pinned_dn.as_mut_slice(), &self.stream)
                 .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
-        out_up.copy_from_slice(pinned_up.as_slice());
-        out_down.copy_from_slice(pinned_dn.as_slice());
-        Ok((rows, cols, combos))
+        self.stream.synchronize().map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
+        Ok((pinned_up, pinned_dn, rows, cols, combos))
     }
 }
 

@@ -1,4 +1,4 @@
-// CUDA kernels for Mass Index (MASS)
+// CUDA kernels for Mass Index (MASS) – FP64-free, double-single (float2) prefixes
 //
 // Math per scalar path (src/indicators/mass.rs):
 // - ema1 = EMA_9(high - low)
@@ -7,10 +7,10 @@
 // - MASS(period) = rolling sum over `period` of ratio
 //
 // For GPU batch (one series × many params), we precompute the ratio on host
-// and provide double-precision prefix sums of ratio along with a prefix count
-// of NaNs so that any window containing a NaN yields a NaN output (matching
+// and provide double-single (float2) prefix sums of ratio along with a prefix
+// count of NaNs so that any window containing a NaN yields a NaN output (matching
 // scalar semantics with a ring buffer where NaN poisons the sum until it
-// leaves the window).
+// leaves the window). We avoid FP64 in device code completely.
 //
 // For many-series × one-param (time-major), the wrapper provides time-major
 // prefix arrays of ratio and ratio-NaN counts.
@@ -24,10 +24,37 @@
 
 __device__ __forceinline__ float mass_nan() { return __int_as_float(0x7fffffff); }
 
+// ---------------------- error-free f32 helpers ----------------------
+
+// Error-free transformations (Knuth/Dekker): all-f32
+// Returns (s,e) such that a + b == s + e and s == fl(a+b)
+__device__ __forceinline__ float2 two_sum_f32(float a, float b) {
+    float s = a + b;
+    float z = s - a;
+    float e = (a - (s - z)) + (b - z);
+    return make_float2(s, e);
+}
+
+// Returns (s,e) such that a - b == s + e and s == fl(a-b)
+__device__ __forceinline__ float2 two_diff_f32(float a, float b) {
+    float s = a - b;
+    float z = s - a;
+    float e = (a - (s - z)) - (b + z);
+    return make_float2(s, e);
+}
+
+// Compute (A.hi+A.lo) - (B.hi+B.lo) in fp32 with ~48-bit effective precision
+__device__ __forceinline__ float ds_diff_to_f32(const float2 A, const float2 B) {
+    float2 d  = two_diff_f32(A.x, B.x);
+    float2 s1 = two_sum_f32(d.x, A.y - B.y);
+    float2 s2 = two_sum_f32(s1.x, d.y + s1.y);
+    return s2.x + s2.y;
+}
+
 // ----------------------- Batch: one series × many params -----------------------
 
 extern "C" __global__ void mass_batch_f32(
-    const double* __restrict__ prefix_ratio, // len+1
+    const float2* __restrict__ prefix_ratio_ds, // len+1 (DS prefix)
     const int*    __restrict__ prefix_nan,   // len+1 (count of NaNs in ratio)
     int len,
     int first_valid,
@@ -44,21 +71,25 @@ extern "C" __global__ void mass_batch_f32(
     const int warm = first_valid + 16 + period - 1;
     const int row_off = row * len;
 
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int t0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
 
+    int t = t0;
+    int start = t + 1 - period; // maintain incrementally
     while (t < len) {
         float out_val = mass_nan();
         if (t >= warm) {
-            const int start = t + 1 - period; // using len+1 prefixes
-            const int bad = prefix_nan[t + 1] - prefix_nan[start];
+            const int p1 = t + 1; // using len+1 prefixes
+            const int bad = prefix_nan[p1] - prefix_nan[start];
             if (bad == 0) {
-                const double sum = prefix_ratio[t + 1] - prefix_ratio[start];
-                out_val = static_cast<float>(sum);
+                const float2 a = prefix_ratio_ds[p1];
+                const float2 b = prefix_ratio_ds[start];
+                out_val = ds_diff_to_f32(a, b);
             }
         }
         out[row_off + t] = out_val;
-        t += stride;
+        t     += stride;
+        start += stride;
     }
 }
 
@@ -81,11 +112,13 @@ extern "C" __global__ void mass_many_series_one_param_time_major_f32(
     const int fv = first_valids[series];
     const int warm = fv + 16 + period - 1;
 
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int t0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
 
+    int t   = t0;
+
     while (t < series_len) {
-        const int idx = t * num_series + series; // time-major index
+        const int idx = t * num_series + series;               // (t,s)
         float out_val = mass_nan();
         if (t >= warm) {
             const int start = (t + 1 - period) * num_series + series;

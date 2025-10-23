@@ -16,7 +16,7 @@
 use crate::cuda::moving_averages::{CudaEma, CudaSma, DeviceArrayF32};
 use crate::indicators::keltner::{KeltnerBatchRange, KeltnerParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -66,6 +66,7 @@ pub struct CudaKeltner {
     stream: Stream,
     _ctx: Context,
     policy: CudaKeltnerPolicy,
+    max_grid_y: u32,
 }
 
 impl CudaKeltner {
@@ -85,12 +86,10 @@ impl CudaKeltner {
             .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
-        Ok(Self {
-            module,
-            stream,
-            _ctx: ctx,
-            policy: CudaKeltnerPolicy::default(),
-        })
+        let max_grid_y = dev
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))? as u32;
+        Ok(Self { module, stream, _ctx: ctx, policy: CudaKeltnerPolicy::default(), max_grid_y })
     }
 
     #[inline]
@@ -213,12 +212,9 @@ impl CudaKeltner {
                     }
                 }
             }
-            DeviceArrayF32 {
-                buf: DeviceBuffer::from_slice(&flat)
-                    .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?,
-                rows: rows_p,
-                cols: len,
-            }
+            let buf = unsafe { DeviceBuffer::from_slice_async(&flat, &self.stream) }
+                .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
+            DeviceArrayF32 { buf, rows: rows_p, cols: len }
         };
 
         // VRAM estimate: parameters + outputs. Inputs already allocated above.
@@ -252,23 +248,20 @@ impl CudaKeltner {
             .map(|c| (first_valid_close + c.period.unwrap() - 1) as i32)
             .collect();
 
-        let d_row_period_idx = DeviceBuffer::from_slice(&row_period_idx)
+        let d_row_period_idx = unsafe { DeviceBuffer::from_slice_async(&row_period_idx, &self.stream) }
             .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
-        let d_row_multipliers = DeviceBuffer::from_slice(&row_multipliers)
+        let d_row_multipliers = unsafe { DeviceBuffer::from_slice_async(&row_multipliers, &self.stream) }
             .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
-        let d_row_warms = DeviceBuffer::from_slice(&row_warms)
+        let d_row_warms = unsafe { DeviceBuffer::from_slice_async(&row_warms, &self.stream) }
             .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
 
         // Outputs
-        let mut d_upper: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(combos.len() * len) }
-                .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
-        let mut d_middle: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(combos.len() * len) }
-                .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
-        let mut d_lower: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(combos.len() * len) }
-                .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
+        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
+            .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
+        let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
+            .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
+        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
+            .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
 
         // Kernel
         let func = self
@@ -276,10 +269,10 @@ impl CudaKeltner {
             .get_function("keltner_batch_f32")
             .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
 
-        // grid.y must be <= 65_535; chunk if needed
+        // grid.y must be <= device max; chunk if needed
         let block_x = self.policy.batch_block_x.unwrap_or(256);
         let grid_x = ((len as u32) + block_x - 1) / block_x;
-        let max_y = 65_535usize;
+        let max_y = self.max_grid_y as usize;
         let mut launched = 0usize;
         while launched < combos.len() {
             let chunk = (combos.len() - launched).min(max_y);
@@ -288,32 +281,15 @@ impl CudaKeltner {
             unsafe {
                 let mut ma_ptr = ma_rows.buf.as_device_ptr().as_raw();
                 let mut atr_ptr = atr_rows.buf.as_device_ptr().as_raw();
-                let mut idx_ptr = d_row_period_idx
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
-                let mut mul_ptr = d_row_multipliers
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * std::mem::size_of::<f32>()) as u64);
                 let mut len_i = len as i32;
                 let mut rows_i = chunk as i32;
-                let mut up_ptr = d_upper
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
-                let mut mid_ptr = d_middle
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
-                let mut low_ptr = d_lower
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
-                let mut warm_ptr = d_row_warms
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
+                // typed element offsets
+                let mut idx_ptr = d_row_period_idx.as_device_ptr().offset(launched as isize).as_raw();
+                let mut mul_ptr = d_row_multipliers.as_device_ptr().offset(launched as isize).as_raw();
+                let mut warm_ptr = d_row_warms.as_device_ptr().offset(launched as isize).as_raw();
+                let mut up_ptr = d_upper.as_device_ptr().offset((launched * len) as isize).as_raw();
+                let mut mid_ptr = d_middle.as_device_ptr().offset((launched * len) as isize).as_raw();
+                let mut low_ptr = d_lower.as_device_ptr().offset((launched * len) as isize).as_raw();
 
                 let args: &mut [*mut c_void] = &mut [
                     &mut ma_ptr as *mut _ as *mut c_void,
@@ -453,12 +429,9 @@ impl CudaKeltner {
                     }
                 }
             }
-            DeviceArrayF32 {
-                buf: DeviceBuffer::from_slice(&out)
-                    .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?,
-                rows,
-                cols,
-            }
+            let buf = unsafe { DeviceBuffer::from_slice_async(&out, &self.stream) }
+                .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
+            DeviceArrayF32 { buf, rows, cols }
         };
 
         // VRAM + outputs
@@ -470,11 +443,11 @@ impl CudaKeltner {
             ));
         }
 
-        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
+        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(expected, &self.stream) }
             .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
-        let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
+        let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(expected, &self.stream) }
             .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
-        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
+        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(expected, &self.stream) }
             .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
 
         let func = self
@@ -482,9 +455,6 @@ impl CudaKeltner {
             .get_function("keltner_many_series_one_param_f32")
             .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
         let block_x = self.policy.many_block_x.unwrap_or(256);
-        let grid_x = (((expected as u32) + block_x - 1) / block_x).max(1);
-        let grid: GridSize = (grid_x, 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
         // Build first_valids per series from close (Keltner semantics)
         let mut first_valids: Vec<i32> = vec![-1; cols];
         for s in 0..cols {
@@ -495,37 +465,75 @@ impl CudaKeltner {
                 })
                 .unwrap_or(rows) as i32;
         }
-        let d_first = DeviceBuffer::from_slice(&first_valids)
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
             .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
 
-        unsafe {
-            let mut ma_ptr = ma_tm.buf.as_device_ptr().as_raw();
-            let mut atr_ptr = atr_tm.buf.as_device_ptr().as_raw();
-            let mut fv_ptr = d_first.as_device_ptr().as_raw();
-            let mut period_i = period as i32;
-            let mut cols_i = cols as i32;
-            let mut rows_i = rows as i32;
-            let mut elems_i = expected as i32;
-            let mut mult = multiplier as f32;
-            let mut up_ptr = d_upper.as_device_ptr().as_raw();
-            let mut mid_ptr = d_middle.as_device_ptr().as_raw();
-            let mut low_ptr = d_lower.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut ma_ptr as *mut _ as *mut c_void,
-                &mut atr_ptr as *mut _ as *mut c_void,
-                &mut fv_ptr as *mut _ as *mut c_void,
-                &mut period_i as *mut _ as *mut c_void,
-                &mut cols_i as *mut _ as *mut c_void,
-                &mut rows_i as *mut _ as *mut c_void,
-                &mut elems_i as *mut _ as *mut c_void,
-                &mut mult as *mut _ as *mut c_void,
-                &mut up_ptr as *mut _ as *mut c_void,
-                &mut mid_ptr as *mut _ as *mut c_void,
-                &mut low_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
+        // Prefer 2-D launch if rows fits in grid.y; else 1-D fallback
+        let use_2d = (rows as u32) <= self.max_grid_y;
+        if use_2d {
+            let grid_x = (((cols as u32) + block_x - 1) / block_x).max(1);
+            let grid: GridSize = (grid_x, rows as u32, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            unsafe {
+                let mut ma_ptr = ma_tm.buf.as_device_ptr().as_raw();
+                let mut atr_ptr = atr_tm.buf.as_device_ptr().as_raw();
+                let mut fv_ptr = d_first.as_device_ptr().as_raw();
+                let mut period_i = period as i32;
+                let mut cols_i = cols as i32;
+                let mut rows_i = rows as i32;
+                let mut elems_i = expected as i32; // unused in 2D path
+                let mut mult = multiplier as f32;
+                let mut up_ptr = d_upper.as_device_ptr().as_raw();
+                let mut mid_ptr = d_middle.as_device_ptr().as_raw();
+                let mut low_ptr = d_lower.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut ma_ptr as *mut _ as *mut c_void,
+                    &mut atr_ptr as *mut _ as *mut c_void,
+                    &mut fv_ptr as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut elems_i as *mut _ as *mut c_void,
+                    &mut mult as *mut _ as *mut c_void,
+                    &mut up_ptr as *mut _ as *mut c_void,
+                    &mut mid_ptr as *mut _ as *mut c_void,
+                    &mut low_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
+            }
+        } else {
+            let grid_x = (((expected as u32) + block_x - 1) / block_x).max(1);
+            let grid: GridSize = (grid_x, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            unsafe {
+                let mut ma_ptr = ma_tm.buf.as_device_ptr().as_raw();
+                let mut atr_ptr = atr_tm.buf.as_device_ptr().as_raw();
+                let mut fv_ptr = d_first.as_device_ptr().as_raw();
+                let mut period_i = period as i32;
+                let mut cols_i = cols as i32;
+                let mut rows_i = rows as i32;
+                let mut elems_i = expected as i32;
+                let mut mult = multiplier as f32;
+                let mut up_ptr = d_upper.as_device_ptr().as_raw();
+                let mut mid_ptr = d_middle.as_device_ptr().as_raw();
+                let mut low_ptr = d_lower.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut ma_ptr as *mut _ as *mut c_void,
+                    &mut atr_ptr as *mut _ as *mut c_void,
+                    &mut fv_ptr as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut elems_i as *mut _ as *mut c_void,
+                    &mut mult as *mut _ as *mut c_void,
+                    &mut up_ptr as *mut _ as *mut c_void,
+                    &mut mid_ptr as *mut _ as *mut c_void,
+                    &mut low_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaKeltnerError::Cuda(e.to_string()))?;
+            }
         }
 
         self.stream

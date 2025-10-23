@@ -11,8 +11,8 @@
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::indicators::ttm_squeeze::TtmSqueezeBatchRange;
-use cust::context::{CacheConfig, Context};
-use cust::device::Device;
+use cust::context::{CacheConfig, Context, CurrentContext};
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, Function, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -86,6 +86,7 @@ pub struct CudaTtmSqueeze {
     policy: CudaTtmSqueezePolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
+    smem_limit_optin: usize,
 }
 
 impl CudaTtmSqueeze {
@@ -94,6 +95,13 @@ impl CudaTtmSqueeze {
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+
+        // Query default and opt-in per-block dynamic shared memory limits.
+        let def = device
+            .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)
+            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))? as usize;
+        // Older cust versions may not expose the opt-in attribute; use default per-block limit.
+        let smem_limit_optin = def;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ttm_squeeze_kernel.ptx"));
         let jit_opts = &[
@@ -105,7 +113,7 @@ impl CudaTtmSqueeze {
             .or_else(|_| Module::from_ptx(ptx, &[]))
             .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
 
-        let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
+        let _ = CurrentContext::set_cache_config(CacheConfig::PreferShared);
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
 
@@ -116,26 +124,23 @@ impl CudaTtmSqueeze {
             policy: CudaTtmSqueezePolicy::default(),
             last_batch: None,
             last_many: None,
+            smem_limit_optin,
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaTtmSqueezePolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaTtmSqueezePolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
-    pub fn synchronize(&self) -> Result<(), CudaTtmSqueezeError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))
-    }
+    const SHMEM_ELEM_BYTES: usize =
+        2 * std::mem::size_of::<i32>() +
+        2 * std::mem::size_of::<f32>() +
+        2 * std::mem::size_of::<u8>();
+
+    #[inline(always)]
+    fn smem_bytes_for_len(len: usize) -> usize { len.saturating_mul(Self::SHMEM_ELEM_BYTES) }
+
+    pub fn set_policy(&mut self, policy: CudaTtmSqueezePolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaTtmSqueezePolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn synchronize(&self) -> Result<(), CudaTtmSqueezeError> { self.stream.synchronize().map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string())) }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -247,29 +252,24 @@ impl CudaTtmSqueeze {
 
     fn launch_batch_kernel(
         &self,
-        d_high: &DeviceBuffer<f32>,
-        d_low: &DeviceBuffer<f32>,
-        d_close: &DeviceBuffer<f32>,
-        d_len: &DeviceBuffer<i32>,
-        d_bb: &DeviceBuffer<f32>,
-        d_kh: &DeviceBuffer<f32>,
-        d_km: &DeviceBuffer<f32>,
-        d_kl: &DeviceBuffer<f32>,
-        len: usize,
-        n_combos: usize,
-        first_valid: usize,
-        d_mo: &mut DeviceBuffer<f32>,
-        d_sq: &mut DeviceBuffer<f32>,
+        d_high: &DeviceBuffer<f32>, d_low: &DeviceBuffer<f32>, d_close: &DeviceBuffer<f32>,
+        d_len: &DeviceBuffer<i32>, d_bb: &DeviceBuffer<f32>, d_kh: &DeviceBuffer<f32>, d_km: &DeviceBuffer<f32>, d_kl: &DeviceBuffer<f32>,
+        len: usize, n_combos: usize, first_valid: usize,
+        l_max: usize,
+        d_mo: &mut DeviceBuffer<f32>, d_sq: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTtmSqueezeError> {
-        let mut func: Function = self
-            .module
-            .get_function("ttm_squeeze_batch_f32")
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
-        let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
-            BatchKernelPolicy::OneD { block_x } => block_x.max(32),
-        };
+        let mut func: Function = self.module.get_function("ttm_squeeze_batch_f32").map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        // Dynamic shared memory sizing for largest L
+        let smem_bytes = Self::smem_bytes_for_len(l_max);
+        if smem_bytes > self.smem_limit_optin {
+            let max_L = self.smem_limit_optin / Self::SHMEM_ELEM_BYTES;
+            return Err(CudaTtmSqueezeError::InvalidInput(format!(
+                "window length {} requires {} bytes of dynamic shared memory, exceeding device limit {} bytes. Maximum supported length on this GPU is {}.",
+                l_max, smem_bytes, self.smem_limit_optin, max_L
+            )));
+        }
+        let _ = func.set_cache_config(CacheConfig::PreferShared);
+        let block_x = match self.policy.batch { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::OneD { block_x } => block_x.max(32) };
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
@@ -302,9 +302,7 @@ impl CudaTtmSqueeze {
                 &mut p_sq as *mut _ as *mut c_void,
                 std::ptr::null_mut(),
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, smem_bytes as u32, &mut args).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaTtmSqueeze)).last_batch =
@@ -336,30 +334,35 @@ impl CudaTtmSqueeze {
             )));
         }
 
-        // Upload inputs
-        let d_h = DeviceBuffer::from_slice(high_f32)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
-        let d_l = DeviceBuffer::from_slice(low_f32)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
-        let d_c = DeviceBuffer::from_slice(close_f32)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        // Upload inputs (async)
+        let mut d_h: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_l: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_c: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        unsafe {
+            d_h.async_copy_from(high_f32, &self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+            d_l.async_copy_from(low_f32,  &self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+            d_c.async_copy_from(close_f32,&self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        }
 
         // Upload params
         let v_len: Vec<i32> = combos.iter().map(|c| c.length).collect();
-        let v_bb: Vec<f32> = combos.iter().map(|c| c.bb_mult).collect();
-        let v_kh: Vec<f32> = combos.iter().map(|c| c.kc_high).collect();
-        let v_km: Vec<f32> = combos.iter().map(|c| c.kc_mid).collect();
-        let v_kl: Vec<f32> = combos.iter().map(|c| c.kc_low).collect();
-        let d_len = DeviceBuffer::from_slice(&v_len)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
-        let d_bb = DeviceBuffer::from_slice(&v_bb)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
-        let d_kh = DeviceBuffer::from_slice(&v_kh)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
-        let d_km = DeviceBuffer::from_slice(&v_km)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
-        let d_kl = DeviceBuffer::from_slice(&v_kl)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let v_bb:  Vec<f32> = combos.iter().map(|c| c.bb_mult).collect();
+        let v_kh:  Vec<f32> = combos.iter().map(|c| c.kc_high).collect();
+        let v_km:  Vec<f32> = combos.iter().map(|c| c.kc_mid).collect();
+        let v_kl:  Vec<f32> = combos.iter().map(|c| c.kc_low).collect();
+        // Upload params (async)
+        let mut d_len: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(v_len.len()) }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_bb:  DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_bb.len())  }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_kh:  DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_kh.len())  }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_km:  DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_km.len())  }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_kl:  DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_kl.len())  }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        unsafe {
+            d_len.async_copy_from(&v_len, &self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+            d_bb .async_copy_from(&v_bb,  &self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+            d_kh .async_copy_from(&v_kh,  &self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+            d_km .async_copy_from(&v_km,  &self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+            d_kl .async_copy_from(&v_kl,  &self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        }
 
         // Allocate outputs
         let elems = combos.len() * len;
@@ -369,73 +372,49 @@ impl CudaTtmSqueeze {
             .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
 
         self.launch_batch_kernel(
-            &d_h,
-            &d_l,
-            &d_c,
-            &d_len,
-            &d_bb,
-            &d_kh,
-            &d_km,
-            &d_kl,
-            len,
-            combos.len(),
-            first_valid,
-            &mut d_mo,
-            &mut d_sq,
+            &d_h, &d_l, &d_c,
+            &d_len, &d_bb, &d_kh, &d_km, &d_kl,
+            len, combos.len(), first_valid,
+            combos.iter().map(|c| c.length as usize).max().unwrap_or(0),
+            &mut d_mo, &mut d_sq,
         )?;
-        Ok((
-            DeviceArrayF32 {
-                buf: d_mo,
-                rows: combos.len(),
-                cols: len,
-            },
-            DeviceArrayF32 {
-                buf: d_sq,
-                rows: combos.len(),
-                cols: len,
-            },
-        ))
+        Ok((DeviceArrayF32 { buf: d_mo, rows: combos.len(), cols: len }, DeviceArrayF32 { buf: d_sq, rows: combos.len(), cols: len }))
     }
 
     fn launch_many_series_kernel(
         &self,
-        d_h_tm: &DeviceBuffer<f32>,
-        d_l_tm: &DeviceBuffer<f32>,
-        d_c_tm: &DeviceBuffer<f32>,
-        d_first: &DeviceBuffer<i32>,
-        rows: usize,
-        cols: usize,
-        length: usize,
-        bb_mult: f32,
-        kh: f32,
-        km: f32,
-        kl: f32,
-        d_mo_tm: &mut DeviceBuffer<f32>,
-        d_sq_tm: &mut DeviceBuffer<f32>,
+        d_h_tm: &DeviceBuffer<f32>, d_l_tm: &DeviceBuffer<f32>, d_c_tm: &DeviceBuffer<f32>,
+        // NOTE: cols = num_series, rows = series_len (time)
+        d_first: &DeviceBuffer<i32>, cols: usize, rows: usize, length: usize, bb_mult: f32, kh: f32, km: f32, kl: f32,
+        d_mo_tm: &mut DeviceBuffer<f32>, d_sq_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTtmSqueezeError> {
-        let mut func: Function = self
-            .module
-            .get_function("ttm_squeeze_many_series_one_param_f32")
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
-        let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 64,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
-        };
-        let grid: GridSize = (1u32, rows as u32, 1u32).into();
+        let mut func: Function = self.module.get_function("ttm_squeeze_many_series_one_param_f32").map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        // Dynamic shared memory per-series length
+        let smem_bytes = Self::smem_bytes_for_len(length);
+        if smem_bytes > self.smem_limit_optin {
+            let max_L = self.smem_limit_optin / Self::SHMEM_ELEM_BYTES;
+            return Err(CudaTtmSqueezeError::InvalidInput(format!(
+                "window length {} requires {} bytes of dynamic shared memory, exceeding device limit {} bytes. Maximum supported length on this GPU is {}.",
+                length, smem_bytes, self.smem_limit_optin, max_L
+            )));
+        }
+        let _ = func.set_cache_config(CacheConfig::PreferShared);
+        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::Auto => 1, ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1) };
+        // One block per series on grid.y
+        let grid: GridSize = (1u32, cols as u32, 1u32).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
             let mut p_h = d_h_tm.as_device_ptr().as_raw();
             let mut p_l = d_l_tm.as_device_ptr().as_raw();
             let mut p_c = d_c_tm.as_device_ptr().as_raw();
             let mut p_fv = d_first.as_device_ptr().as_raw();
-            let mut nser = rows as i32;
-            let mut slen = cols as i32;
-            let mut l_i = length as i32;
-            let mut bb = bb_mult as f32;
-            let mut khf = kh as f32;
-            let mut kmf = km as f32;
-            let mut klf = kl as f32;
+            let mut nser = cols as i32; // num_series
+            let mut slen = rows as i32; // series_len
+            let mut l_i  = length as i32;
+            let mut bb   = bb_mult as f32;
+            let mut khf  = kh as f32;
+            let mut kmf  = km as f32;
+            let mut klf  = kl as f32;
             let mut p_mo = d_mo_tm.as_device_ptr().as_raw();
             let mut p_sq = d_sq_tm.as_device_ptr().as_raw();
             let mut args: [*mut c_void; 14] = [
@@ -454,9 +433,7 @@ impl CudaTtmSqueeze {
                 &mut p_sq as *mut _ as *mut c_void,
                 std::ptr::null_mut(),
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, smem_bytes as u32, &mut args).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaTtmSqueeze)).last_many =
@@ -530,15 +507,17 @@ impl CudaTtmSqueeze {
             )));
         }
 
-        // Upload inputs
-        let d_h = DeviceBuffer::from_slice(high_tm_f32)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
-        let d_l = DeviceBuffer::from_slice(low_tm_f32)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
-        let d_c = DeviceBuffer::from_slice(close_tm_f32)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        // Upload inputs (async)
+        let mut d_h: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_l: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        let mut d_c: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        unsafe {
+            d_h.async_copy_from(high_tm_f32,  &self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+            d_l.async_copy_from(low_tm_f32,   &self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+            d_c.async_copy_from(close_tm_f32, &self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        }
+        let mut d_fv: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(cols) }.map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;
+        unsafe { d_fv.async_copy_from(&first_valids, &self.stream).map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?; }
 
         let mut d_mo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaTtmSqueezeError::Cuda(e.to_string()))?;

@@ -25,6 +25,9 @@ use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// Must match the kernel's MSW_CHUNK_PER_THREAD macro (default 8)
+const MSW_CHUNK_PER_THREAD: u32 = 8;
+
 #[derive(Debug)]
 pub enum CudaMswError {
     Cuda(String),
@@ -214,10 +217,12 @@ impl CudaMsw {
             .collect()
     }
 
-    // dynamic shared memory: floats needed = cos(P) + sin(P) + tile(block_x + P - 1)
+    // Dynamic shared memory for optimized kernel (use_lut = true):
+    // floats = cos(P) + sin(P) + tile(T + P - 1), with T = block_x * MSW_CHUNK_PER_THREAD.
     #[inline]
     fn dyn_smem_floats(period: usize, block_x: u32) -> usize {
-        (block_x as usize) + 3usize.saturating_mul(period) - 1
+        let t = (block_x as usize) * (MSW_CHUNK_PER_THREAD as usize);
+        t + 3usize.saturating_mul(period) - 1
     }
 
     fn try_pick_block_x(
@@ -286,11 +291,9 @@ impl CudaMsw {
         d_out: &mut DeviceBuffer<f32>,
         block_x: u32,
         shared_bytes: usize,
+        func: &Function,
     ) -> Result<(), CudaMswError> {
-        let mut func = self
-            .module
-            .get_function("msw_batch_f32")
-            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        // Batch kernel currently advances one output per thread (tile = block_x)
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid_y = chunk_rows as u32;
         let grid: GridSize = (grid_x.max(1), grid_y, 1).into();
@@ -314,8 +317,7 @@ impl CudaMsw {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes as u32, args)
+            self.stream.launch(func, grid, block, shared_bytes as u32, args)
                 .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
         }
         unsafe {
@@ -379,11 +381,10 @@ impl CudaMsw {
         // Device buffers
         let d_prices = unsafe { DeviceBuffer::from_slice_async(prices_f32, &self.stream) }
             .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
             .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(2 * combos.len() * len, &self.stream) }
-                .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(2 * combos.len() * len, &self.stream) }
+            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
 
         // Select block_x based on max_p for shared memory sizing once using the function handle
         // (we still pass it to launch method via try_pick inside, so warm up function cache here)
@@ -405,17 +406,7 @@ impl CudaMsw {
         const MAX_Y: usize = 65_535;
         while base < combos.len() {
             let take = (combos.len() - base).min(MAX_Y);
-            self.launch_batch_chunk(
-                &d_prices,
-                &d_periods,
-                len,
-                first_valid,
-                take,
-                base,
-                &mut d_out,
-                block_x,
-                shared_bytes,
-            )?;
+            self.launch_batch_chunk(&d_prices, &d_periods, len, first_valid, take, base, &mut d_out, block_x, shared_bytes, &func)?;
             base += take;
         }
         self.stream
@@ -487,25 +478,19 @@ impl CudaMsw {
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }
             .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
             .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * 2 * cols, &self.stream) }
-                .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows * 2 * cols, &self.stream) }
+            .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
 
         let mut func = self
             .module
             .get_function("msw_many_series_one_param_time_major_f32")
             .map_err(|e| CudaMswError::Cuda(e.to_string()))?;
-        let (block_x, shared_bytes) = self.try_pick_block_x(
-            &func,
-            period,
-            match self.policy_many {
-                ManySeriesKernelPolicy::OneD { block_x } => Some(block_x),
-                _ => None,
-            },
-        )?;
-        let grid_x = ((rows as u32) + block_x - 1) / block_x;
+        let (block_x, shared_bytes) = self.try_pick_block_x(&func, period, match self.policy_many { ManySeriesKernelPolicy::OneD { block_x } => Some(block_x), _ => None })?;
+        // grid.x in tiles of T = block_x * MSW_CHUNK_PER_THREAD
+        let t_per_block = block_x * MSW_CHUNK_PER_THREAD;
+        let grid_x = ((rows as u32) + t_per_block - 1) / t_per_block;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 

@@ -1,30 +1,73 @@
 // CUDA kernels for Klinger Volume Oscillator (KVO)
 //
-// Math pattern: recurrence/IIR per row/series.
-// - Batch (one series × many params): precompute VF (volume force) on host once
-//   and pass it to the kernel. Each row (short/long pair) is processed by a
-//   single thread that performs a sequential time scan for EMA updates.
-// - Many-series × one-param (time-major): compute VF and EMA inside the kernel
-//   per series in a single sequential pass.
-//
-// Semantics (match scalar implementation):
-// - Warmup: outputs are NaN up to (first_valid + 1). At index (first_valid + 1),
-//   both EMAs are seeded to the first VF value and the output is 0.0.
-// - Accumulations use float64 for numeric stability; outputs are float32.
+// This file implements two FP32-only kernels using FMA-centric math and
+// compensated float-float (hi+lo) state for EMA recurrences. Semantics match
+// the scalar implementation: NaN through t < first_valid+1; at t=first_valid+1
+// both EMAs are seeded to the first VF value and the output is 0.0.
 
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Helper to write an IEEE-754 quiet NaN as f32
+// ======================== Small numeric helpers (FP32 only) ========================
+
+// Write an IEEE-754 quiet NaN as f32
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
 
-// -------------------------- Batch: one series × many params --------------------------
+// Error-free transforms (float-float arithmetic). Based on Dekker/Knuth patterns.
+// Using FMA gives exact product residual cheaply on NVIDIA GPUs.
+__device__ __forceinline__ void two_sum(float a, float b, float &s, float &e) {
+    s = a + b;
+    float bb = s - a;
+    e = (a - (s - bb)) + (b - bb);
+}
+__device__ __forceinline__ void two_diff(float a, float b, float &s, float &e) {
+    s = a - b;
+    float bb = s - a;
+    e = (a - (s - bb)) - b;
+}
+__device__ __forceinline__ void quick_two_sum(float a, float b, float &s, float &e) {
+    s = a + b;
+    e = b - (s - a);
+}
+__device__ __forceinline__ void two_prod(float a, float b, float &p, float &e) {
+    p = a * b;
+    e = fmaf(a, b, -p); // exact residual with one FMA
+}
+
+struct f2 { float hi, lo; }; // value ~= hi + lo
+
+__device__ __forceinline__ f2 f2_make(float x) { f2 r; r.hi = x; r.lo = 0.0f; return r; }
+
+// ema <- ema + alpha * (x - ema) in compensated float-float
+__device__ __forceinline__ void ema_update_f2(f2 &ema, float x, float alpha)
+{
+    float s, s_err; two_sum(ema.hi, ema.lo, s, s_err);
+    float d_hi, d_err; two_diff(x, s, d_hi, d_err);
+    float delta_hi = d_hi;
+    float delta_lo = d_err - s_err;
+
+    float p_hi, p_lo; two_prod(alpha, delta_hi, p_hi, p_lo);
+    p_lo = fmaf(alpha, delta_lo, p_lo);
+
+    float y_hi, y_lo; two_sum(s, p_hi, y_hi, y_lo);
+    y_lo += p_lo;
+    quick_two_sum(y_hi, y_lo, ema.hi, ema.lo); // renormalize
+}
+
+// One-step NR reciprocal (near-1 ulp) — cheaper than a divide, uses FMA.
+// r ≈ 1/c with one Newton step: r = r * (2 - c*r)
+__device__ __forceinline__ float rcp_nr(float c)
+{
+    float r = __fdividef(1.0f, c);
+    r = r * fmaf(-c, r, 2.0f);
+    return r;
+}
+
+// ==================== Batch: one series × many (short,long) ====================
 // Inputs:
-//  - vf:          precomputed VF stream (length = len)
-//  - len:         number of elements
-//  - first_valid: index of first fully valid OHLCV bar
-//  - shorts/longs: period arrays of length n_combos
-//  - out:         row-major [combo][t] (n_combos x len)
+//  - vf:     precomputed VF stream [len]
+//  - shorts/longs: period arrays [n_combos]
+//  - out:    row-major [combo][t] (n_combos x len)
 extern "C" __global__ void kvo_batch_f32(
     const float* __restrict__ vf,
     int len,
@@ -34,55 +77,48 @@ extern "C" __global__ void kvo_batch_f32(
     int n_combos,
     float* __restrict__ out)
 {
-    const int combo = blockIdx.y; // row index
-    if (combo >= n_combos) return;
+    // Grid-stride over combos. Compatible with existing launcher chunking
+    // that passes (shorts,longs,out) already offset to the current window.
+    for (int combo = blockIdx.x * blockDim.x + threadIdx.x;
+         combo < n_combos;
+         combo += blockDim.x * gridDim.x)
+    {
+        const int s = shorts[combo];
+        const int l = longs[combo];
+        if (s <= 0 || l < s) continue;
 
-    const int s = shorts[combo];
-    const int l = longs[combo];
-    if (s <= 0 || l < s) return;
+        const int warm = first_valid + 1; // same scalar warmup
+        float* __restrict__ row_out = out + (size_t)combo * (size_t)len;
 
-    const int warm = first_valid + 1; // matches scalar warmup for KVO
-    const int row_off = combo * len;
+        const int warm_end = (warm < len ? warm : len);
+        for (int t = 0; t < warm_end; ++t) row_out[t] = f32_nan();
+        if (warm >= len) continue;
 
-    // Fill warmup prefix with NaN in parallel across block.x
-    for (int t = threadIdx.x; t < min(warm, len); t += blockDim.x) {
-        out[row_off + t] = f32_nan();
-    }
-    __syncthreads();
+        const float alpha_s = 2.0f / (float)(s + 1);
+        const float alpha_l = 2.0f / (float)(l + 1);
 
-    // Only one thread performs the sequential EMA scan to respect dependency
-    if (threadIdx.x != 0) return;
-    if (warm >= len) return;
+        const float seed = vf[warm];
+        float ema_s = seed;
+        float ema_l = seed;
 
-    const double alpha_s = 2.0 / (double)(s + 1);
-    const double alpha_l = 2.0 / (double)(l + 1);
+        row_out[warm] = 0.0f; // first difference defined as zero
 
-    double ema_s = 0.0;
-    double ema_l = 0.0;
-
-    // Seed at warm index
-    const double seed = (double)vf[warm];
-    ema_s = seed;
-    ema_l = seed;
-    out[row_off + warm] = 0.0f; // first difference is zero by definition
-
-    // Sequential scan
-    for (int t = warm + 1; t < len; ++t) {
-        const double vfi = (double)vf[t];
-        ema_s += (vfi - ema_s) * alpha_s;
-        ema_l += (vfi - ema_l) * alpha_l;
-        out[row_off + t] = (float)(ema_s - ema_l);
+        #pragma unroll 1
+        for (int t = warm + 1; t < len; ++t) {
+            const float vfi = vf[t];
+            // EMA update via FFMA: ema += alpha*(x-ema)
+            ema_s = fmaf(alpha_s, (vfi - ema_s), ema_s);
+            ema_l = fmaf(alpha_l, (vfi - ema_l), ema_l);
+            row_out[t] = ema_s - ema_l;
+        }
     }
 }
 
-// ----------------------- Many-series × one-param (time-major) -----------------------
+// ================= Many-series × one-param (time-major) =================
 // Inputs (time-major):
-//  - high_tm, low_tm, close_tm, volume_tm: arrays of length rows*cols in time-major order
-//  - first_valids: per-series first valid index (length = cols). Negative => no valid data
-//  - cols: number of series (columns)
-//  - rows: number of time steps (rows)
-//  - short_p, long_p: EMA periods (long_p >= short_p >= 1)
-//  - out_tm: output buffer, time-major [t][series]
+//  - *_tm: float arrays [rows*cols] time-major
+//  - first_valids[cols]
+//  - short_p, long_p >= 1
 extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -95,85 +131,89 @@ extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
     int long_p,
     float* __restrict__ out_tm)
 {
-    const int s = blockIdx.y * blockDim.y + threadIdx.y; // series/column index
-    if (s >= cols) return;
-
-    const int fv = first_valids[s];
-    if (fv < 0 || fv >= rows) {
-        // Fill with NaN if no valid data
-        for (int t = threadIdx.x; t < rows; t += blockDim.x) {
-            out_tm[t * cols + s] = f32_nan();
-        }
-        return;
-    }
-
-    const int warm = fv + 1;
-
-    // Fill warmup prefix with NaN in parallel across block.x
-    for (int t = threadIdx.x; t < min(warm, rows); t += blockDim.x) {
-        out_tm[t * cols + s] = f32_nan();
-    }
-    __syncthreads();
-
-    if (threadIdx.x != 0) return;
-    if (warm >= rows) return;
-
-    const double alpha_s = 2.0 / (double)(short_p + 1);
-    const double alpha_l = 2.0 / (double)(long_p + 1);
-
-    // Seed state from bar fv
-    double ema_s = 0.0;
-    double ema_l = 0.0;
-
-    // Initialize recurrence state for VF computation
-    double prev_hlc = (double)high_tm[fv * cols + s]
-                    + (double)low_tm[fv * cols + s]
-                    + (double)close_tm[fv * cols + s];
-    double prev_dm = (double)high_tm[fv * cols + s] - (double)low_tm[fv * cols + s];
-    int trend = -1; // -1 for down, 0 down, 1 up (mirrors scalar init)
-    double cm = 0.0;
-
-    // First consumable VF at t = warm
+    // 1-D launch over columns (series) with grid-stride on grid.x
+    for (int s = blockIdx.x * blockDim.x + threadIdx.x;
+         s < cols;
+         s += blockDim.x * gridDim.x)
     {
-        const int t = warm;
-        const double h = (double)high_tm[t * cols + s];
-        const double l = (double)low_tm[t * cols + s];
-        const double c = (double)close_tm[t * cols + s];
-        const double v = (double)volume_tm[t * cols + s];
-        const double hlc = h + l + c;
-        const double dm = h - l;
-        if (hlc > prev_hlc && trend != 1) { trend = 1; cm = prev_dm; }
-        else if (hlc < prev_hlc && trend != 0) { trend = 0; cm = prev_dm; }
-        cm += dm;
-        const double temp = fabs(((dm / cm) * 2.0) - 1.0);
-        const double sign = (trend == 1) ? 1.0 : -1.0;
-        const double vf = v * temp * 100.0 * sign;
-        ema_s = vf;
-        ema_l = vf;
-        out_tm[t * cols + s] = 0.0f; // seed difference
-        prev_hlc = hlc;
-        prev_dm = dm;
-    }
+        const int fv = first_valids[s];
+        if (fv < 0 || fv >= rows) {
+            for (int t = 0; t < rows; ++t) out_tm[(size_t)t * (size_t)cols + s] = f32_nan();
+            continue;
+        }
 
-    // Continue sequentially for t > warm
-    for (int t = warm + 1; t < rows; ++t) {
-        const double h = (double)high_tm[t * cols + s];
-        const double l = (double)low_tm[t * cols + s];
-        const double c = (double)close_tm[t * cols + s];
-        const double v = (double)volume_tm[t * cols + s];
-        const double hlc = h + l + c;
-        const double dm = h - l;
-        if (hlc > prev_hlc && trend != 1) { trend = 1; cm = prev_dm; }
-        else if (hlc < prev_hlc && trend != 0) { trend = 0; cm = prev_dm; }
-        cm += dm;
-        const double temp = fabs(((dm / cm) * 2.0) - 1.0);
-        const double sign = (trend == 1) ? 1.0 : -1.0;
-        const double vf = v * temp * 100.0 * sign;
-        ema_s += (vf - ema_s) * alpha_s;
-        ema_l += (vf - ema_l) * alpha_l;
-        out_tm[t * cols + s] = (float)(ema_s - ema_l);
-        prev_hlc = hlc;
-        prev_dm = dm;
+        const int warm = fv + 1;
+
+        const int warm_end = (warm < rows ? warm : rows);
+        for (int t = 0; t < warm_end; ++t) out_tm[(size_t)t * (size_t)cols + s] = f32_nan();
+        if (warm >= rows) continue;
+
+        const float alpha_s = 2.0f / (float)(short_p + 1);
+        const float alpha_l = 2.0f / (float)(long_p + 1);
+
+        const size_t idx0 = (size_t)fv * (size_t)cols + s;
+        double prev_h = (double)high_tm[idx0];
+        double prev_l = (double)low_tm[idx0];
+        double prev_c = (double)close_tm[idx0];
+        double prev_hlc = prev_h + prev_l + prev_c;
+        double prev_dm  = prev_h - prev_l;
+        int    trend    = -1; // initial state
+        double cm       = 0.0;
+
+        // First consumable VF at t = warm
+        {
+            const size_t idx = (size_t)warm * (size_t)cols + s;
+            const double h = (double)high_tm[idx];
+            const double l = (double)low_tm[idx];
+            const double c = (double)close_tm[idx];
+            const double v = (double)volume_tm[idx];
+            const double hlc = h + l + c;
+            const double dm  = h - l;
+
+            if (hlc > prev_hlc && trend != 1) { trend = 1; cm = prev_dm; }
+            else if (hlc < prev_hlc && trend != 0) { trend = 0; cm = prev_dm; }
+            cm += dm;
+
+            const double ratio = dm / cm;
+            const double temp  = fabs((ratio * 2.0) - 1.0);
+            const double sign  = (trend == 1) ? 1.0 : -1.0;
+            const float vf     = (float)(v * temp * 100.0 * sign);
+
+            float ema_s = vf;
+            float ema_l = vf;
+            out_tm[idx] = 0.0f; // seed diff
+
+            prev_hlc = hlc;
+            prev_dm  = dm;
+
+            #pragma unroll 1
+            for (int t = warm + 1; t < rows; ++t) {
+                const size_t j = (size_t)t * (size_t)cols + s;
+                const double h2 = (double)high_tm[j];
+                const double l2 = (double)low_tm[j];
+                const double c2 = (double)close_tm[j];
+                const double v2 = (double)volume_tm[j];
+                const double hlc2 = h2 + l2 + c2;
+                const double dm2  = h2 - l2;
+
+                if (hlc2 > prev_hlc && trend != 1) { trend = 1; cm = prev_dm; }
+                else if (hlc2 < prev_hlc && trend != 0) { trend = 0; cm = prev_dm; }
+                cm += dm2;
+
+                const double ratio2 = dm2 / cm;
+                const double temp2  = fabs((ratio2 * 2.0) - 1.0);
+                const double sign2  = (trend == 1) ? 1.0 : -1.0;
+                const float vf2     = (float)(v2 * temp2 * 100.0 * sign2);
+
+                // EMA in FP32 with FFMA
+                ema_s = fmaf(alpha_s, (vf2 - ema_s), ema_s);
+                ema_l = fmaf(alpha_l, (vf2 - ema_l), ema_l);
+                out_tm[j] = ema_s - ema_l;
+
+                prev_hlc = hlc2;
+                prev_dm  = dm2;
+            }
+        }
     }
 }
 

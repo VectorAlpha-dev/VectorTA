@@ -1,18 +1,279 @@
-// CUDA kernels for On-Balance Volume (OBV).
+// CUDA kernels for On-Balance Volume (OBV) — Parallel scan + dual-FP32 accumulator.
+// Targets CUDA 13 / Ada+ (e.g., RTX 4090). No FP64 used in the fast path.
+// Shapes kept compatible with "batch" layout: out is [n_combos][series_len] row-major.
 //
-// Math: OBV[i] = OBV[i-1] + sign(close[i] - close[i-1]) * volume[i]
-// - sign in {-1, 0, +1}
-// - Warmup: write NaN for indices < first_valid; write 0.0 at first_valid
-// - Inputs are FP32; accumulations use FP64 for numerical parity; outputs FP32
+// Math recap:
+//   inc[i] = sign(close[i] - close[i-1]) * volume[i]              for i > first_valid
+//          = 0                                                    for i <= first_valid
+//   OBV[i] = inclusive_scan(inc)[i], with out[i<fv]=NaN, out[fv]=0.
+//
+// Strategy (3-pass):
+//   Pass 1: Per-block tile scan on 'inc' directly into out row 0. Also writes per-block totals (float2).
+//   Pass 2: Scan per-block totals (exclusive) to produce offsets (float2).
+//   Pass 3: Add each block's offset to its tile.
+// If n_combos > 1, replicate row 0 -> other rows (GPU copy kernel).
+//
+// Notes:
+//  - Dual-FP32 ("double-single"): error-free transforms (TwoSum) to carry a residual.
+//  - Warp shuffles provide close[i-1] for most lanes; lane 0 in each warp does a single fallback global read.
+//  - Heuristic: wrapper should pick fast path for series_len >= ~4096; otherwise use serial fallback.
 
 #include <cuda_runtime.h>
-#include <math.h>
 #include <math_constants.h>
 
-// Batch kernel: one price series × many params (OBV has no params).
-// We keep the same shape as other batch kernels: grid.y indexes the
-// parameter row (here, n_combos is typically 1).
-extern "C" __global__ void obv_batch_f32(
+#ifndef OBV_BLOCK_SIZE
+#define OBV_BLOCK_SIZE 256
+#endif
+#ifndef OBV_ITEMS_PER_THREAD
+#define OBV_ITEMS_PER_THREAD 8
+#endif
+
+// --- Dual-FP32 accumulation primitives (error-free transform) ----------------
+struct FPair { float hi, lo; };  // value ≈ hi + lo
+
+__device__ __forceinline__ FPair make_zero_pair() { return {0.0f, 0.0f}; }
+
+__device__ __forceinline__ FPair two_sum_fp32(float a, float b) {
+    // Error-free transform of a+b into hi+lo where hi = fl(a+b), lo = exact error.
+    float s  = a + b;
+    float bb = s - a;
+    float err = (a - (s - bb)) + (b - bb);
+    return {s, err};
+}
+
+__device__ __forceinline__ FPair fp_add_pair(FPair x, FPair y) {
+    FPair t = two_sum_fp32(x.hi, y.hi);
+    float lo = x.lo + y.lo;
+    FPair u = two_sum_fp32(t.hi, t.lo + lo);
+    return {u.hi, u.lo};
+}
+__device__ __forceinline__ FPair fp_add_f(FPair x, float y) {
+    FPair t = two_sum_fp32(x.hi, y);
+    FPair u = two_sum_fp32(t.hi, t.lo + x.lo);
+    return {u.hi, u.lo};
+}
+__device__ __forceinline__ FPair fp_sub_pair(FPair x, FPair y) {
+    return fp_add_pair(x, { -y.hi, -y.lo });
+}
+__device__ __forceinline__ float fp_collapse(FPair x) { return x.hi + x.lo; }
+
+// --- Warp/block scan helpers over FPair --------------------------------------
+__device__ __forceinline__ FPair warp_inclusive_scan(FPair v, unsigned mask) {
+    int lane = threadIdx.x & 31;
+    // Kogge–Stone inclusive scan using shuffles
+    #pragma unroll
+    for (int offset = 1; offset < 32; offset <<= 1) {
+        float hi = __shfl_up_sync(mask, v.hi, offset);
+        float lo = __shfl_up_sync(mask, v.lo, offset);
+        if (lane >= offset) v = fp_add_pair(v, {hi, lo});
+    }
+    return v;
+}
+
+// Returns: exclusive offset for this thread's "thread_total". Also
+//          writes per-warp sums to shared for computing block totals.
+template<int NUM_WARPS>
+__device__ __forceinline__
+FPair block_exclusive_offset(FPair thread_total, FPair* warp_buf) {
+    unsigned full = 0xFFFFFFFFu;
+    int lane  = threadIdx.x & 31;
+    int wid   = threadIdx.x >> 5;
+
+    FPair incl = warp_inclusive_scan(thread_total, full);
+    // Save per-warp inclusive sum in the last lane
+    if (lane == 31) warp_buf[wid] = incl;
+    __syncthreads();
+
+    // First warp scans warp sums to build exclusive warp offsets
+    if (wid == 0) {
+        FPair x = (lane < NUM_WARPS) ? warp_buf[lane] : make_zero_pair();
+        FPair x_incl = warp_inclusive_scan(x, full);
+        // exclusive = inclusive - self
+        FPair x_excl = fp_sub_pair(x_incl, x);
+        if (lane < NUM_WARPS) warp_buf[lane] = x_excl;
+    }
+    __syncthreads();
+
+    // exclusive offset for this thread = warp_offset + (inclusive - self)
+    FPair warp_off = warp_buf[wid];
+    FPair excl_intra = fp_sub_pair(incl, thread_total);
+    return fp_add_pair(warp_off, excl_intra);
+}
+
+// --- PASS 1: compute increments, scan per tile, write partial OBV + block sums
+//   - close, volume: one series (length series_len)
+//   - Writes out row 0 (combo 0). If you want N rows, call replicate later.
+extern "C" __global__
+void obv_batch_f32_pass1_tilescan(
+    const float* __restrict__ close,
+    const float* __restrict__ volume,
+    int series_len,
+    int /*n_combos*/,   // kept for shape parity; we only compute row 0 here
+    int first_valid,
+    float* __restrict__ out,
+    FPair* __restrict__ block_sums,   // size = num_tiles (gridDim.x)
+    int tiles_per_row                  // = gridDim.x at launch
+){
+    const int tid  = threadIdx.x;
+    const int bid  = blockIdx.x;  // tile id along time
+    // only produce the first row; others are later replicated (saves recompute)
+    const int base = 0; // combo 0 row base offset
+
+    if (series_len <= 0 || bid >= tiles_per_row) return;
+    const int fv = first_valid < 0 ? 0 : first_valid;
+
+    constexpr int ITEMS = OBV_ITEMS_PER_THREAD;
+    const int tile_size = blockDim.x * ITEMS;
+    const int tile_beg  = bid * tile_size;
+    const int tile_end  = min(series_len, tile_beg + tile_size);
+
+    // Shared memory for warp prefixes
+    constexpr int NUM_WARPS = (OBV_BLOCK_SIZE + 31) / 32;
+    __shared__ FPair warp_buf[NUM_WARPS];
+
+    // Prepare per-thread local scan (within the thread's ITEMS)
+    FPair prefix_local[ITEMS];
+    #pragma unroll
+    for (int j = 0; j < ITEMS; ++j) prefix_local[j] = make_zero_pair();
+
+    FPair running = make_zero_pair();
+    int lane  = tid & 31;
+    unsigned full = 0xFFFFFFFFu;
+
+    // Load/compute in micro-batches spaced by blockDim.x (coalesced).
+    #pragma unroll
+    for (int j = 0; j < ITEMS; ++j) {
+        int i = tile_beg + j * blockDim.x + tid;
+        float inc = 0.0f;
+
+        if (i < series_len) {
+            if (i < fv) {
+                out[base + i] = CUDART_NAN_F;  // warmup NaN
+            } else if (i == fv) {
+                out[base + i] = 0.0f;
+            } else {
+                // Compute sign(close[i] - close[i-1]) * volume[i]
+                float ci = close[i];
+                // obtain close[i-1] via warp shuffle; lane 0 falls back to global
+                float cim1 = (lane > 0) ? __shfl_up_sync(full, ci, 1)
+                                        : ((i > 0) ? close[i - 1] : ci);
+                // branchless sign in {-1,0,+1}
+                int gt = (ci > cim1);
+                int lt = (ci < cim1);
+                float sgn = static_cast<float>(gt - lt);
+                inc = sgn * volume[i];
+            }
+        }
+        running = fp_add_f(running, inc);
+        prefix_local[j] = running; // thread-local inclusive prefix
+    }
+
+    // thread_total is the last element of the local prefix
+    FPair thread_total = prefix_local[ITEMS - 1];
+
+    // Compute exclusive block offset for this thread
+    FPair block_off = block_exclusive_offset<NUM_WARPS>(thread_total, warp_buf);
+
+    // Add block offset to each local prefix and write out
+    #pragma unroll
+    for (int j = 0; j < ITEMS; ++j) {
+        int i = tile_beg + j * blockDim.x + tid;
+        if (i >= series_len) break;
+        if (i <= fv) continue; // we already wrote NaN or 0
+        FPair v = fp_add_pair(prefix_local[j], block_off);
+        out[base + i] = fp_collapse(v);
+    }
+
+    // One thread computes and stores the total for this tile
+    // Recover final tile sum from the last element written in this tile
+    int last_i = tile_end - 1;
+    int last_tid = last_i - tile_beg;
+    int last_thread = last_tid % blockDim.x;
+    int last_slot   = last_tid / blockDim.x;
+    __shared__ FPair tile_sum_shared;
+    if (tid == last_thread) {
+        FPair last_local = prefix_local[last_slot];
+        FPair my_total = fp_add_pair(last_local, block_off);
+        tile_sum_shared = my_total;
+    }
+    __syncthreads();
+    if (tid == 0) {
+        block_sums[bid] = tile_sum_shared;
+    }
+}
+
+// --- PASS 2: scan block totals (per row 0) to produce exclusive offsets
+extern "C" __global__
+void obv_batch_f32_pass2_scan_block_sums(
+    const FPair* __restrict__ block_sums,   // len = num_tiles
+    int num_tiles,
+    FPair* __restrict__ block_offsets       // len = num_tiles (exclusive)
+){
+    if (num_tiles <= 0) return;
+    int lane = threadIdx.x & 31;
+    if (lane == 0) {
+        FPair acc = make_zero_pair();
+        for (int b = 0; b < num_tiles; ++b) {
+            block_offsets[b] = acc;            // exclusive offset for tile b
+            acc = fp_add_pair(acc, block_sums[b]);
+        }
+    }
+}
+
+// --- PASS 3: add per-tile offsets to the partial results
+extern "C" __global__
+void obv_batch_f32_pass3_add_offsets(
+    int series_len,
+    int /*n_combos*/,
+    int first_valid,
+    float* __restrict__ out,
+    const FPair* __restrict__ block_offsets,
+    int tiles_per_row
+){
+    const int tid = threadIdx.x;
+    const int bid = blockIdx.x;
+    if (bid >= tiles_per_row) return;
+
+    const int fv = first_valid < 0 ? 0 : first_valid;
+    constexpr int ITEMS = OBV_ITEMS_PER_THREAD;
+    const int tile_size = blockDim.x * ITEMS;
+    const int tile_beg  = bid * tile_size;
+
+    FPair off = block_offsets[bid];
+
+    #pragma unroll
+    for (int j = 0; j < ITEMS; ++j) {
+        int i = tile_beg + j * blockDim.x + tid;
+        if (i >= series_len) break;
+        if (i <= fv) continue; // preserve NaN and 0
+        // Accumulate offset into existing float using error-free transform
+        FPair s = two_sum_fp32(out[i], off.hi);
+        s = two_sum_fp32(s.hi, s.lo + off.lo);
+        out[i] = fp_collapse(s);
+    }
+}
+
+// --- Optional: replicate row 0 to [1..n_combos-1]
+extern "C" __global__
+void obv_batch_f32_replicate_rows(
+    const float* __restrict__ row0,
+    int series_len,
+    int n_combos,
+    float* __restrict__ out // destination is [n_combos][series_len]
+){
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = tid; i < series_len; i += stride) {
+        float v = row0[i];
+        for (int r = 1; r < n_combos; ++r) {
+            out[r * series_len + i] = v;
+        }
+    }
+}
+
+// --- Serial fallback for tiny series (kept for parity & testing) --------------
+extern "C" __global__
+void obv_batch_f32_serial_ref(
     const float* __restrict__ close,
     const float* __restrict__ volume,
     int series_len,
@@ -20,48 +281,39 @@ extern "C" __global__ void obv_batch_f32(
     int first_valid,
     float* __restrict__ out)
 {
-    const int combo = blockIdx.y; // row index
-    if (combo >= n_combos || series_len <= 0) {
-        return;
-    }
+    const int combo = blockIdx.y;
+    if (combo >= n_combos || series_len <= 0) return;
 
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
 
-    // Clamp first_valid
     const int fv = first_valid < 0 ? 0 : first_valid;
-
-    // Each thread writes warmup prefix NaNs for its slice
     for (int i = tid; i < fv && i < series_len; i += stride) {
         out[combo * series_len + i] = CUDART_NAN_F;
     }
 
-    // Single-thread serial scan for the recurrence (carry dependency)
     if (tid == 0) {
         const int base = combo * series_len;
         if (fv < series_len) {
-            out[base + fv] = 0.0f; // OBV starts at 0 at first valid
-            double prev_obv = 0.0;
-            double prev_close = static_cast<double>(close[fv]);
-
+            out[base + fv] = 0.0f;
+            // Dual-FP32 running sum (no FP64)
+            FPair obv = make_zero_pair();
+            float prev_close = close[fv];
             for (int i = fv + 1; i < series_len; ++i) {
-                const double c = static_cast<double>(close[i]);
-                const double v = static_cast<double>(volume[i]);
-                // Branchless sign via comparisons
-                const int gt = (c > prev_close);
-                const int lt = (c < prev_close);
-                const double s = static_cast<double>(gt - lt);
-                prev_obv = fma(v, s, prev_obv);
-                out[base + i] = static_cast<float>(prev_obv);
+                float c = close[i];
+                float v = volume[i];
+                int gt = (c > prev_close);
+                int lt = (c < prev_close);
+                float s = float(gt - lt);
+                obv = fp_add_f(obv, s * v);
+                out[base + i] = fp_collapse(obv);
                 prev_close = c;
             }
         }
     }
 }
 
-// Many-series × one-param (time-major):
-// - close_tm, volume_tm: [rows][cols] laid out as index = t*cols + s
-// - first_valids: per-series first valid index (time index)
+// --- Many-series × one-param (time-major) — light cleanup, avoid FP64 --------
 extern "C" __global__ void obv_many_series_one_param_time_major_f32(
     const float* __restrict__ close_tm,
     const float* __restrict__ volume_tm,
@@ -71,33 +323,31 @@ extern "C" __global__ void obv_many_series_one_param_time_major_f32(
     float* __restrict__ out_tm)
 {
     const int s = blockIdx.x * blockDim.x + threadIdx.x; // series id
-    if (s >= cols || rows <= 0) {
-        return;
-    }
+    if (s >= cols || rows <= 0) return;
 
     const int fv = first_valids[s] < 0 ? 0 : first_valids[s];
 
-    // Warmup prefix
     for (int t = 0; t < rows && t < fv; ++t) {
         out_tm[t * cols + s] = CUDART_NAN_F;
     }
+    if (fv >= rows) return;
 
-    if (fv < rows) {
-        const int idx0 = fv * cols + s;
-        out_tm[idx0] = 0.0f; // OBV starts at 0 at first valid
-        double prev_obv = 0.0;
-        double prev_close = static_cast<double>(close_tm[idx0]);
-        for (int t = fv + 1; t < rows; ++t) {
-            const int idx = t * cols + s;
-            const double c = static_cast<double>(close_tm[idx]);
-            const double v = static_cast<double>(volume_tm[idx]);
-            const int gt = (c > prev_close);
-            const int lt = (c < prev_close);
-            const double sgn = static_cast<double>(gt - lt);
-            prev_obv = fma(v, sgn, prev_obv);
-            out_tm[idx] = static_cast<float>(prev_obv);
-            prev_close = c;
-        }
+    int idx0 = fv * cols + s;
+    out_tm[idx0] = 0.0f;
+
+    // Dual-FP32 accumulation per series (serial along time)
+    FPair obv = make_zero_pair();
+    float prev_close = close_tm[idx0];
+    for (int t = fv + 1; t < rows; ++t) {
+        int idx = t * cols + s;
+        float c = close_tm[idx];
+        float v = volume_tm[idx];
+        int gt = (c > prev_close);
+        int lt = (c < prev_close);
+        float sgn = float(gt - lt);
+        obv = fp_add_f(obv, sgn * v);
+        out_tm[idx] = fp_collapse(obv);
+        prev_close = c;
     }
 }
 

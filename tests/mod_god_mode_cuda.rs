@@ -26,14 +26,8 @@ fn gen_candles(len: usize) -> Candles {
         l[i] = c[i] - 0.5;
         v[i] = (x * 0.0017).cos().abs() + 0.4;
     }
-    Candles {
-        open: vec![0.0; len],
-        high: h,
-        low: l,
-        close: c,
-        volume: v,
-        source: None,
-    }
+    let ts: Vec<i64> = (0..len as i64).collect();
+    Candles::new(ts, vec![0.0; len], h, l, c, v)
 }
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {

@@ -51,7 +51,8 @@ extern "C" __global__ void pvi_build_scale_f32(
             if ((double)vf > prev_vol) {
                 const double c = (double)cf;
                 const double r = (c - prev_close) / prev_close;
-                accum = fma(r, accum, accum); // accum += r*accum; (matches CPU mul_add path)
+                // Use non-fused mul-add to mirror CPU scalar ordering
+                accum += r * accum;
             }
             scale_out[i] = (float)accum;
             prev_close = (double)cf;
@@ -104,7 +105,58 @@ extern "C" __global__ void pvi_apply_scale_batch_f32(
     }
 
     for (int r = 0; r < rows; ++r) {
-        out[r * len + t] = initial_values[r] * s;
+        const double iv = (double)initial_values[r];
+        const double sd = (double)s;
+        out[r * len + t] = (float)(iv * sd);
+    }
+}
+
+// Direct batch application: compute PVI per row (FP64 accumulator), one thread per row (grid-stride)
+extern "C" __global__ void pvi_apply_batch_direct_f32(
+    const float* __restrict__ close,   // [len]
+    const float* __restrict__ volume,  // [len]
+    int len,
+    int first_valid,
+    const float* __restrict__ initial_values, // [rows]
+    int rows,
+    float* __restrict__ out) // [rows * len], row-major
+{
+    if (rows <= 0 || len <= 0) return;
+    const int fv = first_valid < 0 ? 0 : first_valid;
+    const float nan_f = nanf("");
+
+    const int stride = blockDim.x * gridDim.x;
+    for (int r = blockIdx.x * blockDim.x + threadIdx.x; r < rows; r += stride) {
+        // Warmup prefix
+        for (int t = 0; t < min(fv, len); ++t) out[(size_t)r * len + t] = nan_f;
+        if (fv >= len) continue;
+
+        double pvi = (double)initial_values[r];
+        out[(size_t)r * len + fv] = (float)pvi;
+        if (fv + 1 >= len) continue;
+
+        double prev_close = (double)close[fv];
+        double prev_vol   = (double)volume[fv];
+        for (int t = fv + 1; t < len; ++t) {
+            const float cf = close[t];
+            const float vf = volume[t];
+            if (isfinite(cf) && isfinite(vf) && isfinite(prev_close) && isfinite(prev_vol)) {
+                if ((double)vf > prev_vol) {
+                    const double c = (double)cf;
+                    // Equivalent multiplicative update reduces rounding error slightly
+                    pvi *= c / prev_close;
+                }
+                out[(size_t)r * len + t] = (float)pvi;
+                prev_close = (double)cf;
+                prev_vol   = (double)vf;
+            } else {
+                out[(size_t)r * len + t] = nan_f;
+                if (isfinite(cf) && isfinite(vf)) {
+                    prev_close = (double)cf;
+                    prev_vol   = (double)vf;
+                }
+            }
+        }
     }
 }
 

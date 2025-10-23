@@ -12,16 +12,20 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::cg::{CgBatchRange, CgParams};
-use cust::context::{CacheConfig, Context};
+use cust::context::Context;
+use cust::context::{CacheConfig, CurrentContext};
 use cust::device::Device;
 use cust::function::{BlockSize, FunctionAttribute, GridSize};
-use cust::memory::DeviceBuffer;
+use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// Prefer pinned transfers for moderately large buffers to enable true async H2D/D2H.
+const H2D_PIN_THRESHOLD_BYTES: usize = 256 * 1024; // ~256 KiB
 
 #[derive(Debug)]
 pub enum CudaCgError {
@@ -95,22 +99,19 @@ impl CudaCg {
             Device::get_device(device_id as u32).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
 
+        // Hint: prefer L1 for read-mostly kernels like CG.
+        let _ = CurrentContext::set_cache_config(CacheConfig::PreferL1);
+
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cg_kernel.ptx"));
+        // Prefer highest optimizer level and target from context; fall back progressively.
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaCgError::Cuda(e.to_string()))?
-                }
-            }
-        };
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))
+            .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
 
@@ -210,8 +211,23 @@ impl CudaCg {
         }
 
         // Upload inputs
-        let d_prices =
-            DeviceBuffer::from_slice(prices_f32).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+        // ---------- Upload inputs (with pinned H2D for large buffers) ----------
+        let d_prices: DeviceBuffer<f32> = if prices_f32.len() * std::mem::size_of::<f32>()
+            >= H2D_PIN_THRESHOLD_BYTES
+        {
+            let h_locked = LockedBuffer::from_slice(prices_f32)
+                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut buf = DeviceBuffer::<f32>::uninitialized_async(len, &self.stream)
+                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                buf.async_copy_from(&h_locked, &self.stream)
+                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                buf
+            }
+        } else {
+            DeviceBuffer::from_slice(prices_f32)
+                .map_err(|e| CudaCgError::Cuda(e.to_string()))?
+        };
         let periods: Vec<i32> = combos
             .iter()
             .map(|p| p.period.unwrap_or(0) as i32)
@@ -223,50 +239,52 @@ impl CudaCg {
                 .map_err(|e| CudaCgError::Cuda(e.to_string()))?
         };
 
-        // Decide prefix vs sliding path (conservative: prefixes only for large sweeps)
-        let combos_len = periods.len();
-        let use_prefix = (combos_len >= 2048) && (len >= 16_384);
+        // ---------- Kernel selection heuristic (rolling vs prefix) ----------
+        let avg_period: f64 = periods.iter().map(|&p| p as f64).sum::<f64>() / (periods.len() as f64);
+        let use_prefix = (avg_period >= 512.0) && (periods.len() >= 16)
+            && ((periods.len() as f64) * avg_period >= (len as f64) * 2.0);
 
         if use_prefix {
-            // ---------- Prefix arrays (build once, then O(1) per row per combo) ----------
+            // Prepare prefix arrays
             let mut d_P: DeviceBuffer<f32> = unsafe {
                 DeviceBuffer::uninitialized(len).map_err(|e| CudaCgError::Cuda(e.to_string()))?
             };
             let mut d_Q: DeviceBuffer<f32> = unsafe {
                 DeviceBuffer::uninitialized(len).map_err(|e| CudaCgError::Cuda(e.to_string()))?
             };
-            let mut d_B: DeviceBuffer<i32> = unsafe {
+            let mut d_C: DeviceBuffer<i32> = unsafe {
                 DeviceBuffer::uninitialized(len).map_err(|e| CudaCgError::Cuda(e.to_string()))?
             };
 
-            // 1) Build prefix arrays
+            // cg_prefix_prepare_f32<<<1,1>>>(prices, len, P, Q, C)
             let mut prep = self
                 .module
-                .get_function("cg_build_prefix_f32")
+                .get_function("cg_prefix_prepare_f32")
                 .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+            // Function-level L1 preference
             let _ = prep.set_cache_config(CacheConfig::PreferL1);
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut p_ptr = d_P.as_device_ptr().as_raw();
                 let mut q_ptr = d_Q.as_device_ptr().as_raw();
-                let mut b_ptr = d_B.as_device_ptr().as_raw();
+                let mut c_ptr = d_C.as_device_ptr().as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
                     &mut p_ptr as *mut _ as *mut c_void,
                     &mut q_ptr as *mut _ as *mut c_void,
-                    &mut b_ptr as *mut _ as *mut c_void,
+                    &mut c_ptr as *mut _ as *mut c_void,
                 ];
                 self.stream
                     .launch(&prep, (1, 1, 1), (1, 1, 1), 0, args)
                     .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
             }
 
-            // 2) Use prefix arrays to compute all combos
+            // Launch from-prefix kernel with occupancy-guided block size
             let mut func = self
                 .module
-                .get_function("cg_batch_from_prefix_f32")
+                .get_function("cg_batch_f32_from_prefix")
                 .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
             let _ = func.set_cache_config(CacheConfig::PreferL1);
             let (suggested_block_x, _min_grid) = func
@@ -281,32 +299,34 @@ impl CudaCg {
             }
             let grid_x = ((combos.len() as u32) + block_x - 1) / block_x;
             unsafe { (*(self as *const _ as *mut CudaCg)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
-
             unsafe {
-                let mut p_ptr = d_P.as_device_ptr().as_raw();
-                let mut q_ptr = d_Q.as_device_ptr().as_raw();
-                let mut b_ptr = d_B.as_device_ptr().as_raw();
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw(); // unused in kernel but kept for symmetry
                 let mut periods_ptr = d_periods.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut combos_i = combos.len() as i32;
                 let mut first_i = first_valid as i32;
+                let mut p_ptr = d_P.as_device_ptr().as_raw();
+                let mut q_ptr = d_Q.as_device_ptr().as_raw();
+                let mut c_ptr = d_C.as_device_ptr().as_raw();
                 let mut out_ptr = d_out.as_device_ptr().as_raw();
                 let args: &mut [*mut c_void] = &mut [
-                    &mut p_ptr as *mut _ as *mut c_void,
-                    &mut q_ptr as *mut _ as *mut c_void,
-                    &mut b_ptr as *mut _ as *mut c_void,
+                    &mut prices_ptr as *mut _ as *mut c_void,
                     &mut periods_ptr as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
                     &mut combos_i as *mut _ as *mut c_void,
                     &mut first_i as *mut _ as *mut c_void,
+                    &mut p_ptr as *mut _ as *mut c_void,
+                    &mut q_ptr as *mut _ as *mut c_void,
+                    &mut c_ptr as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
                 self.stream
                     .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)
                     .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
             }
+            self.maybe_log_batch_debug();
         } else {
-            // Sliding path
+            // Rolling kernel path (default)
             let mut func = self
                 .module
                 .get_function("cg_batch_f32")
@@ -343,8 +363,8 @@ impl CudaCg {
                     .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)
                     .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
             }
+            self.maybe_log_batch_debug();
         }
-        self.maybe_log_batch_debug();
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -377,10 +397,25 @@ impl CudaCg {
         // Compute per-series first_valids over time-major input
         let first_valids = compute_first_valids_time_major(prices_tm_f32, cols, rows);
 
-        let d_prices = DeviceBuffer::from_slice(prices_tm_f32)
-            .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+        // ---------- Upload inputs ----------
+        let d_prices: DeviceBuffer<f32> = if prices_tm_f32.len() * std::mem::size_of::<f32>()
+            >= H2D_PIN_THRESHOLD_BYTES
+        {
+            let h_locked = LockedBuffer::from_slice(prices_tm_f32)
+                .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut buf = DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream)
+                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                buf.async_copy_from(&h_locked, &self.stream)
+                    .map_err(|e| CudaCgError::Cuda(e.to_string()))?;
+                buf
+            }
+        } else {
+            DeviceBuffer::from_slice(prices_tm_f32)
+                .map_err(|e| CudaCgError::Cuda(e.to_string()))?
+        };
+        let d_first =
+            DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaCgError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(cols * rows)
                 .map_err(|e| CudaCgError::Cuda(e.to_string()))?
