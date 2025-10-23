@@ -1,11 +1,7 @@
 // CUDA kernels for IFT RSI (Inverse Fisher Transform of RSI) in FP32.
 //
-// Behavior mirrors src/indicators/ift_rsi.rs (scalar path):
-// - Warmup prefix: first_valid + rsi_period + wma_period - 1 written as NaN
-// - RSI uses Wilder SMMA recurrence on gains/losses (positive/negative diffs)
-// - Smoothed RSI: x = 0.1 * (RSI - 50)
-// - LWMA with weights 1..wp maintained via O(1) rolling recurrence
-// - Output is tanh(LWMA(x)) per timestep
+// Drop-in FP32 rewrite: removes FP64 from hot paths, adds compensated
+// summation for LWMA, and uses warp-parallel seeding where available.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -13,6 +9,7 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include <stdint.h>
 
 #ifndef LIKELY
 #define LIKELY(x)   (__builtin_expect(!!(x), 1))
@@ -21,13 +18,39 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-static __device__ __forceinline__ float f32_qnan() {
-    return __int_as_float(0x7fffffff);
+// --------- small utils ---------
+static __device__ __forceinline__ float f32_qnan() { return __int_as_float(0x7fffffff); }
+static __device__ __forceinline__ int   imax(int a,int b){ return a>b? a:b; }
+static __device__ __forceinline__ int   imin(int a,int b){ return a<b? a:b; }
+
+// Kahan-style compensated adder for FP32
+struct KahanF32 {
+    float sum;
+    float c; // compensation
+    __device__ __forceinline__ void init(float s = 0.f){ sum=s; c=0.f; }
+    __device__ __forceinline__ void add(float x){
+        float y = x - c;
+        float t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    }
+};
+
+// warp reduction (sum) over up to 32-lane warp
+static __device__ __forceinline__ float warp_sum(float v) {
+    unsigned mask = __activemask();
+    // tree reduce
+    v += __shfl_down_sync(mask, v, 16);
+    v += __shfl_down_sync(mask, v,  8);
+    v += __shfl_down_sync(mask, v,  4);
+    v += __shfl_down_sync(mask, v,  2);
+    v += __shfl_down_sync(mask, v,  1);
+    return v;
 }
 
-// One-series × many-params (batch). Each block handles one combo sequentially.
-// Inputs are original price series; gains/losses computed on the fly per row
-// to minimize host-side buffers (acceptable because seed is O(rsi_period)).
+// ------------------ KERNEL 1: one series × many params ------------------
+// - Each block (ideally one warp) processes multiple combos in a grid-stride loop.
+// - Lane 0 executes the sequential recurrence; other lanes help seed RSI.
 extern "C" __global__ void ift_rsi_batch_f32(
     const float* __restrict__ data,
     int series_len,
@@ -35,113 +58,145 @@ extern "C" __global__ void ift_rsi_batch_f32(
     int first_valid,
     const int* __restrict__ rsi_periods,
     const int* __restrict__ wma_periods,
-    float* __restrict__ out_values) {
+    float* __restrict__ out_values)
+{
+    // grid-stride over combos to keep device busy when n_combos is small
+    for (int combo = blockIdx.x; combo < n_combos; combo += gridDim.x) {
 
-    const int combo = blockIdx.x;
-    if (combo >= n_combos) return;
-
-    const int rp = rsi_periods[combo];
-    const int wp = wma_periods[combo];
-    if (UNLIKELY(rp <= 0 || wp <= 0 || rp > series_len || wp > series_len)) {
-        // Write NaNs for robustness
+        const int rp = rsi_periods[combo];
+        const int wp = wma_periods[combo];
         const int base = combo * series_len;
-        for (int t = 0; t < series_len; ++t) out_values[base + t] = f32_qnan();
-        return;
-    }
-    if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
-        const int base = combo * series_len;
-        for (int t = 0; t < series_len; ++t) out_values[base + t] = f32_qnan();
-        return;
-    }
 
-    const int tail = series_len - first_valid;
-    if (UNLIKELY(tail < max(rp, wp))) {
-        const int base = combo * series_len;
-        for (int t = 0; t < series_len; ++t) out_values[base + t] = f32_qnan();
-        return;
-    }
-
-    const int warm = first_valid + rp + wp - 1;
-    const int base = combo * series_len;
-    // Fill NaNs up to warmup
-    for (int t = 0; t < min(warm, series_len); ++t) out_values[base + t] = f32_qnan();
-
-    // Single thread per block performs the scan (branchless for other threads)
-    if (threadIdx.x != 0) return;
-
-    // Wilder RSI seeding over first rp diffs after first_valid
-    double avg_gain = 0.0;
-    double avg_loss = 0.0;
-    const int start_seed = first_valid + 1;
-    const int seed_end = start_seed + rp - 1;
-    for (int i = start_seed; i <= seed_end; ++i) {
-        const double d = (double)data[i] - (double)data[i - 1];
-        if (d > 0.0) avg_gain += d; else avg_loss -= d;
-    }
-    const double rp_f = (double)rp;
-    avg_gain /= rp_f;
-    avg_loss /= rp_f;
-    const double alpha = 1.0 / rp_f;
-    const double beta  = 1.0 - alpha;
-
-    // LWMA state over x = 0.1*(RSI-50)
-    const double wp_f = (double)wp;
-    const double denom_rcp = 1.0 / (0.5 * wp_f * (wp_f + 1.0));
-    // Small ring buffer in registers/local memory
-    extern __shared__ float shmem[];
-    int head = 0;
-    int filled = 0;
-    double S1 = 0.0; // sum(x)
-    double S2 = 0.0; // sum(k*x)
-
-    // For wp up to CAP, we keep the last wp samples to update S1 efficiently
-    // Otherwise, we still update S1 with a running sum by subtracting x_old read from data path (fallback not supported without ring),
-    // so we constrain to CAP to keep memory bounded; typical wp << CAP.
-    float* ring = shmem; // per-block ring of size >= wp floats
-
-    // Iterate timesteps in sliced index space i = rp..(tail-1), corresponding to absolute t = first_valid + i
-    for (int i = rp; i < tail; ++i) {
-        // Update Wilder averages (use gain/loss from diff at absolute index (first_valid + i))
-        if (i > rp) {
-            const int abs_idx = first_valid + i;
-            const double d = (double)data[abs_idx] - (double)data[abs_idx - 1];
-            const double g = (d > 0.0) ? d : 0.0;
-            const double l = (d > 0.0) ? 0.0 : -d;
-            avg_gain = fma(avg_gain, beta, alpha * g);
-            avg_loss = fma(avg_loss, beta, alpha * l);
+        // basic arg checks
+        if (UNLIKELY(rp <= 0 || wp <= 0 || rp > series_len || wp > series_len)) {
+            for (int t = threadIdx.x; t < series_len; t += blockDim.x) out_values[base + t] = f32_qnan();
+            continue;
+        }
+        if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
+            for (int t = threadIdx.x; t < series_len; t += blockDim.x) out_values[base + t] = f32_qnan();
+            continue;
         }
 
-        const double rs = (avg_loss != 0.0) ? (avg_gain / avg_loss) : 100.0;
-        const double rsi = 100.0 - 100.0 / (1.0 + rs);
-        const float  x_f = (float)(0.1 * (rsi - 50.0));
+        const int tail = series_len - first_valid;
+        const int need = imax(rp, wp);
+        if (UNLIKELY(tail < need)) {
+            for (int t = threadIdx.x; t < series_len; t += blockDim.x) out_values[base + t] = f32_qnan();
+            continue;
+        }
 
-        if (filled < wp) {
-            // Build phase
-            S1 += (double)x_f;
-            S2 = fma((double)(filled + 1), (double)x_f, S2);
-            if (ring) ring[head] = x_f;
-            head = (head + 1 == wp) ? 0 : head + 1;
-            filled += 1;
-            if (filled == wp) {
-                const double wma = S2 * denom_rcp;
-                const int abs_t = first_valid + i;
-                out_values[base + abs_t] = tanhf((float)wma);
+        const int warm = first_valid + rp + wp - 1;
+        for (int t = threadIdx.x; t < imin(warm, series_len); t += blockDim.x) out_values[base + t] = f32_qnan();
+
+        // dynamic shared memory ring buffer: host must pass max_wp*sizeof(float)
+        extern __shared__ float shmem[];
+        float* ring = shmem; // ring[0..wp-1] per block
+        // we unconditionally require ring memory
+        if (UNLIKELY(wp <= 0)) continue; // already screened; defensive
+
+        // -------- seed Wilder's SMMA over the first rp diffs --------
+        const int lane = threadIdx.x & 31;
+        const int seed_start = first_valid + 1;
+        const int seed_end   = seed_start + rp - 1;
+
+        float gain_seed = 0.f, loss_seed = 0.f;
+
+        if (blockDim.x >= 32) {
+            // strided over [seed_start .. seed_end]; each lane sums its slice
+            float gain_part = 0.f, loss_part = 0.f;
+            for (int i = seed_start + lane; i <= seed_end; i += 32) {
+                float cur  = data[i];
+                float prev = data[i - 1];
+                float d = cur - prev;
+                if (d > 0.f) gain_part += d; else loss_part += -d;
             }
+            // warp reduction
+            gain_seed = warp_sum(gain_part);
+            loss_seed = warp_sum(loss_part);
         } else {
-            const float x_old = ring ? ring[head] : 0.0f; // ring always valid for wp<=CAP
-            if (ring) ring[head] = x_f;
-            head = (head + 1 == wp) ? 0 : head + 1;
-            const double S1_prev = S1;
-            S1 = S1_prev + (double)x_f - (double)x_old;
-            S2 = (S2 - S1_prev) + wp_f * (double)x_f;
-            const double wma = S2 * denom_rcp;
-            const int abs_t = first_valid + i;
-            out_values[base + abs_t] = tanhf((float)wma);
+            // Fallback for tiny blocks: compute seed on lane 0 sequentially
+            if (threadIdx.x == 0) {
+                float g = 0.f, l = 0.f;
+                for (int i = seed_start; i <= seed_end; ++i) {
+                    float d = data[i] - data[i - 1];
+                    if (d > 0.f) g += d; else l += -d;
+                }
+                gain_seed = g; loss_seed = l;
+            }
+        }
+
+        // lane 0 finalizes seed and runs the sequential recurrences
+        if (lane == 0) {
+            const float rp_rcp = 1.0f / (float)rp;
+            float avg_gain = gain_seed * rp_rcp;
+            float avg_loss = loss_seed * rp_rcp;
+            const float alpha = rp_rcp;
+            const float beta  = 1.0f - alpha;
+
+            // LWMA state for x = 0.1*(RSI - 50)
+            const float wp_f = (float)wp;
+            const float denom_rcp = 2.0f / (wp_f * (wp_f + 1.0f));
+            int head = 0, filled = 0;
+            KahanF32 S1; S1.init(0.f);
+            KahanF32 S2; S2.init(0.f);
+
+            // initialize streaming prev to avoid 2nd load per step
+            float prev = data[first_valid + rp];
+
+            // iterate absolute offset i = rp..(tail-1), abs_t = first_valid + i
+            for (int i = rp; i < tail; ++i) {
+                if (i > rp) {
+                    const int abs_idx = first_valid + i;
+                    float curr = data[abs_idx];
+                    float d = curr - prev;
+                    prev = curr;
+                    float g = (d > 0.f) ? d : 0.f;
+                    float l = (d > 0.f) ? 0.f : -d;
+                    // Wilder SMMA recurrence in FP32 with FMA
+                    avg_gain = __fmaf_rn(alpha, g, beta * avg_gain);
+                    avg_loss = __fmaf_rn(alpha, l, beta * avg_loss);
+                }
+
+                // RSI -> x
+                float rs  = (avg_loss != 0.f) ? (avg_gain / avg_loss) : 100.f;
+                float rsi = 100.f - 100.f / (1.f + rs);
+                float x   = 0.1f * (rsi - 50.f);
+
+                if (filled < wp) {
+                    S1.add(x);
+                    S2.add((float)(filled + 1) * x);
+                    ring[head] = x;
+                    head = (head + 1 == wp) ? 0 : head + 1;
+                    filled += 1;
+                    if (filled == wp) {
+                        float wma = S2.sum * denom_rcp;
+                        const int abs_t = first_valid + i;
+                        out_values[base + abs_t] = tanhf(wma);
+                    }
+                } else {
+                    float x_old = ring[head];
+                    ring[head]  = x;
+                    head = (head + 1 == wp) ? 0 : head + 1;
+
+                    float S1_prev = S1.sum;
+                    // S1' = S1 + x - x_old    (compensated)
+                    S1.add(x);
+                    S1.add(-x_old);
+
+                    // S2' = S2 - S1_prev + wp*x   (compensated)
+                    S2.add(-S1_prev);
+                    S2.add(wp_f * x);
+
+                    float wma = S2.sum * denom_rcp;
+                    const int abs_t = first_valid + i;
+                    out_values[base + abs_t] = tanhf(wma);
+                }
+            }
         }
     }
 }
 
-// Many-series × one-param (time-major). Each thread handles one series (column).
+// ------------------ KERNEL 2: many series × one param (time-major) ------------------
+// Each thread handles one series. Uses per-thread slice in shared memory for the ring.
 extern "C" __global__ void ift_rsi_many_series_one_param_f32(
     const float* __restrict__ data_tm,     // time-major [row * num_series + series]
     const int*   __restrict__ first_valids,// per-series first valid index
@@ -149,11 +204,15 @@ extern "C" __global__ void ift_rsi_many_series_one_param_f32(
     int series_len,
     int rsi_period,
     int wma_period,
-    float* __restrict__ out_tm) {
-
+    float* __restrict__ out_tm)
+{
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
-    if (UNLIKELY(rsi_period <= 0 || wma_period <= 0 || rsi_period > series_len || wma_period > series_len)) {
+
+    const int rp = rsi_period;
+    const int wp = wma_period;
+
+    if (UNLIKELY(rp <= 0 || wp <= 0 || rp > series_len || wp > series_len)) {
         for (int r = 0; r < series_len; ++r) out_tm[r * num_series + series] = f32_qnan();
         return;
     }
@@ -164,72 +223,82 @@ extern "C" __global__ void ift_rsi_many_series_one_param_f32(
         return;
     }
     const int tail = series_len - first;
-    if (UNLIKELY(tail < max(rsi_period, wma_period))) {
+    if (UNLIKELY(tail < imax(rp, wp))) {
         for (int r = 0; r < series_len; ++r) out_tm[r * num_series + series] = f32_qnan();
         return;
     }
 
-    const int warm = first + rsi_period + wma_period - 1;
-    for (int r = 0; r < min(warm, series_len); ++r) out_tm[r * num_series + series] = f32_qnan();
+    const int warm = first + rp + wp - 1;
+    for (int r = 0; r < imin(warm, series_len); ++r) out_tm[r * num_series + series] = f32_qnan();
 
-    // Seed Wilder averages over first rsi_period diffs after first
-    double avg_gain = 0.0, avg_loss = 0.0;
+    // seed Wilder over [first+1 .. first+rp]
+    float gain_part = 0.f, loss_part = 0.f;
     const int seed_start = first + 1;
-    const int seed_end = seed_start + rsi_period - 1;
+    const int seed_end   = seed_start + rp - 1;
     for (int i = seed_start; i <= seed_end; ++i) {
-        const int idx = i * num_series + series;
-        const int idx_prev = (i - 1) * num_series + series;
-        const double d = (double)data_tm[idx] - (double)data_tm[idx_prev];
-        if (d > 0.0) avg_gain += d; else avg_loss -= d;
+        const float cur  = data_tm[i * num_series + series];
+        const float prev = data_tm[(i - 1) * num_series + series];
+        const float d = cur - prev;
+        if (d > 0.f) gain_part += d; else loss_part += -d;
     }
-    const double rp_f = (double)rsi_period;
-    avg_gain /= rp_f; avg_loss /= rp_f;
-    const double alpha = 1.0 / rp_f;
-    const double beta  = 1.0 - alpha;
+    const float rp_rcp = 1.0f / (float)rp;
+    float avg_gain = gain_part * rp_rcp;
+    float avg_loss = loss_part * rp_rcp;
+    const float alpha = rp_rcp;
+    const float beta  = 1.0f - alpha;
 
     // LWMA state
-    const int wp = wma_period;
-    const double wp_f = (double)wp;
-    const double denom_rcp = 1.0 / (0.5 * wp_f * (wp_f + 1.0));
+    const float wp_f = (float)wp;
+    const float denom_rcp = 2.0f / (wp_f * (wp_f + 1.0f));
     int head = 0, filled = 0;
-    double S1 = 0.0, S2 = 0.0;
-    extern __shared__ float shbuf[];
-    // Use per-thread slice of shared memory as ring buffer: [threadIdx.x * wp .. +wp)
-    float* ring = shbuf ? (shbuf + threadIdx.x * wma_period) : (float*)0;
+    KahanF32 S1; S1.init(0.f);
+    KahanF32 S2; S2.init(0.f);
 
-    for (int r = first + rsi_period; r < series_len; ++r) {
-        if (r > first + rsi_period) {
-            const int idx = r * num_series + series;
-            const int idx_prev = (r - 1) * num_series + series;
-            const double d = (double)data_tm[idx] - (double)data_tm[idx_prev];
-            const double g = (d > 0.0) ? d : 0.0;
-            const double l = (d > 0.0) ? 0.0 : -d;
-            avg_gain = fma(avg_gain, beta, alpha * g);
-            avg_loss = fma(avg_loss, beta, alpha * l);
+    extern __shared__ float shbuf[];
+    float* ring = shbuf + threadIdx.x * wp;
+
+    // streaming prev
+    float prev = data_tm[(first + rp) * num_series + series];
+
+    for (int r = first + rp; r < series_len; ++r) {
+        if (r > first + rp) {
+            const float curr = data_tm[r * num_series + series];
+            const float d = curr - prev;
+            prev = curr;
+            const float g = (d > 0.f) ? d : 0.f;
+            const float l = (d > 0.f) ? 0.f : -d;
+            avg_gain = __fmaf_rn(alpha, g, beta * avg_gain);
+            avg_loss = __fmaf_rn(alpha, l, beta * avg_loss);
         }
-        const double rs = (avg_loss != 0.0) ? (avg_gain / avg_loss) : 100.0;
-        const double rsi = 100.0 - 100.0 / (1.0 + rs);
-        const float  x_f = (float)(0.1 * (rsi - 50.0));
+
+        const float rs  = (avg_loss != 0.f) ? (avg_gain / avg_loss) : 100.f;
+        const float rsi = 100.f - 100.f / (1.f + rs);
+        const float x   = 0.1f * (rsi - 50.f);
 
         if (filled < wp) {
-            S1 += (double)x_f;
-            S2 = fma((double)(filled + 1), (double)x_f, S2);
-            if (ring) ring[head] = x_f;
+            S1.add(x);
+            S2.add((float)(filled + 1) * x);
+            ring[head] = x;
             head = (head + 1 == wp) ? 0 : head + 1;
             filled += 1;
             if (filled == wp) {
-                const double wma = S2 * denom_rcp;
-                out_tm[r * num_series + series] = tanhf((float)wma);
+                const float wma = S2.sum * denom_rcp;
+                out_tm[r * num_series + series] = tanhf(wma);
             }
         } else {
-            const float x_old = ring ? ring[head] : 0.0f;
-            if (ring) ring[head] = x_f;
+            const float x_old = ring[head];
+            ring[head] = x;
             head = (head + 1 == wp) ? 0 : head + 1;
-            const double S1_prev = S1;
-            S1 = S1_prev + (double)x_f - (double)x_old;
-            S2 = (S2 - S1_prev) + wp_f * (double)x_f;
-            const double wma = S2 * denom_rcp;
-            out_tm[r * num_series + series] = tanhf((float)wma);
+
+            const float S1_prev = S1.sum;
+            S1.add(x);
+            S1.add(-x_old);
+
+            S2.add(-S1_prev);
+            S2.add(wp_f * x);
+
+            const float wma = S2.sum * denom_rcp;
+            out_tm[r * num_series + series] = tanhf(wma);
         }
     }
 }

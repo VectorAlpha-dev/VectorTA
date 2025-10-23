@@ -179,23 +179,30 @@ impl CudaDti {
         combos
     }
 
-    fn precompute_x_ax(high: &[f32], low: &[f32], start: usize) -> (Vec<f32>, Vec<f32>) {
+    #[inline]
+    fn precompute_x_ax_into_locked(
+        high: &[f32],
+        low: &[f32],
+        start: usize,
+        x: &mut [f32],
+        ax: &mut [f32],
+    ) {
+        debug_assert_eq!(high.len(), low.len());
+        debug_assert_eq!(high.len(), x.len());
+        debug_assert_eq!(x.len(), ax.len());
+        x.fill(0.0);
+        ax.fill(0.0);
         let len = high.len();
-        let mut x = vec![0f32; len];
-        let mut ax = vec![0f32; len];
-        if start == 0 || start >= len { return (x, ax); }
-        let mut i = start;
-        while i < len {
+        if start == 0 || start >= len { return; }
+        for i in start..len {
             let dh = high[i] - high[i - 1];
-            let dl = low[i] - low[i - 1];
+            let dl = low[i]  - low[i - 1];
             let x_hmu = if dh > 0.0 { dh } else { 0.0 };
             let x_lmd = if dl < 0.0 { -dl } else { 0.0 };
             let v = x_hmu - x_lmd;
-            x[i] = v;
+            x[i]  = v;
             ax[i] = v.abs();
-            i += 1;
         }
-        (x, ax)
     }
 
     fn launch_batch_kernel(
@@ -304,18 +311,18 @@ impl CudaDti {
             return Err(CudaDtiError::InvalidInput("insufficient VRAM for DTI batch".into()));
         }
 
-        // Precompute x and |x| once on host (shares across rows)
-        let (x_host, ax_host) = Self::precompute_x_ax(high_f32, low_f32, start);
+        // Precompute x and |x| directly into pinned memory (page-locked)
+        let mut hx  = unsafe { LockedBuffer::<f32>::uninitialized(len) }
+            .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+        let mut hax = unsafe { LockedBuffer::<f32>::uninitialized(len) }
+            .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+        Self::precompute_x_ax_into_locked(high_f32, low_f32, start, hx.as_mut_slice(), hax.as_mut_slice());
 
-        // Prepare params (i32)
+        // Prepare params (i32) into pinned memory
         let mut r_vec = Vec::with_capacity(rows);
         let mut s_vec = Vec::with_capacity(rows);
         let mut u_vec = Vec::with_capacity(rows);
         for c in &combos { r_vec.push(c.r.unwrap() as i32); s_vec.push(c.s.unwrap() as i32); u_vec.push(c.u.unwrap() as i32); }
-
-        // Async copies using pinned host buffers
-        let hx = LockedBuffer::from_slice(&x_host).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-        let hax = LockedBuffer::from_slice(&ax_host).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
         let hr = LockedBuffer::from_slice(&r_vec).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
         let hs = LockedBuffer::from_slice(&s_vec).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
         let hu = LockedBuffer::from_slice(&u_vec).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
@@ -446,10 +453,26 @@ impl CudaDti {
             return Err(CudaDtiError::InvalidInput("insufficient VRAM for DTI many-series".into()));
         }
 
-        let d_high = DeviceBuffer::from_slice(high_tm_f32).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-        let d_low  = DeviceBuffer::from_slice(low_tm_f32 ).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+        // Pinned host staging
+        let h_high  = LockedBuffer::from_slice(high_tm_f32).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+        let h_low   = LockedBuffer::from_slice(low_tm_f32 ).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+        let h_first = LockedBuffer::from_slice(&first_valids).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+
+        // Async device allocations + async copies
+        let mut d_high  = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+            .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+        let mut d_low   = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+            .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+        let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
+            .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+            .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+
+        unsafe {
+            d_high .async_copy_from(&h_high,  &self.stream).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+            d_low  .async_copy_from(&h_low,   &self.stream).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+            d_first.async_copy_from(&h_first, &self.stream).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
+        }
 
         self.launch_many_series_kernel(&d_high, &d_low, &d_first, cols, rows, r, s, u, &mut d_out)?;
         self.stream.synchronize().map_err(|e| CudaDtiError::Cuda(e.to_string()))?;

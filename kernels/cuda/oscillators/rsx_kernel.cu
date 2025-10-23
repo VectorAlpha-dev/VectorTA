@@ -16,39 +16,41 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
+// Branchless clamp helper used by both kernels
+static __device__ __forceinline__ float clamp_0_100(float x) {
+    x = fminf(x, 100.0f);
+    x = fmaxf(x, 0.0f);
+    return x;
+}
+
 // One series × many params (batch)
+// Mapping: 1 thread = 1 param combo; warp broadcasts price[t]
 // prices: length = series_len
 // periods: length = n_combos
 // out: layout rows=n_combos, cols=series_len (row-major)
 extern "C" __global__
 void rsx_batch_f32(const float* __restrict__ prices,
-                   const int* __restrict__ periods,
+                   const int*   __restrict__ periods,
                    int series_len,
                    int first_valid,
                    int n_combos,
                    float* __restrict__ out) {
-    const int combo = blockIdx.x;
+    const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
-    const int base = combo * series_len;
-
-    // Initialize entire row to NaN so warmup semantics match CPU.
-    for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
-        out[base + i] = NAN;
-    }
-    __syncthreads();
-
-    // Single lane performs the sequential recurrence.
-    if (threadIdx.x != 0) return;
-    if (first_valid >= series_len) return;
 
     const int period = periods[combo];
-    if (period <= 0) return;
-    const int warm = first_valid + period - 1;
-    if (warm >= series_len) return;
+    const int base   = combo * series_len;
+    if (period <= 0) {
+        for (int t = 0; t < series_len; ++t) out[base + t] = NAN;
+        return;
+    }
 
-    // State registers (FP32; matches repo convention for GPU infra)
-    float f0 = 0.0f;
-    float f8 = 100.0f * prices[warm];
+    const int warm = first_valid + period - 1;
+
+    // RSX state (FP32)
+    float f0  = 0.0f;
+    float f8  = 0.0f;   // set at t==warm
+    bool  have_init = false;
     const float alpha = 3.0f / (float(period) + 2.0f);
     const float beta  = 1.0f - alpha;
     float f28 = 0.0f, f30 = 0.0f;
@@ -60,16 +62,32 @@ void rsx_batch_f32(const float* __restrict__ prices,
     const float f88 = (period >= 6) ? float(period - 1) : 5.0f;
     float f90 = 1.0f;
 
-    // warmup index remains NaN (already set). Start from warm+1.
-    for (int i = warm + 1; i < series_len; ++i) {
-        // saturating/incrementing counter
-        f90 = (f88 <= f90) ? (f88 + 1.0f) : (f90 + 1.0f);
+    // Sequential in time per combo
+    #pragma unroll 1
+    for (int t = 0; t < series_len; ++t) {
+        // Warp-broadcast price[t]: lane0 loads; __shfl_sync shares within warp
+        unsigned mask = __activemask();
+        float p = 0.0f;
+        if ((threadIdx.x & 31) == 0) {
+            p = __ldg(prices + t);
+        }
+        p = __shfl_sync(mask, p, 0);
+        const float p100 = 100.0f * p;
 
+        // Warmup semantics: prefix including warm index as NaN
+        if (t <= warm) {
+            out[base + t] = NAN;
+            if (t == warm) { f8 = p100; have_init = true; }
+            continue;
+        }
+
+        // After warmup
+        f90 = (f88 <= f90) ? (f88 + 1.0f) : (f90 + 1.0f);
         const float prev = f8;
-        f8 = 100.0f * prices[i];
+        f8 = p100;
         const float v8 = f8 - prev;
 
-        // IIR cascade with simple FMAs where natural
+        // IIR cascade; compiler fuses to FMAs
         f28 = beta * f28 + alpha * v8;
         f30 = alpha * f28 + beta * f30;
         const float v_c = 1.5f * f28 - 0.5f * f30;
@@ -95,23 +113,14 @@ void rsx_batch_f32(const float* __restrict__ prices,
         f80 = alpha * f78 + beta * f80;
         const float v20_ = 1.5f * f78 - 0.5f * f80;
 
-        if (f88 >= f90 && f8 != prev) {
-            f0 = 1.0f;
-        }
-        if (fabsf(f88 - f90) <= 1e-12f && f0 == 0.0f) {
-            f90 = 0.0f;
-        }
+        if (f88 >= f90 && f8 != prev) { f0 = 1.0f; }
+        if (fabsf(f88 - f90) <= 1e-12f && f0 == 0.0f) { f90 = 0.0f; }
 
-        float y;
-        if (f88 < f90 && v20_ > 1e-10f) {
-            float v4 = (v14 / v20_ + 1.0f) * 50.0f;
-            if (v4 > 100.0f) v4 = 100.0f;
-            if (v4 < 0.0f) v4 = 0.0f;
-            y = v4;
-        } else {
-            y = 50.0f;
+        float y = 50.0f;
+        if (f88 < f90 && v20_ > 1e-10f && have_init) {
+            y = clamp_0_100((v14 / v20_ + 1.0f) * 50.0f);
         }
-        out[base + i] = y;
+        out[base + t] = y;
     }
 }
 
@@ -119,7 +128,7 @@ void rsx_batch_f32(const float* __restrict__ prices,
 // prices_tm/out_tm layout: index = t * cols + s
 extern "C" __global__
 void rsx_many_series_one_param_f32(const float* __restrict__ prices_tm,
-                                   const int* __restrict__ first_valids,
+                                   const int*   __restrict__ first_valids,
                                    int cols,
                                    int rows,
                                    int period,
@@ -195,14 +204,9 @@ void rsx_many_series_one_param_f32(const float* __restrict__ prices_tm,
             f90 = 0.0f;
         }
 
-        float y;
+        float y = 50.0f;
         if (f88 < f90 && v20_ > 1e-10f) {
-            float v4 = (v14 / v20_ + 1.0f) * 50.0f;
-            if (v4 > 100.0f) v4 = 100.0f;
-            if (v4 < 0.0f) v4 = 0.0f;
-            y = v4;
-        } else {
-            y = 50.0f;
+            y = clamp_0_100((v14 / v20_ + 1.0f) * 50.0f);
         }
         out_tm[t * cols + s] = y;
     }

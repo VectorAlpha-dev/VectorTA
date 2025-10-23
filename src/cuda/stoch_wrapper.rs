@@ -112,22 +112,17 @@ impl CudaStoch {
         if combos.is_empty() {
             return Err(CudaStochError::InvalidInput("no parameter combinations".into()));
         }
-        let max_fkp = combos
-            .iter()
-            .map(|c| c.fastk_period.unwrap_or(14))
-            .max()
-            .unwrap_or(14);
+        let max_fkp = combos.iter().map(|c| c.fastk_period.unwrap_or(14)).max().unwrap_or(14);
         if len - first_valid < max_fkp {
             return Err(CudaStochError::InvalidInput(format!(
                 "not enough valid data for fastk {} (tail = {})",
-                max_fkp,
-                len - first_valid
+                max_fkp, len - first_valid
             )));
         }
 
-        // VRAM check (rough): close + hh + ll + kraw + 2*outputs
-        let rows = combos.len();
-        let est_bytes = (len * 4) * (1 /*close*/ + 1 /*hh*/ + 1 /*ll*/ + 1 /*kraw*/) + (rows * len * 4) * 2;
+        // Rough VRAM check: close + hh + ll + kraw + 2 * (rows*len outputs)
+        let rows_total = combos.len();
+        let est_bytes = (len * 4) * (1 + 1 + 1 + 1) + (rows_total * len * 4) * 2;
         if let Ok((free, _)) = mem_get_info() {
             let headroom = 64 * 1024 * 1024usize;
             if est_bytes.saturating_add(headroom) > free {
@@ -138,58 +133,67 @@ impl CudaStoch {
             }
         }
 
-        // Upload base inputs once
+        // Upload base CLOSE once
         let d_close = DeviceBuffer::from_slice(close_f32)
             .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
 
-        // Group rows by fastk to reuse raw %K
-        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
-        for (row, prm) in combos.iter().enumerate() {
-            let fkp = prm.fastk_period.unwrap_or(14);
-            groups.entry(fkp).or_default().push(row);
-        }
+        // Final outputs on device (row-major: [combos, len])
+        let total_out = rows_total * len;
+        let mut d_k: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }
+            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+        let mut d_d: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }
+            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
 
-        // Host accumulation buffers for final outputs
-        let mut host_k = vec![f32::NAN; combos.len() * len];
-        let mut host_d = vec![f32::NAN; combos.len() * len];
-        let selector = CudaMaSelector::new(0);
-
-        // Launch kernel handle
-        let func = self
+        // Kernel handles
+        let func_kraw = self
             .module
             .get_function("stoch_k_raw_from_hhll_f32")
             .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let block: BlockSize = (256, 1, 1).into();
-        let grid: GridSize = (1, 1, 1).into();
+        let func_pack = self
+            .module
+            .get_function("pack_row_broadcast_rowmajor_f32")
+            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
 
-        // Temporary device buffers (reused per group)
+        // Group parameter rows by fastk period so we reuse Kraw.
+        use std::collections::HashMap;
+        let mut by_fastk: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (row, prm) in combos.iter().enumerate() {
+            by_fastk.entry(prm.fastk_period.unwrap_or(14)).or_default().push(row);
+        }
+
+        // Reusable device temporaries
         let mut d_hh: Option<DeviceBuffer<f32>> = None;
         let mut d_ll: Option<DeviceBuffer<f32>> = None;
         let mut d_kraw: Option<DeviceBuffer<f32>> = None;
 
-        for (fkp, rows_in_group) in groups {
-            // Build hh/ll on host (use existing f64 helpers, then cast)
+        // Note: For smoothing stages we must pass the first index where the input is finite.
+        // This depends on the upstream stage:
+        //  - Kraw first valid: first_valid_ohlc + fastk - 1
+        //  - slowK first valid: (first_valid_kraw) + slowk_period - 1
+
+        // Helper: 1D launch config
+        let launch_1d = |n: usize| -> (GridSize, BlockSize) {
+            let block_x: u32 = 256;
+            let grid_x: u32 = ((n as u32) + block_x - 1) / block_x;
+            ((grid_x.max(1), 1, 1).into(), (block_x, 1, 1).into())
+        };
+
+        let norm = |s: &str| s.to_ascii_lowercase();
+
+        for (fkp, rows_in_group) in by_fastk {
+            // Build hh/ll on host (f64 helpers → cast to f32)
             let mut hh = vec![f32::NAN; len];
             let mut ll = vec![f32::NAN; len];
-            let warm = first_valid + fkp - 1;
             let high_f64: Vec<f64> = high_f32.iter().map(|&v| v as f64).collect();
             let low_f64: Vec<f64> = low_f32.iter().map(|&v| v as f64).collect();
             let highs = max_rolling(&high_f64[first_valid..], fkp)
                 .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             let lows = min_rolling(&low_f64[first_valid..], fkp)
                 .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
-            for (i, &v) in highs.iter().enumerate() {
-                if v.is_finite() {
-                    hh[first_valid + i] = v as f32;
-                }
-            }
-            for (i, &v) in lows.iter().enumerate() {
-                if v.is_finite() {
-                    ll[first_valid + i] = v as f32;
-                }
-            }
+            for (i, &v) in highs.iter().enumerate() { if v.is_finite() { hh[first_valid + i] = v as f32; } }
+            for (i, &v) in lows.iter().enumerate() { if v.is_finite() { ll[first_valid + i] = v as f32; } }
 
-            // H2D hh/ll and allocate kraw
+            // Ensure device buffers sized
             if d_hh.as_ref().map(|b| b.len()).unwrap_or(0) != len {
                 d_hh = Some(unsafe { DeviceBuffer::uninitialized(len) }
                     .map_err(|e| CudaStochError::Cuda(e.to_string()))?);
@@ -205,115 +209,244 @@ impl CudaStoch {
             let d_hh_ref = d_hh.as_mut().unwrap();
             let d_ll_ref = d_ll.as_mut().unwrap();
             let d_kraw_ref = d_kraw.as_mut().unwrap();
-            d_hh_ref.copy_from(&hh).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-            d_ll_ref.copy_from(&ll).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
 
-            // Launch raw %K kernel
+            // Async H2D hh/ll
             unsafe {
-                let mut p_close = d_close.as_device_ptr().as_raw();
-                let mut p_hh = d_hh_ref.as_device_ptr().as_raw();
-                let mut p_ll = d_ll_ref.as_device_ptr().as_raw();
-                let mut p_len = len as i32;
-                let mut p_fv = first_valid as i32;
-                let mut p_fastk = fkp as i32;
-                let mut p_out = d_kraw_ref.as_device_ptr().as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut p_close as *mut _ as *mut c_void,
-                    &mut p_hh as *mut _ as *mut c_void,
-                    &mut p_ll as *mut _ as *mut c_void,
-                    &mut p_len as *mut _ as *mut c_void,
-                    &mut p_fv as *mut _ as *mut c_void,
-                    &mut p_fastk as *mut _ as *mut c_void,
-                    &mut p_out as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
+                d_hh_ref
+                    .async_copy_from(&hh, &self.stream)
+                    .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                d_ll_ref
+                    .async_copy_from(&ll, &self.stream)
                     .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
             }
 
-            // Stage raw %K to pinned host once per group
-            let mut kraw_host: LockedBuffer<f32> = unsafe {
-                LockedBuffer::uninitialized(len).map_err(|e| CudaStochError::Cuda(e.to_string()))?
-            };
-            unsafe {
-                d_kraw_ref
-                    .async_copy_to(kraw_host.as_mut_slice(), &self.stream)
-                    .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+            // Launch raw %K (grid‑stride parallel)
+            {
+                let (grid, block) = launch_1d(len);
+                unsafe {
+                    let mut p_close = d_close.as_device_ptr().as_raw();
+                    let mut p_hh = d_hh_ref.as_device_ptr().as_raw();
+                    let mut p_ll = d_ll_ref.as_device_ptr().as_raw();
+                    let mut p_len = len as i32;
+                    let mut p_fv = first_valid as i32;
+                    let mut p_fastk = fkp as i32;
+                    let mut p_out = d_kraw_ref.as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut p_close as *mut _ as *mut c_void,
+                        &mut p_hh as *mut _ as *mut c_void,
+                        &mut p_ll as *mut _ as *mut c_void,
+                        &mut p_len as *mut _ as *mut c_void,
+                        &mut p_fv as *mut _ as *mut c_void,
+                        &mut p_fastk as *mut _ as *mut c_void,
+                        &mut p_out as *mut _ as *mut c_void,
+                    ];
+                    self.stream
+                        .launch(&func_kraw, grid, block, 0, args)
+                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                }
             }
-            self.stream
-                .synchronize()
-                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
 
-            let kraw_slice = kraw_host.as_slice();
-
-            // For each row in this fastk group: apply slow K and D smoothing via selector
+            // Partition rows by slowK settings
+            #[derive(Hash, Eq, PartialEq, Clone)]
+            struct SlowKKey { ty: String, p: usize }
+            let mut by_slowk: HashMap<SlowKKey, Vec<usize>> = HashMap::new();
             for &row in &rows_in_group {
                 let prm = &combos[row];
+                let ty = norm(prm.slowk_ma_type.as_deref().unwrap_or("sma"));
+                let p = prm.slowk_period.unwrap_or(3);
+                by_slowk.entry(SlowKKey { ty, p }).or_default().push(row);
+            }
 
-                // slow %K
-                let slowk_ma = prm
-                    .slowk_ma_type
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("sma");
-                let slowk_p = prm.slowk_period.unwrap_or(3);
-                let k_dev = selector
-                    .ma_to_device(slowk_ma, CudaMaData::SliceF32(kraw_slice), slowk_p)
-                    .map_err(|e| CudaStochError::Cuda(format!("slowK: {}", e)))?;
-                let mut k_row_host: LockedBuffer<f32> = unsafe {
-                    LockedBuffer::uninitialized(len)
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?
-                };
-                unsafe {
-                    k_dev
-                        .buf
-                        .async_copy_to(k_row_host.as_mut_slice(), &self.stream)
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-                }
-                self.stream
-                    .synchronize()
+            for (sk_key, rows_sk) in by_slowk {
+                let first_kraw = first_valid + fkp - 1;
+                let d_first_kraw = DeviceBuffer::from_slice(&[first_kraw as i32])
                     .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-                // copy into host_k row-major
-                host_k[row * len..(row + 1) * len].copy_from_slice(k_row_host.as_slice());
+                // Compute slowK once from device d_kraw_ref (1 column time-major)
+                let slowk_dev_buf = if sk_key.ty == "sma" {
+                    use crate::cuda::moving_averages::sma_wrapper::CudaSma;
+                    let sma = CudaSma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    let dev = sma
+                        .sma_multi_series_one_param_time_major_dev_from_device(
+                            d_kraw_ref, &d_first_kraw, 1, len, sk_key.p,
+                        )
+                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    dev.buf
+                } else if sk_key.ty == "ema" {
+                    // Fallback to host path (EMA lacks D2D variant currently)
+                    use crate::cuda::moving_averages::ema_wrapper::CudaEma;
+                    use crate::indicators::moving_averages::ema::EmaParams as EParams;
+                    let ema = CudaEma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    let mut kraw_host: LockedBuffer<f32> = unsafe {
+                        LockedBuffer::uninitialized(len)
+                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?
+                    };
+                    unsafe {
+                        d_kraw_ref
+                            .async_copy_to(kraw_host.as_mut_slice(), &self.stream)
+                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    }
+                    self.stream
+                        .synchronize()
+                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    let params = EParams { period: Some(sk_key.p) };
+                    let dev = ema
+                        .ema_many_series_one_param_time_major_dev(
+                            kraw_host.as_slice(), 1, len, &params,
+                        )
+                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    dev.buf
+                } else {
+                    // Generic MA via selector: copy once to host then run selector
+                    let selector = CudaMaSelector::new(0);
+                    let mut kraw_host: LockedBuffer<f32> = unsafe {
+                        LockedBuffer::uninitialized(len)
+                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?
+                    };
+                    unsafe {
+                        d_kraw_ref
+                            .async_copy_to(kraw_host.as_mut_slice(), &self.stream)
+                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    }
+                    self.stream
+                        .synchronize()
+                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    let dev = selector
+                        .ma_to_device(&sk_key.ty, CudaMaData::SliceF32(kraw_host.as_slice()), sk_key.p)
+                        .map_err(|e| CudaStochError::Cuda(format!("slowK: {}", e)))?;
+                    dev.buf
+                };
 
-                // %D over slowK
-                let slowd_ma = prm
-                    .slowd_ma_type
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("sma");
-                let slowd_p = prm.slowd_period.unwrap_or(3);
-                let d_dev = selector
-                    .ma_to_device(slowd_ma, CudaMaData::SliceF32(k_row_host.as_slice()), slowd_p)
-                    .map_err(|e| CudaStochError::Cuda(format!("slowD: {}", e)))?;
-                let mut d_row_host: LockedBuffer<f32> = unsafe {
-                    LockedBuffer::uninitialized(len)
-                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?
-                };
-                unsafe {
-                    d_dev
-                        .buf
-                        .async_copy_to(d_row_host.as_mut_slice(), &self.stream)
+                // Broadcast slowK to all K rows in this subgroup
+                {
+                    let idx_i32: Vec<i32> = rows_sk.iter().map(|&r| r as i32).collect();
+                    let d_rows = DeviceBuffer::from_slice(&idx_i32)
                         .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    let (grid, block) = launch_1d(len);
+                    unsafe {
+                        let mut p_src = slowk_dev_buf.as_device_ptr().as_raw();
+                        let mut p_len = len as i32;
+                        let mut p_rows = d_rows.as_device_ptr().as_raw();
+                        let mut p_nrows = rows_sk.len() as i32;
+                        let mut p_dst = d_k.as_device_ptr().as_raw();
+                        let mut p_stride = len as i32;
+                        let args: &mut [*mut c_void] = &mut [
+                            &mut p_src as *mut _ as *mut c_void,
+                            &mut p_len as *mut _ as *mut c_void,
+                            &mut p_rows as *mut _ as *mut c_void,
+                            &mut p_nrows as *mut _ as *mut c_void,
+                            &mut p_dst as *mut _ as *mut c_void,
+                            &mut p_stride as *mut _ as *mut c_void,
+                        ];
+                        self.stream
+                            .launch(&func_pack, grid, block, 0, args)
+                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    }
                 }
-                self.stream
-                    .synchronize()
-                    .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-                host_d[row * len..(row + 1) * len].copy_from_slice(d_row_host.as_slice());
+
+                // Partition by slowD settings
+                #[derive(Hash, Eq, PartialEq, Clone)]
+                struct SlowDKey { ty: String, p: usize }
+                let mut by_slowd: HashMap<SlowDKey, Vec<usize>> = HashMap::new();
+                for &row in &rows_sk {
+                    let prm = &combos[row];
+                    let ty = norm(prm.slowd_ma_type.as_deref().unwrap_or("sma"));
+                    let p = prm.slowd_period.unwrap_or(3);
+                    by_slowd.entry(SlowDKey { ty, p }).or_default().push(row);
+                }
+
+                for (sd_key, rows_sd) in by_slowd {
+                    let first_slowk = first_valid + fkp - 1 + sk_key.p - 1;
+                    let d_first_slowk = DeviceBuffer::from_slice(&[first_slowk as i32])
+                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    // slowD once from device slowK
+                    let slowd_dev_buf = if sd_key.ty == "sma" {
+                        use crate::cuda::moving_averages::sma_wrapper::CudaSma;
+                        let sma = CudaSma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        let dev = sma
+                            .sma_multi_series_one_param_time_major_dev_from_device(
+                                &slowk_dev_buf, &d_first_slowk, 1, len, sd_key.p,
+                            )
+                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        dev.buf
+                    } else if sd_key.ty == "ema" {
+                        use crate::cuda::moving_averages::ema_wrapper::CudaEma;
+                        use crate::indicators::moving_averages::ema::EmaParams as EParams;
+                        let ema = CudaEma::new(0).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        let mut slowk_host: LockedBuffer<f32> = unsafe {
+                            LockedBuffer::uninitialized(len)
+                                .map_err(|e| CudaStochError::Cuda(e.to_string()))?
+                        };
+                        unsafe {
+                            slowk_dev_buf
+                                .async_copy_to(slowk_host.as_mut_slice(), &self.stream)
+                                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        }
+                        self.stream
+                            .synchronize()
+                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        let params = EParams { period: Some(sd_key.p) };
+                        let dev = ema
+                            .ema_many_series_one_param_time_major_dev(
+                                slowk_host.as_slice(), 1, len, &params,
+                            )
+                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        dev.buf
+                    } else {
+                        let selector = CudaMaSelector::new(0);
+                        let mut slowk_host: LockedBuffer<f32> = unsafe {
+                            LockedBuffer::uninitialized(len)
+                                .map_err(|e| CudaStochError::Cuda(e.to_string()))?
+                        };
+                        unsafe {
+                            slowk_dev_buf
+                                .async_copy_to(slowk_host.as_mut_slice(), &self.stream)
+                                .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        }
+                        self.stream
+                            .synchronize()
+                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                        let dev = selector
+                            .ma_to_device(&sd_key.ty, CudaMaData::SliceF32(slowk_host.as_slice()), sd_key.p)
+                            .map_err(|e| CudaStochError::Cuda(format!("slowD: {}", e)))?;
+                        dev.buf
+                    };
+
+                    // Broadcast slowD into D matrix rows
+                    let idx_i32: Vec<i32> = rows_sd.iter().map(|&r| r as i32).collect();
+                    let d_rows = DeviceBuffer::from_slice(&idx_i32)
+                        .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    let (grid, block) = launch_1d(len);
+                    unsafe {
+                        let mut p_src = slowd_dev_buf.as_device_ptr().as_raw();
+                        let mut p_len = len as i32;
+                        let mut p_rows = d_rows.as_device_ptr().as_raw();
+                        let mut p_nrows = rows_sd.len() as i32;
+                        let mut p_dst = d_d.as_device_ptr().as_raw();
+                        let mut p_stride = len as i32;
+                        let args: &mut [*mut c_void] = &mut [
+                            &mut p_src as *mut _ as *mut c_void,
+                            &mut p_len as *mut _ as *mut c_void,
+                            &mut p_rows as *mut _ as *mut c_void,
+                            &mut p_nrows as *mut _ as *mut c_void,
+                            &mut p_dst as *mut _ as *mut c_void,
+                            &mut p_stride as *mut _ as *mut c_void,
+                        ];
+                        self.stream
+                            .launch(&func_pack, grid, block, 0, args)
+                            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
+                    }
+                }
             }
         }
 
-        // Upload final K and D matrices
-        let mut d_k: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(host_k.len()) }
+        // Ensure completion
+        self.stream
+            .synchronize()
             .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        let mut d_d: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(host_d.len()) }
-            .map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        d_k.copy_from(&host_k).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
-        d_d.copy_from(&host_d).map_err(|e| CudaStochError::Cuda(e.to_string()))?;
 
         Ok(CudaStochBatch {
-            k: DeviceArrayF32 { buf: d_k, rows: combos.len(), cols: len },
-            d: DeviceArrayF32 { buf: d_d, rows: combos.len(), cols: len },
+            k: DeviceArrayF32 { buf: d_k, rows: rows_total, cols: len },
+            d: DeviceArrayF32 { buf: d_d, rows: rows_total, cols: len },
             combos,
         })
     }
