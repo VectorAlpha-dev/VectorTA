@@ -90,7 +90,8 @@ impl CudaStochf {
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))
             .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
+            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         Ok(Self { module, stream, _context: context, policy })
@@ -133,40 +134,52 @@ impl CudaStochf {
         let max_fk = combos.iter().map(|p| p.fastk_period.unwrap()).max().unwrap();
         if len - first_valid < max_fk { return Err(CudaStochfError::InvalidInput("insufficient data after first_valid".into())); }
 
-        // VRAM estimate (inputs + WILLR tables + outputs)
+        // ── VRAM estimate (device): close + WILLR tables + param arrays + outputs
+        // We do NOT upload high/low for the batch path.
         let rows = combos.len();
-        let in_bytes = 3 * len * std::mem::size_of::<f32>();
-        // Rough table size upper-bound: 4 arrays ~ few * len each
+        let in_bytes_close = len * std::mem::size_of::<f32>();
+        let params_bytes   = 3 * rows * std::mem::size_of::<i32>();
+        let out_bytes      = 2 * rows * len * std::mem::size_of::<f32>();
+        // Rough WILLR table upper bound (host->device): keep as ballpark
         let tables_overhead = 8 * len * std::mem::size_of::<f32>();
-        let params_bytes = 3 * rows * std::mem::size_of::<i32>();
-        let out_bytes = 2 * rows * len * std::mem::size_of::<f32>();
-        let required = in_bytes + tables_overhead + params_bytes + out_bytes;
+        let required = in_bytes_close + tables_overhead + params_bytes + out_bytes;
         if !Self::mem_ok(required, 64 * 1024 * 1024) {
-            return Err(CudaStochfError::InvalidInput(format!("estimated device memory {:.2} MB exceeds free VRAM", required as f64 / (1024.0*1024.0))));
+            return Err(CudaStochfError::InvalidInput(format!(
+                "estimated device memory {:.2} MB exceeds free VRAM",
+                required as f64 / (1024.0*1024.0)
+            )));
         }
 
         // Build WILLR tables once on host (reuse across rows)
         let tables = build_willr_gpu_tables(high_f32, low_f32);
 
-        // Upload inputs (async with pinned host buffers when large)
-        let (d_high, d_low, d_close) = if len >= 131072 {
-            // Use pinned host buffers for better H2D throughput
-            let h_high = LockedBuffer::from_slice(high_f32).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-            let h_low  = LockedBuffer::from_slice(low_f32 ).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-            let h_close= LockedBuffer::from_slice(close_f32).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-            let mut dh = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-            let mut dl = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-            let mut dc = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-            unsafe { dh.async_copy_from(&h_high, &self.stream) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-            unsafe { dl.async_copy_from(&h_low , &self.stream) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-            unsafe { dc.async_copy_from(&h_close, &self.stream) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-            (dh, dl, dc)
+        // Precise VRAM check using actual table sizes
+        let tables_bytes =
+            tables.log2.len() * std::mem::size_of::<i32>() +
+            tables.level_offsets.len() * std::mem::size_of::<i32>() +
+            tables.st_max.len() * std::mem::size_of::<f32>() +
+            tables.st_min.len() * std::mem::size_of::<f32>() +
+            tables.nan_psum.len() * std::mem::size_of::<i32>();
+        let required_exact = (len * std::mem::size_of::<f32>()) + tables_bytes + params_bytes + out_bytes;
+        if !Self::mem_ok(required_exact, 64 * 1024 * 1024) {
+            return Err(CudaStochfError::InvalidInput(format!(
+                "device memory required {:.2} MB exceeds free VRAM",
+                required_exact as f64 / (1024.0*1024.0)
+            )));
+        }
+
+        // Upload ONLY close (kernel does not deref high/low in batch path)
+        let use_pinned = len >= 131_072;
+        let mut pinned_close: Option<LockedBuffer<f32>> = None;
+        let d_close = if use_pinned {
+            let host = LockedBuffer::from_slice(close_f32).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            let mut dc = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
+                .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            unsafe { dc.async_copy_from(&host, &self.stream) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            pinned_close = Some(host);
+            dc
         } else {
-            (
-                DeviceBuffer::from_slice(high_f32).map_err(|e| CudaStochfError::Cuda(e.to_string()))?,
-                DeviceBuffer::from_slice(low_f32 ).map_err(|e| CudaStochfError::Cuda(e.to_string()))?,
-                DeviceBuffer::from_slice(close_f32).map_err(|e| CudaStochfError::Cuda(e.to_string()))?,
-            )
+            DeviceBuffer::from_slice(close_f32).map_err(|e| CudaStochfError::Cuda(e.to_string()))?
         };
 
         // Upload WILLR tables
@@ -180,45 +193,47 @@ impl CudaStochf {
         let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         let mut d_d = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
 
-        // Prepare kernel
-        let mut func: Function = self.module.get_function("stochf_batch_f32").map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
-        let combos_per_launch = 65_535usize; // grid.x limit
-
-        // Flatten param arrays once, chunk upload per launch
+        // Flatten param arrays once, upload once, then offset per launch
         let fk_host: Vec<i32> = combos.iter().map(|p| p.fastk_period.unwrap() as i32).collect();
         let fd_host: Vec<i32> = combos.iter().map(|p| p.fastd_period.unwrap() as i32).collect();
         let mt_host: Vec<i32> = combos.iter().map(|p| p.fastd_matype.unwrap_or(0) as i32).collect();
 
+        let d_fk_all = DeviceBuffer::from_slice(&fk_host).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+        let d_fd_all = DeviceBuffer::from_slice(&fd_host).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+        let d_mt_all = DeviceBuffer::from_slice(&mt_host).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+
+        // Prepare kernel
+        let mut func: Function = self.module
+            .get_function("stochf_batch_f32")
+            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+        let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
+        let combos_per_launch = 65_535usize; // grid.x limit
         let mut row0 = 0usize;
         while row0 < rows {
             let n = (rows - row0).min(combos_per_launch);
-            let d_fk = DeviceBuffer::from_slice(&fk_host[row0..row0 + n]).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-            let d_fd = DeviceBuffer::from_slice(&fd_host[row0..row0 + n]).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-            let d_mt = DeviceBuffer::from_slice(&mt_host[row0..row0 + n]).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-
             let grid: GridSize = (n as u32, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
 
             unsafe {
-                let mut high_ptr  = d_high.as_device_ptr().as_raw();
-                let mut low_ptr   = d_low.as_device_ptr().as_raw();
+                // Kernel ignores high/low; pass null device pointers
+                let mut high_ptr: u64 = 0;
+                let mut low_ptr:  u64 = 0;
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
                 let mut log2_ptr  = d_log2.as_device_ptr().as_raw();
                 let mut offs_ptr  = d_offs.as_device_ptr().as_raw();
                 let mut stmax_ptr = d_st_max.as_device_ptr().as_raw();
                 let mut stmin_ptr = d_st_min.as_device_ptr().as_raw();
                 let mut npsum_ptr = d_nan_ps.as_device_ptr().as_raw();
-                let mut fk_ptr    = d_fk.as_device_ptr().as_raw();
-                let mut fd_ptr    = d_fd.as_device_ptr().as_raw();
-                let mut mt_ptr    = d_mt.as_device_ptr().as_raw();
+                let mut fk_ptr    = d_fk_all.as_device_ptr().offset(row0 as isize).as_raw();
+                let mut fd_ptr    = d_fd_all.as_device_ptr().offset(row0 as isize).as_raw();
+                let mut mt_ptr    = d_mt_all.as_device_ptr().offset(row0 as isize).as_raw();
                 let mut len_i     = len as i32;
                 let mut first_i   = first_valid as i32;
                 let mut levels_i  = (tables.level_offsets.len() as i32);
                 let mut n_i       = n as i32;
-                let mut k_out_ptr = unsafe { d_k.as_device_ptr().offset((row0 * len) as isize).as_raw() };
-                let mut d_out_ptr = unsafe { d_d.as_device_ptr().offset((row0 * len) as isize).as_raw() };
+                let mut k_out_ptr = d_k.as_device_ptr().offset((row0 * len) as isize).as_raw();
+                let mut d_out_ptr = d_d.as_device_ptr().offset((row0 * len) as isize).as_raw();
 
                 let args: &mut [*mut c_void] = &mut [
                     &mut high_ptr  as *mut _ as *mut c_void,
@@ -239,7 +254,9 @@ impl CudaStochf {
                     &mut k_out_ptr as *mut _ as *mut c_void,
                     &mut d_out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
             }
             row0 += n;
         }
@@ -286,16 +303,44 @@ impl CudaStochf {
             first_valids[s] = f;
         }
 
-        // Upload inputs
-        let d_h = DeviceBuffer::from_slice(high_tm_f32).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let d_l = DeviceBuffer::from_slice(low_tm_f32 ).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let d_c = DeviceBuffer::from_slice(close_tm_f32 ).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+        // Upload inputs (use pinned host and async copies when large)
+        let tm_len = cols * rows;
+        let mut pinned_h: Option<LockedBuffer<f32>> = None;
+        let mut pinned_l: Option<LockedBuffer<f32>> = None;
+        let mut pinned_c: Option<LockedBuffer<f32>> = None;
+        let (d_h, d_l, d_c) = if tm_len >= 131_072 {
+            let h_h = LockedBuffer::from_slice(high_tm_f32).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            let h_l = LockedBuffer::from_slice(low_tm_f32 ).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            let h_c = LockedBuffer::from_slice(close_tm_f32 ).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            let mut d_h = unsafe { DeviceBuffer::<f32>::uninitialized_async(tm_len, &self.stream) }
+                .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            let mut d_l = unsafe { DeviceBuffer::<f32>::uninitialized_async(tm_len, &self.stream) }
+                .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            let mut d_c = unsafe { DeviceBuffer::<f32>::uninitialized_async(tm_len, &self.stream) }
+                .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            unsafe { d_h.async_copy_from(&h_h, &self.stream) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            unsafe { d_l.async_copy_from(&h_l, &self.stream) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            unsafe { d_c.async_copy_from(&h_c, &self.stream) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            pinned_h = Some(h_h);
+            pinned_l = Some(h_l);
+            pinned_c = Some(h_c);
+            (d_h, d_l, d_c)
+        } else {
+            (
+                DeviceBuffer::from_slice(high_tm_f32).map_err(|e| CudaStochfError::Cuda(e.to_string()))?,
+                DeviceBuffer::from_slice(low_tm_f32 ).map_err(|e| CudaStochfError::Cuda(e.to_string()))?,
+                DeviceBuffer::from_slice(close_tm_f32 ).map_err(|e| CudaStochfError::Cuda(e.to_string()))?,
+            )
+        };
         let d_fv= DeviceBuffer::from_slice(&first_valids ).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
 
         let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         let mut d_d = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }.map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
 
-        let mut func: Function = self.module.get_function("stochf_many_series_one_param_f32").map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+        // Prepare kernel
+        let mut func: Function = self.module
+            .get_function("stochf_many_series_one_param_f32")
+            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
@@ -327,8 +372,13 @@ impl CudaStochf {
                 &mut ko_ptr as *mut _ as *mut c_void,
                 &mut do_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         }
+
+        // Ensure results are ready (match batch path semantics) and keep pinned buffers alive
+        self.stream.synchronize().map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
+        drop(pinned_h); drop(pinned_l); drop(pinned_c);
 
         Ok((
             DeviceArrayF32 { buf: d_k, rows, cols },
@@ -360,7 +410,8 @@ pub mod benches {
     }
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        // Batch kernel reads only close on device (HH/LL via WILLR tables)
+        let in_bytes = 1 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = 2 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }

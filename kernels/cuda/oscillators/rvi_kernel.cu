@@ -89,6 +89,261 @@ static __device__ __forceinline__ float smooth_ema_push(
     }
 }
 
+// Double-precision EMA push that returns double (avoids FP32 flush-to-zero)
+static __device__ __forceinline__ double smooth_ema_push_d(
+    double x,
+    bool* __restrict__ started,
+    double* __restrict__ seed_sum,
+    int* __restrict__ seed_cnt,
+    int ma_len,
+    double inv_m,
+    double alpha,
+    double one_m_alpha,
+    double* __restrict__ prev)
+{
+    if (!isfinite(x)) {
+        *started = false; *seed_sum = 0.0; *seed_cnt = 0; return NAN;
+    }
+    if (!*started) {
+        *seed_sum += x;
+        (*seed_cnt)++;
+        if (*seed_cnt == ma_len) {
+            *prev = (*seed_sum) * inv_m;
+            *started = true;
+            return *prev;
+        }
+        return NAN;
+    } else {
+        *prev = fma(one_m_alpha, *prev, alpha * x);
+        return *prev;
+    }
+}
+
+// ---------- New: FP32 compensated summation helpers ----------
+static __device__ __forceinline__ void kahan_add(float x, float &sum, float &comp) {
+    float t = sum + x;
+    if (fabsf(sum) >= fabsf(x)) comp += (sum - t) + x;
+    else                        comp += (x   - t) + sum;
+    sum = t;
+}
+
+static __device__ __forceinline__ void kahan_add_diff(float x_add_minus_y, float &sum, float &comp) {
+    kahan_add(x_add_minus_y, sum, comp);
+}
+
+// ---------- New: segmented prefix sums & run-length ----------
+extern "C" __global__
+void rvi_segprefix_f32(const float* __restrict__ prices,
+                       int len,
+                       float* __restrict__ pref,   // S
+                       float* __restrict__ pref2,  // Q
+                       int*   __restrict__ runlen) // R
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    float s = 0.0f, q = 0.0f, cs = 0.0f, cq = 0.0f;
+    int   r = 0;
+
+    float prev = NAN;
+    for (int i = 0; i < len; ++i) {
+        const float x = prices[i];
+        if (!isfinite(x)) {
+            s = q = cs = cq = 0.0f;
+            r = 0; prev = NAN;
+            pref[i] = 0.0f; pref2[i] = 0.0f; runlen[i] = 0;
+            continue;
+        }
+        if (isfinite(prev)) {
+            kahan_add(x, s, cs);
+            const float xx = x * x;
+            kahan_add(xx, q, cq);
+            r += 1;
+        } else {
+            s = x; q = x * x; cs = cq = 0.0f; r = 1;
+        }
+        pref[i]  = s + cs;
+        pref2[i] = q + cq;
+        runlen[i]= r;
+        prev = x;
+    }
+}
+
+// ---------- New: SMA / EMA push (FP32 with compensation) ----------
+static __device__ __forceinline__ float smooth_sma_push_f32(
+    float x,
+    float* __restrict__ ring,
+    int* __restrict__ head,
+    int* __restrict__ count,
+    int ma_len,
+    float* __restrict__ sum,
+    float* __restrict__ comp,
+    float inv_m)
+{
+    if (!isfinite(x)) { // reset on gap
+        *sum = 0.0f; *comp = 0.0f; *count = 0; *head = 0; return NAN;
+    }
+    if (*count < ma_len) {
+        ring[*head] = x;
+        kahan_add(x, *sum, *comp);
+        *head = (*head + 1 == ma_len) ? 0 : *head + 1;
+        (*count)++;
+        return (*count == ma_len) ? (*sum) * inv_m : NAN;
+    } else {
+        const float old = ring[*head];
+        ring[*head] = x;
+        *head = (*head + 1 == ma_len) ? 0 : *head + 1;
+        kahan_add_diff(x - old, *sum, *comp);
+        return (*sum) * inv_m;
+    }
+}
+
+static __device__ __forceinline__ float smooth_ema_push_f32(
+    float x,
+    bool* __restrict__ started,
+    float* __restrict__ seed_sum,
+    float* __restrict__ seed_comp,
+    int* __restrict__ seed_cnt,
+    int ma_len,
+    float inv_m,
+    float alpha,
+    float one_m_alpha,
+    float* __restrict__ prev)
+{
+    if (!isfinite(x)) {
+        *started = false; *seed_sum = 0.0f; *seed_comp = 0.0f; *seed_cnt = 0; return NAN;
+    }
+    if (!*started) {
+        kahan_add(x, *seed_sum, *seed_comp);
+        (*seed_cnt)++;
+        if (*seed_cnt == ma_len) {
+            *prev = (*seed_sum) * inv_m;   // SMA seed
+            *started = true;
+            return *prev;
+        }
+        return NAN;
+    } else {
+        *prev = fmaf(one_m_alpha, *prev, alpha * x);
+        return *prev;
+    }
+}
+
+// ---------- New: one series × many params (StdDev via prefix) ----------
+extern "C" __global__
+void rvi_batch_stddev_from_prefix_f32(const float* __restrict__ prices,
+                                      const float* __restrict__ pref,    // S
+                                      const float* __restrict__ pref2,   // Q
+                                      const int*   __restrict__ runlen,  // R
+                                      const int* __restrict__ periods,
+                                      const int* __restrict__ ma_lens,
+                                      const int* __restrict__ matypes,
+                                      int series_len,
+                                      int first_valid,
+                                      int n_combos,
+                                      int max_ma_len,
+                                      const int* __restrict__ row_ids,   // maps local row -> global row id
+                                      float* __restrict__ out)
+{
+    const int row = blockIdx.x;              // one block per combo
+    if (row >= n_combos) return;
+    if (threadIdx.x != 0) return;            // single-thread scan per row
+
+    const int period = periods[row];
+    const int ma_len = ma_lens[row];
+    const int matype = matypes[row];
+    if (period <= 0 || ma_len <= 0) return;
+
+    // Shared memory layout: [ up_ring | dn_ring ]
+    extern __shared__ unsigned char shraw[];
+    float* up_ring = reinterpret_cast<float*>(shraw);
+    float* dn_ring = up_ring + max_ma_len;
+
+    const int global_row = row_ids ? row_ids[row] : row; // default to contiguous if null
+    const int base = global_row * series_len;
+    const int warm = first_valid + (period - 1) + (ma_len - 1);
+
+    // Warmup NaNs
+    for (int i = 0; i < ((warm < series_len) ? warm : series_len); ++i) out[base + i] = NAN;
+    if (warm >= series_len) return;
+
+    // Smoothing state (FP64 to improve parity with CPU)
+    const double inv_m_d = 1.0 / (double)ma_len;
+    const double alpha_d  = 2.0 / ((double)ma_len + 1.0);
+    const double one_m_alpha_d = 1.0 - alpha_d;
+
+    bool  up_started = false, dn_started = false;
+    double up_seed_sum = 0.0, dn_seed_sum = 0.0;
+    int   up_seed_cnt = 0,    dn_seed_cnt = 0;
+
+    int   up_h = 0, dn_h = 0, up_cnt = 0, dn_cnt = 0;
+    double up_sum = 0.0, dn_sum = 0.0;
+    double up_prev = 0.0, dn_prev = 0.0;
+
+    float prev = prices[0];
+
+    for (int i = 0; i < series_len; ++i) {
+        const float x = prices[i];
+
+        double dd;
+        if (i == 0 || !isfinite(x) || !isfinite(prev)) dd = NAN; else dd = (double)x - (double)prev;
+        prev = x;
+
+        float dev;
+        if (i + 1 < period) {
+            dev = NAN;
+        } else if (runlen[i] < period) {
+            dev = NAN;
+        } else {
+            // Compose variance in FP64 for improved stability/parity
+            double s = (double)(pref[i]  - ((i == period - 1) ? 0.f : pref[i - period]));
+            double q = (double)(pref2[i] - ((i == period - 1) ? 0.f : pref2[i - period]));
+            const double invP = 1.0 / (double)period;
+            const double mean = s * invP;
+            const double var  = fmax(0.0, fma(-mean, mean, q * invP));
+            dev = (float)sqrt(var);
+        }
+
+        float up_i, dn_i;
+        if (!isfinite(dd) || !isfinite(dev))      { up_i = NAN;  dn_i = NAN; }
+        else if (dd > 0.0)                       { up_i = dev;  dn_i = 0.0f; }
+        else if (dd < 0.0)                       { up_i = 0.0f; dn_i = dev;  }
+        else                                     { up_i = 0.0f; dn_i = 0.0f; }
+
+        float up_s, dn_s;
+        if (matype == 0) {
+            up_s = smooth_sma_push(up_i, up_ring, &up_h, &up_cnt, ma_len, &up_sum, inv_m_d);
+            dn_s = smooth_sma_push(dn_i, dn_ring, &dn_h, &dn_cnt, ma_len, &dn_sum, inv_m_d);
+        } else {
+            up_s = smooth_ema_push(up_i, &up_started, &up_seed_sum, &up_seed_cnt, ma_len, inv_m_d, alpha_d, one_m_alpha_d, &up_prev);
+            dn_s = smooth_ema_push(dn_i, &dn_started, &dn_seed_sum, &dn_seed_cnt, ma_len, inv_m_d, alpha_d, one_m_alpha_d, &dn_prev);
+        }
+
+        if (i >= warm) {
+            if (!isfinite(up_s) || !isfinite(dn_s)) {
+                out[base + i] = NAN;
+            } else {
+                const double denom_d = (double)up_s + (double)dn_s;
+                out[base + i] = (fabs(denom_d) <= 1e-15) ? NAN : (100.0f * (up_s / (float)denom_d));
+            }
+        }
+    }
+}
+
+// ---------- New: scatter helper to place contiguous rows into scattered slots ----------
+extern "C" __global__
+void scatter_rows_f32(const float* __restrict__ src,
+                      int src_rows,
+                      int len,
+                      const int* __restrict__ row_ids,
+                      float* __restrict__ dst) {
+    const int row = blockIdx.x;
+    if (row >= src_rows) return;
+    const int dst_row = row_ids[row];
+    const int src_base = row * len;
+    const int dst_base = dst_row * len;
+    for (int i = threadIdx.x; i < len; i += blockDim.x) {
+        dst[dst_base + i] = src[src_base + i];
+    }
+}
+
 // Compute one RVI row (single series) sequentially. Uses dynamic shared memory layout:
 // [ up_ring (max_ma_len floats) | dn_ring (max_ma_len floats) | dev_ring (max_period floats) | vflag (max_period bytes) ]
 static __device__ __forceinline__ void rvi_compute_series(
@@ -238,21 +493,23 @@ static __device__ __forceinline__ void rvi_compute_series(
             up_i = 0.0f; dn_i = dev;
         } else { up_i = 0.0f; dn_i = 0.0f; }
 
-        float up_s, dn_s;
+        double up_sd, dn_sd; float up_s, dn_s;
         if (matype == 0) {
             up_s = smooth_sma_push(up_i, up_ring, &up_h, &up_cnt, ma_len, &up_sum, inv_m);
             dn_s = smooth_sma_push(dn_i, dn_ring, &dn_h, &dn_cnt, ma_len, &dn_sum, inv_m);
+            up_sd = (double)up_s; dn_sd = (double)dn_s;
         } else {
-            up_s = smooth_ema_push(up_i, &up_started, &up_seed_sum, &up_seed_cnt, ma_len, inv_m, alpha, one_m_alpha, &up_prev);
-            dn_s = smooth_ema_push(dn_i, &dn_started, &dn_seed_sum, &dn_seed_cnt, ma_len, inv_m, alpha, one_m_alpha, &dn_prev);
+            up_sd = smooth_ema_push_d((double)up_i, &up_started, &up_seed_sum, &up_seed_cnt, ma_len, inv_m, alpha, one_m_alpha, &up_prev);
+            dn_sd = smooth_ema_push_d((double)dn_i, &dn_started, &dn_seed_sum, &dn_seed_cnt, ma_len, inv_m, alpha, one_m_alpha, &dn_prev);
+            up_s = (float)up_sd; dn_s = (float)dn_sd;
         }
 
         if (i >= warm) {
             if (!isfinite(up_s) || !isfinite(dn_s)) {
                 out[i] = NAN;
             } else {
-                const double denom_d = (double)up_s + (double)dn_s;
-                out[i] = (fabs(denom_d) <= 1e-15) ? NAN : (100.0f * (up_s / (float)denom_d));
+                const double denom_d = up_sd + dn_sd;
+                out[i] = (fabs(denom_d) <= 1e-15) ? NAN : (float)(100.0 * (up_sd / denom_d));
             }
         }
     }

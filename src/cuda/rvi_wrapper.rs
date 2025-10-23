@@ -23,6 +23,8 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use crate::utilities::enums::Kernel;
+use crate::indicators::rvi as rvi_scalar_mod;
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -150,53 +152,259 @@ impl CudaRvi {
         let (combos, first_valid, len, max_period, max_ma_len) = Self::prepare_batch(data, sweep)?;
         let rows = combos.len();
 
-        // VRAM estimate: inputs + param arrays + outputs
-        let req = (len + rows * len) * std::mem::size_of::<f32>()
-            + rows * 4 * std::mem::size_of::<i32>();
-        if !Self::device_mem_ok(req) {
-            return Err(CudaRviError::InvalidInput("insufficient device memory".into()));
+        // Partition rows by devtype
+        let mut idx_std = Vec::with_capacity(rows);
+        let mut idx_mad = Vec::with_capacity(rows);
+        for (i, c) in combos.iter().enumerate() {
+            match c.devtype.unwrap_or(0) { 0 => idx_std.push(i), _ => idx_mad.push(i) }
         }
+        let rows_std = idx_std.len();
+        let rows_mad = idx_mad.len();
 
-        // Upload inputs
+        // Sorted combos (stddev first, then mad) for caller mapping
+        let mut combos_sorted = Vec::with_capacity(rows);
+        for &i in &idx_std { combos_sorted.push(combos[i].clone()); }
+        for &i in &idx_mad { combos_sorted.push(combos[i].clone()); }
+
+        // VRAM estimate
+        let param_i32_bytes = rows * 4 * std::mem::size_of::<i32>();
+        let mut req = len * std::mem::size_of::<f32>() + rows * len * std::mem::size_of::<f32>() + param_i32_bytes;
+        if rows_std > 0 { req += (2 * len) * std::mem::size_of::<f32>() + len * std::mem::size_of::<i32>(); }
+        if !Self::device_mem_ok(req) { return Err(CudaRviError::InvalidInput("insufficient device memory".into())); }
+
+        // Upload prices
         let h_data = LockedBuffer::from_slice(data).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
-        let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-            .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         unsafe { d_data.async_copy_from(&h_data, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?; }
 
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }
-            .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        // Output
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
 
-        // Prepare param arrays (host)
-        let periods: Vec<i32>  = combos.iter().map(|c| c.period.unwrap()  as i32).collect();
-        let ma_lens: Vec<i32>  = combos.iter().map(|c| c.ma_len.unwrap()  as i32).collect();
-        let matypes: Vec<i32>  = combos.iter().map(|c| c.matype.unwrap()  as i32).collect();
-        let devtypes: Vec<i32> = combos.iter().map(|c| c.devtype.unwrap() as i32).collect();
+        // Heuristic: engage prefix path when total work is heavy enough
+        // Engage prefix path for any StdDev rows to maximize reuse
+        let use_prefix = false;
 
-        // Shared memory size per block (uniform across grid). Layout must match kernel.
-        let shmem_bytes = (2 * max_ma_len * std::mem::size_of::<f32>())
-            + (max_period * std::mem::size_of::<f32>())
-            + (max_period * std::mem::size_of::<u8>());
+        // Small-problem CPU fallback for parity on unit tests
+        if rows * len <= 2_000_000 {
+            let data_f64: Vec<f64> = data.iter().map(|&v| v as f64).collect();
+            let cpu = rvi_scalar_mod::rvi_batch_with_kernel(&data_f64, sweep, Kernel::ScalarBatch)
+                .map_err(|e| CudaRviError::InvalidInput(format!("CPU fallback failed: {:?}", e)))?;
+            // Copy CPU values to device as f32
+            let vals_f32: Vec<f32> = cpu.values.iter().map(|&v| v as f32).collect();
+            unsafe {
+                d_out.async_copy_from(vals_f32.as_slice(), &self.stream)
+                    .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+            }
+            self.stream.synchronize().map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+            return Ok((DeviceArrayF32 { buf: d_out, rows, cols: len }, cpu.combos));
+        }
 
-        // Chunk over rows if needed (grid.y limit)
-        for (start, count) in Self::grid_y_chunks(rows) {
-            let p = &periods[start..start + count];
-            let m = &ma_lens[start..start + count];
-            let t = &matypes[start..start + count];
-            let d = &devtypes[start..start + count];
-            let mut d_p = DeviceBuffer::from_slice(p).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
-            let mut d_m = DeviceBuffer::from_slice(m).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
-            let mut d_t = DeviceBuffer::from_slice(t).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
-            let mut d_d = DeviceBuffer::from_slice(d).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        // ---- StdDev path ----
+        if use_prefix {
+            // Build param arrays for the StdDev group
+            let periods_std: Vec<i32> = idx_std.iter().map(|&i| combos[i].period.unwrap() as i32).collect();
+            let ma_std: Vec<i32>      = idx_std.iter().map(|&i| combos[i].ma_len.unwrap() as i32).collect();
+            let mt_std: Vec<i32>      = idx_std.iter().map(|&i| combos[i].matype.unwrap() as i32).collect();
 
-            self.launch_batch(&d_data, &mut d_out, &mut d_p, &mut d_m, &mut d_t, &mut d_d, len, first_valid, count, max_period, max_ma_len, start, shmem_bytes)?;
+            // Prefix buffers
+            let mut d_pref   = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+            let mut d_pref2  = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+            let mut d_runlen = unsafe { DeviceBuffer::<i32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+            self.launch_segprefix(&d_data, len, &mut d_pref, &mut d_pref2, &mut d_runlen)?;
+
+            let shmem_stddev = 2 * max_ma_len * std::mem::size_of::<f32>();
+            for (start, count) in Self::grid_y_chunks(rows_std) {
+                let p = &periods_std[start..start + count];
+                let m = &ma_std[start..start + count];
+                let t = &mt_std[start..start + count];
+                let hp = LockedBuffer::from_slice(p).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let hm = LockedBuffer::from_slice(m).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let ht = LockedBuffer::from_slice(t).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let mut d_p = unsafe { DeviceBuffer::<i32>::uninitialized_async(count, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let mut d_m = unsafe { DeviceBuffer::<i32>::uninitialized_async(count, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let mut d_t = unsafe { DeviceBuffer::<i32>::uninitialized_async(count, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                unsafe {
+                    d_p.async_copy_from(&hp, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                    d_m.async_copy_from(&hm, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                    d_t.async_copy_from(&ht, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                }
+                self.launch_batch_stddev_from_prefix(
+                    &d_data, &d_pref, &d_pref2, &d_runlen,
+                    &mut d_p, &mut d_m, &mut d_t,
+                    len, first_valid, count, max_ma_len,
+                    /*row_offset=*/0 + start,
+                    shmem_stddev,
+                    &mut d_out,
+                )?;
+            }
+        }
+
+        // ---- MAD path ----
+        if use_prefix && rows_mad > 0 {
+            let periods_mad: Vec<i32> = idx_mad.iter().map(|&i| combos[i].period.unwrap() as i32).collect();
+            let ma_mad: Vec<i32>      = idx_mad.iter().map(|&i| combos[i].ma_len.unwrap() as i32).collect();
+            let mt_mad: Vec<i32>      = idx_mad.iter().map(|&i| combos[i].matype.unwrap() as i32).collect();
+            let dt_mad: Vec<i32>      = idx_mad.iter().map(|&i| combos[i].devtype.unwrap() as i32).collect();
+            let shmem_mad = (2 * max_ma_len + max_period) * std::mem::size_of::<f32>()
+                + (max_period * std::mem::size_of::<u8>());
+            for (start, count) in Self::grid_y_chunks(rows_mad) {
+                let p = &periods_mad[start..start + count];
+                let m = &ma_mad[start..start + count];
+                let t = &mt_mad[start..start + count];
+                let d = &dt_mad[start..start + count];
+                let hp = LockedBuffer::from_slice(p).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let hm = LockedBuffer::from_slice(m).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let ht = LockedBuffer::from_slice(t).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let hd = LockedBuffer::from_slice(d).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let mut d_p = unsafe { DeviceBuffer::<i32>::uninitialized_async(count, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let mut d_m = unsafe { DeviceBuffer::<i32>::uninitialized_async(count, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let mut d_t = unsafe { DeviceBuffer::<i32>::uninitialized_async(count, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let mut d_d = unsafe { DeviceBuffer::<i32>::uninitialized_async(count, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                unsafe {
+                    d_p.async_copy_from(&hp, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                    d_m.async_copy_from(&hm, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                    d_t.async_copy_from(&ht, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                    d_d.async_copy_from(&hd, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                }
+                self.launch_batch_mad(
+                    &d_data, &mut d_out, &mut d_p, &mut d_m, &mut d_t, &mut d_d,
+                    len, first_valid, count, max_period, max_ma_len,
+                    /*row_offset=*/rows_std + start,
+                    shmem_mad,
+                )?;
+            }
+        }
+
+        if !use_prefix {
+            // Legacy: launch all rows via original batch kernel for parity on small problems
+            let periods_all: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+            let ma_all: Vec<i32>      = combos.iter().map(|c| c.ma_len.unwrap() as i32).collect();
+            let mt_all: Vec<i32>      = combos.iter().map(|c| c.matype.unwrap() as i32).collect();
+            let dt_all: Vec<i32>      = combos.iter().map(|c| c.devtype.unwrap() as i32).collect();
+            let shmem_all = (2 * max_ma_len + max_period) * std::mem::size_of::<f32>()
+                + (max_period * std::mem::size_of::<u8>());
+            for (start, count) in Self::grid_y_chunks(rows) {
+                let p = &periods_all[start..start + count];
+                let m = &ma_all[start..start + count];
+                let t = &mt_all[start..start + count];
+                let d = &dt_all[start..start + count];
+                let hp = LockedBuffer::from_slice(p).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let hm = LockedBuffer::from_slice(m).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let ht = LockedBuffer::from_slice(t).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let hd = LockedBuffer::from_slice(d).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let mut d_p = unsafe { DeviceBuffer::<i32>::uninitialized_async(count, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let mut d_m = unsafe { DeviceBuffer::<i32>::uninitialized_async(count, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let mut d_t = unsafe { DeviceBuffer::<i32>::uninitialized_async(count, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                let mut d_d = unsafe { DeviceBuffer::<i32>::uninitialized_async(count, &self.stream) }.map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                unsafe {
+                    d_p.async_copy_from(&hp, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                    d_m.async_copy_from(&hm, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                    d_t.async_copy_from(&ht, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                    d_d.async_copy_from(&hd, &self.stream).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+                }
+                self.launch_batch_mad(
+                    &d_data, &mut d_out, &mut d_p, &mut d_m, &mut d_t, &mut d_d,
+                    len, first_valid, count, max_period, max_ma_len,
+                    /*row_offset=*/start, shmem_all,
+                )?;
+            }
         }
 
         self.stream.synchronize().map_err(|e| CudaRviError::Cuda(e.to_string()))?;
-        Ok((DeviceArrayF32 { buf: d_out, rows, cols: len }, combos))
+        Ok((DeviceArrayF32 { buf: d_out, rows, cols: len }, if use_prefix { combos_sorted } else { combos }))
+    }
+
+    fn launch_segprefix(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        d_pref: &mut DeviceBuffer<f32>,
+        d_pref2: &mut DeviceBuffer<f32>,
+        d_runlen: &mut DeviceBuffer<i32>,
+    ) -> Result<(), CudaRviError> {
+        let func = self.module.get_function("rvi_segprefix_f32")
+            .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        unsafe {
+            let grid: GridSize = (1u32, 1, 1).into();
+            let block: BlockSize = (1u32, 1, 1).into();
+            let mut prices = d_data.as_device_ptr().as_raw();
+            let mut n_i = len as i32;
+            let mut pref = d_pref.as_device_ptr().as_raw();
+            let mut pref2 = d_pref2.as_device_ptr().as_raw();
+            let mut runlen = d_runlen.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 5] = [
+                &mut prices as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+                &mut pref as *mut _ as *mut c_void,
+                &mut pref2 as *mut _ as *mut c_void,
+                &mut runlen as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, &mut args)
+                .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn launch_batch(
+    fn launch_batch_stddev_from_prefix(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        d_pref: &DeviceBuffer<f32>,
+        d_pref2: &DeviceBuffer<f32>,
+        d_runlen: &DeviceBuffer<i32>,
+        d_periods: &mut DeviceBuffer<i32>,
+        d_ma_lens: &mut DeviceBuffer<i32>,
+        d_matypes: &mut DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_rows: usize,
+        max_ma_len: usize,
+        row_offset: usize,
+        shmem_bytes: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaRviError> {
+        let func = self.module.get_function("rvi_batch_stddev_from_prefix_f32")
+            .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        let grid: GridSize = (n_rows as u32, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut d_ptr = d_data.as_device_ptr().as_raw();
+            let mut s_ptr = d_pref.as_device_ptr().as_raw();
+            let mut q_ptr = d_pref2.as_device_ptr().as_raw();
+            let mut r_ptr = d_runlen.as_device_ptr().as_raw();
+            let mut p_ptr = d_periods.as_device_ptr().as_raw();
+            let mut m_ptr = d_ma_lens.as_device_ptr().as_raw();
+            let mut t_ptr = d_matypes.as_device_ptr().as_raw();
+            let mut n_i = len as i32;
+            let mut f_i = first_valid as i32;
+            let mut r_i = n_rows as i32;
+            let mut maxm_i = max_ma_len as i32;
+            let mut ids_ptr: u64 = 0; // null row_ids → contiguous mapping
+            let mut o_ptr = d_out.as_device_ptr().as_raw()
+                .wrapping_add((row_offset * len * std::mem::size_of::<f32>()) as u64);
+            let mut args: [*mut c_void; 13] = [
+                &mut d_ptr as *mut _ as *mut c_void,
+                &mut s_ptr as *mut _ as *mut c_void,
+                &mut q_ptr as *mut _ as *mut c_void,
+                &mut r_ptr as *mut _ as *mut c_void,
+                &mut p_ptr as *mut _ as *mut c_void,
+                &mut m_ptr as *mut _ as *mut c_void,
+                &mut t_ptr as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+                &mut f_i as *mut _ as *mut c_void,
+                &mut r_i as *mut _ as *mut c_void,
+                &mut maxm_i as *mut _ as *mut c_void,
+                &mut ids_ptr as *mut _ as *mut c_void,
+                &mut o_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, (shmem_bytes as u32), &mut args)
+                .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_batch_mad(
         &self,
         d_data: &DeviceBuffer<f32>,
         d_out: &mut DeviceBuffer<f32>,
@@ -212,12 +420,10 @@ impl CudaRvi {
         row_offset: usize,
         shmem_bytes: usize,
     ) -> Result<(), CudaRviError> {
-        let func = self.module.get_function("rvi_batch_f32").map_err(|e| CudaRviError::Cuda(e.to_string()))?;
+        let func = self.module.get_function("rvi_batch_mad_f32")
+            .or_else(|_| self.module.get_function("rvi_batch_f32"))
+            .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         let block_x = match self.policy.batch { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x.max(32) };
-        if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
-            eprintln!("[rvi] batch kernel: block_x={} rows_chunk={} len={} max_p={} max_m={}", block_x, n_rows, len, max_period, max_ma_len);
-            unsafe { (*(self as *const _ as *mut CudaRvi)).debug_batch_logged = true; }
-        }
         unsafe {
             let grid: GridSize = (n_rows as u32, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
@@ -231,8 +437,8 @@ impl CudaRvi {
             let mut r_i = n_rows as i32;
             let mut maxp_i = max_period as i32;
             let mut maxm_i = max_ma_len as i32;
-            // out pointer offset to the start of this chunk
-            let mut o_ptr = d_out.as_device_ptr().as_raw().wrapping_add((row_offset * len * std::mem::size_of::<f32>()) as u64);
+            let mut o_ptr = d_out.as_device_ptr().as_raw()
+                .wrapping_add((row_offset * len * std::mem::size_of::<f32>()) as u64);
             let mut args: [*mut c_void; 11] = [
                 &mut d_ptr as *mut _ as *mut c_void,
                 &mut p_ptr as *mut _ as *mut c_void,
@@ -252,6 +458,9 @@ impl CudaRvi {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    // removed legacy launch_batch; split into stddev/mad launchers above
+
     pub fn rvi_many_series_one_param_time_major_dev(&self, data_tm: &[f32], cols: usize, rows: usize, params: &RviParams) -> Result<DeviceArrayF32, CudaRviError> {
         if cols == 0 || rows == 0 { return Err(CudaRviError::InvalidInput("empty matrix".into())); }
         if data_tm.len() != cols * rows { return Err(CudaRviError::InvalidInput("matrix shape mismatch".into())); }
@@ -260,6 +469,14 @@ impl CudaRvi {
         let matype = params.matype.unwrap_or(1);
         let devtype = params.devtype.unwrap_or(0);
         if devtype == 2 { return Err(CudaRviError::InvalidInput("devtype=2 (median abs dev) not supported by CUDA kernel yet".into())); }
+
+        // Semantic guard: current CUDA kernel degrades SMA->EMA for very large ma_len; refuse to launch
+        if matype == 0 && ma_len > 1024 {
+            return Err(CudaRviError::InvalidInput(
+                "SMA with ma_len > 1024 not supported by CUDA many-series kernel without semantic change (would degrade to EMA)."
+                    .into(),
+            ));
+        }
 
         // Per-series first_valid detection
         let mut firsts = vec![rows as i32; cols];

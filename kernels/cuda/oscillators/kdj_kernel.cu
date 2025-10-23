@@ -34,34 +34,36 @@
 // Map MA type to integers (host side must agree)
 // 0 = SMA, 1 = EMA
 
-// Helper: compute stochastic value at index t using sparse tables (batch path)
-__device__ __forceinline__ float stoch_from_tables(
-    int t,
-    int fast_k,
+// --- Helpers: compensated FP32 sum (Kahan) and sparse-table %K with precomputed fk state ---
+__device__ __forceinline__ void kahan_add(float x, float &sum, float &c) {
+    // Compensated add: sum += x with small-error compensation (all FP32)
+    float y = x - c;
+    float t = sum + y;
+    c = (t - sum) - y;
+    sum = t;
+}
+
+// stoch_from_tables specialized for a fixed fast_k (k, offset, level_base precomputed)
+__device__ __forceinline__ float stoch_from_tables_fk(
+    int t, int fk, int k_log2, int offset, int level_base,
     const float* __restrict__ close,
-    const int*   __restrict__ log2_tbl,
-    const int*   __restrict__ level_offsets,
     const float* __restrict__ st_max,
     const float* __restrict__ st_min,
     const int*   __restrict__ nan_psum
-) {
-    const int start = t - fast_k + 1;
-    // Any NaN in window → NaN
-    if (nan_psum[t + 1] - nan_psum[start] != 0) return KDJ_QNAN;
+){
+    const int start = t - fk + 1;
+    // Any NaN in window -> NaN
+    if (nan_psum[t + 1] - nan_psum[start]) return KDJ_QNAN;
 
-    const int window = fast_k;
-    const int k = log2_tbl[window];
-    const int offset = 1 << k;
-    const int level_base = level_offsets[k];
     const int idx_a = level_base + start;
     const int idx_b = level_base + (t + 1 - offset);
-    const double h = (double)fmaxf(st_max[idx_a], st_max[idx_b]);
-    const double l = (double)fminf(st_min[idx_a], st_min[idx_b]);
-    const double c = (double)close[t];
-    if (!isfinite(h) || !isfinite(l) || !isfinite(c)) return KDJ_QNAN;
-    const double den = h - l;
-    if (!(den == den) || den == 0.0) return KDJ_QNAN;
-    return (float)(100.0 * ((c - l) / den));
+    const float h = fmaxf(st_max[idx_a], st_max[idx_b]);
+    const float l = fminf(st_min[idx_a], st_min[idx_b]);
+    const float c = close[t];
+    const float den = h - l;
+    // Note: NaN checks fold into (x==x); den<=0 covers zero-span ranges
+    if (!(h==h) || !(l==l) || !(c==c) || den <= 0.0f) return KDJ_QNAN;
+    return (c - l) * (100.0f / den);
 }
 
 extern "C" __global__ void kdj_batch_f32(
@@ -93,74 +95,101 @@ extern "C" __global__ void kdj_batch_f32(
 
     const int base = combo * series_len;
 
-    // Parallel init of NaN prefixes for K/D/J
+    // Parallel init of NaNs (also clears scratch in out_j)
     for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
         out_k[base + i] = KDJ_QNAN;
         out_d[base + i] = KDJ_QNAN;
-        out_j[base + i] = KDJ_QNAN;
+        out_j[base + i] = KDJ_QNAN; // later used as scratch for S[t]
     }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; // single lane performs sequential scan per combo
-
     if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) return;
+
     const int fk = fast_k_arr[combo];
     const int sk = slow_k_arr[combo];
     const int sd = slow_d_arr[combo];
     if (UNLIKELY(fk <= 0 || sk <= 0 || sd <= 0)) return;
 
-    // Guard sparse table arrays range
     if (UNLIKELY(level_count <= 0)) return;
 
     const int stoch_warm = first_valid + fk - 1;
-    const int k_warm     = stoch_warm + sk - 1;
-    const int d_warm     = k_warm + sd - 1;
     if (UNLIKELY(stoch_warm >= series_len)) return;
 
     const int k_ma = k_ma_types[combo];
     const int d_ma = d_ma_types[combo];
 
-    // Naive stoch using H/L slices for exact parity (fast_k is usually small)
-    auto stoch_naive_batch = [&](int t)->float {
-        const int start = t - fk + 1;
-        double h = -INFINITY, l = INFINITY;
-        for (int i = start; i <= t; ++i) {
-            const double hi = (double)high[i];
-            const double lo = (double)low[i];
-            if (!(hi == hi) || !(lo == lo)) return KDJ_QNAN;
-            h = fmax(h, hi); l = fmin(l, lo);
-        }
-        const double c = (double)close[t];
-        if (!(c == c)) return KDJ_QNAN;
-        const double den = h - l; if (den == 0.0 || !isfinite(den)) return KDJ_QNAN;
-        return (float)(100.0 * ((c - l) / den));
-    };
+    // Precompute sparse-table constants for this fk
+    const int k_log2 = log2_tbl[fk];
+    if (UNLIKELY(k_log2 < 0 || k_log2 >= level_count)) return;
+    const int offset     = 1 << k_log2;
+    const int level_base = level_offsets[k_log2];
 
-    // ---- SMA -> SMA fused path (ignore NaNs in window) ----
+    // Warp-0 cooperatively precomputes S[t] = raw stochastic for all t >= stoch_warm
+    // Store into out_j[base + t] as a temporary scratch buffer.
+    const int lane = threadIdx.x & 31;
+    if ((threadIdx.x >> 5) == 0) {
+        // Fill pre-warm with NaN (usually small)
+        for (int t = lane; t < stoch_warm; t += 32) {
+            out_j[base + t] = KDJ_QNAN;
+        }
+        for (int t = stoch_warm + lane; t < series_len; t += 32) {
+            out_j[base + t] = stoch_from_tables_fk(
+                t, fk, k_log2, offset, level_base, close, st_max, st_min, nan_psum
+            );
+        }
+    }
+    __syncthreads();
+
+    // All smoothing is inherently sequential; run it in lane 0 for this combo
+    if (threadIdx.x != 0) return;
+
+    const int k_warm = stoch_warm + sk - 1;
+    const int d_warm = k_warm     + sd - 1;
+
+    // ---- SMA -> SMA fused path (ignore NaNs within windows) ----
     if (k_ma == 0 && d_ma == 0) {
-        // K is defined starting at k_warm; D at d_warm; J at d_warm
-        for (int t = k_warm; t < series_len; ++t) {
-            // Average stoch over last sk samples [t-sk+1..t]
-            double sum_k = 0.0; int cnt_k = 0;
-            const int k_start = t - sk + 1;
-            // Note: k_start >= stoch_warm by construction
-            for (int u = 0; u < sk; ++u) {
-                const int ti = k_start + u;
-                float s = stoch_naive_batch(ti);
-                if (s == s) { sum_k += (double)s; cnt_k += 1; }
+        if (k_warm >= series_len) return;
+
+        // Seed K at t = k_warm over S[t-sk+1..t]
+        float sum_k = 0.0f, ck = 0.0f; int cnt_k = 0;
+        {
+            const int start = k_warm - sk + 1;
+            for (int ti = start; ti <= k_warm; ++ti) {
+                const float s = out_j[base + ti];
+                if (s == s) { kahan_add(s, sum_k, ck); ++cnt_k; }
             }
-            const float kv = (cnt_k > 0) ? (float)(sum_k / (double)cnt_k) : KDJ_QNAN;
+            const float kv = (cnt_k > 0) ? (sum_k / (float)cnt_k) : KDJ_QNAN;
+            out_k[base + k_warm] = kv;
+        }
+
+        // Prepare D sliding accumulators
+        float sum_d = 0.0f, cd = 0.0f; int cnt_d = 0;
+        const float kv0 = out_k[base + k_warm];
+        if (kv0 == kv0) { kahan_add(kv0, sum_d, cd); ++cnt_d; }
+
+        // Slide forward
+        for (int t = k_warm + 1; t < series_len; ++t) {
+            // Update K window: +S[t], -S[t-sk]
+            const float s_new = out_j[base + t];
+            if (s_new == s_new) { kahan_add(s_new, sum_k, ck); ++cnt_k; }
+            const int t_old = t - sk;
+            if (t_old >= stoch_warm) {
+                const float s_old = out_j[base + t_old];
+                if (s_old == s_old) { kahan_add(-s_old, sum_k, ck); --cnt_k; }
+            }
+            const float kv = (cnt_k > 0) ? (sum_k / (float)cnt_k) : KDJ_QNAN;
             out_k[base + t] = kv;
 
+            // Update D window over K: +K[t], -K[t-sd]
+            if (kv == kv) { kahan_add(kv, sum_d, cd); ++cnt_d; }
+            const int t_old_k = t - sd;
+            if (t_old_k >= k_warm) {
+                const float kk_old = out_k[base + t_old_k];
+                if (kk_old == kk_old) { kahan_add(-kk_old, sum_d, cd); --cnt_d; }
+            }
+
             if (t >= d_warm) {
-                double sum_d = 0.0; int cnt_d = 0;
-                const int d_start = t - sd + 1;
-                for (int v = 0; v < sd; ++v) {
-                    const int tj = d_start + v;
-                    const float kk = out_k[base + tj];
-                    if (kk == kk) { sum_d += (double)kk; cnt_d += 1; }
-                }
-                const float dv = (cnt_d > 0) ? (float)(sum_d / (double)cnt_d) : KDJ_QNAN;
+                const float dv = (cnt_d > 0) ? (sum_d / (float)cnt_d) : KDJ_QNAN;
                 out_d[base + t] = dv;
                 out_j[base + t] = (kv == kv && dv == dv) ? (3.0f * kv - 2.0f * dv) : KDJ_QNAN;
             }
@@ -168,71 +197,73 @@ extern "C" __global__ void kdj_batch_f32(
         return;
     }
 
-    // ---- EMA -> EMA fused path ----
+    // ---- EMA -> EMA fused path (seed averages, update only on finite samples) ----
     if (k_ma == 1 && d_ma == 1) {
-        const double alpha_k = 2.0 / (double(sk) + 1.0);
-        const double om_k    = 1.0 - alpha_k;
-        const double alpha_d = 2.0 / (double(sd) + 1.0);
-        const double om_d    = 1.0 - alpha_d;
+        if (k_warm >= series_len) return;
 
-        double ema_k = NAN;
-        double ema_d = NAN;
-        double sum_init_k = 0.0; int cnt_init_k = 0;
-        double sum_init_d = 0.0; int cnt_init_d = 0;
+        const float alpha_k = 2.0f / (float(sk) + 1.0f);
+        const float one_mk  = 1.0f - alpha_k;
+        const float alpha_d = 2.0f / (float(sd) + 1.0f);
+        const float one_md  = 1.0f - alpha_d;
 
-        // Seed ema_k at t = k_warm with average of valid stoch in [k_warm - sk + 1 .. k_warm]
-        if (k_warm < series_len) {
-            const int k_start = k_warm - sk + 1;
-            for (int ti = k_start; ti <= k_warm; ++ti) {
-                float s = stoch_from_tables(ti, fk, close, log2_tbl, level_offsets, st_max, st_min, nan_psum);
-                if (s == s) { sum_init_k += (double)s; cnt_init_k += 1; }
+        // Seed ema_k at t=k_warm with average of finite S over [k_warm-sk+1..k_warm]
+        float sum0 = 0.0f, c0 = 0.0f; int cnt0 = 0;
+        {
+            const int start = k_warm - sk + 1;
+            for (int ti = start; ti <= k_warm; ++ti) {
+                const float s = out_j[base + ti];
+                if (s == s) { kahan_add(s, sum0, c0); ++cnt0; }
             }
-            ema_k = (cnt_init_k > 0) ? (sum_init_k / (double)cnt_init_k) : NAN;
-            out_k[base + k_warm] = (float)ema_k;
-            if (ema_k == ema_k) { sum_init_d += ema_k; cnt_init_d += 1; }
         }
+        float ema_k = (cnt0 > 0) ? (sum0 / (float)cnt0) : KDJ_QNAN;
+        out_k[base + k_warm] = ema_k;
 
-        // Advance until d_warm, still accumulating init D average
+        // Accumulate initial D seed over K[k_warm..d_warm]
+        float sum_d = (ema_k == ema_k) ? ema_k : 0.0f;
+        int   cnt_d = (ema_k == ema_k) ? 1 : 0;
+
+        // Advance K until d_warm, accumulating for D’s seed
         for (int t = k_warm + 1; t <= d_warm && t < series_len; ++t) {
-            float s = stoch_naive_batch(t);
+            const float s = out_j[base + t];
             if (s == s && ema_k == ema_k) {
-                ema_k = alpha_k * (double)s + om_k * ema_k;
+                ema_k = fmaf(alpha_k, s, one_mk * ema_k);
             } else if (s == s && !(ema_k == ema_k)) {
-                ema_k = (double)s; // bootstrap if ema_k was NaN
+                ema_k = s; // bootstrap
             }
-            out_k[base + t] = (float)ema_k;
-            if (ema_k == ema_k) { sum_init_d += ema_k; cnt_init_d += 1; }
+            out_k[base + t] = ema_k;
+            if (ema_k == ema_k) { sum_d += ema_k; ++cnt_d; }
         }
 
-        // Seed ema_d at t = d_warm
+        // Seed ema_d at t=d_warm
+        float ema_d = (d_warm < series_len && cnt_d > 0) ? (sum_d / (float)cnt_d) : KDJ_QNAN;
         if (d_warm < series_len) {
-            ema_d = (cnt_init_d > 0) ? (sum_init_d / (double)cnt_init_d) : NAN;
-            out_d[base + d_warm] = (float)ema_d;
+            out_d[base + d_warm] = ema_d;
             const float kv = out_k[base + d_warm];
-            out_j[base + d_warm] = (kv == kv && ema_d == ema_d) ? (3.0f * kv - 2.0f * (float)ema_d) : KDJ_QNAN;
+            out_j[base + d_warm] = (kv == kv && ema_d == ema_d) ? (3.0f * kv - 2.0f * ema_d) : KDJ_QNAN;
         }
 
+        // Full EMA update
         for (int t = d_warm + 1; t < series_len; ++t) {
-            float s = stoch_naive_batch(t);
+            const float s = out_j[base + t];
             if (s == s && ema_k == ema_k) {
-                ema_k = alpha_k * (double)s + om_k * ema_k;
+                ema_k = fmaf(alpha_k, s, one_mk * ema_k);
             } else if (s == s && !(ema_k == ema_k)) {
-                ema_k = (double)s;
+                ema_k = s;
             }
-            out_k[base + t] = (float)ema_k;
+            out_k[base + t] = ema_k;
 
             if (ema_k == ema_k && ema_d == ema_d) {
-                ema_d = alpha_d * ema_k + om_d * ema_d;
+                ema_d = fmaf(alpha_d, ema_k, one_md * ema_d);
             } else if (ema_k == ema_k && !(ema_d == ema_d)) {
                 ema_d = ema_k;
             }
-            out_d[base + t] = (float)ema_d;
-            out_j[base + t] = (ema_k == ema_k && ema_d == ema_d) ? (3.0f * (float)ema_k - 2.0f * (float)ema_d) : KDJ_QNAN;
+            out_d[base + t] = ema_d;
+            out_j[base + t] = (ema_k == ema_k && ema_d == ema_d) ? (3.0f * ema_k - 2.0f * ema_d) : KDJ_QNAN;
         }
         return;
     }
 
-    // Unsupported MA combination: leave NaNs (host should avoid this path)
+    // Unsupported MA combination: leave NaNs
 }
 
 // ---------------- Many-series × one-param (time-major) ----------------
@@ -275,21 +306,25 @@ extern "C" __global__ void kdj_many_series_one_param_f32(
     };
 
     auto stoch_naive = [&](int t)->float {
-        // compute over [t-fast_k+1 .. t]
-        int start = t - fast_k + 1;
-        double h = -INFINITY, l = INFINITY;
-        for (int i = start; i <= t; ++i) {
-            double hi = (double)load_tm(high_tm, i);
-            double lo = (double)load_tm(low_tm,  i);
-            if (!(hi == hi) || !(lo == lo)) return KDJ_QNAN; // NaN in window
-            h = fmax(h, hi);
-            l = fmin(l, lo);
+    const int start = t - fast_k + 1;
+    float h = -INFINITY, l = INFINITY;
+
+        // Row pointers that we walk by +num_series
+        size_t idx = (size_t)start * (size_t)num_series + (size_t)series;
+        const float* __restrict__ ph = high_tm;
+        const float* __restrict__ pl = low_tm;
+
+        for (int i = start; i <= t; ++i, idx += (size_t)num_series) {
+            const float hi = ph[idx];
+            const float lo = pl[idx];
+            if (!(hi==hi) || !(lo==lo)) return KDJ_QNAN;
+            h = fmaxf(h, hi);
+            l = fminf(l, lo);
         }
-        const double c = (double)load_tm(close_tm, t);
-        if (!(c == c)) return KDJ_QNAN;
-        const double den = h - l;
-        if (den == 0.0 || !isfinite(den)) return KDJ_QNAN;
-        return (float)(100.0 * ((c - l) / den));
+        const float c = *(close_tm + (size_t)t * (size_t)num_series + series);
+        if (!(c==c)) return KDJ_QNAN;
+        const float den = h - l;
+        return (den > 0.0f) ? (c - l) * (100.0f / den) : KDJ_QNAN;
     };
 
     if (k_ma_type == 0 && d_ma_type == 0) {

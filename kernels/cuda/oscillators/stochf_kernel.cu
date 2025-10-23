@@ -31,7 +31,7 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-// %K from WILLR sparse tables
+// %K from WILLR sparse tables (FP32-only, preserves degeneracy semantics)
 __device__ __forceinline__ float stoch_from_tables(
     int t,
     int fast_k,
@@ -43,25 +43,29 @@ __device__ __forceinline__ float stoch_from_tables(
     const int*   __restrict__ nan_psum
 ) {
     const int start = t - fast_k + 1;
-    // Any NaN in window → NaN (conservative; typical datasets have no NaNs post-warm)
-    if (nan_psum[t + 1] - nan_psum[start] != 0) return STOCHF_QNAN;
 
-    const int window = fast_k;
-    const int k = log2_tbl[window];
-    const int offset = 1 << k;
-    const int level_base = level_offsets[k];
-    const int idx_a = level_base + start;
-    const int idx_b = level_base + (t + 1 - offset);
-    const double h = (double)fmaxf(st_max[idx_a], st_max[idx_b]);
-    const double l = (double)fminf(st_min[idx_a], st_min[idx_b]);
-    const double c = (double)close[t];
-    if (!isfinite(h) || !isfinite(l) || !isfinite(c)) return STOCHF_QNAN;
-    const double den = h - l;
-    if (den == 0.0) {
+    // Any NaN in window -> NaN
+    if (nan_psum[t + 1] - nan_psum[start]) return STOCHF_QNAN;
+
+    const int k           = log2_tbl[fast_k];
+    const int offset      = 1 << k;
+    const int level_base  = level_offsets[k];
+    const int idx_a       = level_base + start;
+    const int idx_b       = level_base + (t + 1 - offset);
+
+    const float h = fmaxf(st_max[idx_a], st_max[idx_b]);
+    const float l = fminf(st_min[idx_a], st_min[idx_b]);
+    const float c = close[t];
+
+    // Propagate NaN if any
+    if (!(h == h) || !(l == l) || !(c == c)) return STOCHF_QNAN;
+
+    const float den = h - l;
+    if (den == 0.0f) {
         // Match scalar: if c==hh (==l), return 100; else 0
         return (c == h) ? 100.0f : 0.0f;
     }
-    return (float)(100.0 * ((c - l) / den));
+    return 100.0f * ((c - l) / den);
 }
 
 extern "C" __global__ void stochf_batch_f32(
@@ -88,58 +92,83 @@ extern "C" __global__ void stochf_batch_f32(
     const int combo = blockIdx.x;
     if (combo >= n_combos) return;
 
-    const int base = combo * series_len;
-
-    // Initialize entire row to NaN
-    for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
-        out_k[base + i] = STOCHF_QNAN;
-        out_d[base + i] = STOCHF_QNAN;
-    }
-    __syncthreads();
-
-    if (threadIdx.x != 0) return; // single-lane sequential scan per combo
-
-    if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) return;
-    if (UNLIKELY(level_count <= 0)) return;
-
     const int fk = fastk_arr[combo];
     const int fd = fastd_arr[combo];
     const int mt = matype_arr[combo];
-    if (UNLIKELY(fk <= 0 || fd <= 0)) return;
 
+    if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) return;
+    if (UNLIKELY(level_count <= 0 || fk <= 0 || fd <= 0))       return;
+
+    const int base   = combo * series_len;
     const int k_warm = first_valid + fk - 1;
     const int d_warm = k_warm + fd - 1;
-    if (UNLIKELY(k_warm >= series_len)) return;
 
-    // %K raw stochastic per index
-    for (int t = k_warm; t < series_len; ++t) {
-        float kv = stoch_from_tables(t, fk, close, log2_tbl, level_offsets, st_max, st_min, nan_psum);
-        out_k[base + t] = kv;
+    if (UNLIKELY(k_warm >= series_len)) {
+        // Still initialize D warm-up region if it overlaps
+        for (int t = threadIdx.x; t < min(series_len, d_warm); t += blockDim.x)
+            out_d[base + t] = STOCHF_QNAN;
+        return;
     }
 
-    // %D only SMA (matype==0). Others remain NaN (match scalar contract)
+    // Initialize warm-up regions only (avoid touching the whole row)
+    for (int t = threadIdx.x; t < k_warm; t += blockDim.x) out_k[base + t] = STOCHF_QNAN;
+    for (int t = threadIdx.x; t < min(series_len, d_warm); t += blockDim.x) out_d[base + t] = STOCHF_QNAN;
+
+    __syncthreads();
+
+    // -------- Parallel %K: each thread does a grid-stride loop over t --------
+    for (int t = k_warm + threadIdx.x; t < series_len; t += blockDim.x) {
+        out_k[base + t] = stoch_from_tables(t, fk, close, log2_tbl, level_offsets, st_max, st_min, nan_psum);
+    }
+
+    __syncthreads(); // ensure K is fully written before building D
+
+    // -------- %D (SMA only) with FP32 Kahan and NaN-correct semantics --------
     if (mt == 0) {
-        double d_sum = 0.0; int cnt = 0;
-        for (int t = k_warm; t < series_len; ++t) {
-            const float kv = out_k[base + t];
-            if (kv == kv) {
-                if (cnt < fd) { d_sum += (double)kv; cnt += 1; }
-                if (t < d_warm) {
-                    out_d[base + t] = STOCHF_QNAN;
-                } else if (t == d_warm) {
-                    // First complete window
-                    out_d[base + t] = (cnt == fd) ? (float)(d_sum / (double)fd) : STOCHF_QNAN;
+        if (fd == 1) {
+            // D == K when fd==1
+            for (int t = k_warm + threadIdx.x; t < series_len; t += blockDim.x)
+                out_d[base + t] = out_k[base + t];
+        } else if (threadIdx.x == 0) {
+            // One-lane linear pass is typically cheap (fd small, e.g., 3)
+            // Kahan compensated running sum for accuracy in FP32.
+            auto kahan_add = [](float &sum, float x, float &c) {
+                float y = x - c;
+                float t = sum + y;
+                c = (t - sum) - y;
+                sum = t;
+            };
+
+            float sum = 0.0f, comp = 0.0f;
+            int consec = 0; // consecutive finite K's seen in current run
+
+            for (int t = k_warm; t < series_len; ++t) {
+                const float kv = out_k[base + t];
+                if (kv == kv) { // finite
+                    kahan_add(sum, kv, comp);
+                    ++consec;
+
+                    if (consec < fd) {
+                        out_d[base + t] = STOCHF_QNAN;
+                    } else if (consec == fd) {
+                        // first complete valid window in this run
+                        out_d[base + t] = sum / (float)fd;
+                    } else {
+                        // sliding window over a fully finite run
+                        const float oldk = out_k[base + (t - fd)];
+                        // oldk is guaranteed finite within a "consec" >= fd run
+                        kahan_add(sum, -oldk, comp);
+                        out_d[base + t] = sum / (float)fd;
+                    }
                 } else {
-                    // Rolling window: subtract k[t-fd], add kv
-                    const float oldk = out_k[base + (t - fd)];
-                    d_sum += (double)kv - (double)oldk;
-                    out_d[base + t] = (float)(d_sum / (double)fd);
+                    // reset on NaN, D remains NaN at this t
+                    out_d[base + t] = STOCHF_QNAN;
+                    sum = 0.0f; comp = 0.0f; consec = 0;
                 }
-            } else {
-                // kv is NaN → D is NaN; keep d_sum/cnt unchanged until next valid run
-                out_d[base + t] = STOCHF_QNAN;
             }
         }
+    } else {
+        // Non-SMA matypes: outputs remain NaN per contract.
     }
 }
 
@@ -162,7 +191,8 @@ extern "C" __global__ void stochf_many_series_one_param_f32(
     if (series >= num_series) return;
 
     const int fv = first_valids[series];
-    // Initialize outputs to NaN for entire series
+
+    // Initialize outputs to NaN for this series
     for (int t = 0; t < series_len; ++t) {
         *(k_out_tm + (size_t)t * num_series + series) = STOCHF_QNAN;
         *(d_out_tm + (size_t)t * num_series + series) = STOCHF_QNAN;
@@ -179,19 +209,25 @@ extern "C" __global__ void stochf_many_series_one_param_f32(
 
     auto stoch_naive = [&](int t)->float {
         const int start = t - fast_k + 1;
-        double h = -INFINITY, l = INFINITY;
-        for (int i = start; i <= t; ++i) {
-            const double hi = (double)load_tm(high_tm, i);
-            const double lo = (double)load_tm(low_tm,  i);
-            if (!(hi == hi) || !(lo == lo)) return STOCHF_QNAN; // NaN in window
-            h = fmax(h, hi);
-            l = fmin(l, lo);
+
+        // initialize from first element to avoid inf constants
+        float h = load_tm(high_tm, start);
+        float l = load_tm(low_tm,  start);
+        if (!(h == h) || !(l == l)) return STOCHF_QNAN;
+
+        for (int i = start + 1; i <= t; ++i) {
+            const float hi = load_tm(high_tm, i);
+            const float lo = load_tm(low_tm,  i);
+            if (!(hi == hi) || !(lo == lo)) return STOCHF_QNAN;
+            h = fmaxf(h, hi);
+            l = fminf(l, lo);
         }
-        const double c = (double)load_tm(close_tm, t);
+        const float c = load_tm(close_tm, t);
         if (!(c == c)) return STOCHF_QNAN;
-        const double den = h - l;
-        if (den == 0.0) return (c == h) ? 100.0f : 0.0f;
-        return (float)(100.0 * ((c - l) / den));
+
+        const float den = h - l;
+        if (den == 0.0f) return (c == h) ? 100.0f : 0.0f;
+        return 100.0f * ((c - l) / den);
     };
 
     // Fill K
@@ -200,24 +236,27 @@ extern "C" __global__ void stochf_many_series_one_param_f32(
         *(k_out_tm + (size_t)t * num_series + series) = kv;
     }
 
-    // Fill D (SMA only)
+    // Fill D (SMA only) with stable FP32 rolling sum
     if (matype == 0) {
-        double d_sum = 0.0; int cnt = 0;
+        float sum = 0.0f, comp = 0.0f; int consec = 0;
+        auto kahan_add = [](float &s, float x, float &c){ float y=x-c; float t=s+y; c=(t-s)-y; s=t; };
+
         for (int t = k_warm; t < series_len; ++t) {
             const float kv = *(k_out_tm + (size_t)t * num_series + series);
             if (kv == kv) {
-                if (cnt < fast_d) { d_sum += (double)kv; cnt += 1; }
-                if (t < d_warm) {
+                kahan_add(sum, kv, comp); ++consec;
+                if (consec < fast_d) {
                     *(d_out_tm + (size_t)t * num_series + series) = STOCHF_QNAN;
-                } else if (t == d_warm) {
-                    *(d_out_tm + (size_t)t * num_series + series) = (cnt == fast_d) ? (float)(d_sum / (double)fast_d) : STOCHF_QNAN;
+                } else if (consec == fast_d) {
+                    *(d_out_tm + (size_t)t * num_series + series) = sum / (float)fast_d;
                 } else {
                     const float oldk = *(k_out_tm + (size_t)(t - fast_d) * num_series + series);
-                    d_sum += (double)kv - (double)oldk;
-                    *(d_out_tm + (size_t)t * num_series + series) = (float)(d_sum / (double)fast_d);
+                    kahan_add(sum, -oldk, comp);
+                    *(d_out_tm + (size_t)t * num_series + series) = sum / (float)fast_d;
                 }
             } else {
                 *(d_out_tm + (size_t)t * num_series + series) = STOCHF_QNAN;
+                sum = 0.0f; comp = 0.0f; consec = 0;
             }
         }
     }
