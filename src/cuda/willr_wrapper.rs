@@ -44,6 +44,18 @@ pub struct CudaWillr {
     _context: Context,
 }
 
+/// Device-resident sparse-table buffers for WILLR, reusable across runs.
+pub struct WillrGpuTablesDev {
+    d_log2: DeviceBuffer<i32>,
+    d_level_offsets: DeviceBuffer<i32>,
+    d_st_max: DeviceBuffer<f32>,
+    d_st_min: DeviceBuffer<f32>,
+    d_nan_psum: DeviceBuffer<i32>,
+    pub series_len: usize,
+    pub first_valid: usize,
+    pub level_count: usize,
+}
+
 struct PreparedWillrBatch {
     combos: Vec<WillrParams>,
     first_valid: usize,
@@ -61,7 +73,8 @@ impl CudaWillr {
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/willr_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            // Prefer higher driver JIT optimization; fallback below if unsupported.
+            ModuleJitOption::OptLevel(OptLevel::O3),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -276,6 +289,160 @@ impl CudaWillr {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWillrError> {
+        self.launch_batch_kernel_raw(
+            d_close,
+            d_periods,
+            d_log2,
+            d_offsets,
+            d_st_max,
+            d_st_min,
+            d_nan_psum,
+            series_len,
+            first_valid,
+            level_count,
+            n_combos,
+            d_out,
+        )
+    }
+
+    /// Build sparse tables on host (from H/L) and upload them once.
+    /// Returns a reusable device handle that also carries series_len, first_valid and level_count.
+    pub fn prepare_tables_device(
+        &self,
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+    ) -> Result<WillrGpuTablesDev, CudaWillrError> {
+        let len = high.len();
+        if len == 0 || low.len() != len || close.len() != len {
+            return Err(CudaWillrError::InvalidInput(
+                "input slices are empty or mismatched".into(),
+            ));
+        }
+
+        // earliest index where all H/L/C are non-NaN (preserves warmup semantics)
+        let first_valid = (0..len)
+            .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+            .ok_or_else(|| CudaWillrError::InvalidInput("all values are NaN".into()))?;
+
+        // Build sparse tables (host) once for this series.
+        let tables = build_willr_gpu_tables(high, low);
+
+        // Upload once; keep device buffers around for reuse.
+        let d_log2 = DeviceBuffer::from_slice(&tables.log2)
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_level_offsets = DeviceBuffer::from_slice(&tables.level_offsets)
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_st_max = DeviceBuffer::from_slice(&tables.st_max)
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_st_min = DeviceBuffer::from_slice(&tables.st_min)
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_nan_psum = DeviceBuffer::from_slice(&tables.nan_psum)
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+
+        let level_count = tables
+            .level_offsets
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| CudaWillrError::InvalidInput("level offsets is empty".into()))?;
+
+        Ok(WillrGpuTablesDev {
+            d_log2,
+            d_level_offsets,
+            d_st_max,
+            d_st_min,
+            d_nan_psum,
+            series_len: len,
+            first_valid,
+            level_count,
+        })
+    }
+
+    /// Compute WILLR for many periods using previously uploaded device tables.
+    /// This avoids re-uploading st_max/st_min/nan_psum/log2/offsets on every run.
+    pub fn willr_batch_dev_with_tables(
+        &self,
+        close_f32: &[f32],
+        sweep: &WillrBatchRange,
+        dev_tables: &WillrGpuTablesDev,
+    ) -> Result<DeviceArrayF32, CudaWillrError> {
+        if close_f32.len() != dev_tables.series_len {
+            return Err(CudaWillrError::InvalidInput(format!(
+                "close length {} != series_len {}",
+                close_f32.len(),
+                dev_tables.series_len
+            )));
+        }
+
+        // Expand period sweep → device vector
+        let combos = expand_periods(sweep);
+        if combos.is_empty() {
+            return Err(CudaWillrError::InvalidInput("no period combinations".into()));
+        }
+        let periods: Vec<i32> = combos
+            .iter()
+            .map(|p| p.period.unwrap_or(0) as i32)
+            .collect();
+        let n_combos = periods.len();
+
+        let d_close =
+            DeviceBuffer::from_slice(close_f32).map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods)
+            .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(dev_tables.series_len * n_combos)
+                .map_err(|e| CudaWillrError::Cuda(e.to_string()))?
+        };
+
+        // Launch using the reusable tables.
+        self.launch_batch_kernel_raw(
+            &d_close,
+            &d_periods,
+            &dev_tables.d_log2,
+            &dev_tables.d_level_offsets,
+            &dev_tables.d_st_max,
+            &dev_tables.d_st_min,
+            &dev_tables.d_nan_psum,
+            dev_tables.series_len,
+            dev_tables.first_valid,
+            dev_tables.level_count,
+            n_combos,
+            &mut d_out,
+        )?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: dev_tables.series_len,
+        })
+    }
+
+    #[inline]
+    fn block_for_time_parallel(series_len: usize) -> u32 {
+        if series_len >= (1 << 20) {
+            512
+        } else if series_len >= (1 << 14) {
+            256
+        } else {
+            128
+        }
+    }
+
+    fn launch_batch_kernel_raw(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_log2: &DeviceBuffer<i32>,
+        d_offsets: &DeviceBuffer<i32>,
+        d_st_max: &DeviceBuffer<f32>,
+        d_st_min: &DeviceBuffer<f32>,
+        d_nan_psum: &DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        level_count: usize,
+        n_combos: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaWillrError> {
         if n_combos == 0 {
             return Ok(());
         }
@@ -285,8 +452,9 @@ impl CudaWillr {
             .get_function("willr_batch_f32")
             .map_err(|e| CudaWillrError::Cuda(e.to_string()))?;
 
+        let block_x: u32 = Self::block_for_time_parallel(series_len);
         let grid: GridSize = (n_combos as u32, 1, 1).into();
-        let block: BlockSize = (256, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut close_ptr = d_close.as_device_ptr().as_raw();

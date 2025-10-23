@@ -13,7 +13,19 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// One-series × many-params (batch). Each block handles one period combo.
+// ------------------------------
+// Helpers
+// ------------------------------
+#ifndef ROCP_QNAN
+// Canonical quiet NaN payload (IEEE-754): 0x7fc00000
+__device__ __forceinline__ float rocp_qnan() {
+    return __int_as_float(0x7fc00000);
+}
+#define ROCP_QNAN rocp_qnan()
+#endif
+
+// One-series × many-params (batch), FP32 only.
+// Each block handles one period combo (row).
 // Inputs:
 //  - data: price series (len)
 //  - inv: reciprocals of price series (len), i.e., inv[i] = 1.0f / data[i]
@@ -37,20 +49,47 @@ void rocp_batch_f32(const float* __restrict__ data,
 
     const int base = row * len;
 
-    // Initialize row to NaN in parallel to match warmup semantics
-    for (int i = threadIdx.x; i < len; i += blockDim.x) {
-        out[base + i] = NAN;
+    const int start = first_valid + period; // first valid output index
+
+    // Write only the warm-up prefix to NaN. Avoid full-row initialization.
+    const int warm = (start < len) ? start : len;
+    for (int t = threadIdx.x; t < warm; t += blockDim.x) {
+        out[base + t] = ROCP_QNAN;
     }
-    __syncthreads();
 
-    const int start = first_valid + period;
-    if (start >= len) return;
+    if (start >= len) return; // nothing to compute
 
-    // Parallel compute across time with striding threads
-    for (int t = start + threadIdx.x; t < len; t += blockDim.x) {
-        const float c = data[t];
-        const float ip = inv[t - period]; // 1/prev
-        out[base + t] = fmaf(c, ip, -1.0f); // (c/prev) - 1
+    // Grid-stride loop with 4x unroll for ILP.
+    int t = start + threadIdx.x;
+    const int stride = blockDim.x;
+
+    // Main unrolled body: process 4 elements per iteration.
+    for (; t + 3*stride < len; t += 4*stride) {
+        const float c0  = data[t];
+        const float ip0 = inv[t - period];
+        out[base + t] = fmaf(c0, ip0, -1.0f); // (c/prev) - 1
+
+        const int t1 = t + stride;
+        const float c1  = data[t1];
+        const float ip1 = inv[t1 - period];
+        out[base + t1] = fmaf(c1, ip1, -1.0f);
+
+        const int t2 = t + 2*stride;
+        const float c2  = data[t2];
+        const float ip2 = inv[t2 - period];
+        out[base + t2] = fmaf(c2, ip2, -1.0f);
+
+        const int t3 = t + 3*stride;
+        const float c3  = data[t3];
+        const float ip3 = inv[t3 - period];
+        out[base + t3] = fmaf(c3, ip3, -1.0f);
+    }
+
+    // Tail
+    for (; t < len; t += stride) {
+        const float c  = data[t];
+        const float ip = inv[t - period];
+        out[base + t] = fmaf(c, ip, -1.0f);
     }
 }
 
@@ -76,15 +115,16 @@ void rocp_many_series_one_param_f32(const float* __restrict__ data_tm,
     if (first >= rows) {
         // Initialize column to NaN (rare case); keep behavior consistent
         for (int t = 0; t < rows; ++t) {
-            out[t * cols + s] = NAN;
+            out[t * cols + s] = ROCP_QNAN;
         }
         return;
     }
 
     const int warm = first + period; // first output index
     // Prefix NaNs
-    for (int t = 0; t < warm && t < rows; ++t) {
-        out[t * cols + s] = NAN;
+    const int limit = (warm < rows) ? warm : rows;
+    for (int t = 0; t < limit; ++t) {
+        out[t * cols + s] = ROCP_QNAN;
     }
     if (warm >= rows) return;
 

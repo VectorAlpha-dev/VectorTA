@@ -52,7 +52,7 @@ fn fosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4; // FP32 kernel vs FP64 CPU
+    let tol = 7e-4; // match original acceptance for parity
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -103,7 +103,7 @@ fn fosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4;
+    let tol = 7e-4; // match original acceptance for parity
     for idx in 0..host.len() {
         assert!(approx_eq(cpu_tm[idx], host[idx] as f64, tol), "many-series mismatch at {}", idx);
     }

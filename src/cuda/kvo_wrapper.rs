@@ -16,7 +16,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
-use cust::module::{Module, ModuleJitOption, OptLevel};
+use cust::module::{Module, ModuleJitOption};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
@@ -76,11 +76,13 @@ impl CudaKvo {
         let context = Context::new(device).map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kvo_kernel.ptx"));
+        // Prefer default JIT optimization level (O4) and target from context.
         let module = Module::from_ptx(
             ptx,
             &[
                 ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
+                // If register pressure becomes a limit, consider:
+                // ModuleJitOption::MaxRegisters(128),
             ],
         )
         .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -181,32 +183,31 @@ impl CudaKvo {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        // grid.x is 1 (sequential inside thread 0); grid.y is rows (chunk to 65_535)
-        let grid_x = 1u32;
-        for (start, count) in grid_y_chunks(n_combos as usize) {
-            let grid: GridSize = (grid_x, count as u32, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            unsafe {
-                let mut p_vf = d_vf.as_device_ptr().as_raw();
-                let mut p_len = len;
-                let mut p_first = first_valid;
-                let mut p_shorts = d_shorts.as_device_ptr().add(start).as_raw();
-                let mut p_longs = d_longs.as_device_ptr().add(start).as_raw();
-                let mut p_n = count as i32;
-                let mut p_out = d_out.as_device_ptr().add(start * (len as usize)).as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut p_vf as *mut _ as *mut c_void,
-                    &mut p_len as *mut _ as *mut c_void,
-                    &mut p_first as *mut _ as *mut c_void,
-                    &mut p_shorts as *mut _ as *mut c_void,
-                    &mut p_longs as *mut _ as *mut c_void,
-                    &mut p_n as *mut _ as *mut c_void,
-                    &mut p_out as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
-            }
+        // 1-D grid over combos (kernel grid-strides over combo index)
+        let threads = block_x;
+        let blocks = ((n_combos as u32) + threads - 1) / threads;
+        let grid: GridSize = (blocks.max(1), 1, 1).into();
+        let block: BlockSize = (threads, 1, 1).into();
+        unsafe {
+            let mut p_vf = d_vf.as_device_ptr().as_raw();
+            let mut p_len = len;
+            let mut p_first = first_valid;
+            let mut p_shorts = d_shorts.as_device_ptr().as_raw();
+            let mut p_longs = d_longs.as_device_ptr().as_raw();
+            let mut p_n = n_combos;
+            let mut p_out = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut p_vf as *mut _ as *mut c_void,
+                &mut p_len as *mut _ as *mut c_void,
+                &mut p_first as *mut _ as *mut c_void,
+                &mut p_shorts as *mut _ as *mut c_void,
+                &mut p_longs as *mut _ as *mut c_void,
+                &mut p_n as *mut _ as *mut c_void,
+                &mut p_out as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
         }
         Ok(())
     }
@@ -292,15 +293,15 @@ impl CudaKvo {
             .get_function("kvo_many_series_one_param_time_major_f32")
             .map_err(|e| CudaKvoError::Cuda(e.to_string()))?;
 
-        let (block_x, block_y) = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x, block_y } if block_x > 0 && block_y > 0 => {
-                (block_x, block_y)
-            }
-            _ => (128, 4),
+        // 1-D over columns; ignore block_y in policy for API compatibility
+        let (block_x, _ignore) = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x, block_y: _ } if block_x > 0 => (block_x, 1u32),
+            _ => (256, 1u32),
         };
-        let grid_y = ((cols as u32) + block_y - 1) / block_y;
-        let grid: GridSize = (1, grid_y.max(1), 1).into();
-        let block: BlockSize = (block_x, block_y, 1).into();
+        let threads = block_x;
+        let blocks = ((cols as u32) + threads - 1) / threads;
+        let grid: GridSize = (blocks.max(1), 1, 1).into();
+        let block: BlockSize = (threads, 1, 1).into();
 
         unsafe {
             let mut p_high = d_high.as_device_ptr().as_raw();

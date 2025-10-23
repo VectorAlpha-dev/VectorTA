@@ -19,7 +19,7 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::rsi::{rsi, RsiInput, RsiParams};
 use crate::indicators::srsi::{expand_grid_srsi, SrsiBatchRange, SrsiParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -60,6 +60,7 @@ pub struct CudaSrsi {
     stream: Stream,
     _ctx: Context,
     policy: CudaSrsiPolicy,
+    max_grid_x: u32,
 }
 
 impl CudaSrsi {
@@ -79,7 +80,11 @@ impl CudaSrsi {
             .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
-        Ok(Self { module, stream, _ctx: ctx, policy: CudaSrsiPolicy::default() })
+        // Query true 1D grid X cap for chunking (often 2^31-1 on modern GPUs)
+        let max_grid_x = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .unwrap_or(65_535) as u32;
+        Ok(Self { module, stream, _ctx: ctx, policy: CudaSrsiPolicy::default(), max_grid_x })
     }
 
     #[inline]
@@ -126,28 +131,36 @@ impl CudaSrsi {
                 return Err(CudaSrsiError::InvalidInput("estimated device memory exceeds free VRAM".into()));
             }
         }
-
-        // Group combos by rsi_period so we can reuse a single RSI array per group.
+        // Group by rsi_period but preserve original row order
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, p) in combos.iter().enumerate() { groups.entry(p.rsi_period.unwrap()).or_default().push(i); }
 
-        // Allocate output buffers (entire grid)
+        // Allocate outputs for all rows in original order
         let mut d_k: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len * combos.len())
             .map_err(|e| CudaSrsiError::Cuda(e.to_string()))? };
         let mut d_d: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len * combos.len())
             .map_err(|e| CudaSrsiError::Cuda(e.to_string()))? };
 
-        // Upload the price series once if we want device-side RSI later; for now compute RSI on host per rp.
-        // Host precompute RSI cache (f64 for parity, then cast to f32)
+        // Build prices_f64 once (host RSI source)
+        let prices_f64: Vec<f64> = prices_f32.iter().map(|&v| v as f64).collect();
+
+        // Cache kernel handle & limits
+        let func = self.module.get_function("srsi_batch_f32")
+            .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
+        let block_x = self.policy.batch_block_x.unwrap_or(128).min(1024);
+        let grid_cap = self.max_grid_x.max(1);
+
+        // Keep allocations alive until after sync
+        let mut keep_alive: Vec<(DeviceBuffer<f32>, DeviceBuffer<i32>, DeviceBuffer<i32>, DeviceBuffer<i32>)> = Vec::new();
+
         for (rp, idxs) in groups {
-            // Build RSI on host for this rp
-            let prices_f64: Vec<f64> = prices_f32.iter().map(|&v| v as f64).collect();
+            // Build RSI for this rp
             let rsi_out = rsi(&RsiInput::from_slice(&prices_f64, RsiParams { period: Some(rp) }))
                 .map_err(|e| CudaSrsiError::InvalidInput(e.to_string()))?;
             let rsi_f32: Vec<f32> = rsi_out.values.into_iter().map(|v| v as f32).collect();
             let d_rsi = DeviceBuffer::from_slice(&rsi_f32).map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
 
-            // Build per-group parameter arrays
+            // Per-group parameter arrays following original index order
             let mut sp: Vec<i32> = Vec::with_capacity(idxs.len());
             let mut kp: Vec<i32> = Vec::with_capacity(idxs.len());
             let mut dp: Vec<i32> = Vec::with_capacity(idxs.len());
@@ -162,52 +175,52 @@ impl CudaSrsi {
             let d_kp = DeviceBuffer::from_slice(&kp).map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
             let d_dp = DeviceBuffer::from_slice(&dp).map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
 
-            // Launch srsi_batch_f32 over this group; write rows at correct offsets
-            let func = self.module.get_function("srsi_batch_f32")
-                .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
-            let block_x = self.policy.batch_block_x.unwrap_or(128).min(1024);
-            let grid_x = (idxs.len() as u32).min(65_535);
-            // Dynamic shared memory per block: (2*sp ints + 2*sp floats + k + d floats)
+            // Dynamic shared memory per block
             let smem_bytes = (2 * max_sp * std::mem::size_of::<i32>()
                 + (2 * max_sp + max_k + max_d) * std::mem::size_of::<f32>()) as u32;
 
-            // Write directly into final output buffers at contiguous group offset
+            // In current expand order, idxs are contiguous; use group_start and chunk by grid cap
             let group_start = *idxs.first().expect("group start");
-            unsafe {
-                let mut rsi_ptr = d_rsi.as_device_ptr().as_raw() as u64;
-                let mut sp_ptr  = d_sp.as_device_ptr().as_raw() as u64;
-                let mut kp_ptr  = d_kp.as_device_ptr().as_raw() as u64;
-                let mut dp_ptr  = d_dp.as_device_ptr().as_raw() as u64;
-                let mut len_i = len as i32; let mut first_i = first_valid as i32; let mut rp_i = rp as i32;
-                let mut n_i = idxs.len() as i32;
-                let mut out_k_ptr = d_k
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add(((group_start * len) * std::mem::size_of::<f32>()) as u64);
-                let mut out_d_ptr = d_d
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add(((group_start * len) * std::mem::size_of::<f32>()) as u64);
-                let mut args: [*mut c_void; 10] = [
-                    &mut rsi_ptr as *mut _ as *mut c_void,
-                    &mut sp_ptr as *mut _ as *mut c_void,
-                    &mut kp_ptr as *mut _ as *mut c_void,
-                    &mut dp_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                    &mut first_i as *mut _ as *mut c_void,
-                    &mut rp_i as *mut _ as *mut c_void,
-                    &mut n_i as *mut _ as *mut c_void,
-                    &mut out_k_ptr as *mut _ as *mut c_void,
-                    &mut out_d_ptr as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, GridSize::x(grid_x), BlockSize::x(block_x), smem_bytes, &mut args)
-                    .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
+            let mut base = 0usize;
+            while base < idxs.len() {
+                let chunk = (idxs.len() - base).min(grid_cap as usize);
+                unsafe {
+                    let mut rsi_ptr = d_rsi.as_device_ptr().as_raw() as u64;
+                    let mut sp_ptr  = d_sp.as_device_ptr().as_raw().wrapping_add((base * std::mem::size_of::<i32>()) as u64);
+                    let mut kp_ptr  = d_kp.as_device_ptr().as_raw().wrapping_add((base * std::mem::size_of::<i32>()) as u64);
+                    let mut dp_ptr  = d_dp.as_device_ptr().as_raw().wrapping_add((base * std::mem::size_of::<i32>()) as u64);
+                    let mut len_i = len as i32; let mut first_i = first_valid as i32; let mut rp_i = rp as i32; let mut n_i = chunk as i32;
+
+                    let row_byte_off = ((group_start + base) * len * std::mem::size_of::<f32>()) as u64;
+                    let mut out_k_ptr = d_k.as_device_ptr().as_raw().wrapping_add(row_byte_off);
+                    let mut out_d_ptr = d_d.as_device_ptr().as_raw().wrapping_add(row_byte_off);
+
+                    let mut args: [*mut c_void; 10] = [
+                        &mut rsi_ptr as *mut _ as *mut c_void,
+                        &mut sp_ptr  as *mut _ as *mut c_void,
+                        &mut kp_ptr  as *mut _ as *mut c_void,
+                        &mut dp_ptr  as *mut _ as *mut c_void,
+                        &mut len_i   as *mut _ as *mut c_void,
+                        &mut first_i as *mut _ as *mut c_void,
+                        &mut rp_i    as *mut _ as *mut c_void,
+                        &mut n_i     as *mut _ as *mut c_void,
+                        &mut out_k_ptr as *mut _ as *mut c_void,
+                        &mut out_d_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.stream
+                        .launch(&func, GridSize::x(chunk as u32), BlockSize::x(block_x), smem_bytes, &mut args)
+                        .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
+                }
+                base += chunk;
             }
-            self.stream
-                .synchronize()
-                .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
+
+            keep_alive.push((d_rsi, d_sp, d_kp, d_dp));
         }
+
+        // One sync for all groups
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
 
         Ok((DeviceSrsiPair { k: DeviceArrayF32 { buf: d_k, rows: combos.len(), cols: len },
                              d: DeviceArrayF32 { buf: d_d, rows: combos.len(), cols: len }, }, combos))
@@ -251,33 +264,38 @@ impl CudaSrsi {
 
         let func = self.module.get_function("srsi_many_series_one_param_f32")
             .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
-        let grid_x = (cols as u32).min(65_535);
         let block_x = self.policy.many_block_x.unwrap_or(128).min(1024);
+        let grid_cap = self.max_grid_x.max(1);
         let smem_bytes = (2 * (sp as usize) * std::mem::size_of::<i32>()
             + (2 * (sp as usize) + (kp as usize) + (dp as usize)) * std::mem::size_of::<f32>()) as u32;
 
-        let mut prices_ptr = d_prices.as_device_ptr().as_raw() as u64;
-        let mut cols_i = cols as i32; let mut rows_i = rows as i32;
-        let mut rp_i = rp; let mut sp_i = sp; let mut kp_i = kp; let mut dp_i = dp;
-        let mut first_ptr = d_firsts.as_device_ptr().as_raw() as u64;
-        let mut k_ptr = d_k.as_device_ptr().as_raw() as u64;
-        let mut d_ptr = d_d.as_device_ptr().as_raw() as u64;
-        let mut args: [*mut c_void; 10] = [
-            &mut prices_ptr as *mut _ as *mut c_void,
-            &mut cols_i as *mut _ as *mut c_void,
-            &mut rows_i as *mut _ as *mut c_void,
-            &mut rp_i as *mut _ as *mut c_void,
-            &mut sp_i as *mut _ as *mut c_void,
-            &mut kp_i as *mut _ as *mut c_void,
-            &mut dp_i as *mut _ as *mut c_void,
-            &mut first_ptr as *mut _ as *mut c_void,
-            &mut k_ptr as *mut _ as *mut c_void,
-            &mut d_ptr as *mut _ as *mut c_void,
-        ];
-        unsafe {
-            self.stream
-                .launch(&func, GridSize::x(grid_x), BlockSize::x(block_x), smem_bytes, &args)
-                .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
+        let mut cols_done = 0usize;
+        while cols_done < cols {
+            let chunk_cols = (cols - cols_done).min(grid_cap as usize);
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw().wrapping_add((cols_done * std::mem::size_of::<f32>()) as u64);
+            let mut cols_i = cols as i32; let mut rows_i = rows as i32;
+            let mut rp_i = rp; let mut sp_i = sp; let mut kp_i = kp; let mut dp_i = dp;
+            let mut first_ptr = d_firsts.as_device_ptr().as_raw().wrapping_add((cols_done * std::mem::size_of::<i32>()) as u64);
+            let mut k_ptr = d_k.as_device_ptr().as_raw().wrapping_add((cols_done * std::mem::size_of::<f32>()) as u64);
+            let mut d_ptr = d_d.as_device_ptr().as_raw().wrapping_add((cols_done * std::mem::size_of::<f32>()) as u64);
+            let mut args: [*mut c_void; 10] = [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
+                &mut rp_i as *mut _ as *mut c_void,
+                &mut sp_i as *mut _ as *mut c_void,
+                &mut kp_i as *mut _ as *mut c_void,
+                &mut dp_i as *mut _ as *mut c_void,
+                &mut first_ptr as *mut _ as *mut c_void,
+                &mut k_ptr as *mut _ as *mut c_void,
+                &mut d_ptr as *mut _ as *mut c_void,
+            ];
+            unsafe {
+                self.stream
+                    .launch(&func, GridSize::x(chunk_cols as u32), BlockSize::x(block_x), smem_bytes, &args)
+                    .map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
+            }
+            cols_done += chunk_cols;
         }
         self.stream.synchronize().map_err(|e| CudaSrsiError::Cuda(e.to_string()))?;
 

@@ -10,7 +10,7 @@
 //! - Warmup per row/series: warm = first_valid + period - 1
 //! - Warmup prefix is filled with NaN
 //! - If current value is NaN or 0.0, output is NaN
-//! - Critical accumulations use f64; outputs are f32
+//! - Critical accumulations and OLS solve use f64 for parity; outputs are f32
 
 #![cfg(feature = "cuda")]
 
@@ -54,8 +54,8 @@ pub enum BatchKernelPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    // 2D launch with each series handled by one thread in Y.
-    OneD { block_y: u32 },
+    // 1D launch with each series handled by one thread in X.
+    OneD { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,7 +75,7 @@ pub struct CudaFosc {
     _context: Context,
     policy: CudaFoscPolicy,
     last_batch_block_x: Cell<Option<u32>>,
-    last_many_block_y: Cell<Option<u32>>,
+    last_many_block_x: Cell<Option<u32>>,
     // Debug: ensure we only print selection once per instance when BENCH_DEBUG=1
     debug_batch_logged: AtomicBool,
     debug_many_logged: AtomicBool,
@@ -109,7 +109,7 @@ impl CudaFosc {
             _context: context,
             policy: CudaFoscPolicy::default(),
             last_batch_block_x: Cell::new(None),
-            last_many_block_y: Cell::new(None),
+            last_many_block_x: Cell::new(None),
             debug_batch_logged: AtomicBool::new(false),
             debug_many_logged: AtomicBool::new(false),
         })
@@ -118,7 +118,7 @@ impl CudaFosc {
     pub fn set_policy(&mut self, policy: CudaFoscPolicy) { self.policy = policy; }
     pub fn policy(&self) -> &CudaFoscPolicy { &self.policy }
     pub fn selected_batch_block_x(&self) -> Option<u32> { self.last_batch_block_x.get() }
-    pub fn selected_many_block_y(&self) -> Option<u32> { self.last_many_block_y.get() }
+    pub fn selected_many_block_x(&self) -> Option<u32> { self.last_many_block_x.get() }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -127,7 +127,7 @@ impl CudaFosc {
         }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(bx) = self.last_batch_block_x.get() {
-                eprintln!("[DEBUG] FOSC batch selected block_x={} (1 thread does scan)", bx);
+                eprintln!("[DEBUG] FOSC batch selected block_x={} (one thread per combo)", bx);
                 self.debug_batch_logged.store(true, Ordering::Relaxed);
             }
         }
@@ -136,8 +136,8 @@ impl CudaFosc {
     fn maybe_log_many_debug(&self) {
         if self.debug_many_logged.load(Ordering::Relaxed) { return; }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
-            if let Some(by) = self.last_many_block_y.get() {
-                eprintln!("[DEBUG] FOSC many-series selected block_y={} (1 thread per series)", by);
+            if let Some(bx) = self.last_many_block_x.get() {
+                eprintln!("[DEBUG] FOSC many-series selected block_x={} (one thread per series)", bx);
                 self.debug_many_logged.store(true, Ordering::Relaxed);
             }
         }
@@ -197,33 +197,30 @@ impl CudaFosc {
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
-            _ => 32, // any >0; only thread 0 writes, but keep a small block for warmup fill loop
+            _ => 256,
         };
-        let grid_x: u32 = 1; // sequential scan per row – no parallelization over time
+        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1u32, 1u32).into();
+        let block: BlockSize = (block_x, 1u32, 1u32).into();
 
-        // Launch in grid.y chunks to respect 65_535 limit
-        for (start, count) in grid_y_chunks(n_combos as usize) {
-            let grid: GridSize = (grid_x, count as u32, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            unsafe {
-                let mut p_data = d_data.as_device_ptr().as_raw();
-                let mut p_len = len;
-                let mut p_first = first_valid;
-                let mut p_periods = d_periods.as_device_ptr().add(start).as_raw();
-                let mut p_n = count as i32;
-                let mut p_out = d_out.as_device_ptr().add(start * (len as usize)).as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut p_data as *mut _ as *mut c_void,
-                    &mut p_len as *mut _ as *mut c_void,
-                    &mut p_first as *mut _ as *mut c_void,
-                    &mut p_periods as *mut _ as *mut c_void,
-                    &mut p_n as *mut _ as *mut c_void,
-                    &mut p_out as *mut _ as *mut c_void,
-                ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
-            }
+        unsafe {
+            let mut p_data = d_data.as_device_ptr().as_raw();
+            let mut p_len = len;
+            let mut p_first = first_valid;
+            let mut p_periods = d_periods.as_device_ptr().as_raw();
+            let mut p_n = n_combos;
+            let mut p_out = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut p_data as *mut _ as *mut c_void,
+                &mut p_len as *mut _ as *mut c_void,
+                &mut p_first as *mut _ as *mut c_void,
+                &mut p_periods as *mut _ as *mut c_void,
+                &mut p_n as *mut _ as *mut c_void,
+                &mut p_out as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
         }
         self.last_batch_block_x.set(Some(block_x));
         self.maybe_log_batch_debug();
@@ -282,13 +279,13 @@ impl CudaFosc {
             .get_function("fosc_many_series_one_param_time_major_f32")
             .map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
 
-        let block_y = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_y } if block_y > 0 => block_y,
-            _ => 64,
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
+            _ => 256,
         };
-        let grid_y = ((cols as u32) + block_y - 1) / block_y;
-        let grid: GridSize = (1u32, grid_y.max(1), 1).into();
-        let block: BlockSize = (1u32, block_y, 1).into();
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1u32, 1u32).into();
+        let block: BlockSize = (block_x, 1u32, 1u32).into();
 
         unsafe {
             let mut p_data = d_data.as_device_ptr().as_raw();
@@ -309,7 +306,7 @@ impl CudaFosc {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaFoscError::Cuda(e.to_string()))?;
         }
-        self.last_many_block_y.set(Some(block_y));
+        self.last_many_block_x.set(Some(block_x));
         self.maybe_log_many_debug();
         Ok(())
     }

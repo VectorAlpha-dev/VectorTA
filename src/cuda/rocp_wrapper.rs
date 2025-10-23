@@ -15,7 +15,7 @@ use crate::indicators::rocp::{RocpBatchRange, RocpParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -124,28 +124,22 @@ impl CudaRocp {
         let (combos, first_valid, len) = Self::prepare_batch(data, sweep)?;
         // Rough VRAM estimate: inputs + periods + out
         let rows = combos.len();
-        let req = ((2 * len) + rows + (rows * len)) * std::mem::size_of::<f32>();
+        let req = ((2 * len) + (rows * len)) * std::mem::size_of::<f32>()
+            + rows * std::mem::size_of::<i32>();
         if !Self::device_mem_ok(req) { return Err(CudaRocpError::InvalidInput("insufficient device memory".into())); }
 
         // Host precompute reciprocals (shared across rows)
         let inv_host = Self::build_reciprocals(data);
 
-        // Upload inputs
-        let h_data = LockedBuffer::from_slice(data).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        let h_inv = LockedBuffer::from_slice(&inv_host).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
+        // Upload inputs without page-locked staging (synchronous Vec->Device)
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods_host).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-
-        let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        let mut d_inv  = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        let mut d_out  = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }.map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        unsafe {
-            d_data.async_copy_from(&h_data, &self.stream).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-            d_inv.async_copy_from(&h_inv, &self.stream).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        }
+        let d_data = DeviceBuffer::from_slice(data).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
+        let d_inv  = DeviceBuffer::from_slice(&inv_host).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
+        let mut d_out  = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }
+            .map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
 
         self.launch_batch(&d_data, &d_inv, &d_periods, len, rows, first_valid, &mut d_out)?;
-        self.stream.synchronize().map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
 
         Ok((DeviceArrayF32 { buf: d_out, rows, cols: len }, combos))
     }
@@ -154,13 +148,24 @@ impl CudaRocp {
         let (arr, combos) = self.rocp_batch_dev(data, sweep)?;
         let need = arr.rows * arr.cols;
         if out.len() != need { return Err(CudaRocpError::InvalidInput(format!("output slice wrong length: got {}, need {}", out.len(), need))); }
+        // Ensure all work queued on our NON_BLOCKING stream has completed before D->H copy
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
         arr.buf.copy_to(out).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
         Ok((arr.rows, arr.cols, combos))
     }
 
     fn launch_batch(&self, d_data: &DeviceBuffer<f32>, d_inv: &DeviceBuffer<f32>, d_periods: &DeviceBuffer<i32>, len: usize, rows: usize, first_valid: usize, d_out: &mut DeviceBuffer<f32>) -> Result<(), CudaRocpError> {
         let func = self.module.get_function("rocp_batch_f32").map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.batch { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x.max(32) };
+        let suggested = func
+            .suggested_launch_configuration(0, (256u32, 1u32, 1u32).into())
+            .map(|(_min_grid, bs)| bs)
+            .unwrap_or(256);
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => suggested.clamp(32, 1024),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        };
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
             eprintln!("[rocp] batch kernel: block_x={} rows={} len={}", block_x, rows, len);
             unsafe { (*(self as *const _ as *mut CudaRocp)).debug_batch_logged = true; }
@@ -201,29 +206,31 @@ impl CudaRocp {
         let max_first = *firsts.iter().max().unwrap_or(&0);
         if (rows as i32) - max_first < period as i32 { return Err(CudaRocpError::InvalidInput("not enough valid data".into())); }
 
-        // VRAM estimate
-        let req = ((cols * rows) * 2 + cols) * std::mem::size_of::<f32>();
+        // VRAM estimate (data + out + firsts)
+        let req = ((cols * rows) * 2) * std::mem::size_of::<f32>()
+            + cols * std::mem::size_of::<i32>();
         if !Self::device_mem_ok(req) { return Err(CudaRocpError::InvalidInput("insufficient device memory".into())); }
 
-        // Upload buffers
-        let h_data = LockedBuffer::from_slice(data_tm).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        let h_firsts = LockedBuffer::from_slice(&firsts).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }.map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        let mut d_firsts = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }.map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }.map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        unsafe {
-            d_data.async_copy_from(&h_data, &self.stream).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-            d_firsts.async_copy_from(&h_firsts, &self.stream).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        }
+        // Upload buffers (synchronous copy; avoids extra host->host copy)
+        let d_data = DeviceBuffer::from_slice(data_tm).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
+        let d_firsts = DeviceBuffer::from_slice(&firsts).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+            .map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
 
         self.launch_many_series(&d_data, &d_firsts, cols, rows, period, &mut d_out)?;
-        self.stream.synchronize().map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 
     fn launch_many_series(&self, d_data: &DeviceBuffer<f32>, d_firsts: &DeviceBuffer<i32>, cols: usize, rows: usize, period: usize, d_out: &mut DeviceBuffer<f32>) -> Result<(), CudaRocpError> {
         let func = self.module.get_function("rocp_many_series_one_param_f32").map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::Auto => 256, ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32) };
+        let suggested = func
+            .suggested_launch_configuration(0, (256u32, 1u32, 1u32).into())
+            .map(|(_min_grid, bs)| bs)
+            .unwrap_or(256);
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => suggested.clamp(32, 1024),
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+        };
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_many_logged {
             eprintln!("[rocp] many-series kernel: block_x={} cols={} rows={} period={}", block_x, cols, rows, period);
             unsafe { (*(self as *const _ as *mut CudaRocp)).debug_many_logged = true; }
