@@ -416,16 +416,41 @@ pub use vosc_wrapper::{
 pub fn cuda_available() -> bool {
     #[cfg(feature = "cuda")]
     {
-        use cust::{device::Device, prelude::CudaFlags};
+        use cust::{device::Device, function::BlockSize, function::GridSize, module::Module, prelude::CudaFlags, stream::{Stream, StreamFlags}};
         // Initialize the CUDA driver and query devices. Keep this defensive so
         // it never panics when CUDA is missing.
         if cust::init(CudaFlags::empty()).is_err() {
             return false;
         }
-        match Device::num_devices() {
-            Ok(n) => n > 0,
-            Err(_) => false,
+        let ndev = match Device::num_devices() { Ok(n) => n, Err(_) => 0 };
+        if ndev == 0 { return false; }
+        // Probe a minimal kernel launch so test suites can confidently run.
+        // Some environments expose a device but cannot JIT/launch PTX (e.g., mismatched drivers).
+        // Launch a no-op kernel via a tiny PTX module; if it fails, treat CUDA as unavailable.
+        const PROBE_PTX: &str = r#"
+            .version 7.0
+            .target compute_52
+            .address_size 64
+            .visible .entry probe() {
+                ret;
+            }
+        "#;
+        let device = match Device::get_device(0) { Ok(d) => d, Err(_) => return false };
+        let context = match cust::context::Context::new(device) { Ok(c) => c, Err(_) => return false };
+        let module = match Module::from_ptx(PROBE_PTX, &[]) { Ok(m) => m, Err(_) => return false };
+        let func = match module.get_function("probe") { Ok(f) => f, Err(_) => return false };
+        let stream = match Stream::new(StreamFlags::NON_BLOCKING, None) { Ok(s) => s, Err(_) => return false };
+        unsafe {
+            let args: &mut [*mut std::ffi::c_void] = &mut [];
+            if stream.launch(&func, GridSize::xy(1, 1), BlockSize::xyz(1, 1, 1), 0, args).is_err() {
+                return false;
+            }
         }
+        if stream.synchronize().is_err() {
+            return false;
+        }
+        drop(context);
+        true
     }
 
     #[cfg(not(feature = "cuda"))]

@@ -12,7 +12,7 @@ use crate::cuda::moving_averages::alma_wrapper::{BatchKernelSelected, ManySeries
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::lrsi::{LrsiBatchRange, LrsiParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -57,6 +57,8 @@ pub struct CudaLrsi {
     stream: Stream,
     _context: Context,
     policy: CudaLrsiPolicy,
+    // For launch heuristics
+    sm_count: u32,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
@@ -68,6 +70,9 @@ impl CudaLrsi {
         cust::init(CudaFlags::empty()).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
+        let sm_count = device
+            .get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map_err(|e| CudaLrsiError::Cuda(e.to_string()))? as u32;
         let context = Context::new(device).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/lrsi_kernel.ptx"));
@@ -95,11 +100,54 @@ impl CudaLrsi {
             stream,
             _context: context,
             policy: CudaLrsiPolicy::default(),
+            sm_count,
             last_batch: None,
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
         })
+    }
+
+    #[inline]
+    fn pick_block_grid(
+        &self,
+        work_items: usize,
+        policy_block_x: Option<u32>,
+        default_block: u32,
+    ) -> (u32, u32) {
+        const WARP: u32 = 32;
+        const MAX_BLOCK: u32 = 256;
+
+        let sm = self.sm_count.max(1);
+        let target_blocks = sm.saturating_mul(4);
+
+        let mut block_x = policy_block_x
+            .unwrap_or(default_block)
+            .max(WARP)
+            .min(MAX_BLOCK);
+
+        let mut grid_x = if work_items == 0 {
+            1
+        } else {
+            ((work_items as u32) + block_x - 1) / block_x
+        };
+
+        if grid_x < target_blocks && work_items > 0 {
+            let mut b = ((work_items as u32) + target_blocks - 1) / target_blocks;
+            if b < WARP {
+                b = WARP;
+            }
+            b = ((b + WARP - 1) / WARP) * WARP;
+            b = b.min(MAX_BLOCK);
+            block_x = b;
+
+            grid_x = ((work_items as u32) + block_x - 1) / block_x;
+            if grid_x == 0 {
+                grid_x = 1;
+            }
+        }
+
+        (block_x, grid_x.max(1))
     }
 
     #[inline]
@@ -219,11 +267,16 @@ impl CudaLrsi {
                 "inputs exceed kernel limits".into(),
             ));
         }
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
-            _ => 256,
+
+        // Policy: if user pinned a block size, honor it. Otherwise auto.
+        let policy_block = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } if block_x > 0 => Some(block_x),
+            _ => None,
         };
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        // Default is 256 for this kernel.
+        let (block_x, grid_x) = self.pick_block_grid(n_combos, policy_block, 256);
+
+        let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         self.last_batch = Some(BatchKernelSelected::Plain { block_x });
         self.maybe_log_batch_debug();
@@ -374,11 +427,11 @@ impl CudaLrsi {
                 "inputs exceed kernel limits".into(),
             ));
         }
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
-            _ => 128,
+        let policy_block = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => Some(block_x),
+            _ => None,
         };
-        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let (block_x, grid_x) = self.pick_block_grid(cols, policy_block, 256);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         self.last_many = Some(ManySeriesKernelSelected::OneD { block_x });

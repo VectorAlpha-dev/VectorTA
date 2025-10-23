@@ -17,7 +17,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::gatorosc::{GatorOscBatchRange, GatorOscParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -68,6 +68,8 @@ pub struct CudaGatorOsc {
     module: Module,
     stream: Stream,
     _ctx: Context,
+    max_grid_x: usize,
+    max_smem_per_block: usize,
     policy: CudaGatorOscPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -81,6 +83,13 @@ impl CudaGatorOsc {
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
         let ctx = Context::new(device).map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
+        // Query limits we’ll use for chunking & shared-mem capping
+        let max_grid_x = device
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .unwrap_or(65_535) as usize;
+        let max_smem_per_block = device
+            .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)
+            .unwrap_or(48 * 1024) as usize;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/gatorosc_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -97,6 +106,8 @@ impl CudaGatorOsc {
             stream,
             _ctx: ctx,
             policy: CudaGatorOscPolicy::default(),
+            max_grid_x,
+            max_smem_per_block,
             last_batch: None,
             last_many: None,
             debug_batch_logged: false,
@@ -168,71 +179,68 @@ impl CudaGatorOsc {
             return Err(CudaGatorOscError::InvalidInput("empty sweep".into()));
         }
 
-        // Flatten params and validate; compute max needed and max shift
+        // Flatten params and validate
         let mut jl: Vec<i32> = Vec::with_capacity(combos.len());
         let mut js: Vec<i32> = Vec::with_capacity(combos.len());
         let mut tl: Vec<i32> = Vec::with_capacity(combos.len());
-        let mut ts: Vec<i32> = Vec::with_capacity(combos.len());
+        let mut ts_: Vec<i32> = Vec::with_capacity(combos.len());
         let mut ll: Vec<i32> = Vec::with_capacity(combos.len());
         let mut ls: Vec<i32> = Vec::with_capacity(combos.len());
         let mut needed_max: usize = 0;
-        let mut max_shift: usize = 0;
         for p in &combos {
             let jlen = p.jaws_length.unwrap_or(13) as i32;
-            let jsh = p.jaws_shift.unwrap_or(8) as i32;
+            let jsh  = p.jaws_shift.unwrap_or(8) as i32;
             let tlen = p.teeth_length.unwrap_or(8) as i32;
-            let tsh = p.teeth_shift.unwrap_or(5) as i32;
+            let tsh  = p.teeth_shift.unwrap_or(5) as i32;
             let llen = p.lips_length.unwrap_or(5) as i32;
-            let lsh = p.lips_shift.unwrap_or(3) as i32;
+            let lsh  = p.lips_shift.unwrap_or(3) as i32;
             if jlen <= 0 || tlen <= 0 || llen <= 0 {
-                return Err(CudaGatorOscError::InvalidInput(
-                    "non-positive length".into(),
-                ));
+                return Err(CudaGatorOscError::InvalidInput("non-positive length".into()));
             }
-            let upper_needed =
-                (jlen as usize).max(tlen as usize) + (jsh as usize).max(tsh as usize);
-            let lower_needed =
-                (tlen as usize).max(llen as usize) + (tsh as usize).max(lsh as usize);
+            let upper_needed = (jlen as usize).max(tlen as usize) + (jsh as usize).max(tsh as usize);
+            let lower_needed = (tlen as usize).max(llen as usize) + (tsh as usize).max(lsh as usize);
             needed_max = needed_max.max(upper_needed.max(lower_needed));
-            max_shift = max_shift.max((jsh as usize).max(tsh as usize).max(lsh as usize));
-            jl.push(jlen);
-            js.push(jsh);
-            tl.push(tlen);
-            ts.push(tsh);
-            ll.push(llen);
-            ls.push(lsh);
+            jl.push(jlen); js.push(jsh); tl.push(tlen); ts_.push(tsh); ll.push(llen); ls.push(lsh);
         }
         let valid_tail = len - first_valid;
         if valid_tail < needed_max {
             return Err(CudaGatorOscError::InvalidInput(format!(
-                "not enough valid data: needed >= {}, valid = {}",
-                needed_max, valid_tail
+                "not enough valid data: needed >= {}, valid = {}", needed_max, valid_tail
             )));
         }
 
-        // VRAM estimation
+        // VRAM estimation for outputs + prices (params sliced per chunk)
         let rows = combos.len();
-        let bytes_params = 6 * rows * std::mem::size_of::<i32>();
         let bytes_prices = len * std::mem::size_of::<f32>();
         let bytes_out = 4 * rows * len * std::mem::size_of::<f32>();
-        let required = bytes_params + bytes_prices + bytes_out;
         let headroom = 64usize * 1024 * 1024;
-        let fits = match mem_get_info() {
-            Ok((free, _)) => required.saturating_add(headroom) <= free,
-            Err(_) => true,
-        };
+        let free_now = mem_get_info().ok().map(|(f, _)| f).unwrap_or(usize::MAX);
+        if free_now.saturating_sub(headroom) < bytes_out + bytes_prices {
+            return Err(CudaGatorOscError::Cuda(format!(
+                "Insufficient VRAM for outputs+prices (need ~{:.1} MiB). Reduce sweep size or run CPU.",
+                ((bytes_out + bytes_prices + headroom) as f64) / (1024.0 * 1024.0)
+            )));
+        }
 
+        // Upload prices once
         let d_prices = DeviceBuffer::from_slice(data_f32)
             .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
 
-        // Helper to launch a chunk [start..start+chunk)
+        // Final device outputs allocated once
+        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
+            .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
+        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
+            .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
+        let mut d_uchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
+            .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
+        let mut d_lchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
+            .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
+
+        // Launcher: write directly into final outputs at row offset = start
         let launch_chunk = |this: &CudaGatorOsc,
                             start: usize,
                             chunk: usize,
-                            d_upper: &mut DeviceBuffer<f32>,
-                            d_lower: &mut DeviceBuffer<f32>,
-                            d_uchn: &mut DeviceBuffer<f32>,
-                            d_lchn: &mut DeviceBuffer<f32>|
+                            ring_len_i: i32|
          -> Result<(), CudaGatorOscError> {
             let d_jl = DeviceBuffer::from_slice(&jl[start..start + chunk])
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
@@ -240,7 +248,7 @@ impl CudaGatorOsc {
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
             let d_tl = DeviceBuffer::from_slice(&tl[start..start + chunk])
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            let d_ts = DeviceBuffer::from_slice(&ts[start..start + chunk])
+            let d_ts = DeviceBuffer::from_slice(&ts_[start..start + chunk])
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
             let d_ll = DeviceBuffer::from_slice(&ll[start..start + chunk])
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
@@ -251,7 +259,7 @@ impl CudaGatorOsc {
                 .module
                 .get_function("gatorosc_batch_f32")
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            let block_x = this.policy.batch_block_x.unwrap_or(32);
+            let block_x = this.policy.batch_block_x.unwrap_or(256);
             let grid: GridSize = (chunk as u32, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             unsafe {
@@ -267,18 +275,14 @@ impl CudaGatorOsc {
                 let mut ll_ptr = d_ll.as_device_ptr().as_raw();
                 let mut ls_ptr = d_ls.as_device_ptr().as_raw();
                 let mut ncomb_i = chunk as i32;
-                let mut ring_len_i = (max_shift + 1) as i32;
-                let row_off = start * len * std::mem::size_of::<f32>();
-                let mut u_ptr = d_upper
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add(row_off as u64);
-                let mut l_ptr = d_lower
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add(row_off as u64);
-                let mut uc_ptr = d_uchn.as_device_ptr().as_raw().wrapping_add(row_off as u64);
-                let mut lc_ptr = d_lchn.as_device_ptr().as_raw().wrapping_add(row_off as u64);
+                let mut ring_len_param = ring_len_i;
+
+                let row_off_bytes = (start * len * std::mem::size_of::<f32>()) as u64;
+                let mut u_ptr = d_upper.as_device_ptr().as_raw().wrapping_add(row_off_bytes);
+                let mut l_ptr = d_lower.as_device_ptr().as_raw().wrapping_add(row_off_bytes);
+                let mut uc_ptr = d_uchn.as_device_ptr().as_raw().wrapping_add(row_off_bytes);
+                let mut lc_ptr = d_lchn.as_device_ptr().as_raw().wrapping_add(row_off_bytes);
+
                 let mut args: [*mut c_void; 15] = [
                     &mut p_ptr as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
@@ -290,13 +294,13 @@ impl CudaGatorOsc {
                     &mut ll_ptr as *mut _ as *mut c_void,
                     &mut ls_ptr as *mut _ as *mut c_void,
                     &mut ncomb_i as *mut _ as *mut c_void,
-                    &mut ring_len_i as *mut _ as *mut c_void,
+                    &mut ring_len_param as *mut _ as *mut c_void,
                     &mut u_ptr as *mut _ as *mut c_void,
                     &mut l_ptr as *mut _ as *mut c_void,
                     &mut uc_ptr as *mut _ as *mut c_void,
                     &mut lc_ptr as *mut _ as *mut c_void,
                 ];
-                let dyn_shmem = (max_shift + 1) * 3 * std::mem::size_of::<f32>();
+                let dyn_shmem = (ring_len_i as usize) * 3 * std::mem::size_of::<f32>();
                 this.stream
                     .launch(&func, grid, block, dyn_shmem.try_into().unwrap(), &mut args)
                     .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
@@ -306,122 +310,22 @@ impl CudaGatorOsc {
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))
         };
 
-        // Allocate outputs
-        if fits && rows <= 65_535 {
-            let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            let mut d_uchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            let mut d_lchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            launch_chunk(
-                self,
-                0,
-                rows,
-                &mut d_upper,
-                &mut d_lower,
-                &mut d_uchn,
-                &mut d_lchn,
-            )?;
-            self.maybe_log_batch_debug();
-            return Ok(DeviceGatorOscQuad {
-                upper: DeviceArrayF32 {
-                    buf: d_upper,
-                    rows,
-                    cols: len,
-                },
-                lower: DeviceArrayF32 {
-                    buf: d_lower,
-                    rows,
-                    cols: len,
-                },
-                upper_change: DeviceArrayF32 {
-                    buf: d_uchn,
-                    rows,
-                    cols: len,
-                },
-                lower_change: DeviceArrayF32 {
-                    buf: d_lchn,
-                    rows,
-                    cols: len,
-                },
-            });
-        }
-
-        // Chunk path (accumulate on host to reduce VRAM burst)
-        self.maybe_log_batch_debug();
-        let max_grid = 65_535usize;
-        let mut host_upper = vec![0f32; rows * len];
-        let mut host_lower = vec![0f32; rows * len];
-        let mut host_uchn = vec![0f32; rows * len];
-        let mut host_lchn = vec![0f32; rows * len];
+        // Chunk by device grid.x and shrink shared memory per chunk
         let mut launched = 0usize;
         while launched < rows {
-            let chunk = (rows - launched).min(max_grid);
-            let mut d_upper: DeviceBuffer<f32> =
-                unsafe { DeviceBuffer::uninitialized(chunk * len) }
-                    .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            let mut d_lower: DeviceBuffer<f32> =
-                unsafe { DeviceBuffer::uninitialized(chunk * len) }
-                    .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            let mut d_uchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(chunk * len) }
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            let mut d_lchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(chunk * len) }
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            launch_chunk(
-                self,
-                launched,
-                chunk,
-                &mut d_upper,
-                &mut d_lower,
-                &mut d_uchn,
-                &mut d_lchn,
-            )?;
-            d_upper
-                .copy_to(&mut host_upper[launched * len..launched * len + chunk * len])
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            d_lower
-                .copy_to(&mut host_lower[launched * len..launched * len + chunk * len])
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            d_uchn
-                .copy_to(&mut host_uchn[launched * len..launched * len + chunk * len])
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-            d_lchn
-                .copy_to(&mut host_lchn[launched * len..launched * len + chunk * len])
-                .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
+            let chunk = (rows - launched).min(self.max_grid_x);
+            let chunk_max_shift = max_shift_in_range(&js, &ts_, &ls, launched, chunk);
+            let ring_len_i = (chunk_max_shift + 1) as i32;
+            launch_chunk(self, launched, chunk, ring_len_i)?;
             launched += chunk;
         }
-        let d_upper = DeviceBuffer::from_slice(&host_upper)
-            .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-        let d_lower = DeviceBuffer::from_slice(&host_lower)
-            .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-        let d_uchn = DeviceBuffer::from_slice(&host_uchn)
-            .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-        let d_lchn = DeviceBuffer::from_slice(&host_lchn)
-            .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
+        self.maybe_log_batch_debug();
+
         Ok(DeviceGatorOscQuad {
-            upper: DeviceArrayF32 {
-                buf: d_upper,
-                rows,
-                cols: len,
-            },
-            lower: DeviceArrayF32 {
-                buf: d_lower,
-                rows,
-                cols: len,
-            },
-            upper_change: DeviceArrayF32 {
-                buf: d_uchn,
-                rows,
-                cols: len,
-            },
-            lower_change: DeviceArrayF32 {
-                buf: d_lchn,
-                rows,
-                cols: len,
-            },
+            upper: DeviceArrayF32 { buf: d_upper, rows, cols: len },
+            lower: DeviceArrayF32 { buf: d_lower, rows, cols: len },
+            upper_change: DeviceArrayF32 { buf: d_uchn, rows, cols: len },
+            lower_change: DeviceArrayF32 { buf: d_lchn, rows, cols: len },
         })
     }
 
@@ -494,11 +398,21 @@ impl CudaGatorOsc {
             .module
             .get_function("gatorosc_many_series_one_param_f32")
             .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
-        let block_x = self.policy.many_block_x.unwrap_or(128);
+        // Ring len drives per-thread shared memory
+        let ring_len = (jaws_shift.max(teeth_shift).max(lips_shift) + 1) as i32;
+        let per_thread_smem = (ring_len as usize) * 3 * std::mem::size_of::<f32>();
+        let smem_budget = self.max_smem_per_block.saturating_sub(1024);
+        let requested_block_x = self.policy.many_block_x.unwrap_or(128);
+        let max_by_smem = if per_thread_smem == 0 {
+            requested_block_x as usize
+        } else {
+            smem_budget / per_thread_smem
+        };
+        let mut block_x = requested_block_x.min((max_by_smem as u32).max(32));
+        block_x -= block_x % 32; if block_x == 0 { block_x = 32; }
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let ring_len = (jaws_shift.max(teeth_shift).max(lips_shift) + 1) as i32;
         unsafe {
             (*(self as *const _ as *mut CudaGatorOsc)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -534,8 +448,7 @@ impl CudaGatorOsc {
                 &mut uc_ptr as *mut _ as *mut c_void,
                 &mut lc_ptr as *mut _ as *mut c_void,
             ];
-            let dyn_shmem =
-                (ring_len as usize) * 3 * (block_x as usize) * std::mem::size_of::<f32>();
+            let dyn_shmem = per_thread_smem * (block_x as usize);
             self.stream
                 .launch(&func, grid, block, dyn_shmem.try_into().unwrap(), &mut args)
                 .map_err(|e| CudaGatorOscError::Cuda(e.to_string()))?;
@@ -608,6 +521,15 @@ fn expand_grid(r: &GatorOscBatchRange) -> Vec<GatorOscParams> {
         }
     }
     out
+}
+
+#[inline]
+fn max_shift_in_range(js: &[i32], ts: &[i32], ls: &[i32], start: usize, count: usize) -> usize {
+    let mut m = 0usize;
+    for i in start..start + count {
+        m = m.max(js[i] as usize).max(ts[i] as usize).max(ls[i] as usize);
+    }
+    m
 }
 
 // ---------- Benches ----------

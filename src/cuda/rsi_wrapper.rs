@@ -10,9 +10,9 @@
 use crate::cuda::moving_averages::DeviceArrayF32; // shared device array handle
 use crate::indicators::rsi::{RsiBatchRange, RsiParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -47,6 +47,7 @@ pub struct CudaRsi {
     stream: Stream,
     _context: Context,
     policy: CudaRsiPolicy,
+    max_grid_x: u32, // device limit for grid.x
 }
 
 impl CudaRsi {
@@ -59,7 +60,7 @@ impl CudaRsi {
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/rsi_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O3),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -68,11 +69,17 @@ impl CudaRsi {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
 
+        // Query device max grid.x and cache (fallback to legacy 65_535)
+        let max_grid_x = device
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .unwrap_or(65_535) as u32;
+
         Ok(Self {
             module,
             stream,
             _context: context,
             policy: CudaRsiPolicy::default(),
+            max_grid_x,
         })
     }
 
@@ -111,14 +118,32 @@ impl CudaRsi {
             }
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices_f32).map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+        // Allocate device buffers and use pinned host + async copies
+        let mut d_prices: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(len)
+                .map_err(|e| CudaRsiError::Cuda(e.to_string()))?
+        };
+        let mut d_periods: DeviceBuffer<i32> = unsafe {
+            DeviceBuffer::uninitialized(n_combos)
+                .map_err(|e| CudaRsiError::Cuda(e.to_string()))?
+        };
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(len * n_combos)
                 .map_err(|e| CudaRsiError::Cuda(e.to_string()))?
         };
+
+        let h_prices = LockedBuffer::from_slice(prices_f32)
+            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+        let h_periods = LockedBuffer::from_slice(&periods_i32)
+            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+        unsafe {
+            d_prices
+                .async_copy_from(&h_prices, &self.stream)
+                .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+            d_periods
+                .async_copy_from(&h_periods, &self.stream)
+                .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
+        }
 
         self.launch_batch(
             &d_prices,
@@ -128,6 +153,10 @@ impl CudaRsi {
             n_combos,
             &mut d_out,
         )?;
+        // Ensure all work/copies are completed before returning
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -148,12 +177,13 @@ impl CudaRsi {
             .module
             .get_function("rsi_batch_f32")
             .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
-        let block_x = self.policy.batch_block_x.unwrap_or(128);
-        let max_blocks: u32 = 65_535;
+        let block_x: u32 = self.policy.batch_block_x.unwrap_or(256);
+        let max_grid_x: u32 = self.max_grid_x.max(1);
+        let combos_per_launch: usize = (block_x as usize) * (max_grid_x as usize);
         let mut launched = 0usize;
         while launched < n_combos {
-            let this_chunk = (n_combos - launched).min(max_blocks as usize);
-            let grid_x = this_chunk as u32;
+            let this_chunk = (n_combos - launched).min(combos_per_launch);
+            let grid_x = ((this_chunk as u32) + block_x - 1) / block_x;
             let grid: GridSize = (grid_x.max(1), 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             unsafe {
@@ -164,7 +194,7 @@ impl CudaRsi {
                     .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
                 let mut series_len_i = len as i32;
                 let mut first_i = first_valid as i32;
-                let mut combos_i = this_chunk as i32;
+                let mut combos_i = this_chunk as i32; // combos processed this launch
                 let mut out_ptr = d_out
                     .as_device_ptr()
                     .as_raw()
@@ -183,9 +213,7 @@ impl CudaRsi {
             }
             launched += this_chunk;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))
+        Ok(())
     }
 
     // ---------- Many-series × one-param (time-major) ----------
@@ -241,6 +269,7 @@ impl CudaRsi {
             }
         }
 
+        // Simpler synchronous copies are sufficient here; keep API synchronous
         let d_prices = DeviceBuffer::from_slice(prices_tm_f32)
             .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
@@ -250,6 +279,9 @@ impl CudaRsi {
         };
 
         self.launch_many_series(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -270,7 +302,7 @@ impl CudaRsi {
             .module
             .get_function("rsi_many_series_one_param_f32")
             .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
-        let block_x = self.policy.many_block_x.unwrap_or(128);
+        let block_x = self.policy.many_block_x.unwrap_or(256);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -293,9 +325,7 @@ impl CudaRsi {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaRsiError::Cuda(e.to_string()))?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRsiError::Cuda(e.to_string()))
+        Ok(())
     }
 
     // ---------- Helpers ----------

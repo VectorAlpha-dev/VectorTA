@@ -34,7 +34,11 @@ extern "C" __global__ void emd_batch_f32(
     int first_valid,
     float* __restrict__ ub_out,         // flattened [combo * series_len + t]
     float* __restrict__ mb_out,
-    float* __restrict__ lb_out) {
+    float* __restrict__ lb_out,
+    int ring_stride_mid,                // >= 2*period_max across combos
+    float* __restrict__ sp_ring,        // [n_combos * 50]
+    float* __restrict__ sv_ring,        // [n_combos * 50]
+    float* __restrict__ bp_ring) {      // [n_combos * ring_stride_mid]
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
 
@@ -43,7 +47,7 @@ extern "C" __global__ void emd_batch_f32(
     float* __restrict__ mb_row = mb_out + base;
     float* __restrict__ lb_row = lb_out + base;
 
-    // Prefill NaN for warmup semantics
+    // Prefill NaN for warmup semantics (outputs only; do not use as scratch)
     fill_nan_row(ub_row, series_len);
     fill_nan_row(mb_row, series_len);
     fill_nan_row(lb_row, series_len);
@@ -67,7 +71,12 @@ extern "C" __global__ void emd_batch_f32(
     const double inv_up_low = 1.0 / (double)per_up_low;
     const double inv_mid    = 1.0 / (double)per_mid;
 
-    double sum_up = 0.0; // sum of scaled peaks
+    // Per-thread ring buffers in global memory (scratch), zero-initialized by host
+    float* __restrict__ sp_r = sp_ring + combo * per_up_low;
+    float* __restrict__ sv_r = sv_ring + combo * per_up_low;
+    float* __restrict__ bp_r = bp_ring + combo * ring_stride_mid;
+
+    double sum_up = 0.0;  // sum of scaled peaks
     double sum_low = 0.0; // sum of scaled valleys
     double sum_mid = 0.0; // sum of band-pass values
 
@@ -90,6 +99,8 @@ extern "C" __global__ void emd_batch_f32(
         price_prev2 = p0;
     }
 
+    int idx_ul = 0; // ring index for upper/lower (size 50)
+    int idx_mid = 0; // ring index for middle (size per_mid)
     int count = 0; // number of processed points since first_valid
     for (; i < series_len; ++i) {
         const double price = (double)prices[i];
@@ -107,31 +118,26 @@ extern "C" __global__ void emd_batch_f32(
             if (bp_prev1 < bp_curr && bp_prev1 < bp_prev2) valley_curr = bp_prev1;
         }
 
-        const double sp = peak_curr * (double)fraction;
-        const double sv = valley_curr * (double)fraction;
+        const float sp = (float)(peak_curr * (double)fraction);
+        const float sv = (float)(valley_curr * (double)fraction);
+        const float bp = (float)bp_curr;
 
-        // Use output rows as scratch to keep prior raw values available
-        mb_row[i] = (float)bp_curr;
-        ub_row[i] = (float)sp;
-        lb_row[i] = (float)sv;
+        const float old_sp = sp_r[idx_ul];
+        const float old_sv = sv_r[idx_ul];
+        const float old_bp = bp_r[idx_mid];
 
-        sum_mid += bp_curr;
-        sum_up  += sp;
-        sum_low += sv;
+        sp_r[idx_ul] = sp;
+        sv_r[idx_ul] = sv;
+        bp_r[idx_mid] = bp;
+
+        sum_up  += (double)sp - (double)old_sp;
+        sum_low += (double)sv - (double)old_sv;
+        sum_mid += (double)bp - (double)old_bp;
+
+        idx_ul += 1; if (idx_ul == per_up_low) idx_ul = 0;
+        idx_mid += 1; if (idx_mid == per_mid)   idx_mid = 0;
 
         const int filled = count + 1;
-        if (filled > per_mid) {
-            // subtract raw value from t - per_mid (still stored in mb_row)
-            const double old_bp = (double)mb_row[i - per_mid];
-            sum_mid -= old_bp;
-        }
-        if (filled > per_up_low) {
-            const double old_sp = (double)ub_row[i - per_up_low];
-            const double old_sv = (double)lb_row[i - per_up_low];
-            sum_up  -= old_sp;
-            sum_low -= old_sv;
-        }
-
         if (filled >= per_up_low) {
             ub_row[i] = (float)(sum_up * inv_up_low);
             lb_row[i] = (float)(sum_low * inv_up_low);
@@ -161,7 +167,11 @@ extern "C" __global__ void emd_many_series_one_param_time_major_f32(
     const int* __restrict__ first_valids, // len = cols
     float* __restrict__ ub_tm,
     float* __restrict__ mb_tm,
-    float* __restrict__ lb_tm) {
+    float* __restrict__ lb_tm,
+    int ring_stride_mid,
+    float* __restrict__ sp_ring,
+    float* __restrict__ sv_ring,
+    float* __restrict__ bp_ring) {
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= cols) return;
 
@@ -170,7 +180,7 @@ extern "C" __global__ void emd_many_series_one_param_time_major_f32(
     float* __restrict__ mb_col = mb_tm + series;
     float* __restrict__ lb_col = lb_tm + series;
 
-    // Prefill NaN
+    // Prefill NaN (outputs only)
     for (int t = 0; t < rows; ++t) {
         ub_col[t * cols] = EMD_NAN;
         mb_col[t * cols] = EMD_NAN;
@@ -192,6 +202,11 @@ extern "C" __global__ void emd_many_series_one_param_time_major_f32(
     const double inv_up_low = 1.0 / (double)per_up_low;
     const double inv_mid    = 1.0 / (double)per_mid;
 
+    // Scratch rings in global memory for this series
+    float* __restrict__ sp_r = sp_ring + series * per_up_low;
+    float* __restrict__ sv_r = sv_ring + series * per_up_low;
+    float* __restrict__ bp_r = bp_ring + series * ring_stride_mid;
+
     double sum_up = 0.0, sum_low = 0.0, sum_mid = 0.0;
     double bp_prev1 = 0.0, bp_prev2 = 0.0;
     double peak_prev = 0.0, valley_prev = 0.0;
@@ -204,6 +219,7 @@ extern "C" __global__ void emd_many_series_one_param_time_major_f32(
         price_prev1 = p0; price_prev2 = p0;
     }
 
+    int idx_ul = 0, idx_mid = 0;
     int count = 0;
     for (; t < rows; ++t) {
         const double price = (double)prices_tm[(size_t)t * cols + series];
@@ -221,29 +237,27 @@ extern "C" __global__ void emd_many_series_one_param_time_major_f32(
             if (bp_prev1 < bp_curr && bp_prev1 < bp_prev2) valley_curr = bp_prev1;
         }
 
-        const double sp = peak_curr * (double)fraction;
-        const double sv = valley_curr * (double)fraction;
+        const float sp = (float)(peak_curr * (double)fraction);
+        const float sv = (float)(valley_curr * (double)fraction);
+        const float bp = (float)bp_curr;
 
-        // scratch writes
-        mb_col[(size_t)t * cols] = (float)bp_curr;
-        ub_col[(size_t)t * cols] = (float)sp;
-        lb_col[(size_t)t * cols] = (float)sv;
+        const float old_sp = sp_r[idx_ul];
+        const float old_sv = sv_r[idx_ul];
+        const float old_bp = bp_r[idx_mid];
 
-        sum_mid += bp_curr;
-        sum_up  += sp;
-        sum_low += sv;
+        sp_r[idx_ul] = sp;
+        sv_r[idx_ul] = sv;
+        bp_r[idx_mid] = bp;
+
+        sum_mid += (double)bp - (double)old_bp;
+        sum_up  += (double)sp - (double)old_sp;
+        sum_low += (double)sv - (double)old_sv;
+
+        idx_ul += 1; if (idx_ul == per_up_low) idx_ul = 0;
+        idx_mid += 1; if (idx_mid == per_mid)   idx_mid = 0;
 
         const int filled = count + 1;
-        if (filled > per_mid) {
-            const double old_bp = (double)mb_col[(size_t)(t - per_mid) * cols];
-            sum_mid -= old_bp;
-        }
-        if (filled > per_up_low) {
-            const double old_sp = (double)ub_col[(size_t)(t - per_up_low) * cols];
-            const double old_sv = (double)lb_col[(size_t)(t - per_up_low) * cols];
-            sum_up  -= old_sp;
-            sum_low -= old_sv;
-        }
+        // No additional subtraction from outputs: we maintain rolling sums via rings above.
 
         if (filled >= per_up_low) {
             ub_col[(size_t)t * cols] = (float)(sum_up * inv_up_low);
@@ -262,4 +276,3 @@ extern "C" __global__ void emd_many_series_one_param_time_major_f32(
         ++count;
     }
 }
-

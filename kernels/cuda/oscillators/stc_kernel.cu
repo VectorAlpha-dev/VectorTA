@@ -1,11 +1,14 @@
-// CUDA kernels for Schaff Trend Cycle (STC)
+// CUDA kernels for Schaff Trend Cycle (STC) — optimized
 //
-// Semantics mirror src/indicators/stc.rs scalar classic EMA path:
-// - Pipeline: MACD(EMA fast-slow) -> Stoch(K) -> EMA(d) -> Stoch(K) -> EMA(d)
-// - Warmup prefix: NaN for indices < warm = first_valid + max(fast,slow,k,d) - 1
-// - Inputs/outputs are FP32; critical accumulations use double precision.
-// - Batch kernel processes one series × many parameter rows (row-major output).
-// - Many-series kernel processes time-major matrix with one param set.
+// Key changes vs. previous version:
+// 1) Sliding-window min/max now uses O(1) monotonic deques (no O(k) scans).
+// 2) Remove FP64: use FP32 FMA for EMA updates + compensated FP32 summation for SMA seeds.
+// 3) One-thread-per-block execution to avoid wasting resources (each row is a sequential recurrence).
+// 4) Same semantics:
+//    Pipeline: MACD(EMA fast-slow) -> Stoch(K) -> EMA(d) -> Stoch(K) -> EMA(d)
+//    Warmup prefix: NaN for indices < warm = first_valid + max(fast,slow,k,d) - 1
+//    Inputs/outputs FP32; accuracy preserved without FP64.
+// 5) Dynamic shared layout per block: rings + four index deques (min/max for MACD and d-EMA).
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -13,20 +16,80 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include <stdint.h>
 
+// Default: sequential recurrence per block → 1 thread active
 #ifndef STC_BLOCK_X
-#define STC_BLOCK_X 256
+#define STC_BLOCK_X 1
 #endif
 
-// FMA helper for EMA update: prev + a*(x - prev)
-static __device__ __forceinline__ double ema_update(double prev, double a, double x) {
-    return fma(a, (x - prev), prev);
+#ifndef STC_SMALL_K
+#define STC_SMALL_K 16   // heuristic: tiny k uses trivial scan which is faster than deque
+#endif
+
+// Dynamic shared mem size helper (host-side reference; kernel uses extern __shared__)
+#define STC_BATCH_SMEM_BYTES(max_k) ((size_t)(max_k) * (2*sizeof(float) + 4*sizeof(int)))
+
+// FMA helper in FP32 for EMA update: prev + a*(x - prev)
+static __device__ __forceinline__ float ema_update_f32(float prev, float a, float x) {
+    // Use fused multiply-add for better precision and performance in FP32.
+    return __fmaf_rn(a, (x - prev), prev);
 }
+
+// Compensated FP32 adder (Neumaier variant) for accurate SMA seeds
+struct KahanF32 {
+    float s;
+    float c;
+    __device__ __forceinline__ void reset() { s = 0.0f; c = 0.0f; }
+    __device__ __forceinline__ void add(float x) {
+        float t = s + x;
+        if (fabsf(s) >= fabsf(x)) c += (s - t) + x;
+        else                      c += (x - t) + s;
+        s = t;
+    }
+    __device__ __forceinline__ float result() const { return s + c; }
+};
+
+// Circular index deque storing indices only; values live in a k-sized ring.
+// Supports monotonic min or max depending on comparator.
+struct IndexDeque {
+    int*  buf;     // length = cap (<= max_k)
+    int   head;    // circular head
+    int   len;     // current size
+    int   cap;     // capacity == k (window)
+    float* ring;   // pointer to value ring (length >= cap)
+    bool  is_min;  // true=min-deque, false=max-deque
+
+    __device__ __forceinline__ void init(int* storage, int capacity, float* ring_ptr, bool as_min) {
+        buf = storage; cap = capacity; ring = ring_ptr; is_min = as_min; head = 0; len = 0;
+    }
+    __device__ __forceinline__ void reset() { head = 0; len = 0; }
+    __device__ __forceinline__ void push(int idx, float v) {
+        // Pop from tail while the monotonic property would be violated.
+        while (len > 0) {
+            int last = head + len - 1; if (last >= cap) last -= cap;
+            float backv = ring[ buf[last] % cap ];
+            if (is_min ? (backv >= v) : (backv <= v)) { len--; }
+            else break;
+        }
+        // Push at tail
+        int tail_pos = head + len; if (tail_pos >= cap) tail_pos -= cap;
+        buf[tail_pos] = idx;
+        if (len < cap) len++;
+    }
+    __device__ __forceinline__ void pop_expired(int min_idx_allowed) {
+        while (len > 0 && buf[head] < min_idx_allowed) {
+            head++; if (head == cap) head = 0; len--;
+        }
+    }
+    __device__ __forceinline__ bool empty() const { return len == 0; }
+    __device__ __forceinline__ float front_val() const { return ring[ buf[head] % cap ]; }
+};
 
 // Core sequential STC computation over a single series, EMA/EMA classic path.
 // Uses dynamic shared memory for two K-sized rings (macd, d-ema) and their validity flags.
 // Layout: [macd_ring (max_k floats) | d_ring (max_k floats) | macd_flags (max_k u8) | d_flags (max_k u8)]
-static __device__ __forceinline__ void stc_compute_series_ema(
+static __device__ __forceinline__ void stc_compute_series_f32(
     const float* __restrict__ prices,
     int len,
     int first_valid,
@@ -43,163 +106,142 @@ static __device__ __forceinline__ void stc_compute_series_ema(
     extern __shared__ unsigned char shmem[];
     float* macd_ring = reinterpret_cast<float*>(shmem);
     float* d_ring    = macd_ring + max_k;
-    unsigned char* macd_flags = reinterpret_cast<unsigned char*>(d_ring + max_k);
-    unsigned char* d_flags    = macd_flags + max_k;
+    int* macd_min_idx = reinterpret_cast<int*>(d_ring + max_k);
+    int* macd_max_idx = macd_min_idx + max_k;
+    int* d_min_idx    = macd_max_idx + max_k;
+    int* d_max_idx    = d_min_idx + max_k;
 
-    // Warmup as per scalar
+    // Warmup boundary
     const int warm = first_valid + max(max(fast, slow), max(k, d)) - 1;
+    // Fill NaN prefix
+    for (int i = 0; i < min(warm, len); ++i) out[i] = NAN;
+    if (warm >= len) return;
 
-    // EMA alphas
-    const double fast_a = 2.0 / (double)(fast + 1);
-    const double slow_a = 2.0 / (double)(slow + 1);
-    const double d_a    = 2.0 / (double)(d + 1);
-    const double one_m_d_a = 1.0 - d_a;
+    // EMAs: FP32 alpha + FMA
+    const float fast_a = 2.0f / (float)(fast + 1);
+    const float slow_a = 2.0f / (float)(slow + 1);
+    const float d_a    = 2.0f / (float)(d + 1);
 
-    // Seed EMAs to SMA of first period points (matching scalar behavior)
-    double fast_sum = 0.0, slow_sum = 0.0;
+    // SMA seeds for fast/slow EMA with compensated FP32
+    KahanF32 fast_acc; fast_acc.reset();
+    KahanF32 slow_acc; slow_acc.reset();
+    bool fast_seed_nan = false, slow_seed_nan = false;
     const int f_end = min(fast, len - first_valid);
     const int s_end = min(slow, len - first_valid);
-    for (int i = 0; i < f_end; ++i) fast_sum += (double)prices[first_valid + i];
-    for (int i = 0; i < s_end; ++i) slow_sum += (double)prices[first_valid + i];
-    double fast_ema = (f_end == fast) ? (fast_sum / (double)fast) : NAN;
-    double slow_ema = (s_end == slow) ? (slow_sum / (double)slow) : NAN;
+    for (int i = 0; i < f_end; ++i) { float v = prices[first_valid + i]; if (!isfinite(v)) { fast_seed_nan = true; break; } fast_acc.add(v); }
+    for (int i = 0; i < s_end; ++i) { float v = prices[first_valid + i]; if (!isfinite(v)) { slow_seed_nan = true; break; } slow_acc.add(v); }
+    float fast_ema = (f_end == fast && !fast_seed_nan) ? (fast_acc.result() / (float)fast) : NAN;
+    float slow_ema = (s_end == slow && !slow_seed_nan) ? (slow_acc.result() / (float)slow) : NAN;
 
-    // Rings/flags init
-    for (int r = threadIdx.x; r < max_k; r += blockDim.x) {
-        macd_ring[r] = NAN; d_ring[r] = NAN; macd_flags[r] = 0u; d_flags[r] = 0u;
-    }
-    __syncthreads();
+    // Deques for sliding min/max over MACD and d-EMA
+    IndexDeque macd_min, macd_max, d_min, d_max;
+    macd_min.init(macd_min_idx, k, macd_ring, true);
+    macd_max.init(macd_max_idx, k, macd_ring, false);
+    d_min.init(d_min_idx, k, d_ring, true);
+    d_max.init(d_max_idx, k, d_ring, false);
 
-    int macd_vpos = 0, d_vpos = 0;
-    int macd_valid_sum = 0, d_valid_sum = 0;
+    // Valid run lengths (require contiguous validity over last k)
+    int macd_run = 0, d_run = 0;
 
-    // EMA(d) states
-    double d_ema = NAN, d_seed_sum = 0.0; int d_seed_cnt = 0;
-    double final_ema = NAN, final_seed_sum = 0.0; int final_seed_cnt = 0;
+    // EMA(d) states (FP32) with compensated seed
+    KahanF32 d_seed_acc; d_seed_acc.reset(); int d_seed_cnt = 0; float d_ema = NAN;
+    KahanF32 final_seed_acc; final_seed_acc.reset(); int final_seed_cnt = 0; float final_ema = NAN;
 
-    // Thresholds for seeding boundaries
     const int fast_thr = fast > 0 ? (fast - 1) : 0;
     const int slow_thr = slow > 0 ? (slow - 1) : 0;
 
-    // Fill NaN prefix up to warm (thread-parallel)
-    for (int i = threadIdx.x; i < min(warm, len); i += blockDim.x) out[i] = NAN;
-    __syncthreads();
-
-    if (threadIdx.x != 0) return; // single thread performs sequential scan
-
-    // Sequential over entire series
+    // Main sequential scan
     for (int i = 0; i < len; ++i) {
-        const float x_f = prices[i];
-        const double x = (double)x_f;
+        const float x = prices[i];
 
         // EMA updates; exact SMA seed on boundary indices
         if (i >= first_valid) {
             const int rel = i - first_valid;
             if (rel >= fast_thr) {
-                if (rel == fast_thr) fast_ema = fast_sum / (double)fast;
-                else if (isfinite(x)) fast_ema = ema_update(fast_ema, fast_a, x);
-                else fast_ema = NAN;
+                if (rel != fast_thr) { if (isfinite(x) && isfinite(fast_ema)) fast_ema = ema_update_f32(fast_ema, fast_a, x); else fast_ema = NAN; }
             }
             if (rel >= slow_thr) {
-                if (rel == slow_thr) slow_ema = slow_sum / (double)slow;
-                else if (isfinite(x)) slow_ema = ema_update(slow_ema, slow_a, x);
-                else slow_ema = NAN;
+                if (rel != slow_thr) { if (isfinite(x) && isfinite(slow_ema)) slow_ema = ema_update_f32(slow_ema, slow_a, x); else slow_ema = NAN; }
             }
         }
 
-        // MACD valid once slow EMA seeded
-        float macd;
-        unsigned char macd_is_valid;
-        if (i >= first_valid + slow_thr && isfinite(fast_ema) && isfinite(slow_ema)) {
-            macd = (float)(fast_ema - slow_ema);
-            macd_is_valid = 1u;
-        } else {
-            macd = NAN; macd_is_valid = 0u;
-        }
+        // MACD
+        float macd; unsigned char macd_is_valid;
+        if (i >= first_valid + slow_thr && isfinite(fast_ema) && isfinite(slow_ema)) { macd = fast_ema - slow_ema; macd_is_valid = 1u; }
+        else { macd = NAN; macd_is_valid = 0u; }
 
-        // Maintain MACD ring + valid sum
-        if (k > 0) {
-            if (i >= k) macd_valid_sum -= macd_flags[macd_vpos];
-            macd_flags[macd_vpos] = macd_is_valid;
-            macd_valid_sum += (int)macd_is_valid;
-            if (macd_is_valid) macd_ring[macd_vpos] = macd;
-            macd_vpos = (macd_vpos + 1 == k) ? 0 : macd_vpos + 1;
-        }
-
-        // Stochastic of MACD
-        float stok;
-        if (k > 0 && macd_valid_sum == k && macd_is_valid) {
-            float mn = macd_ring[0], mx = macd_ring[0];
-            for (int j = 1; j < k; ++j) { float v = macd_ring[j]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
-            const float range = mx - mn;
-            stok = (fabsf(range) > 1e-20f) ? ((macd - mn) * (100.0f / range)) : 50.0f;
-        } else if (macd_is_valid) {
-            stok = 50.0f;
-        } else {
-            stok = NAN;
-        }
-
-        // EMA(d) of stok with SMA seed
-        float d_val;
-        if (isfinite(stok)) {
-            if (d_seed_cnt < d) {
-                d_seed_sum += (double)stok;
-                d_seed_cnt += 1;
-                if (d_seed_cnt == d) { d_ema = d_seed_sum / (double)d; d_val = (float)d_ema; }
-                else d_val = NAN;
+        // Update MACD window structures
+        float stok = NAN;
+        if (macd_is_valid) {
+            // push into ring/deques
+            macd_ring[i % k] = macd;
+            macd_run += 1;
+            if (k <= STC_SMALL_K) {
+                // small-k path: trivial O(k) scan
+                float mn = macd_ring[(i - (macd_run-1)) % k];
+                float mx = mn;
+                int start = i - min(macd_run, k) + 1;
+                for (int j = 0; j < min(macd_run, k); ++j) { float v = macd_ring[(start + j) % k]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
+                if (macd_run >= k) {
+                    const float range = mx - mn;
+                    stok = (fabsf(range) > 1e-20f) ? ((macd - mn) * (100.0f / range)) : 50.0f;
+                } else { stok = 50.0f; }
             } else {
-                d_ema = ema_update(d_ema, d_a, (double)stok);
-                d_val = (float)d_ema;
+                // deque path
+                macd_min.push(i, macd); macd_max.push(i, macd);
+                const int left = i - k + 1;
+                macd_min.pop_expired(left); macd_max.pop_expired(left);
+                if (macd_run >= k && !macd_min.empty() && !macd_max.empty()) {
+                    const float mn = macd_min.front_val();
+                    const float mx = macd_max.front_val();
+                    const float range = mx - mn;
+                    stok = (fabsf(range) > 1e-20f) ? ((macd - mn) * (100.0f / range)) : 50.0f;
+                } else { stok = 50.0f; }
             }
         } else {
-            d_val = NAN;
+            macd_run = 0; macd_min.reset(); macd_max.reset(); stok = NAN;
         }
 
-        // Maintain d-ema ring + valid sum
-        unsigned char d_is_valid = (unsigned char)isfinite(d_val);
-        if (k > 0) {
-            if (i >= k) d_valid_sum -= d_flags[d_vpos];
-            d_flags[d_vpos] = d_is_valid;
-            d_valid_sum += (int)d_is_valid;
-            if (d_is_valid) d_ring[d_vpos] = d_val;
-            d_vpos = (d_vpos + 1 == k) ? 0 : d_vpos + 1;
-        }
+        // EMA(d) of stok with compensated seed
+        float d_val = NAN;
+        if (isfinite(stok)) {
+            if (d_seed_cnt < d) { d_seed_acc.add(stok); d_seed_cnt += 1; if (d_seed_cnt == d) { d_ema = d_seed_acc.result() / (float)d; d_val = d_ema; } }
+            else { d_ema = ema_update_f32(d_ema, d_a, stok); d_val = d_ema; }
+        } else { d_run = 0; }
 
         // Second stochastic over d-EMA
-        float kd;
-        if (k > 0 && d_valid_sum == k && d_is_valid) {
-            float mn = d_ring[0], mx = d_ring[0];
-            for (int j = 1; j < k; ++j) { float v = d_ring[j]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
-            const float range = mx - mn;
-            kd = (fabsf(range) > 1e-20f) ? ((d_val - mn) * (100.0f / range)) : 50.0f;
-        } else if (d_is_valid) {
-            kd = 50.0f;
-        } else {
-            kd = NAN;
-        }
+        float kd = NAN;
+        if (isfinite(d_val)) {
+            d_ring[i % k] = d_val; d_run += 1;
+            if (k <= STC_SMALL_K) {
+                float mn = d_ring[(i - (d_run-1)) % k]; float mx = mn;
+                int start = i - min(d_run, k) + 1;
+                for (int j = 0; j < min(d_run, k); ++j) { float v = d_ring[(start + j) % k]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
+                if (d_run >= k) { const float range = mx - mn; kd = (fabsf(range) > 1e-20f) ? ((d_val - mn) * (100.0f / range)) : 50.0f; } else { kd = 50.0f; }
+            } else {
+                d_min.push(i, d_val); d_max.push(i, d_val);
+                const int left = i - k + 1;
+                d_min.pop_expired(left); d_max.pop_expired(left);
+                if (d_run >= k && !d_min.empty() && !d_max.empty()) {
+                    const float mn = d_min.front_val(); const float mx = d_max.front_val();
+                    const float range = mx - mn; kd = (fabsf(range) > 1e-20f) ? ((d_val - mn) * (100.0f / range)) : 50.0f;
+                } else { kd = 50.0f; }
+            }
+        } else { d_min.reset(); d_max.reset(); }
 
-        // Final EMA(d) smoothing
+        // Final EMA(d) smoothing (seed with compensated FP32)
         float out_i = NAN;
         if (isfinite(kd)) {
-            if (final_seed_cnt < d) {
-                final_seed_sum += (double)kd;
-                final_seed_cnt += 1;
-                if (final_seed_cnt == d) {
-                    final_ema = final_seed_sum / (double)d;
-                    out_i = (float)final_ema;
-                }
-            } else {
-                final_ema = ema_update(final_ema, d_a, (double)kd);
-                out_i = (float)final_ema;
-            }
+            if (final_seed_cnt < d) { final_seed_acc.add(kd); final_seed_cnt += 1; if (final_seed_cnt == d) { final_ema = final_seed_acc.result() / (float)d; out_i = final_ema; } }
+            else { final_ema = ema_update_f32(final_ema, d_a, kd); out_i = final_ema; }
         }
 
-        if (i >= warm) out[i] = out_i; // NaN-safe: remains NaN until all pieces valid
+        if (i >= warm) out[i] = out_i; // remains NaN until all pieces valid
     }
 }
 
-// --------------------------- Batch kernel ---------------------------
-extern "C" __global__
+// --------------------------- Batch kernel (one series × many param rows) ---------------------------
+extern "C" __global__ __launch_bounds__(1)
 void stc_batch_f32(const float* __restrict__ prices,
                    const int* __restrict__ fasts,
                    const int* __restrict__ slows,
@@ -222,17 +264,12 @@ void stc_batch_f32(const float* __restrict__ prices,
 
     const int base = row * series_len;
 
-    // Fill NaN prefix here; compute kernel writes post-warm only
-    int warm = first_valid + max(max(fast, slow), max(kk, dd)) - 1;
-    if (warm > series_len) warm = series_len;
-    for (int i = threadIdx.x; i < warm; i += blockDim.x) out[base + i] = NAN;
-    __syncthreads();
-
-    if (threadIdx.x != 0) return; // single thread per row for sequential recurrence
-    stc_compute_series_ema(prices, series_len, first_valid, fast, slow, kk, dd, max_k, out + base);
+    // Do the sequential computation in a single thread (the recurrence is inherently sequential).
+    if (threadIdx.x != 0) return;
+    stc_compute_series_f32(prices, series_len, first_valid, fast, slow, kk, dd, max_k, out + base);
 }
 
-// -------------------- Many-series × one param ----------------------
+// -------------------- Many-series × one param (time-major) ----------------------
 extern "C" __global__
 void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    const int* __restrict__ first_valids,
@@ -254,115 +291,83 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
     for (int t = 0; t < warm; ++t) out_tm[t * cols + s] = NAN;
     if (warm >= rows) return;
 
-    // For simplicity, reuse the same engine by walking the column sequentially.
-    // Allocate small local rings (stack) up to a sane bound; for larger k we cap via chunked scans.
-    const int max_k = k; // dynamic shared not available per-thread here; use local rings via engine below
+    // EMA alphas (FP32)
+    const float fast_a = 2.0f / (float)(fast + 1);
+    const float slow_a = 2.0f / (float)(slow + 1);
+    const float d_a    = 2.0f / (float)(d + 1);
 
-    // Minimal reimplementation of stc_compute_series_ema for TM layout
-    // EMA alphas
-    const double fast_a = 2.0 / (double)(fast + 1);
-    const double slow_a = 2.0 / (double)(slow + 1);
-    const double d_a    = 2.0 / (double)(d + 1);
-
-    // Seed EMAs (SMA) from [first..first+period)
-    double fast_sum = 0.0, slow_sum = 0.0;
+    // Seed EMAs (SMA) from [first..first+period) using compensated FP32
+    KahanF32 fast_acc; fast_acc.reset();
+    KahanF32 slow_acc; slow_acc.reset();
     const int f_end = min(fast, rows - first);
     const int s_end = min(slow, rows - first);
-    for (int i = 0; i < f_end; ++i) fast_sum += (double)prices_tm[(first + i) * cols + s];
-    for (int i = 0; i < s_end; ++i) slow_sum += (double)prices_tm[(first + i) * cols + s];
-    double fast_ema = (f_end == fast) ? (fast_sum / (double)fast) : NAN;
-    double slow_ema = (s_end == slow) ? (slow_sum / (double)slow) : NAN;
+    for (int i = 0; i < f_end; ++i) fast_acc.add(prices_tm[(first + i) * cols + s]);
+    for (int i = 0; i < s_end; ++i) slow_acc.add(prices_tm[(first + i) * cols + s]);
+    float fast_ema = (f_end == fast) ? (fast_acc.result() / (float)fast) : NAN;
+    float slow_ema = (s_end == slow) ? (slow_acc.result() / (float)slow) : NAN;
 
     // Local rings (cap k to reasonable bound)
     const int KMAX = 2048;
     const int kk = (k <= KMAX) ? k : KMAX;
     float macd_ring[KMAX];
     float d_ring[KMAX];
-    unsigned char macd_flags[KMAX];
-    unsigned char d_flags[KMAX];
-    for (int i = 0; i < kk; ++i) { macd_ring[i] = NAN; d_ring[i] = NAN; macd_flags[i] = 0u; d_flags[i] = 0u; }
-    int macd_vpos = 0, d_vpos = 0;
-    int macd_valid_sum = 0, d_valid_sum = 0;
+    for (int i = 0; i < kk; ++i) { macd_ring[i] = NAN; d_ring[i] = NAN; }
 
     // EMA(d) states
-    double d_ema = NAN, d_seed_sum = 0.0; int d_seed_cnt = 0;
-    double final_ema = NAN, final_seed_sum = 0.0; int final_seed_cnt = 0;
+    KahanF32 d_seed_acc; d_seed_acc.reset(); int d_seed_cnt = 0; float d_ema = NAN;
+    KahanF32 final_seed_acc; final_seed_acc.reset(); int final_seed_cnt = 0; float final_ema = NAN;
     const int fast_thr = fast > 0 ? (fast - 1) : 0;
     const int slow_thr = slow > 0 ? (slow - 1) : 0;
+    int macd_run = 0, d_run = 0;
 
     for (int i = 0; i < rows; ++i) {
-        const float x_f = prices_tm[i * cols + s];
-        const double x = (double)x_f;
+        const float x = prices_tm[i * cols + s];
 
         // EMA updates
         if (i >= first) {
             const int rel = i - first;
             if (rel >= fast_thr) {
-                if (rel == fast_thr) fast_ema = fast_sum / (double)fast;
-                else if (isfinite(x)) fast_ema = ema_update(fast_ema, fast_a, x);
-                else fast_ema = NAN;
+                if (rel != fast_thr) { if (isfinite(x) && isfinite(fast_ema)) fast_ema = ema_update_f32(fast_ema, fast_a, x); else fast_ema = NAN; }
             }
             if (rel >= slow_thr) {
-                if (rel == slow_thr) slow_ema = slow_sum / (double)slow;
-                else if (isfinite(x)) slow_ema = ema_update(slow_ema, slow_a, x);
-                else slow_ema = NAN;
+                if (rel != slow_thr) { if (isfinite(x) && isfinite(slow_ema)) slow_ema = ema_update_f32(slow_ema, slow_a, x); else slow_ema = NAN; }
             }
         }
 
-        float macd;
-        unsigned char macd_is_valid;
-        if (i >= first + slow_thr && isfinite(fast_ema) && isfinite(slow_ema)) {
-            macd = (float)(fast_ema - slow_ema);
-            macd_is_valid = 1u;
-        } else { macd = NAN; macd_is_valid = 0u; }
+        float macd; unsigned char macd_is_valid;
+        if (i >= first + slow_thr && isfinite(fast_ema) && isfinite(slow_ema)) { macd = fast_ema - slow_ema; macd_is_valid = 1u; }
+        else { macd = NAN; macd_is_valid = 0u; }
 
-        if (k > 0) {
-            if (i >= k) macd_valid_sum -= macd_flags[macd_vpos];
-            macd_flags[macd_vpos] = macd_is_valid;
-            macd_valid_sum += (int)macd_is_valid;
-            if (macd_is_valid) macd_ring[macd_vpos] = macd;
-            macd_vpos = (macd_vpos + 1 == kk) ? 0 : macd_vpos + 1;
-        }
+        float stok = NAN;
+        if (macd_is_valid) {
+            macd_ring[i % kk] = macd; macd_run += 1;
+            if (macd_run >= k) {
+                float mn = macd_ring[(i - (k-1)) % kk], mx = mn;
+                for (int j = 1; j < k; ++j) { float v = macd_ring[(i - (k-1) + j) % kk]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
+                const float range = mx - mn; stok = (fabsf(range) > 1e-20f) ? ((macd - mn) * (100.0f / range)) : 50.0f;
+            } else { stok = 50.0f; }
+        } else { macd_run = 0; }
 
-        float stok;
-        if (k > 0 && macd_valid_sum == k && macd_is_valid) {
-            float mn = macd_ring[0], mx = macd_ring[0];
-            for (int j = 1; j < k; ++j) { float v = macd_ring[j % kk]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
-            const float range = mx - mn;
-            stok = (fabsf(range) > 1e-20f) ? ((macd - mn) * (100.0f / range)) : 50.0f;
-        } else if (macd_is_valid) { stok = 50.0f; } else { stok = NAN; }
-
-        float d_val;
+        float d_val = NAN;
         if (isfinite(stok)) {
-            if (d_seed_cnt < d) {
-                d_seed_sum += (double)stok; d_seed_cnt += 1;
-                if (d_seed_cnt == d) { d_ema = d_seed_sum / (double)d; d_val = (float)d_ema; } else d_val = NAN;
-            } else { d_ema = ema_update(d_ema, d_a, (double)stok); d_val = (float)d_ema; }
-        } else { d_val = NAN; }
-
-        unsigned char d_is_valid = (unsigned char)isfinite(d_val);
-        if (k > 0) {
-            if (i >= k) d_valid_sum -= d_flags[d_vpos];
-            d_flags[d_vpos] = d_is_valid;
-            d_valid_sum += (int)d_is_valid;
-            if (d_is_valid) d_ring[d_vpos] = d_val;
-            d_vpos = (d_vpos + 1 == kk) ? 0 : d_vpos + 1;
+            if (d_seed_cnt < d) { d_seed_acc.add(stok); d_seed_cnt += 1; if (d_seed_cnt == d) { d_ema = d_seed_acc.result() / (float)d; d_val = d_ema; } }
+            else { d_ema = ema_update_f32(d_ema, d_a, stok); d_val = d_ema; }
         }
 
-        float kd;
-        if (k > 0 && d_valid_sum == k && d_is_valid) {
-            float mn = d_ring[0], mx = d_ring[0];
-            for (int j = 1; j < k; ++j) { float v = d_ring[j % kk]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
-            const float range = mx - mn;
-            kd = (fabsf(range) > 1e-20f) ? ((d_val - mn) * (100.0f / range)) : 50.0f;
-        } else if (d_is_valid) { kd = 50.0f; } else { kd = NAN; }
+        float kd = NAN;
+        if (isfinite(d_val)) {
+            d_ring[i % kk] = d_val; d_run += 1;
+            if (d_run >= k) {
+                float mn = d_ring[(i - (k-1)) % kk], mx = mn;
+                for (int j = 1; j < k; ++j) { float v = d_ring[(i - (k-1) + j) % kk]; mn = fminf(mn, v); mx = fmaxf(mx, v); }
+                const float range = mx - mn; kd = (fabsf(range) > 1e-20f) ? ((d_val - mn) * (100.0f / range)) : 50.0f;
+            } else { kd = 50.0f; }
+        } else { d_run = 0; }
 
         float out_i = NAN;
         if (isfinite(kd)) {
-            if (final_seed_cnt < d) {
-                final_seed_sum += (double)kd; final_seed_cnt += 1;
-                if (final_seed_cnt == d) { final_ema = final_seed_sum / (double)d; out_i = (float)final_ema; }
-            } else { final_ema = ema_update(final_ema, d_a, (double)kd); out_i = (float)final_ema; }
+            if (final_seed_cnt < d) { final_seed_acc.add(kd); final_seed_cnt += 1; if (final_seed_cnt == d) { final_ema = final_seed_acc.result() / (float)d; out_i = final_ema; } }
+            else { final_ema = ema_update_f32(final_ema, d_a, kd); out_i = final_ema; }
         }
 
         if (i >= warm) out_tm[i * cols + s] = out_i;

@@ -128,13 +128,22 @@ fn dpo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4;
+    // Slightly relaxed tolerance: device path now performs FP32-only math
+    // to avoid slow FP64 ops on consumer GPUs. This can increase error a bit
+    // on rolling-difference of large prefixes in time-major layout.
+    let tol = 1.1e-3;
     for idx in 0..host.len() {
-        assert!(
-            approx_eq(cpu_tm[idx], host[idx] as f64, tol),
-            "many-series mismatch at {}",
-            idx
-        );
+        let c = cpu_tm[idx];
+        let g = host[idx] as f64;
+        if !approx_eq(c, g, tol) {
+            panic!(
+                "many-series mismatch at {}: cpu={} gpu={} |diff|={}",
+                idx,
+                c,
+                g,
+                (c - g).abs()
+            );
+        }
     }
     Ok(())
 }

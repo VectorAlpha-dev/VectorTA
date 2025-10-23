@@ -9,7 +9,7 @@
 //! Semantics match the scalar DPO implementation:
 //! - Warmup per row/series: warm = max(first_valid + period - 1, back) where back = period/2 + 1
 //! - Warmup prefix is filled with NaN
-//! - Critical accumulations use f64; outputs are f32
+//! - Critical accumulations use dual‑fp32 (float2: hi, lo); outputs are f32
 
 #![cfg(feature = "cuda")]
 
@@ -18,8 +18,8 @@ use crate::indicators::dpo::{DpoBatchRange, DpoParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
-use cust::module::{Module, ModuleJitOption, OptLevel};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, DeviceCopy, LockedBuffer};
+use cust::module::{Module, ModuleJitOption};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
@@ -40,6 +40,16 @@ impl fmt::Display for CudaDpoError {
     }
 }
 impl std::error::Error for CudaDpoError {}
+
+// ---------------------- Host mirror for CUDA float2 ----------------------
+// 8-byte aligned to match device-side float2 alignment.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Default)]
+pub struct Float2 {
+    pub x: f32, // hi
+    pub y: f32, // lo
+}
+unsafe impl DeviceCopy for Float2 {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -84,16 +94,9 @@ impl CudaDpo {
         let context = Context::new(device).map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/dpo_kernel.ptx"));
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+        // Keep default (O4) JIT optimization and determine target from current context.
+        let module = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+            .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
@@ -106,6 +109,29 @@ impl CudaDpo {
             last_batch_block: None,
             last_many_block: None,
         })
+    }
+
+    // Upload helper: page-locked (pinned) + async copy for large slices
+    fn upload_slice<T: DeviceCopy + Clone>(&self, h: &[T]) -> Result<DeviceBuffer<T>, CudaDpoError> {
+        use std::mem::size_of;
+        const PIN_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
+        let bytes = h.len() * size_of::<T>();
+        if bytes >= PIN_THRESHOLD_BYTES {
+            let h_locked =
+                LockedBuffer::from_slice(h).map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+            unsafe {
+                let mut d = DeviceBuffer::uninitialized_async(h.len(), &self.stream)
+                    .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+                d.async_copy_from(&h_locked, &self.stream)
+                    .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+                Ok(d)
+            }
+        } else {
+            unsafe {
+                DeviceBuffer::from_slice_async(h, &self.stream)
+                    .map_err(|e| CudaDpoError::Cuda(e.to_string()))
+            }
+        }
     }
 
     pub fn set_policy(&mut self, policy: CudaDpoPolicy) {
@@ -126,7 +152,7 @@ impl CudaDpo {
         let len = data_f32.len();
         let n_combos = periods.len();
 
-        // Build f64 prefix over [first_valid..)
+        // Build dual-fp32 (float2) prefix over [first_valid..)
         let ps = build_prefixes_from_first(data_f32, first_valid);
 
         // VRAM estimate
@@ -140,13 +166,11 @@ impl CudaDpo {
             }
         }
 
-        let d_data =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
-        let d_ps = DeviceBuffer::from_slice(&ps).map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
-        let d_periods =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+        let d_data = self.upload_slice(data_f32)?;
+        let d_ps = self.upload_slice(&ps)?; // Float2
+        let d_periods = self.upload_slice(&periods)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len * n_combos)
+            DeviceBuffer::uninitialized_async(len * n_combos, &self.stream)
                 .map_err(|e| CudaDpoError::Cuda(e.to_string()))?
         };
 
@@ -171,7 +195,7 @@ impl CudaDpo {
     fn launch_batch_kernel(
         &self,
         d_data: &DeviceBuffer<f32>,
-        d_ps: &DeviceBuffer<f64>,
+        d_ps: &DeviceBuffer<Float2>,
         len: i32,
         first_valid: i32,
         d_periods: &DeviceBuffer<i32>,
@@ -232,7 +256,7 @@ impl CudaDpo {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // Build time-major prefix P per series
+        // Build time-major dual-fp32 prefix P per series
         let ps_tm = build_prefixes_time_major(data_tm_f32, cols, rows, &first_valids);
 
         // VRAM estimate
@@ -247,14 +271,12 @@ impl CudaDpo {
             }
         }
 
-        let d_data =
-            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
-        let d_ps =
-            DeviceBuffer::from_slice(&ps_tm).map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaDpoError::Cuda(e.to_string()))?;
+        let d_data = self.upload_slice(data_tm_f32)?;
+        let d_ps = self.upload_slice(&ps_tm)?;
+        let d_fv = self.upload_slice(&first_valids)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(elems).map_err(|e| CudaDpoError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(elems, &self.stream)
+                .map_err(|e| CudaDpoError::Cuda(e.to_string()))?
         };
 
         self.launch_many_series_kernel(
@@ -278,7 +300,7 @@ impl CudaDpo {
     fn launch_many_series_kernel(
         &self,
         d_data: &DeviceBuffer<f32>,
-        d_ps: &DeviceBuffer<f64>,
+        d_ps: &DeviceBuffer<Float2>,
         d_fv: &DeviceBuffer<i32>,
         cols: i32,
         rows: i32,
@@ -421,19 +443,26 @@ impl CudaDpo {
 
 // ---- Prefix builders ----
 
-fn build_prefixes_from_first(data: &[f32], first_valid: usize) -> Vec<f64> {
+#[inline(always)]
+fn kahan_add(mut hi: f32, mut lo: f32, v: f32) -> (f32, f32) {
+    let y = v - lo;
+    let t = hi + y;
+    lo = (t - hi) - y;
+    hi = t;
+    (hi, lo)
+}
+
+fn build_prefixes_from_first(data: &[f32], first_valid: usize) -> Vec<Float2> {
     let len = data.len();
-    // Store length+1 array aligned to absolute indices: prefix[i] holds sum over [first_valid..i-1]
-    // For i <= first_valid, value remains 0.
-    let mut ps = vec![0.0f64; len + 1];
-    let mut acc_s = 0.0f64;
+    // length+1, 1-based prefix; ps[w] holds sum over [first_valid .. w-1]
+    let mut ps = vec![Float2 { x: 0.0, y: 0.0 }; len + 1];
+    let (mut hi, mut lo) = (0.0f32, 0.0f32);
     for i in 0..len {
         if i >= first_valid {
-            let v = data[i] as f64;
-            acc_s += v;
+            (hi, lo) = kahan_add(hi, lo, data[i]);
         }
         let w = i + 1;
-        ps[w] = acc_s;
+        ps[w] = Float2 { x: hi, y: lo };
     }
     ps
 }
@@ -443,19 +472,19 @@ fn build_prefixes_time_major(
     cols: usize,
     rows: usize,
     first_valids: &[i32],
-) -> Vec<f64> {
+) -> Vec<Float2> {
     let total = data_tm.len();
-    let mut ps = vec![0.0f64; total + 1];
+    let mut ps = vec![Float2 { x: 0.0, y: 0.0 }; total + 1];
     for s in 0..cols {
         let fv = first_valids[s].max(0) as usize;
-        let mut acc_s = 0.0f64;
+        let (mut hi, mut lo) = (0.0f32, 0.0f32);
         for t in 0..rows {
             if t >= fv {
-                let v = data_tm[t * cols + s] as f64;
-                acc_s += v;
+                let v = data_tm[t * cols + s];
+                (hi, lo) = kahan_add(hi, lo, v);
             }
             let w = (t * cols + s) + 1;
-            ps[w] = acc_s;
+            ps[w] = Float2 { x: hi, y: lo };
         }
     }
     ps
@@ -516,14 +545,14 @@ pub mod benches {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         // prefixes dominate but amortized
-        let prefix_bytes = (ONE_SERIES_LEN + 1) * std::mem::size_of::<f64>();
+        let prefix_bytes = (ONE_SERIES_LEN + 1) * std::mem::size_of::<Float2>();
         in_bytes + out_bytes + prefix_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_ROWS;
         let in_bytes = elems * std::mem::size_of::<f32>();
         let out_bytes = elems * std::mem::size_of::<f32>();
-        let prefix_bytes = (elems + 1) * std::mem::size_of::<f64>();
+        let prefix_bytes = (elems + 1) * std::mem::size_of::<Float2>();
         let fv_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
         in_bytes + out_bytes + prefix_bytes + fv_bytes + 64 * 1024 * 1024
     }

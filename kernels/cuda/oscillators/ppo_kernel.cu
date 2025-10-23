@@ -12,9 +12,240 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include <limits.h>
 
 // Write IEEE-754 quiet NaN as f32
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
+
+// --- high-accuracy dual-FP32 ("float-float") helpers -----------------
+// Value ≈ hi + lo with near-double precision using error-free transforms.
+struct Float2 { float hi, lo; };
+
+__device__ __forceinline__ Float2 f2_make(float a)    { return {a, 0.0f}; }
+
+// Error-free two-sum (Knuth / QD Alg.4); returns normalized (hi, lo)
+__device__ __forceinline__ Float2 f2_two_sum(float a, float b) {
+    Float2 r;
+    float s  = a + b;
+    float bp = s - a;
+    float e  = (a - (s - bp)) + (b - bp);
+    // quick-two-sum normalize
+    float t  = s + e;
+    r.lo     = e - (t - s);
+    r.hi     = t;
+    return r;
+}
+
+// Add Float2 + float
+__device__ __forceinline__ Float2 f2_add_f(Float2 a, float b) {
+    Float2 s = f2_two_sum(a.hi, b);
+    s.lo += a.lo;
+    // renormalize
+    float t = s.hi + s.lo;
+    s.lo = s.lo - (t - s.hi);
+    s.hi = t;
+    return s;
+}
+
+// Multiply Float2 by float: (a.hi*b) + (a.lo*b) with FMA residual
+__device__ __forceinline__ Float2 f2_mul_f(Float2 a, float b) {
+    float ph = a.hi * b;
+    float pe = fmaf(a.hi, b, -ph) + a.lo * b;
+    float t  = ph + pe;
+    Float2 r = { t, pe - (t - ph) };
+    return r;
+}
+
+// FMA into Float2: a*b + c, where c is Float2
+__device__ __forceinline__ Float2 f2_fma(float a, float b, Float2 c) {
+    float ph = fmaf(a, b, c.hi);        // primary sum in hi
+    float pe = fmaf(a, b, - (ph - c.hi)) + c.lo; // error accumulation
+    float t  = ph + pe;
+    Float2 r = { t, pe - (t - ph) };
+    return r;
+}
+
+// Divide Float2 by int via reciprocal (one-step refinement)
+__device__ __forceinline__ Float2 f2_div_int(Float2 a, int den) {
+    float d      = (float)den;
+    float inv_d  = 1.0f / d;
+    // first quotient from collapsed (hi+lo)
+    float q0     = (a.hi + a.lo) * inv_d;
+    // one Newton-like refinement on (hi,lo)
+    float r      = (a.hi + a.lo) - q0 * d; // residual
+    float q1     = r * inv_d;
+    Float2 q     = f2_make(q0 + q1);
+    return q;
+}
+
+// Ratio (a/b) as float with first-order correction using low parts
+__device__ __forceinline__ float f2_ratio(Float2 num, Float2 den) {
+    float N  = num.hi + num.lo;
+    float D  = den.hi + den.lo;
+    float invD = 1.0f / D;
+    float y  = N * invD;
+    // Correct using low parts: y ≈ (N + δN) / (D + δD) ≈ y + (δN - y*δD)/D
+    float corr = (num.lo - y * den.lo) * invD;
+    return y + corr;
+}
+
+// Warp reductions (min/max) over a 32-lane warp
+__device__ __forceinline__ int warp_max_i(int v, unsigned mask) {
+    for (int ofs = 16; ofs; ofs >>= 1) v = max(v, __shfl_down_sync(mask, v, ofs));
+    return v;
+}
+__device__ __forceinline__ int warp_min_i(int v, unsigned mask) {
+    for (int ofs = 16; ofs; ofs >>= 1) v = min(v, __shfl_down_sync(mask, v, ofs));
+    return v;
+}
+
+// -----------------------------------------------------------------------------
+// One-series × many-params (EMA only), warp-cooperative fast path.
+// Each warp processes up to 32 (fast,slow) combos on the same price series.
+// Lane 0 loads x_t and broadcasts via __shfl_sync to eliminate redundant loads.
+// Row-major out: [combo][t]. Prefix [0..start_idx) filled with NaN per combo.
+extern "C" __global__ void ppo_batch_ema_manyparams_f32(
+    const float* __restrict__ data,   // length len
+    int len,
+    int first_valid,
+    const int* __restrict__ fasts,    // length n_combos
+    const int* __restrict__ slows,    // length n_combos
+    int n_combos,
+    float* __restrict__ out)          // row-major: [combo][t]
+{
+    if (len <= 0 || n_combos <= 0) return;
+
+    const unsigned lane  = threadIdx.x & 31;
+    const unsigned warp  = threadIdx.x >> 5;
+    const unsigned wpb   = blockDim.x >> 5;                // warps per block
+    if (wpb == 0) return;
+
+    const int combos_per_block = (int)(wpb * 32);
+    const int base_combo = (int)blockIdx.y * combos_per_block + (int)warp * 32;
+    const int combo      = base_combo + (int)lane;
+
+    // Keep all lanes participating in shuffles, but mark validity
+    const unsigned full_mask  = __activemask();
+    const bool     valid_lane = (combo < n_combos);
+    const unsigned mask       = __ballot_sync(full_mask, valid_lane);
+    if (mask == 0u) return; // no valid lanes in this warp
+
+    // Load params (per lane)
+    int fast = 0, slow = 0;
+    if (valid_lane) {
+        fast = fasts[combo];
+        slow = slows[combo];
+    }
+    // Sanity: non-positive periods -> lane becomes inactive
+    const bool periods_ok = valid_lane && (fast > 0) && (slow > 0);
+    const unsigned ok_mask = __ballot_sync(mask, periods_ok);
+    (void)ok_mask; // may be unused depending on compiler
+    const float nanf = f32_nan();
+
+    // Compute per-lane geometry
+    int start_idx = 0;
+    if (periods_ok) start_idx = first_valid + slow - 1;
+
+    // Write prefix NaNs independently (stride by warpSize on the row)
+    if (periods_ok) {
+        const int row_off = combo * len;
+        for (int t = (int)lane; t < min(start_idx, len); t += 32) {
+            out[row_off + t] = nanf;
+        }
+    }
+
+    // If lane invalid or start already beyond series, it still participates in shuffles but does nothing afterwards
+    // Compute warp-wide bounds to orchestrate shared steps
+    int warp_slow_min = periods_ok ? slow : INT_MAX;
+    int warp_slow_max = periods_ok ? slow : 0;
+    int warp_fast_min = periods_ok ? fast : INT_MAX;
+
+    warp_slow_min = warp_min_i(warp_slow_min, mask);
+    warp_slow_max = warp_max_i(warp_slow_max, mask);
+    warp_fast_min = warp_min_i(warp_fast_min, mask);
+
+    // --- Seed sums over first `slow` values (per lane) using broadcasted x ---
+    Float2 slow_sum = f2_make(0.0f);
+    Float2 fast_sum = f2_make(0.0f);
+    int overlap = 0;
+    if (periods_ok) overlap = slow - fast; // may be negative (mirror scalar seeding)
+
+    for (int k = 0; k < warp_slow_max && k + first_valid < len; ++k) {
+        float v = 0.0f;
+        if (lane == 0u) v = data[first_valid + k];
+        v = __shfl_sync(mask, v, 0);
+        if (periods_ok) {
+            if (k < slow) {
+                slow_sum = f2_add_f(slow_sum, v);
+                if (k >= overlap) fast_sum = f2_add_f(fast_sum, v);
+            }
+        }
+    }
+
+    // Convert sums to EMA seeds
+    Float2 fast_ema = f2_make(0.0f), slow_ema = f2_make(0.0f);
+    float fa = 0.0f, fb = 0.0f, sa = 0.0f, sb = 0.0f;
+    int row_off = 0;
+    if (periods_ok) {
+        fast_ema = f2_div_int(fast_sum, max(fast, 1));
+        slow_ema = f2_div_int(slow_sum, max(slow, 1));
+        fa = 2.0f / (float)(fast + 1);
+        fb = 1.0f - fa;
+        sa = 2.0f / (float)(slow + 1);
+        sb = 1.0f - sa;
+        row_off = combo * len;
+    }
+
+    // Advance fast EMA from (first_valid + fast) to (first_valid + slow - 1) per lane.
+    // Iterate i over [first_valid + warp_fast_min, first_valid + warp_slow_max - 1]
+    const int i_begin = first_valid + warp_fast_min;
+    const int i_end   = first_valid + warp_slow_max - 1;
+    for (int i = i_begin; i <= i_end && i < len; ++i) {
+        float x = 0.0f;
+        if (lane == 0u) x = data[i];
+        x = __shfl_sync(mask, x, 0);
+        if (periods_ok) {
+            if (i >= first_valid + fast && i <= first_valid + slow - 1) {
+                // fast_ema = fa*x + fb*fast_ema
+                Float2 tmp = f2_mul_f(fast_ema, fb);
+                fast_ema = f2_fma(fa, x, tmp);
+            }
+        }
+    }
+
+    // First PPO at start_idx
+    if (periods_ok && start_idx < len) {
+        float y0 = nanf;
+        float den = slow_ema.hi + slow_ema.lo;
+        if (isfinite(den) && den != 0.0f) {
+            float ratio = f2_ratio(fast_ema, slow_ema);
+            y0 = ratio * 100.0f - 100.0f;
+        }
+        out[row_off + start_idx] = y0;
+    }
+
+    // Main time scan: from t = min(start) + 1 to len-1
+    int warp_start_min = periods_ok ? start_idx : INT_MAX;
+    warp_start_min = warp_min_i(warp_start_min, mask);
+    for (int t = warp_start_min + 1; t < len; ++t) {
+        float x = 0.0f;
+        if (lane == 0u) x = data[t];
+        x = __shfl_sync(mask, x, 0);
+        if (periods_ok && t > start_idx) {
+            // EMA recurrences
+            fast_ema = f2_fma(fa, x, f2_mul_f(fast_ema, fb));
+            slow_ema = f2_fma(sa, x, f2_mul_f(slow_ema, sb));
+            // PPO
+            float y = nanf;
+            float den = slow_ema.hi + slow_ema.lo;
+            if (isfinite(den) && den != 0.0f) {
+                float ratio = f2_ratio(fast_ema, slow_ema);
+                y = ratio * 100.0f - 100.0f;
+            }
+            out[row_off + t] = y;
+        }
+    }
+}
 
 // One-series × many-params (row-major out: [combo][t])
 // data: len
@@ -146,15 +377,19 @@ extern "C" __global__ void ppo_many_series_one_param_time_major_f32(
     const float nanf = f32_nan();
 
     if (ma_mode == 0) {
-        // SMA path: parallelize over time
+        // SMA path: parallelize over time using per-series time-major prefix sums.
+        // Clamp the left window boundary to max(first_valid-1, -1) so that we can
+        // safely address prefix_sum_tm (ps[0] is the global zero).
         const int tx = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = gridDim.x * blockDim.x;
         for (int t = tx; t < rows; t += stride) {
             float y = nanf;
             if (t >= start_idx) {
                 const int wr = (t * cols + s) + 1;
-                const int wl_fast = ((t - fast) * cols + s) + 1;
-                const int wl_slow = ((t - slow) * cols + s) + 1;
+                const int lfast_t = max(t - fast, fv - 1);
+                const int lslow_t = max(t - slow, fv - 1);
+                const int wl_fast = (lfast_t >= 0) ? (lfast_t * cols + s) + 1 : 0;
+                const int wl_slow = (lslow_t >= 0) ? (lslow_t * cols + s) + 1 : 0;
                 const double s_fast = prefix_sum_tm[wr] - prefix_sum_tm[wl_fast];
                 const double s_slow = prefix_sum_tm[wr] - prefix_sum_tm[wl_slow];
                 if (isfinite(s_fast) && isfinite(s_slow) && s_slow != 0.0) {

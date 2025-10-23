@@ -250,7 +250,10 @@ impl CudaEmd {
         let in_bytes = len * std::mem::size_of::<f32>();
         let params_bytes = n * (std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>());
         let out_bytes = 3 * n * len * std::mem::size_of::<f32>();
-        let required = in_bytes + params_bytes + out_bytes;
+        // Scratch rings: sp/sv (50 each) + bp (2*max_period)
+        let ring_stride_mid = 2 * max_p;
+        let ring_bytes = n * (50 + 50 + ring_stride_mid) * std::mem::size_of::<f32>();
+        let required = in_bytes + params_bytes + out_bytes + ring_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaEmdError::InvalidInput(
                 "insufficient device memory for emd batch".into(),
@@ -274,6 +277,17 @@ impl CudaEmd {
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
         let mut d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+
+        // Allocate zero-initialized ring buffers (global memory scratch)
+        let zero_sp = vec![0f32; n * 50];
+        let zero_sv = vec![0f32; n * 50];
+        let zero_bp = vec![0f32; n * ring_stride_mid];
+        let mut d_sp_ring =
+            DeviceBuffer::from_slice(&zero_sp).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let mut d_sv_ring =
+            DeviceBuffer::from_slice(&zero_sv).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let mut d_bp_ring =
+            DeviceBuffer::from_slice(&zero_bp).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
         // Chunk grid.y to <= 65_535 if needed (rows == combos). Use x dimension like other wrappers.
         let block_x = match self.policy.batch {
@@ -299,6 +313,10 @@ impl CudaEmd {
             let mut p_ub = d_ub.as_device_ptr().as_raw();
             let mut p_mb = d_mb.as_device_ptr().as_raw();
             let mut p_lb = d_lb.as_device_ptr().as_raw();
+            let mut ring_stride_i = ring_stride_mid as i32; // fits i32 for typical sizes
+            let mut p_sp = d_sp_ring.as_device_ptr().as_raw();
+            let mut p_sv = d_sv_ring.as_device_ptr().as_raw();
+            let mut p_bp = d_bp_ring.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut p_prices as *mut _ as *mut c_void,
                 &mut p_p as *mut _ as *mut c_void,
@@ -310,6 +328,10 @@ impl CudaEmd {
                 &mut p_ub as *mut _ as *mut c_void,
                 &mut p_mb as *mut _ as *mut c_void,
                 &mut p_lb as *mut _ as *mut c_void,
+                &mut ring_stride_i as *mut _ as *mut c_void,
+                &mut p_sp as *mut _ as *mut c_void,
+                &mut p_sv as *mut _ as *mut c_void,
+                &mut p_bp as *mut _ as *mut c_void,
             ];
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
@@ -365,10 +387,13 @@ impl CudaEmd {
         let delta = params.delta.unwrap_or(0.5) as f32;
         let fraction = params.fraction.unwrap_or(0.1) as f32;
 
-        // VRAM estimate (inputs + first_valids + 3 outputs)
+        // VRAM estimate (inputs + first_valids + 3 outputs + ring scratch)
+        let per_mid = 2 * (period as usize);
+        let ring_bytes = cols * (50 + 50 + per_mid) * std::mem::size_of::<f32>();
         let bytes = data_tm_f32.len() * std::mem::size_of::<f32>()
             + first_valids.len() * std::mem::size_of::<i32>()
-            + 3 * data_tm_f32.len() * std::mem::size_of::<f32>();
+            + 3 * data_tm_f32.len() * std::mem::size_of::<f32>()
+            + ring_bytes;
         if !Self::will_fit(bytes, 64 * 1024 * 1024) {
             return Err(CudaEmdError::InvalidInput(
                 "insufficient device memory for emd many-series".into(),
@@ -385,6 +410,17 @@ impl CudaEmd {
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
         let mut d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+
+        // Zeroed ring buffers
+        let zero_sp = vec![0f32; cols * 50];
+        let zero_sv = vec![0f32; cols * 50];
+        let zero_bp = vec![0f32; cols * per_mid];
+        let mut d_sp_ring =
+            DeviceBuffer::from_slice(&zero_sp).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let mut d_sv_ring =
+            DeviceBuffer::from_slice(&zero_sv).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let mut d_bp_ring =
+            DeviceBuffer::from_slice(&zero_bp).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
@@ -406,6 +442,10 @@ impl CudaEmd {
             let mut p_ub = d_ub.as_device_ptr().as_raw();
             let mut p_mb = d_mb.as_device_ptr().as_raw();
             let mut p_lb = d_lb.as_device_ptr().as_raw();
+            let mut ring_stride_i = per_mid as i32;
+            let mut p_sp = d_sp_ring.as_device_ptr().as_raw();
+            let mut p_sv = d_sv_ring.as_device_ptr().as_raw();
+            let mut p_bp = d_bp_ring.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut p_prices as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
@@ -417,6 +457,10 @@ impl CudaEmd {
                 &mut p_ub as *mut _ as *mut c_void,
                 &mut p_mb as *mut _ as *mut c_void,
                 &mut p_lb as *mut _ as *mut c_void,
+                &mut ring_stride_i as *mut _ as *mut c_void,
+                &mut p_sp as *mut _ as *mut c_void,
+                &mut p_sv as *mut _ as *mut c_void,
+                &mut p_bp as *mut _ as *mut c_void,
             ];
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
