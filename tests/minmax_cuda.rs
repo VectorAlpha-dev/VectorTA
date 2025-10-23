@@ -1,6 +1,12 @@
 // Integration tests for CUDA MinMax kernels
 
-use my_project::indicators::minmax::{minmax_batch_with_kernel, MinmaxBatchRange};
+use my_project::indicators::minmax::{
+    minmax_batch_with_kernel, MinmaxBatchRange,
+};
+// Minimal import fixes: tests use these items below
+use my_project::indicators::minmax::{
+    minmax_with_kernel, MinmaxInput, MinmaxParams,
+};
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]

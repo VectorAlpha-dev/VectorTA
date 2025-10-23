@@ -22,6 +22,23 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 
+#[inline]
+fn alpha_from_period_f32(p: i32) -> f32 {
+    let p = p.max(1) as f64;
+    let omega = 2.0_f64 * std::f64::consts::PI / p;
+    let (s, c) = omega.sin_cos();
+    ((1.0 - s) / c) as f32
+}
+
+#[inline]
+fn build_alpha_lut(p_min: i32, p_max: i32) -> (Vec<f32>, i32) {
+    debug_assert!(p_max >= p_min && p_min >= 1);
+    let mut lut = Vec::with_capacity((p_max - p_min + 1) as usize);
+    for p in p_min..=p_max {
+        lut.push(alpha_from_period_f32(p));
+    }
+    (lut, p_min)
+}
 #[derive(Debug)]
 pub enum CudaLpcError {
     Cuda(String),
@@ -280,14 +297,9 @@ impl CudaLpc {
         let d_tr =
             DeviceBuffer::from_slice(&tr_host).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
 
-        let periods: Vec<i32> = combos
-            .iter()
-            .map(|p| p.fixed_period.unwrap() as i32)
-            .collect();
-        let cms: Vec<f32> = combos
-            .iter()
-            .map(|p| p.cycle_mult.unwrap() as f32)
-            .collect();
+        // Params
+        let periods: Vec<i32> = combos.iter().map(|p| p.fixed_period.unwrap() as i32).collect();
+        let cms: Vec<f32> = combos.iter().map(|p| p.cycle_mult.unwrap() as f32).collect();
         let tms: Vec<f32> = combos.iter().map(|p| p.tr_mult.unwrap() as f32).collect();
         let d_periods =
             DeviceBuffer::from_slice(&periods).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
@@ -301,6 +313,26 @@ impl CudaLpc {
             None
         };
 
+        // Optional alpha LUT for adaptive mode
+        let (d_alpha_lut, alpha_lut_len_i32, alpha_lut_pmin_i32) = if cutoff_adaptive {
+            let p_min = 3i32;
+            let max_fixed = *periods.iter().max().unwrap_or(&p_min);
+            let cm_max = cms.iter().copied().fold(0.0f32, f32::max);
+            let dom_max = dom_host_f32
+                .as_ref()
+                .map(|v| v.iter().copied().fold(0.0f32, f32::max))
+                .unwrap_or(0.0f32);
+            let mut from_dom = (dom_max * cm_max).ceil() as i32;
+            let max_cap = if range.max_cycle_limit > 0 { range.max_cycle_limit as i32 } else { i32::MAX };
+            if from_dom > max_cap { from_dom = max_cap; }
+            let p_max = max_fixed.max(from_dom.max(p_min));
+            let (lut, pmin) = build_alpha_lut(p_min, p_max);
+            let len_i32 = lut.len() as i32;
+            let buf = DeviceBuffer::from_slice(&lut).map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
+            (Some(buf), len_i32, pmin)
+        } else { (None, 0, 0) };
+
+        // Outputs row-major [combos, len] to preserve API
         let mut d_f = unsafe { DeviceBuffer::<f32>::uninitialized(rows * n) }
             .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
         let mut d_hi = unsafe { DeviceBuffer::<f32>::uninitialized(rows * n) }
@@ -308,33 +340,13 @@ impl CudaLpc {
         let mut d_lo = unsafe { DeviceBuffer::<f32>::uninitialized(rows * n) }
             .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
 
-        // Fill warmup NaNs in outputs up to `first` per row
-        let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(rows * n).map_err(|e| CudaLpcError::Cuda(e.to_string()))?
-        };
-        for i in 0..(rows * n) {
-            pinned.as_mut_slice()[i] = f32::NAN;
-        }
-        unsafe {
-            d_f.async_copy_from(pinned.as_slice(), &self.stream)
-                .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
-            d_hi.async_copy_from(pinned.as_slice(), &self.stream)
-                .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
-            d_lo.async_copy_from(pinned.as_slice(), &self.stream)
-                .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
-        }
-
-        // Launch
+        // Launch v2 kernel; keep out_time_major=0 for API compatibility
         let func = self
             .module
-            .get_function("lpc_batch_f32")
+            .get_function("lpc_batch_f32_v2")
             .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
-            BatchKernelPolicy::Plain { block_x } => block_x,
-        };
+        let block_x = match self.policy.batch { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x };
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
-        // Use explicit launch to allow passing a possibly-null raw pointer for `dom`.
         unsafe {
             let grid: GridSize = ((grid_x, 1, 1)).into();
             let block: BlockSize = ((block_x, 1, 1)).into();
@@ -351,15 +363,16 @@ impl CudaLpc {
             let mut first_i = first as i32;
             let mut cutoff_i = if cutoff_adaptive { 1i32 } else { 0i32 };
             let mut maxcl_i = range.max_cycle_limit as i32;
-            let mut dom_ptr: *const f32 = if let Some(ref d) = d_dom {
-                d.as_device_ptr().as_raw() as *const f32
-            } else {
-                std::ptr::null()
-            };
+            let mut dom_ptr: *const f32 = if let Some(ref d) = d_dom { d.as_device_ptr().as_raw() as *const f32 } else { std::ptr::null() };
+            let mut alpha_ptr: *const f32 = if let Some(ref d) = d_alpha_lut { d.as_device_ptr().as_raw() as *const f32 } else { std::ptr::null() };
+            let mut alpha_len = alpha_lut_len_i32;
+            let mut alpha_pmin = alpha_lut_pmin_i32;
+            let mut out_time_major = 0i32; // keep row-major externally
             let mut out_f_ptr = d_f.as_device_ptr().as_raw();
             let mut out_hi_ptr = d_hi.as_device_ptr().as_raw();
             let mut out_lo_ptr = d_lo.as_device_ptr().as_raw();
-            let mut args: [*mut c_void; 16] = [
+
+            let mut args: [*mut c_void; 21] = [
                 &mut h_ptr as *mut _ as *mut c_void,
                 &mut l_ptr as *mut _ as *mut c_void,
                 &mut c_ptr as *mut _ as *mut c_void,
@@ -374,13 +387,16 @@ impl CudaLpc {
                 &mut cutoff_i as *mut _ as *mut c_void,
                 &mut maxcl_i as *mut _ as *mut c_void,
                 &mut dom_ptr as *mut _ as *mut c_void,
+                &mut alpha_ptr as *mut _ as *mut c_void,
+                &mut alpha_len as *mut _ as *mut c_void,
+                &mut alpha_pmin as *mut _ as *mut c_void,
+                &mut out_time_major as *mut _ as *mut c_void,
                 &mut out_f_ptr as *mut _ as *mut c_void,
                 &mut out_hi_ptr as *mut _ as *mut c_void,
+                &mut out_lo_ptr as *mut _ as *mut c_void,
             ];
-            let mut args_vec: Vec<*mut c_void> = args.into();
-            args_vec.push(&mut out_lo_ptr as *mut _ as *mut c_void);
             self.stream
-                .launch(&func, grid, block, 0, &mut args_vec)
+                .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaLpcError::Cuda(e.to_string()))?;
         }
         self.stream

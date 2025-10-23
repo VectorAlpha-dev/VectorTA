@@ -244,115 +244,63 @@ impl CudaKdj {
 
         // Build sparse tables for HH/LL (shared across all rows)
         let tables = build_willr_gpu_tables(high_f32, low_f32);
-        let level_count = tables.level_offsets.len() as i32 - 1;
+        let level_count = tables.level_offsets.len() as i32; // full count; kernel checks k_log2 < level_count
 
         // Estimate VRAM and allow chunking by rows
         let nrows = combos.len();
-        let bytes_inputs =
-            (high_f32.len() + low_f32.len() + close_f32.len()) * std::mem::size_of::<f32>();
-        let bytes_tables = (tables.log2.len() + tables.level_offsets.len() + tables.nan_psum.len())
-            * std::mem::size_of::<i32>()
+        let bytes_inputs = (close_f32.len()) * std::mem::size_of::<f32>(); // batch kernel only reads close + tables
+        let bytes_tables = (tables.log2.len() + tables.level_offsets.len() + tables.nan_psum.len()) * std::mem::size_of::<i32>()
             + (tables.st_max.len() + tables.st_min.len()) * std::mem::size_of::<f32>();
         let bytes_params =
             (fk.len() + sk.len() + sd.len() + kma.len() + dma.len()) * std::mem::size_of::<i32>();
         let bytes_outputs = nrows * len * 3 * std::mem::size_of::<f32>();
         let required = bytes_inputs + bytes_tables + bytes_params + bytes_outputs;
         let headroom = 64 * 1024 * 1024; // 64MB
-        let combos_per_launch = if Self::device_mem_ok(required, headroom) {
-            nrows
-        } else {
-            (65535usize).min(nrows)
-        };
+        // Modern GPUs allow gridDim.x up to 2^31-1; we do not chunk by 65,535.
+        // Keep a single launch domain; rows cap is applied inside the loop.
+        let combos_per_launch = nrows;
 
         // D2H pinned staging (async) when large
         let use_async = required > (64 * 1024 * 1024);
 
-        // Upload common inputs (and high/low for naive stoch)
-        let (d_high, d_low, d_close, d_log2, d_offsets, d_st_max, d_st_min, d_nan_psum) =
-            if use_async {
-                let h_close = LockedBuffer::from_slice(close_f32)
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let h_high = LockedBuffer::from_slice(high_f32)
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let h_low = LockedBuffer::from_slice(low_f32)
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let h_log2 = LockedBuffer::from_slice(&tables.log2)
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let h_offs = LockedBuffer::from_slice(&tables.level_offsets)
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let h_max = LockedBuffer::from_slice(&tables.st_max)
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let h_min = LockedBuffer::from_slice(&tables.st_min)
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let h_nps = LockedBuffer::from_slice(&tables.nan_psum)
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let mut dh = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let mut dlw =
-                    unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-                        .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let mut dc = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let mut dl = unsafe {
-                    DeviceBuffer::<i32>::uninitialized_async(tables.log2.len(), &self.stream)
-                }
-                .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let mut dof = unsafe {
-                    DeviceBuffer::<i32>::uninitialized_async(
-                        tables.level_offsets.len(),
-                        &self.stream,
-                    )
-                }
-                .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let mut dmx = unsafe {
-                    DeviceBuffer::<f32>::uninitialized_async(tables.st_max.len(), &self.stream)
-                }
-                .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let mut dmn = unsafe {
-                    DeviceBuffer::<f32>::uninitialized_async(tables.st_min.len(), &self.stream)
-                }
-                .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                let mut dnp = unsafe {
-                    DeviceBuffer::<i32>::uninitialized_async(tables.nan_psum.len(), &self.stream)
-                }
-                .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                unsafe { dh.async_copy_from(&h_high, &self.stream) }
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                unsafe { dlw.async_copy_from(&h_low, &self.stream) }
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                unsafe { dc.async_copy_from(&h_close, &self.stream) }
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                unsafe { dl.async_copy_from(&h_log2, &self.stream) }
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                unsafe { dof.async_copy_from(&h_offs, &self.stream) }
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                unsafe { dmx.async_copy_from(&h_max, &self.stream) }
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                unsafe { dmn.async_copy_from(&h_min, &self.stream) }
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                unsafe { dnp.async_copy_from(&h_nps, &self.stream) }
-                    .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-                (dh, dlw, dc, dl, dof, dmx, dmn, dnp)
-            } else {
-                (
-                    DeviceBuffer::from_slice(high_f32)
-                        .map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
-                    DeviceBuffer::from_slice(low_f32)
-                        .map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
-                    DeviceBuffer::from_slice(close_f32)
-                        .map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
-                    DeviceBuffer::from_slice(&tables.log2)
-                        .map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
-                    DeviceBuffer::from_slice(&tables.level_offsets)
-                        .map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
-                    DeviceBuffer::from_slice(&tables.st_max)
-                        .map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
-                    DeviceBuffer::from_slice(&tables.st_min)
-                        .map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
-                    DeviceBuffer::from_slice(&tables.nan_psum)
-                        .map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
-                )
-            };
+        // Upload common inputs (batch kernel does NOT dereference high/low)
+        let (d_close, d_log2, d_offsets, d_st_max, d_st_min, d_nan_psum) = if use_async {
+            let h_close = LockedBuffer::from_slice(close_f32).map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            let h_log2 = LockedBuffer::from_slice(&tables.log2).map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            let h_offs = LockedBuffer::from_slice(&tables.level_offsets).map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            let h_max  = LockedBuffer::from_slice(&tables.st_max).map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            let h_min  = LockedBuffer::from_slice(&tables.st_min).map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            let h_nps  = LockedBuffer::from_slice(&tables.nan_psum).map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            let mut dc = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            let mut dl = unsafe { DeviceBuffer::<i32>::uninitialized_async(tables.log2.len(), &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            let mut dof= unsafe { DeviceBuffer::<i32>::uninitialized_async(tables.level_offsets.len(), &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            let mut dmx= unsafe { DeviceBuffer::<f32>::uninitialized_async(tables.st_max.len(), &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            let mut dmn= unsafe { DeviceBuffer::<f32>::uninitialized_async(tables.st_min.len(), &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            let mut dnp= unsafe { DeviceBuffer::<i32>::uninitialized_async(tables.nan_psum.len(), &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            unsafe { dc.async_copy_from(&h_close, &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            unsafe { dl.async_copy_from(&h_log2, &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            unsafe { dof.async_copy_from(&h_offs, &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            unsafe { dmx.async_copy_from(&h_max , &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            unsafe { dmn.async_copy_from(&h_min , &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            unsafe { dnp.async_copy_from(&h_nps , &self.stream) }.map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+            (dc, dl, dof, dmx, dmn, dnp)
+        } else {
+            (
+                DeviceBuffer::from_slice(close_f32).map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
+                DeviceBuffer::from_slice(&tables.log2).map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
+                DeviceBuffer::from_slice(&tables.level_offsets).map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
+                DeviceBuffer::from_slice(&tables.st_max).map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
+                DeviceBuffer::from_slice(&tables.st_min).map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
+                DeviceBuffer::from_slice(&tables.nan_psum).map_err(|e| CudaKdjError::Cuda(e.to_string()))?,
+            )
+        };
+
+        // Persist parameter arrays on device (avoid per-chunk allocations)
+        let d_fk_all = DeviceBuffer::from_slice(&fk).map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+        let d_sk_all = DeviceBuffer::from_slice(&sk).map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+        let d_sd_all = DeviceBuffer::from_slice(&sd).map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+        let d_km_all = DeviceBuffer::from_slice(&kma).map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+        let d_dm_all = DeviceBuffer::from_slice(&dma).map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
 
         // Allocate outputs
         let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(nrows * len) }
@@ -372,47 +320,30 @@ impl CudaKdj {
         // Chunk rows if needed
         let mut row0 = 0usize;
         while row0 < nrows {
-            let rows = (nrows - row0).min(combos_per_launch).min(65_535);
-            let fk_chunk = &fk[row0..row0 + rows];
-            let sk_chunk = &sk[row0..row0 + rows];
-            let sd_chunk = &sd[row0..row0 + rows];
-            let kma_chunk = &kma[row0..row0 + rows];
-            let dma_chunk = &dma[row0..row0 + rows];
-
-            let d_fk = DeviceBuffer::from_slice(fk_chunk)
-                .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-            let d_sk = DeviceBuffer::from_slice(sk_chunk)
-                .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-            let d_sd = DeviceBuffer::from_slice(sd_chunk)
-                .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-            let d_km = DeviceBuffer::from_slice(kma_chunk)
-                .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-            let d_dm = DeviceBuffer::from_slice(dma_chunk)
-                .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
-
+            let rows = (nrows - row0).min(combos_per_launch).min(2_147_483_647usize);
             let grid: GridSize = (rows as u32, 1, 1).into();
-            let block_x = match self.policy.batch {
-                BatchKernelPolicy::Plain { block_x } => block_x,
-                _ => 256,
-            };
+            let mut block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
+            if block_x < 32 { block_x = 32; }
             let block: BlockSize = (block_x, 1, 1).into();
 
             unsafe {
-                let mut high_ptr = d_high.as_device_ptr().as_raw();
-                let mut low_ptr = d_low.as_device_ptr().as_raw();
-                let mut close_ptr = d_close.as_device_ptr().as_raw();
-                let mut log2_ptr = d_log2.as_device_ptr().as_raw();
-                let mut offs_ptr = d_offsets.as_device_ptr().as_raw();
-                let mut stmax_ptr = d_st_max.as_device_ptr().as_raw();
-                let mut stmin_ptr = d_st_min.as_device_ptr().as_raw();
-                let mut nanp_ptr = d_nan_psum.as_device_ptr().as_raw();
-                let mut fk_ptr = d_fk.as_device_ptr().as_raw();
-                let mut sk_ptr = d_sk.as_device_ptr().as_raw();
-                let mut sd_ptr = d_sd.as_device_ptr().as_raw();
-                let mut kma_ptr = d_km.as_device_ptr().as_raw();
-                let mut dma_ptr = d_dm.as_device_ptr().as_raw();
-                let mut series_len_i = len as i32;
-                let mut first_i = first_valid as i32;
+                let mut close_ptr   = d_close.as_device_ptr().as_raw();
+                let mut log2_ptr    = d_log2.as_device_ptr().as_raw();
+                let mut offs_ptr    = d_offsets.as_device_ptr().as_raw();
+                let mut stmax_ptr   = d_st_max.as_device_ptr().as_raw();
+                let mut stmin_ptr   = d_st_min.as_device_ptr().as_raw();
+                let mut nanp_ptr    = d_nan_psum.as_device_ptr().as_raw();
+                // Reuse close pointer for the (unused) high/low kernel args
+                let mut high_ptr    = close_ptr;
+                let mut low_ptr     = close_ptr;
+                // Param pointers with row offsets
+                let mut fk_ptr      = d_fk_all.as_device_ptr().offset(row0 as isize).as_raw();
+                let mut sk_ptr      = d_sk_all.as_device_ptr().offset(row0 as isize).as_raw();
+                let mut sd_ptr      = d_sd_all.as_device_ptr().offset(row0 as isize).as_raw();
+                let mut kma_ptr     = d_km_all.as_device_ptr().offset(row0 as isize).as_raw();
+                let mut dma_ptr     = d_dm_all.as_device_ptr().offset(row0 as isize).as_raw();
+                let mut series_len_i= len as i32;
+                let mut first_i     = first_valid as i32;
                 let mut level_cnt_i = level_count as i32;
                 let mut nrows_i = rows as i32;
                 let mut outk_ptr =
@@ -451,6 +382,12 @@ impl CudaKdj {
             }
             row0 += rows;
         }
+
+        // Ensure kernels finished before dropping short‑lived device buffers
+        self.stream.synchronize().map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
+
+        // Ensure kernels finished before dropping short‑lived device buffers
+        self.stream.synchronize().map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
 
         Ok((
             DeviceArrayF32 {
@@ -547,10 +484,8 @@ impl CudaKdj {
             .get_function("kdj_many_series_one_param_f32")
             .map_err(|e| CudaKdjError::Cuda(e.to_string()))?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let block_x: u32 = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } => block_x,
-            _ => 128,
-        };
+        let mut block_x: u32 = match self.policy.many_series { ManySeriesKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+        if block_x < 32 { block_x = 32; }
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -638,7 +573,7 @@ pub mod benches {
     }
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let in_bytes = 1 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = 3 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }

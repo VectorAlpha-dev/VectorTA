@@ -11,9 +11,9 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::di::{DiBatchRange, DiParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -99,6 +99,7 @@ pub struct CudaDi {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+    sm_count: u32,
 }
 
 impl CudaDi {
@@ -108,10 +109,15 @@ impl CudaDi {
             Device::get_device(device_id as u32).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
 
+        // Query SM count for launch heuristics
+        let sm_count = device
+            .get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map_err(|e| CudaDiError::Cuda(e.to_string()))? as u32;
+
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/di_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -137,6 +143,7 @@ impl CudaDi {
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
+            sm_count,
         })
     }
 
@@ -310,11 +317,10 @@ impl CudaDi {
             .module
             .get_function("di_batch_from_precomputed_f32")
             .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => block_x,
-            _ => 256,
-        };
-        let grid_x = (chunk_len as u32).max(1);
+        let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
+        // Grid-stride over combos: size grid by device parallelism (~8 blocks/SM), cap by chunk size
+        let target_blocks = self.sm_count.saturating_mul(8).max(1);
+        let grid_x = core::cmp::min(chunk_len as u32, target_blocks).max(1);
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -389,27 +395,27 @@ impl CudaDi {
         // Host precompute shared across combos
         let (up_h, dn_h, tr_h) = Self::build_up_dn_tr(high, low, close, first_valid);
 
-        // Upload inputs
-        let d_up = DeviceBuffer::from_slice(&up_h).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_dn = DeviceBuffer::from_slice(&dn_h).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_tr = DeviceBuffer::from_slice(&tr_h).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        // Async uploads to overlap H2D with later work on the same stream
+        let d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&up_h, &self.stream) }
+            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let d_dn: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&dn_h, &self.stream) }
+            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&tr_h, &self.stream) }
+            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
 
         let n_combos = periods.len();
         let periods_i32: Vec<i32> = periods.iter().map(|&p| p as i32).collect();
-        let warms_i32: Vec<i32> = periods
-            .iter()
-            .map(|&p| (first_valid + p - 1) as i32)
-            .collect();
-        let d_periods =
-            DeviceBuffer::from_slice(&periods_i32).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_warms =
-            DeviceBuffer::from_slice(&warms_i32).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let warms_i32: Vec<i32> = periods.iter().map(|&p| (first_valid + p - 1) as i32).collect();
+        let d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
+            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let d_warms: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream) }
+            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
 
         // Allocate outputs (combos x len)
         let elems = n_combos * len;
-        let mut d_plus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+        let mut d_plus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
             .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let mut d_minus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+        let mut d_minus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
             .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
 
         // VRAM-aware chunking across combos if needed
@@ -490,18 +496,18 @@ impl CudaDi {
             }
         }
 
-        let d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
+        let d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }
+            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let d_low:  DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }
+            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }
+            .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
+        let d_first: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
             .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
 
-        let mut d_plus_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+        let mut d_plus_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
             .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let mut d_minus_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+        let mut d_minus_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
             .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
 
         // Launch config: warp-per-series 1D tiling

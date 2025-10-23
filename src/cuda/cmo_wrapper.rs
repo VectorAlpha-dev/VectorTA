@@ -262,22 +262,33 @@ impl CudaCmo {
             .get_function("cmo_batch_f32")
             .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
 
-        // Cache hint
+        // Prefer L1 for this function
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // Block size policy: occupancy suggestion or env override CMO_BLOCK_X
+        // Heuristic default that maintains a healthy grid when n_combos is small.
+        // Accepts overrides via CMO_BLOCK_X (must be warp-multiple).
         let block_x: u32 = match std::env::var("CMO_BLOCK_X").ok().as_deref() {
-            Some("auto") | None => {
-                let (_min_grid, suggested) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-                    .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-                suggested
+            Some(s) if s != "auto" => s
+                .parse::<u32>()
+                .ok()
+                .filter(|&v| v > 0 && v % 32 == 0)
+                .unwrap_or(256),
+            _ => {
+                let n = n_combos as u32;
+                if n >= 256 { 256 } else { ((n + 31) / 32) * 32 }.max(32)
             }
-            Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
         };
+
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        // Record selection for debug/introspection
+        unsafe {
+            (*(self as *const _ as *mut CudaCmo)).last_batch =
+                Some(BatchKernelSelected::OneD { block_x });
+        }
+        self.maybe_log_batch_debug();
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -424,14 +435,28 @@ impl CudaCmo {
             .get_function("cmo_many_series_one_param_f32")
             .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
 
-        // One thread per series
+        // Default 256; clamp to warp-multiple when cols is small
         let block_x: u32 = match std::env::var("CMO_MS_BLOCK_X").ok().as_deref() {
-            Some("auto") | None => 128,
-            Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
+            Some(s) if s != "auto" => s
+                .parse::<u32>()
+                .ok()
+                .filter(|&v| v > 0 && v % 32 == 0)
+                .unwrap_or(256),
+            _ => {
+                let n = cols as u32;
+                if n >= 256 { 256 } else { ((n + 31) / 32) * 32 }.max(32)
+            }
         };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        // Record selection and maybe log
+        unsafe {
+            (*(self as *const _ as *mut CudaCmo)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
+        self.maybe_log_many_debug();
 
         unsafe {
             let mut p_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -465,23 +490,48 @@ impl CudaCmo {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        let d_prices_tm =
-            DeviceBuffer::from_slice(data_tm_f32).map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
+        // VRAM guard (inputs + first_valids + outputs) + 64MB headroom
+        let bytes = (data_tm_f32.len() * std::mem::size_of::<f32>())
+            + (first_valids.len() * std::mem::size_of::<i32>())
+            + (data_tm_f32.len() * std::mem::size_of::<f32>());
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(bytes, headroom) {
+            return Err(CudaCmoError::InvalidInput(
+                "insufficient VRAM for CMO many-series".into(),
+            ));
+        }
+
+        // Pinned host buffers + async copies on our NON_BLOCKING stream
+        let h_prices = LockedBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
+        let h_first = LockedBuffer::from_slice(&first_valids)
             .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+
+        let mut d_prices_tm =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        let mut d_first =
+            unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
+                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        let mut d_out_tm =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+
+        unsafe {
+            d_prices_tm
+                .async_copy_from(&h_prices, &self.stream)
+                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+            d_first
+                .async_copy_from(&h_first, &self.stream)
+                .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
+        }
 
         self.launch_many_series_kernel(&d_prices_tm, &d_first, cols, rows, period, &mut d_out_tm)?;
 
         self.stream
             .synchronize()
             .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 {
-            buf: d_out_tm,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
     }
 }
 
@@ -497,11 +547,9 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
-        // g, l (f32) and pg, pl (f64)
-        let pre_bytes = (ONE_SERIES_LEN * 2) * std::mem::size_of::<f32>()
-            + ((ONE_SERIES_LEN + 1) * 2) * std::mem::size_of::<f64>();
+        let periods_bytes = PARAM_SWEEP * std::mem::size_of::<i32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + pre_bytes + out_bytes + 64 * 1024 * 1024
+        in_bytes + periods_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;

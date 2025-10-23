@@ -83,10 +83,11 @@ fn lpc_cuda_batch_matches_cpu_fixed() -> Result<(), Box<dyn std::error::Error>> 
     // Compare matrices
     let tol = 5e-4;
     for combo in 0..combos.len() {
-        let cpu_f_row = combo * cols; // in CPU values, filter rows are at (combo*3 + 0)
+        // CPU batch packs rows in triplets per combo: [filter, high, low]
+        let cpu_f_row = (combo * 3 + 0) * cols;
         let cpu_hi_row = (combo * 3 + 1) * cols;
         let cpu_lo_row = (combo * 3 + 2) * cols;
-        let gpu_f_row = combo * cols;
+        let gpu_f_row = combo * cols; // GPU triplet arrays each have `rows=combos, cols=len`
         for j in 0..cols {
             let cf = cpu.values[cpu_f_row + j];
             let ch = cpu.values[cpu_hi_row + j];

@@ -1,15 +1,15 @@
 // CUDA kernels for NET MyRSI (Ehlers' MyRSI + Noise Elimination Technique)
 //
-// Math pattern: Recurrence/streaming per time step, with small rings:
-// - MyRSI: maintain rolling sums of up/down diffs using a ring of last `period` diffs
-// - NET:    maintain a ring of last `period` MyRSI values and update the
-//           pairwise "lt-minus-gt" count incrementally.
+// Reference implementation focused on parity with the scalar CPU path.
+// Two-pass structure per row/series:
+// 1) Compute MyRSI r[t] using an O(period) window-sum in double precision.
+// 2) Compute NET using O(period^2) pairwise sign counts over r-window.
 //
-// Warmup/NaN parity with scalar:
+// Warmup/NaN semantics:
 // - warm = first_valid + period - 1
 // - out[warm] = 0.0f (if period > 1) else NaN
 // - [0, warm) are NaN
-// - Division by zero in MyRSI denominator yields 0.0
+// - Division by zero emits 0.0f
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -17,6 +17,7 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include <stdint.h>
 
 #ifndef LIKELY
 #define LIKELY(x)   (__builtin_expect(!!(x), 1))
@@ -25,48 +26,39 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-// Quiets NaN constant
-static __device__ __forceinline__ float qnan32() {
-    return __int_as_float(0x7fffffff);
-}
+// Quiet NaN
+static __device__ __forceinline__ float qnan32() { return __int_as_float(0x7fffffff); }
 
-// Conservative bound for typical usage; host wrapper validates periods.
+// Max supported period for ring buffers (bounded local storage); host validates.
 #ifndef NET_MYRSI_MAX_PERIOD
 #define NET_MYRSI_MAX_PERIOD 2048
 #endif
 
-// Compute (#(v < s) - #(v > s)) over a contiguous slice [ptr, ptr+len)
-static __device__ __forceinline__ int lt_minus_gt_slice(const double* ptr, int len, double s) {
-    int lt = 0, gt = 0;
-    for (int i = 0; i < len; ++i) {
-        const double v = ptr[i];
-        lt += (v < s);
-        gt += (v > s);
-    }
-    return lt - gt;
-}
+// No extra helpers required
 
+// --- Batch path: one price series × many params (thread-per-combo mapping) ---
 extern "C" __global__
-void net_myrsi_batch_f32(const float* __restrict__ prices,
-                         const int*   __restrict__ periods,
+void net_myrsi_batch_f32(const float* __restrict__ prices,   // one series
+                         const int*   __restrict__ periods,  // [n_combos]
                          int series_len,
                          int n_combos,
                          int first_valid,
-                         float* __restrict__ out) {
+                         float* __restrict__ out)            // [n_combos, series_len]
+{
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
 
     const int period = periods[combo];
-    float* out_row = out + static_cast<size_t>(combo) * series_len;
+    float* out_row = out + (size_t)combo * series_len;
 
-    // Validate inputs and prefill with NaNs when invalid
+    // Validate & prefill
     if (UNLIKELY(period <= 0 || period > NET_MYRSI_MAX_PERIOD ||
                  first_valid < 0 || first_valid >= series_len)) {
         for (int i = 0; i < series_len; ++i) out_row[i] = qnan32();
         return;
     }
     const int tail = series_len - first_valid;
-    if (UNLIKELY(tail < (period + 1))) { // need period+1 values
+    if (UNLIKELY(tail < (period + 1))) {
         for (int i = 0; i < series_len; ++i) out_row[i] = qnan32();
         return;
     }
@@ -75,55 +67,79 @@ void net_myrsi_batch_f32(const float* __restrict__ prices,
     for (int i = 0; i < warm; ++i) out_row[i] = qnan32();
     out_row[warm] = (period > 1) ? 0.0f : qnan32();
 
-    // Two-pass exact parity with scalar helper functions using out_row as temporary for r
-    const double denom = 0.5 * static_cast<double>(period) * static_cast<double>(period - 1);
+    // Streaming parity: use diff ring (size=period) and myr ring
+    double cu = 0.0, cd = 0.0;
+    double diffs[NET_MYRSI_MAX_PERIOD];
+    int d_head = 0, d_count = 0;
+    double myr[NET_MYRSI_MAX_PERIOD];
+    for (int j = 0; j < period; ++j) myr[j] = 0.0;
+    int m_head = 0, m_count = 0;
+    int num = 0;
+    const float denom = 0.5f * (float)period * (float)(period - 1);
 
-    // Pass 1: compute MyRSI r[t] into out_row[t]
-    for (int t = first_valid + period; t < series_len; ++t) {
-        double cu = 0.0, cd = 0.0;
-        #pragma unroll 1
-        for (int j = 0; j < period; ++j) {
-            const double newer = static_cast<double>(prices[t - j]);
-            const double older = static_cast<double>(prices[t - j - 1]);
-            const double diff  = newer - older;
-            if (diff > 0.0)       cu += diff;
-            else if (diff < 0.0)  cd += -diff;
+    for (int i = first_valid + 1; i < series_len; ++i) {
+        double newer = (double)prices[i];
+        double older = (double)prices[i - 1];
+        double diff  = newer - older;
+
+        cu += ((diff > 0.0) ? 1.0 : 0.0) * diff;
+        cd += ((diff < 0.0) ? 1.0 : 0.0) * (-diff);
+
+        if (d_count < period) {
+            diffs[d_head] = diff;
+            d_head++; if (d_head == period) d_head = 0;
+            d_count++;
+        } else {
+            double old = diffs[d_head];
+            cu -= ((old > 0.0) ? 1.0 : 0.0) * old;
+            cd -= ((old < 0.0) ? 1.0 : 0.0) * (-old);
+            diffs[d_head] = diff;
+            d_head++; if (d_head == period) d_head = 0;
         }
-        const double sum = cu + cd;
-        const double r = (sum != 0.0) ? ((cu - cd) / sum) : 0.0;
-        out_row[t] = static_cast<float>(r);
-    }
 
-    // Pass 2: compute NET over r (in-place overwrite)
-    for (int idx = warm + 1; idx < series_len; ++idx) {
-        int num = 0;
-        for (int i = 1; i < period; ++i) {
-            const double vi = static_cast<double>(out_row[idx - i]);
-            for (int k = 0; k < i; ++k) {
-                const double vk = static_cast<double>(out_row[idx - k]);
-                const double d = vi - vk;
-                if (d > 0.0)      num -= 1;
-                else if (d < 0.0) num += 1;
+        if (d_count >= period) {
+            double sum = cu + cd;
+            double r = (sum != 0.0) ? ((cu - cd) / sum) : 0.0;
+
+            if (m_count < period) {
+                int add = 0;
+                for (int j = 0; j < m_head; ++j) { double u = myr[j]; add += (u < r) - (u > r); }
+                num += add;
+                myr[m_head] = r;
+                m_head++; if (m_head == period) m_head = 0;
+                m_count++;
+            } else {
+                double z = myr[m_head];
+                int rm = 0;
+                for (int j = m_head + 1; j < period; ++j) { double u = myr[j]; rm += (u < z) - (u > z); }
+                for (int j = 0; j < m_head; ++j)       { double u = myr[j]; rm += (u < z) - (u > z); }
+                num += rm;
+
+                int ad = 0;
+                for (int j = m_head + 1; j < period; ++j) { double u = myr[j]; ad += (u < r) - (u > r); }
+                for (int j = 0; j < m_head; ++j)       { double u = myr[j]; ad += (u < r) - (u > r); }
+                num += ad;
+
+                myr[m_head] = r;
+                m_head++; if (m_head == period) m_head = 0;
             }
+
+            out_row[i] = (denom != 0.0f) ? (float)((double)num / (double)denom) : 0.0f;
         }
-        out_row[idx] = (denom != 0.0) ? static_cast<float>(static_cast<double>(num) / denom) : 0.0f;
     }
 }
 
-// Many-series × one-param (time-major): prices_tm[t * cols + series]
+// --- Many-series × one-param (time-major): thread-per-series mapping ---
 extern "C" __global__
 void net_myrsi_many_series_one_param_time_major_f32(
-    const float* __restrict__ prices_tm,
-    int cols,
-    int rows,
-    int period,
-    const int* __restrict__ first_valids,
-    float* __restrict__ out_tm
-) {
+    const float* __restrict__ prices_tm, // [rows * cols], time-major
+    int cols, int rows, int period,
+    const int* __restrict__ first_valids, // [cols]
+    float* __restrict__ out_tm            // [rows * cols], time-major
+){
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= cols) return;
 
-    // Validate inputs for this series
     const int fv = first_valids[series];
     float* col_out = out_tm + series;
     if (UNLIKELY(period <= 0 || period > NET_MYRSI_MAX_PERIOD || fv < 0 || fv >= rows)) {
@@ -140,37 +156,67 @@ void net_myrsi_many_series_one_param_time_major_f32(
     for (int t = 0; t < warm; ++t) col_out[t * cols] = qnan32();
     col_out[warm * cols] = (period > 1) ? 0.0f : qnan32();
 
-    const double denom = 0.5 * static_cast<double>(period) * static_cast<double>(period - 1);
-    auto load_tm = [&](int t) -> double { return static_cast<double>(prices_tm[static_cast<size_t>(t) * cols + series]); };
 
-    // Pass 1: compute MyRSI r[t] into col_out[t*cols]
-    for (int t = fv + period; t < rows; ++t) {
-        double cu = 0.0, cd = 0.0;
-        #pragma unroll 1
-        for (int j = 0; j < period; ++j) {
-            const double newer = load_tm(t - j);
-            const double older = load_tm(t - j - 1);
-            const double diff  = newer - older;
-            if (diff > 0.0)       cu += diff;
-            else if (diff < 0.0)  cd += -diff;
+    // Streaming parity with explicit diff ring (time-major)
+    double cu = 0.0, cd = 0.0;
+    double diffs[NET_MYRSI_MAX_PERIOD];
+    int d_head = 0, d_count = 0;
+    double myr[NET_MYRSI_MAX_PERIOD];
+    for (int j = 0; j < period; ++j) myr[j] = 0.0;
+    int m_head = 0, m_count = 0, num = 0;
+    const float denom = 0.5f * (float)period * (float)(period - 1);
+
+    for (int i = fv + 1; i < rows; ++i) {
+        double newer = (double)prices_tm[(size_t)i * cols + series];
+        double older = (double)prices_tm[(size_t)(i - 1) * cols + series];
+        double diff  = newer - older;
+        cu += ((diff > 0.0) ? 1.0 : 0.0) * diff;
+        cd += ((diff < 0.0) ? 1.0 : 0.0) * (-diff);
+
+        if (d_count < period) {
+            diffs[d_head] = diff;
+            d_head++; if (d_head == period) d_head = 0;
+            d_count++;
+        } else {
+            double old = diffs[d_head];
+            cu -= ((old > 0.0) ? 1.0 : 0.0) * old;
+            cd -= ((old < 0.0) ? 1.0 : 0.0) * (-old);
+            diffs[d_head] = diff;
+            d_head++; if (d_head == period) d_head = 0;
         }
-        const double sum = cu + cd;
-        const double r = (sum != 0.0) ? ((cu - cd) / sum) : 0.0;
-        col_out[t * cols] = static_cast<float>(r);
-    }
 
-    // Pass 2: compute NET using stored r
-    for (int idx = warm + 1; idx < rows; ++idx) {
-        int num = 0;
-        for (int i = 1; i < period; ++i) {
-            const double vi = static_cast<double>(col_out[(idx - i) * cols]);
-            for (int k = 0; k < i; ++k) {
-                const double vk = static_cast<double>(col_out[(idx - k) * cols]);
-                const double d = vi - vk;
-                if (d > 0.0)      num -= 1;
-                else if (d < 0.0) num += 1;
+        if (d_count >= period) {
+            double sum = cu + cd;
+            double r = (sum != 0.0) ? ((cu - cd) / sum) : 0.0;
+
+            // insert into ring
+            if (m_count < period) {
+                myr[m_head] = r;
+                m_head++; if (m_head == period) m_head = 0;
+                m_count++;
+            } else {
+                myr[m_head] = r;
+                m_head++; if (m_head == period) m_head = 0;
             }
-        }
-        col_out[idx * cols] = (denom != 0.0) ? static_cast<float>(static_cast<double>(num) / denom) : 0.0f;
+
+            // recompute numerator from scratch over current ring contents
+            int cur_len = m_count;
+            int latest = (m_head - 1 + period) % period; // position of newest r
+            double rw[NET_MYRSI_MAX_PERIOD];
+            for (int kk = 0; kk < cur_len; ++kk) {
+                int pos = (latest - kk + period) % period;
+                rw[kk] = myr[pos];
+            }
+            int local = 0;
+            for (int i2 = 1; i2 < cur_len; ++i2) {
+                double vi = rw[i2];
+                for (int k2 = 0; k2 < i2; ++k2) {
+                    double vk = rw[k2];
+                    double d2 = vi - vk;
+                    if (d2 > 0.0) local -= 1; else if (d2 < 0.0) local += 1;
+                }
+            }
+            col_out[i * cols] = (denom != 0.0f) ? (float)((double)local / (double)denom) : 0.0f;
+            }
     }
 }

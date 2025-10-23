@@ -20,6 +20,21 @@ use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// ---- Helpers (module scope) ----
+const H2D_PINNED_THRESHOLD_BYTES: usize = 128 * 1024 * 1024; // 128 MiB heuristic
+
+#[inline]
+fn round_block_x_to_warp(x: u32) -> u32 {
+    const WARP: u32 = 32;
+    let y = (x / WARP) * WARP;
+    if y == 0 { WARP } else { y.min(1024) }
+}
+
+#[inline]
+fn is_triplet_valid(h: f32, l: f32, v: f32) -> bool {
+    !(h.is_nan() || l.is_nan() || v.is_nan())
+}
+
 #[derive(Debug)]
 pub enum CudaEmvError {
     Cuda(String),
@@ -194,8 +209,22 @@ impl CudaEmv {
         }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
+        } else { true }
+    }
+
+    #[inline]
+    fn copy_to_device_adaptive_f32(&self, host: &[f32]) -> Result<DeviceBuffer<f32>, CudaEmvError> {
+        let bytes = host.len() * std::mem::size_of::<f32>();
+        if bytes >= H2D_PINNED_THRESHOLD_BYTES {
+            DeviceBuffer::from_slice(host).map_err(|e| CudaEmvError::Cuda(e.to_string()))
         } else {
-            true
+            let pinned = LockedBuffer::from_slice(host).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+            let mut dev = unsafe { DeviceBuffer::<f32>::uninitialized_async(host.len(), &self.stream) }
+                .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+            unsafe {
+                dev.async_copy_from(&pinned, &self.stream).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+            }
+            Ok(dev)
         }
     }
 
@@ -215,17 +244,11 @@ impl CudaEmv {
                 "input slice length mismatch".into(),
             ));
         }
-        let first = (0..len)
-            .find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
+        let first = (0..len).find(|&i| is_triplet_valid(high[i], low[i], volume[i]))
             .ok_or_else(|| CudaEmvError::InvalidInput("all values are NaN".into()))?;
-        let valid_after = (first..len)
-            .filter(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
-            .count();
-        if valid_after < 2 {
-            return Err(CudaEmvError::InvalidInput(format!(
-                "not enough valid data: need at least 2, found {}",
-                valid_after
-            )));
+        let has_second = (first + 1..len).any(|i| is_triplet_valid(high[i], low[i], volume[i]));
+        if !has_second {
+            return Err(CudaEmvError::InvalidInput("not enough valid data: need at least 2".into()));
         }
         Ok((first, len))
     }
@@ -247,8 +270,8 @@ impl CudaEmv {
 
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // Block size policy: env EMV_BLOCK_X or occupancy suggestion
-        let block_x: u32 = match std::env::var("EMV_BLOCK_X").ok().as_deref() {
+        // Block size policy: env EMV_BLOCK_X or occupancy suggestion; warp-align
+        let mut block_x: u32 = match std::env::var("EMV_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
                 let (_min_grid, suggested) = func
                     .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
@@ -257,6 +280,7 @@ impl CudaEmv {
             }
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
         };
+        block_x = round_block_x_to_warp(block_x);
         let grid_x = ((n_rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -310,41 +334,19 @@ impl CudaEmv {
             ));
         }
 
-        // Use pinned host buffers for better H2D throughput
-        let h_high =
-            LockedBuffer::from_slice(high).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let h_low = LockedBuffer::from_slice(low).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let h_vol =
-            LockedBuffer::from_slice(volume).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-
-        let mut d_high = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-            .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let mut d_low = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-            .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let mut d_vol = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-            .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+        // Adaptive H2D strategy (pinned+async for small, direct for large)
+        let d_high = self.copy_to_device_adaptive_f32(high)?;
+        let d_low  = self.copy_to_device_adaptive_f32(low)?;
+        let d_vol  = self.copy_to_device_adaptive_f32(volume)?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
             .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-
-        unsafe {
-            d_high
-                .async_copy_from(&h_high, &self.stream)
-                .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-            d_low
-                .async_copy_from(&h_low, &self.stream)
-                .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-            d_vol
-                .async_copy_from(&h_vol, &self.stream)
-                .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        }
 
         self.launch_batch_kernel(&d_high, &d_low, &d_vol, len, 1, first, &mut d_out)?;
 
         self.stream
             .synchronize()
             .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        // Selection introspection optional; keep None to avoid &mut self requirement.
-        self.maybe_log_batch_debug();
+        // Selection introspection optional; launcher already logged.
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -367,45 +369,39 @@ impl CudaEmv {
                 "matrix dimensions must be positive".into(),
             ));
         }
-        if high_tm.len() != cols * rows
-            || low_tm.len() != cols * rows
-            || vol_tm.len() != cols * rows
-        {
+        let elems = cols * rows;
+        if high_tm.len() != elems || low_tm.len() != elems || vol_tm.len() != elems {
             return Err(CudaEmvError::InvalidInput("matrix shape mismatch".into()));
         }
-        let mut fv = vec![0i32; cols];
-        for s in 0..cols {
-            let mut found = -1i32;
-            for r in 0..rows {
-                let idx = r * cols + s;
-                if !(high_tm[idx].is_nan() || low_tm[idx].is_nan() || vol_tm[idx].is_nan()) {
-                    found = r as i32;
-                    break;
+
+        // Row‑major sweep with early exit once all series have two valids
+        let mut first = vec![-1i32; cols];
+        let mut have_second = vec![false; cols];
+        let mut remaining_first = cols;
+        let mut remaining_second = cols;
+
+        'rowsweep: for r in 0..rows {
+            let base = r * cols;
+            for s in 0..cols {
+                if first[s] >= 0 && have_second[s] { continue; }
+                let idx = base + s;
+                if is_triplet_valid(high_tm[idx], low_tm[idx], vol_tm[idx]) {
+                    if first[s] < 0 {
+                        first[s] = r as i32;
+                        remaining_first -= 1;
+                    } else if !have_second[s] {
+                        have_second[s] = true;
+                        remaining_second -= 1;
+                    }
                 }
             }
-            if found < 0 {
-                return Err(CudaEmvError::InvalidInput(format!(
-                    "all NaN in series {}",
-                    s
-                )));
-            }
-            // Require at least two valid points
-            let mut valid = 0usize;
-            for r in (found as usize)..rows {
-                let idx = r * cols + s;
-                if !(high_tm[idx].is_nan() || low_tm[idx].is_nan() || vol_tm[idx].is_nan()) {
-                    valid += 1;
-                }
-            }
-            if valid < 2 {
-                return Err(CudaEmvError::InvalidInput(format!(
-                    "not enough valid data in series {}: need >=2, found {}",
-                    s, valid
-                )));
-            }
-            fv[s] = found;
+            if remaining_first == 0 && remaining_second == 0 { break 'rowsweep; }
         }
-        Ok(fv)
+        for s in 0..cols {
+            if first[s] < 0 { return Err(CudaEmvError::InvalidInput(format!("all NaN in series {}", s))); }
+            if !have_second[s] { return Err(CudaEmvError::InvalidInput(format!("not enough valid data in series {}: need >=2", s))); }
+        }
+        Ok(first)
     }
 
     fn launch_many_series_kernel(
@@ -418,13 +414,16 @@ impl CudaEmv {
         rows: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEmvError> {
-        let func: Function = self
+        let mut func: Function = self
             .module
             .get_function("emv_many_series_one_param_f32")
             .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
 
-        // Block size policy: env EMV_BLOCK_X or occupancy suggestion
-        let block_x: u32 = match std::env::var("EMV_BLOCK_X").ok().as_deref() {
+        // Favor L1 for read‑mostly kernel as well
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+        // Block size policy: env EMV_BLOCK_X or occupancy suggestion; warp-align
+        let mut block_x: u32 = match std::env::var("EMV_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
                 let (_min_grid, suggested) = func
                     .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
@@ -433,6 +432,7 @@ impl CudaEmv {
             }
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(256),
         };
+        block_x = round_block_x_to_warp(block_x);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -488,15 +488,11 @@ impl CudaEmv {
             ));
         }
 
-        let d_high_tm =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let d_low_tm =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let d_vol_tm =
-            DeviceBuffer::from_slice(vol_tm).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+        let d_high_tm = self.copy_to_device_adaptive_f32(high_tm)?;
+        let d_low_tm  = self.copy_to_device_adaptive_f32(low_tm)?;
+        let d_vol_tm  = self.copy_to_device_adaptive_f32(vol_tm)?;
+        let d_first   = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
             .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(
@@ -511,8 +507,7 @@ impl CudaEmv {
         self.stream
             .synchronize()
             .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
-        // Selection introspection optional; keep None to avoid &mut self requirement.
-        self.maybe_log_many_debug();
+        // Selection introspection optional; launcher already logged.
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,

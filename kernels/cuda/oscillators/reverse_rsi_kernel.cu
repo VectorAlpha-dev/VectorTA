@@ -20,6 +20,10 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include <cooperative_groups.h>
+#include <cuda/pipeline>
+
+namespace cg = cooperative_groups;
 
 #ifndef RRSI_NAN
 #define RRSI_NAN (__int_as_float(0x7fffffff))
@@ -32,8 +36,19 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-static __device__ __forceinline__ bool is_finite_f(float x) {
-    return isfinite(x);
+static __device__ __forceinline__ bool is_finite_f(float x) { return isfinite(x); }
+
+// Fast bitwise finiteness check for IEEE-754 float (true iff not NaN/Inf)
+static __device__ __forceinline__ bool is_finite_bits(float x) {
+    return ((__float_as_uint(x) & 0x7f800000u) != 0x7f800000u);
+}
+
+// Kahan-compensated add: sum += x (updating compensation c)
+static __device__ __forceinline__ void kahan_add(float x, float& sum, float& c) {
+    float y = x - c;
+    float t = sum + y;
+    c = (t - sum) - y;
+    sum = t;
 }
 
 extern "C" __global__ void reverse_rsi_batch_f32(
@@ -43,111 +58,224 @@ extern "C" __global__ void reverse_rsi_batch_f32(
     int series_len,
     int n_combos,
     int first_valid,
-    float* __restrict__ out            // length = n_combos * series_len
+    float* __restrict__ out             // length = n_combos * series_len
 ) {
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
 
+    // Per-thread parameters
     const int n = lengths[combo];
     const float L = levels[combo];
     float* out_row = out + combo * series_len;
 
-    // Basic validation; mirror scalar/CPU guard semantics by producing NaNs
-    if (UNLIKELY(n <= 0 || !(L > 0.0f && L < 100.0f) || !isfinite(L))) {
+    // Validate inputs; mirror scalar guard semantics with NaN outputs.
+    if (UNLIKELY(n <= 0 || !(L > 0.0f && L < 100.0f) || !is_finite_bits(L))) {
         for (int i = 0; i < series_len; ++i) out_row[i] = RRSI_NAN;
         return;
     }
-    const int ema_len = (2 * n) - 1;
     if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
         for (int i = 0; i < series_len; ++i) out_row[i] = RRSI_NAN;
         return;
     }
+
+    const int ema_len = (2 * n) - 1;
     const int tail = series_len - first_valid;
     if (UNLIKELY(tail <= ema_len)) {
         for (int i = 0; i < series_len; ++i) out_row[i] = RRSI_NAN;
         return;
     }
 
-    // Prefill NaN up to warm_idx
+    // Indices
     const int warm_end = first_valid + ema_len; // exclusive
     const int warm_idx = warm_end - 1;
-    for (int i = 0; i < warm_idx; ++i) out_row[i] = RRSI_NAN;
 
-    // Precompute constants
-    const double nd = static_cast<double>(n);
-    const double n_minus_1 = nd - 1.0;
-    const double inv = 100.0 - static_cast<double>(L);
-    const double rs_target = static_cast<double>(L) / inv;   // L / (100-L)
-    const double neg_scale = inv / static_cast<double>(L);   // (100-L)/L
-    const double rs_coeff = n_minus_1 * rs_target;
-    const double alpha = 2.0 / (static_cast<double>(ema_len) + 1.0); // == 1/n
-    const double beta = 1.0 - alpha;
+    // Constants (pure FP32 path)
+    const float alpha = 1.0f / float(n);       // == 2/(ema_len+1)
+    const float beta  = 1.0f - alpha;
+    const float inv   = 100.0f - L;
+    const float rs_target = L / inv;           // L / (100-L)
+    const float neg_scale = inv / L;           // (100-L)/L
+    const float n_minus_1 = float(n - 1);
+    const float rs_coeff  = n_minus_1 * rs_target;
 
-    // Determine if all remaining values are finite; if so, we can skip per-step checks
-    bool all_finite = true;
-    for (int i = first_valid; i < series_len; ++i) {
-        if (!is_finite_f(prices[i])) { all_finite = false; break; }
-    }
+#if __CUDA_ARCH__ >= 800
+    // Ampere+/Ada path: async copy to shared + double-buffered pipeline
+    constexpr int TILE = 256; // tuned for sm_89; 2*TILE + TILE + TILE = 1024 floats (4 KB)
 
-    // Warmup sums across ema_len samples starting at first_valid
-    double sum_up = 0.0;
-    double sum_dn = 0.0;
-    double prev = 0.0; // matches scalar: first delta uses prev=0.0
-    for (int i = first_valid; i < warm_end; ++i) {
-        const float c = prices[i];
-        double d = 0.0;
-        if (all_finite) {
-            d = static_cast<double>(c) - prev;
-        } else {
-            if (is_finite_f(c) && isfinite(prev)) {
-                d = static_cast<double>(c) - prev;
-            } else {
-                d = 0.0;
+    cg::thread_block cta = cg::this_thread_block();
+    __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 2> pss;
+    auto pipe = cuda::make_pipeline(cta, &pss);
+
+    // Dynamic shared memory region layout:
+    // [0 .. 2*TILE) -> double-buffered price tiles
+    // [2*TILE .. 3*TILE) -> up[] tile
+    // [3*TILE .. 4*TILE) -> dn[] tile
+    extern __shared__ float smem[];
+    float* prices_buf = smem;
+    float* up_buf     = smem + 2 * TILE;
+    float* dn_buf     = smem + 3 * TILE;
+
+    const int num_tiles = (series_len + TILE - 1) / TILE;
+
+    // Producer helper
+    auto prefetch_tile = [&](int t) {
+        if (t >= num_tiles) return;
+        const int stage = t & 1;
+        float* dst  = prices_buf + stage * TILE;
+        const int g0   = t * TILE;
+        const int len  = min(TILE, series_len - g0);
+
+        pipe.producer_acquire();
+        // Cooperative async copy: each thread pulls a strided subset
+        for (int i = threadIdx.x; i < len; i += blockDim.x) {
+            cuda::memcpy_async(cta, dst + i, prices + g0 + i, sizeof(float), pipe);
+        }
+        pipe.producer_commit();
+    };
+
+    // Warmup accumulators (Kahan) and EMA state (per thread)
+    float sum_up = 0.f, c_up = 0.f;
+    float sum_dn = 0.f, c_dn = 0.f;
+    float up_ema = 0.f, dn_ema = 0.f;
+
+    // Cross-tile delta carry for building up/dn (shared, built once per tile)
+    __shared__ float    prev_carry;
+    __shared__ unsigned prev_carry_is_finite;
+    if (threadIdx.x == 0) { prev_carry = 0.0f; prev_carry_is_finite = 1u; }
+    __syncthreads();
+
+    // Prefetch first tile
+    prefetch_tile(0);
+
+    for (int t = 0; t < num_tiles; ++t) {
+        // Wait for current tile, then expose it to all threads
+        pipe.consumer_wait();
+        __syncthreads();
+
+        const int stage = t & 1;
+        float* p = prices_buf + stage * TILE;
+        const int start = t * TILE;
+        const int len   = min(TILE, series_len - start);
+
+        // Build per-sample up/dn once (thread 0), honoring NaN/Inf semantics
+        if (threadIdx.x == 0) {
+            float    prev = prev_carry;
+            unsigned pfin = prev_carry_is_finite;
+            for (int j = 0; j < len; ++j) {
+                const int r = start + j;
+                const float cur = p[j];
+                const unsigned cfin = is_finite_bits(cur);
+                float d = 0.0f;
+                if (r >= first_valid) {
+                    // first delta uses prev=0.0 (finite true), otherwise prior sample
+                    const float    prev_used = (r == first_valid) ? 0.0f : prev;
+                    const unsigned p_used_ok = (r == first_valid) ? 1u   : pfin;
+                    d = (cfin & p_used_ok) ? (cur - prev_used) : 0.0f;
+                    up_buf[j] = d > 0.0f ? d : 0.0f;
+                    dn_buf[j] = d < 0.0f ? -d : 0.0f;
+                } else {
+                    up_buf[j] = 0.0f; dn_buf[j] = 0.0f;
+                }
+                prev = cur; pfin = cfin;
+            }
+            if (len > 0) {
+                prev_carry = p[len - 1];
+                prev_carry_is_finite = is_finite_bits(prev_carry);
             }
         }
-        sum_up += fmax(0.0, d);
-        sum_dn += fmax(0.0, -d);
-        prev = static_cast<double>(c);
+        __syncthreads();
+
+        // While consuming this tile, prefetch the next
+        prefetch_tile(t + 1);
+
+        // Consume tile for this thread's parameter combo
+        for (int j = 0; j < len; ++j) {
+            const int r = start + j;
+
+            if (r < warm_idx) {
+                out_row[r] = RRSI_NAN;
+                continue;
+            }
+
+            if (r < warm_end) {
+                // Warmup: Kahan sums for SMA of up/down over ema_len samples
+                kahan_add(up_buf[j], sum_up, c_up);
+                kahan_add(dn_buf[j], sum_dn, c_dn);
+
+                if (r == warm_idx) {
+                    up_ema = sum_up / float(ema_len);
+                    dn_ema = sum_dn / float(ema_len);
+
+                    const float x = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
+                    const float m = (x >= 0.0f) ? 1.0f : 0.0f;
+                    const float scale = fmaf(m, (1.0f - neg_scale), neg_scale);
+                    const float v = p[j] + x * scale;
+                    out_row[r] = (is_finite_bits(v) || x >= 0.0f) ? v : 0.0f;
+                } else {
+                    out_row[r] = RRSI_NAN;
+                }
+            } else {
+                // EMA recurrence with FMA: y += alpha*(x - y)
+                up_ema = fmaf(alpha, (up_buf[j] - up_ema), up_ema);
+                dn_ema = fmaf(alpha, (dn_buf[j] - dn_ema), dn_ema);
+
+                const float x = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
+                const float m = (x >= 0.0f) ? 1.0f : 0.0f;
+                const float scale = fmaf(m, (1.0f - neg_scale), neg_scale);
+                const float v = p[j] + x * scale;
+                out_row[r] = (is_finite_bits(v) || x >= 0.0f) ? v : 0.0f;
+            }
+        }
+
+        pipe.consumer_release();
     }
 
-    double up_ema = sum_up / static_cast<double>(ema_len);
-    double dn_ema = sum_dn / static_cast<double>(ema_len);
+#else
+    // Fallback path (pre-Ampere): still FP32 only, Kahan warmup, FMA EMA
+    // Fill NaNs up to warm_idx
+    for (int i = 0; i < warm_idx; ++i) out_row[i] = RRSI_NAN;
+
+    float sum_up = 0.f, c_up = 0.f;
+    float sum_dn = 0.f, c_dn = 0.f;
+
+    float prev = 0.0f; // first delta uses prev=0.0
+    for (int r = first_valid; r < warm_end; ++r) {
+        const float cur = prices[r];
+        const unsigned ok = (is_finite_bits(cur) & is_finite_bits(prev));
+        const float d = ok ? (cur - prev) : 0.0f;
+        kahan_add((d > 0.f) ? d : 0.f, sum_up, c_up);
+        kahan_add((d < 0.f) ? -d : 0.f, sum_dn, c_dn);
+        prev = cur;
+    }
+    float up_ema = sum_up / float(ema_len);
+    float dn_ema = sum_dn / float(ema_len);
 
     // First output at warm_idx
     {
-        const double base = static_cast<double>(prices[warm_idx]);
-        const double x0 = rs_coeff * dn_ema - n_minus_1 * up_ema;
-        const double m0 = (x0 >= 0.0) ? 1.0 : 0.0;
-        const double scale0 = neg_scale + m0 * (1.0 - neg_scale);
-        const double v0 = base + x0 * scale0;
-        out_row[warm_idx] = (isfinite(v0) || x0 >= 0.0) ? static_cast<float>(v0) : 0.0f;
+        const float x = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
+        const float m = (x >= 0.0f) ? 1.0f : 0.0f;
+        const float scale = fmaf(m, (1.0f - neg_scale), neg_scale);
+        const float v = prices[warm_idx] + x * scale;
+        out_row[warm_idx] = (is_finite_bits(v) || x >= 0.0f) ? v : 0.0f;
     }
 
-    // Main loop
-    double prev_d = static_cast<double>(prices[warm_idx]);
-    for (int i = warm_end; i < series_len; ++i) {
-        const float c = prices[i];
-        double d = 0.0;
-        if (all_finite) {
-            d = static_cast<double>(c) - prev_d;
-        } else {
-            if (is_finite_f(c) && isfinite(prev_d)) {
-                d = static_cast<double>(c) - prev_d;
-            } else {
-                d = 0.0;
-            }
-        }
-        const double up = fmax(0.0, d);
-        const double dn = fmax(0.0, -d);
-        up_ema = beta * up_ema + alpha * up;
-        dn_ema = beta * dn_ema + alpha * dn;
-        const double x = rs_coeff * dn_ema - n_minus_1 * up_ema;
-        const double m = (x >= 0.0) ? 1.0 : 0.0;
-        const double scale = neg_scale + m * (1.0 - neg_scale);
-        const double v = static_cast<double>(c) + x * scale;
-        out_row[i] = (isfinite(v) || x >= 0.0) ? static_cast<float>(v) : 0.0f;
-        prev_d = static_cast<double>(c);
+    float prevd = prices[warm_idx];
+    for (int r = warm_end; r < series_len; ++r) {
+        const float cur = prices[r];
+        const unsigned ok = (is_finite_bits(cur) & is_finite_bits(prevd));
+        const float d = ok ? (cur - prevd) : 0.0f;
+        const float up = (d > 0.f) ? d : 0.0f;
+        const float dn = (d < 0.f) ? -d : 0.0f;
+        up_ema = fmaf(alpha, (up - up_ema), up_ema);
+        dn_ema = fmaf(alpha, (dn - dn_ema), dn_ema);
+        const float x = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
+        const float m = (x >= 0.0f) ? 1.0f : 0.0f;
+        const float scale = fmaf(m, (1.0f - neg_scale), neg_scale);
+        const float v = cur + x * scale;
+        out_row[r] = (is_finite_bits(v) || x >= 0.0f) ? v : 0.0f;
+        prevd = cur;
     }
+#endif
 }
 
 // Many-series × one-param, time-major layout
@@ -188,80 +316,60 @@ extern "C" __global__ void reverse_rsi_many_series_one_param_f32(
     }
 
     // Constants
-    const double nd = static_cast<double>(rsi_length);
-    const double n_minus_1 = nd - 1.0;
-    const double inv = 100.0 - static_cast<double>(rsi_level);
-    const double rs_target = static_cast<double>(rsi_level) / inv;
-    const double rs_coeff = n_minus_1 * rs_target;
-    const double neg_scale = inv / static_cast<double>(rsi_level);
-    const double alpha = 2.0 / (static_cast<double>(ema_len) + 1.0);
-    const double beta = 1.0 - alpha;
+    // Switch to FP32-only math with Kahan warmup and FMA EMA
+    const float nf = static_cast<float>(rsi_length);
+    const float n_minus_1 = nf - 1.0f;
+    const float inv = 100.0f - rsi_level;
+    const float rs_target = rsi_level / inv;
+    const float rs_coeff = n_minus_1 * rs_target;
+    const float neg_scale = inv / rsi_level;
+    const float alpha = 1.0f / nf; // == 2/(ema_len+1)
 
-    // all_finite check for this series
-    bool all_finite = true;
-    for (int r = fv; r < series_len; ++r) {
-        const float v = *(prices_tm + static_cast<size_t>(r) * num_series + series);
-        if (!is_finite_f(v)) { all_finite = false; break; }
-    }
-
-    // Warmup
-    double sum_up = 0.0, sum_dn = 0.0;
-    double prev = 0.0;
+    // Warmup using Kahan summation
+    float sum_up = 0.0f, c_up = 0.0f;
+    float sum_dn = 0.0f, c_dn = 0.0f;
+    float prev = 0.0f;
     for (int r = fv; r < warm_end; ++r) {
         const float cf = *(prices_tm + static_cast<size_t>(r) * num_series + series);
-        double d = 0.0;
-        if (all_finite) {
-            d = static_cast<double>(cf) - prev;
-        } else {
-            if (is_finite_f(cf) && isfinite(prev)) {
-                d = static_cast<double>(cf) - prev;
-            } else {
-                d = 0.0;
-            }
-        }
-        sum_up += fmax(0.0, d);
-        sum_dn += fmax(0.0, -d);
-        prev = static_cast<double>(cf);
+        const unsigned ok = (is_finite_bits(cf) & is_finite_bits(prev));
+        const float d = ok ? (cf - prev) : 0.0f;
+        const float up = d > 0.0f ? d : 0.0f;
+        const float dn = d < 0.0f ? -d : 0.0f;
+        kahan_add(up, sum_up, c_up);
+        kahan_add(dn, sum_dn, c_dn);
+        prev = cf;
     }
-    double up_ema = sum_up / static_cast<double>(ema_len);
-    double dn_ema = sum_dn / static_cast<double>(ema_len);
+    float up_ema = sum_up / static_cast<float>(ema_len);
+    float dn_ema = sum_dn / static_cast<float>(ema_len);
 
     // First output
     {
-        const double base = static_cast<double>(*(prices_tm + static_cast<size_t>(warm_idx) * num_series + series));
-        const double x0 = rs_coeff * dn_ema - n_minus_1 * up_ema;
-        const double m0 = (x0 >= 0.0) ? 1.0 : 0.0;
-        const double scale0 = neg_scale + m0 * (1.0 - neg_scale);
-        const double v0 = base + x0 * scale0;
+        const float base = *(prices_tm + static_cast<size_t>(warm_idx) * num_series + series);
+        const float x0 = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
+        const float m0 = (x0 >= 0.0f) ? 1.0f : 0.0f;
+        const float scale0 = fmaf(m0, (1.0f - neg_scale), neg_scale);
+        const float v0 = base + x0 * scale0;
         *(out_tm + static_cast<size_t>(warm_idx) * num_series + series) =
-            (isfinite(v0) || x0 >= 0.0) ? static_cast<float>(v0) : 0.0f;
+            (is_finite_bits(v0) || x0 >= 0.0f) ? v0 : 0.0f;
     }
 
     // Main loop
-    double prevd = static_cast<double>(*(prices_tm + static_cast<size_t>(warm_idx) * num_series + series));
+    float prevd = *(prices_tm + static_cast<size_t>(warm_idx) * num_series + series);
     for (int r = warm_end; r < series_len; ++r) {
         const float cf = *(prices_tm + static_cast<size_t>(r) * num_series + series);
-        double d = 0.0;
-        if (all_finite) {
-            d = static_cast<double>(cf) - prevd;
-        } else {
-            if (is_finite_f(cf) && isfinite(prevd)) {
-                d = static_cast<double>(cf) - prevd;
-            } else {
-                d = 0.0;
-            }
-        }
-        const double up = fmax(0.0, d);
-        const double dn = fmax(0.0, -d);
-        up_ema = beta * up_ema + alpha * up;
-        dn_ema = beta * dn_ema + alpha * dn;
-        const double x = rs_coeff * dn_ema - n_minus_1 * up_ema;
-        const double m = (x >= 0.0) ? 1.0 : 0.0;
-        const double scale = neg_scale + m * (1.0 - neg_scale);
-        const double v = static_cast<double>(cf) + x * scale;
+        const unsigned ok = (is_finite_bits(cf) & is_finite_bits(prevd));
+        const float d = ok ? (cf - prevd) : 0.0f;
+        const float up = d > 0.0f ? d : 0.0f;
+        const float dn = d < 0.0f ? -d : 0.0f;
+        up_ema = fmaf(alpha, (up - up_ema), up_ema);
+        dn_ema = fmaf(alpha, (dn - dn_ema), dn_ema);
+        const float x = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
+        const float m = (x >= 0.0f) ? 1.0f : 0.0f;
+        const float scale = fmaf(m, (1.0f - neg_scale), neg_scale);
+        const float v = cf + x * scale;
         *(out_tm + static_cast<size_t>(r) * num_series + series) =
-            (isfinite(v) || x >= 0.0) ? static_cast<float>(v) : 0.0f;
-        prevd = static_cast<double>(cf);
+            (is_finite_bits(v) || x >= 0.0f) ? v : 0.0f;
+        prevd = cf;
     }
 }
 

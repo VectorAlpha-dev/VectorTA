@@ -282,11 +282,18 @@ impl CudaReverseRsi {
             .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // Block size via occupancy suggestion or env override RRSI_BLOCK_X
+        // Dynamic shared memory required by the kernel's async tiling path.
+        // Keep TILE consistent with the kernel (TILE=256).
+        const TILE: usize = 256;
+        let shmem_bytes: usize = 4 * TILE * std::mem::size_of::<f32>();
+
+        // Block size via occupancy suggestion or env override RRSI_BLOCK_X.
         let block_x: u32 = match std::env::var("RRSI_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
+                // Feed dynamic shared memory into occupancy so suggested block size
+                // respects per-block SMEM usage.
                 let (_min_grid, suggested) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+                    .suggested_launch_configuration(shmem_bytes, BlockSize::xyz(0, 0, 0))
                     .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
                 suggested
             }
@@ -320,8 +327,9 @@ impl CudaReverseRsi {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
+            // Pass dynamic shared memory size for kernels using extern __shared__
             self.stream
-                .launch(&func, grid, block, 0, args)
+                .launch(&func, grid, block, (shmem_bytes as u32), args)
                 .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
         }
 
@@ -528,12 +536,27 @@ impl CudaReverseRsi {
             ));
         }
 
-        let d_prices_tm = DeviceBuffer::from_slice(prices_tm)
+        // Use pinned host buffers + async copies for higher throughput and true async behavior
+        let h_prices_tm = LockedBuffer::from_slice(prices_tm)
             .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
+        let h_first = LockedBuffer::from_slice(&first_valids)
             .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
-        let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
+
+        let mut d_prices_tm = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
             .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
+            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+            .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+
+        unsafe {
+            d_prices_tm
+                .async_copy_from(&h_prices_tm, &self.stream)
+                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+            d_first
+                .async_copy_from(&h_first, &self.stream)
+                .map_err(|e| CudaReverseRsiError::Cuda(e.to_string()))?;
+        }
 
         self.launch_many_series_kernel(
             &d_prices_tm,

@@ -80,6 +80,20 @@ impl CudaSafeZoneStop {
     }
 
     #[inline]
+    fn upload_pinned_f32(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaSafeZoneStopError> {
+        // Stage in pinned (page-locked) host memory so async H2D truly overlaps compute.
+        let h_pin = LockedBuffer::from_slice(src)
+            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+        let mut d = unsafe { DeviceBuffer::<f32>::uninitialized_async(src.len(), &self.stream) }
+            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+        unsafe {
+            d.async_copy_from(&h_pin, &self.stream)
+                .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+        }
+        Ok(d)
+    }
+
+    #[inline]
     fn find_first_valid_pair(high: &[f32], low: &[f32]) -> Option<usize> {
         let n = high.len().min(low.len());
         for i in 0..n {
@@ -239,26 +253,30 @@ impl CudaSafeZoneStop {
         // Shared precompute
         let dm_raw = Self::compute_dm_raw_f32(high_f32, low_f32, first, dir_long);
 
-        // VRAM accounting: inputs + params + outputs + deque workspace
+        // Decide if we need deque workspace (lb <= 4 uses register-only path)
+        let need_deque = max_look > 4;
+
+        // VRAM accounting: inputs + params + outputs (+ optional deque)
         let out_elems = combos.len() * n;
         let headroom = 64 * 1024 * 1024; // ~64MB
-        let bytes = (high_f32.len() + low_f32.len() + dm_raw.len()) * 4
+        let mut bytes = (high_f32.len() + low_f32.len() + dm_raw.len()) * 4
             + (periods_i32.len() * 4 + mults_f32.len() * 4 + looks_i32.len() * 4)
-            + (out_elems * 4)
-            + (combos.len() * (max_look + 1) * (4 + 4)); // q_idx + q_val
+            + (out_elems * 4);
+        if need_deque {
+            bytes += combos.len() * (max_look + 1) * (4 + 4); // q_idx + q_val
+        }
         if !Self::will_fit(bytes, headroom) {
             return Err(CudaSafeZoneStopError::InvalidInput(
                 "insufficient device memory".into(),
             ));
         }
 
-        // Upload
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }
-            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }
-            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
-        let d_dm = unsafe { DeviceBuffer::from_slice_async(&dm_raw, &self.stream) }
-            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+        // Uploads: pinned for big arrays for true async H2D
+        let d_high = self.upload_pinned_f32(high_f32)?;
+        let d_low  = self.upload_pinned_f32(low_f32)?;
+        let d_dm   = self.upload_pinned_f32(&dm_raw)?;
+
+        // Small arrays sync-upload is fine
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
         let d_mults = DeviceBuffer::from_slice(&mults_f32)
@@ -268,54 +286,87 @@ impl CudaSafeZoneStop {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
                 .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
-        // Deque workspace
-        let lb_cap = (max_look + 1).max(2);
-        let mut d_q_idx: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::uninitialized_async(combos.len() * lb_cap, &self.stream) }
-                .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
-        let mut d_q_val: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(combos.len() * lb_cap, &self.stream) }
-                .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
 
-        // Launch
+        // Optional deque workspace only when needed
+        let (mut opt_q_idx, mut opt_q_val): (Option<DeviceBuffer<i32>>, Option<DeviceBuffer<f32>>) = (None, None);
+        let mut lb_cap_i32 = 0i32;
+        if need_deque {
+            let lb_cap = (max_look + 1).max(2);
+            let d_q_idx: DeviceBuffer<i32> =
+                unsafe { DeviceBuffer::uninitialized_async(combos.len() * lb_cap, &self.stream) }
+                    .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+            let d_q_val: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(combos.len() * lb_cap, &self.stream) }
+                    .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+            lb_cap_i32 = lb_cap as i32;
+            opt_q_idx = Some(d_q_idx);
+            opt_q_val = Some(d_q_val);
+        }
+
+        // Launch: 1D grid.x with many threads per block
         let func = self
             .module
             .get_function("safezonestop_batch_f32")
             .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
-        let block: BlockSize = (1, 1, 1).into();
-        const MAX_GRID_Y: usize = 65_535;
-        let mut launched = 0usize;
-        while launched < combos.len() {
-            let chunk = (combos.len() - launched).min(MAX_GRID_Y);
-            let grid: GridSize = (1, chunk as u32, 1).into();
-            let stream = &self.stream;
-            unsafe {
+
+        const TB: u32 = 256;
+        let block: BlockSize = (TB, 1, 1).into();
+        let grid_x = ((combos.len() as u32) + TB - 1) / TB;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let dir_i32 = if dir_long { 1i32 } else { 0i32 };
+        let stream = &self.stream;
+
+        unsafe {
+            if need_deque {
+                let q_idx_ptr = opt_q_idx.as_ref().unwrap().as_device_ptr().as_raw();
+                let q_val_ptr = opt_q_val.as_ref().unwrap().as_device_ptr().as_raw();
                 launch!(
                     func<<<grid, block, 0, stream>>>(
-                        d_high.as_device_ptr(),
-                        d_low.as_device_ptr(),
-                        d_dm.as_device_ptr(),
+                        d_high.as_device_ptr().as_raw(),
+                        d_low.as_device_ptr().as_raw(),
+                        d_dm.as_device_ptr().as_raw(),
                         n as i32,
                         first as i32,
-                        d_periods.as_device_ptr().add(launched),
-                        d_mults.as_device_ptr().add(launched),
-                        d_looks.as_device_ptr().add(launched),
-                        chunk as i32,
-                        (if dir_long { 1i32 } else { 0i32 }),
-                        d_q_idx.as_device_ptr().add(launched * lb_cap),
-                        d_q_val.as_device_ptr().add(launched * lb_cap),
-                        lb_cap as i32,
-                        d_out.as_device_ptr().add(launched * n)
+                        d_periods.as_device_ptr().as_raw(),
+                        d_mults.as_device_ptr().as_raw(),
+                        d_looks.as_device_ptr().as_raw(),
+                        combos.len() as i32,
+                        dir_i32,
+                        q_idx_ptr,
+                        q_val_ptr,
+                        lb_cap_i32,
+                        d_out.as_device_ptr().as_raw()
+                    )
+                )
+                .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+            } else {
+                launch!(
+                    func<<<grid, block, 0, stream>>>(
+                        d_high.as_device_ptr().as_raw(),
+                        d_low.as_device_ptr().as_raw(),
+                        d_dm.as_device_ptr().as_raw(),
+                        n as i32,
+                        first as i32,
+                        d_periods.as_device_ptr().as_raw(),
+                        d_mults.as_device_ptr().as_raw(),
+                        d_looks.as_device_ptr().as_raw(),
+                        combos.len() as i32,
+                        dir_i32,
+                        0u64,
+                        0u64,
+                        0i32,
+                        d_out.as_device_ptr().as_raw()
                     )
                 )
                 .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
             }
-            launched += chunk;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+        // Keep optional buffers alive across the launch
+        drop(opt_q_idx);
+        drop(opt_q_val);
+
+        self.stream.synchronize().map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
 
         Ok((
             DeviceArrayF32 {
@@ -387,65 +438,101 @@ impl CudaSafeZoneStop {
             }
         }
 
-        // VRAM accounting: inputs + first_valids + outputs + optional deque workspace
+        // VRAM accounting: inputs + first_valids + outputs (+ optional deque)
+        let need_deque = max_lookback > 4;
         let headroom = 64 * 1024 * 1024;
-        let bytes = n * 4 * 2 + cols * 4 + n * 4 + cols * (max_lookback + 1) * (4 + 4);
+        let mut bytes = n * 4 * 2 + cols * 4 + n * 4;
+        if need_deque { bytes += cols * (max_lookback + 1) * (4 + 4); }
         if !Self::will_fit(bytes, headroom) {
             return Err(CudaSafeZoneStopError::InvalidInput(
                 "insufficient device memory".into(),
             ));
         }
 
-        // Upload
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }
-            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm_f32, &self.stream) }
-            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+        // Uploads (pinned for big matrices)
+        let d_high = self.upload_pinned_f32(high_tm_f32)?;
+        let d_low  = self.upload_pinned_f32(low_tm_f32)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
                 .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
-        // Deque workspace per series
-        let lb_cap = (max_lookback + 1).max(2);
-        let mut d_q_idx: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * lb_cap, &self.stream) }
-                .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
-        let mut d_q_val: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * lb_cap, &self.stream) }
-                .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
 
-        // Launch one block per series
+        // Optional deque workspace per series
+        let (mut opt_q_idx, mut opt_q_val): (Option<DeviceBuffer<i32>>, Option<DeviceBuffer<f32>>) = (None, None);
+        let mut lb_cap_i32 = 0i32;
+        if need_deque {
+            let lb_cap = (max_lookback + 1).max(2);
+            let d_q_idx: DeviceBuffer<i32> =
+                unsafe { DeviceBuffer::uninitialized_async(cols * lb_cap, &self.stream) }
+                    .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+            let d_q_val: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(cols * lb_cap, &self.stream) }
+                    .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+            lb_cap_i32 = lb_cap as i32;
+            opt_q_idx = Some(d_q_idx);
+            opt_q_val = Some(d_q_val);
+        }
+
+        // Launch (1D grid.x with threads-per-block)
         let func = self
             .module
             .get_function("safezonestop_many_series_one_param_time_major_f32")
             .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
-        let grid: GridSize = (cols as u32, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        const TB: u32 = 256;
+        let block: BlockSize = (TB, 1, 1).into();
+        let grid_x = ((cols as u32) + TB - 1) / TB;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let dir_i32 = if dir_long { 1i32 } else { 0i32 };
         let stream = &self.stream;
         unsafe {
-            launch!(
-                func<<<grid, block, 0, stream>>>(
-                    d_high.as_device_ptr(),
-                    d_low.as_device_ptr(),
-                    cols as i32,
-                    rows as i32,
-                    period as i32,
-                    mult as f32,
-                    max_lookback as i32,
-                    d_first.as_device_ptr(),
-                    (if dir_long { 1i32 } else { 0i32 }),
-                    d_q_idx.as_device_ptr(),
-                    d_q_val.as_device_ptr(),
-                    lb_cap as i32,
-                    d_out.as_device_ptr()
+            if need_deque {
+                let q_idx_ptr = opt_q_idx.as_ref().unwrap().as_device_ptr().as_raw();
+                let q_val_ptr = opt_q_val.as_ref().unwrap().as_device_ptr().as_raw();
+                launch!(
+                    func<<<grid, block, 0, stream>>>(
+                        d_high.as_device_ptr().as_raw(),
+                        d_low.as_device_ptr().as_raw(),
+                        cols as i32,
+                        rows as i32,
+                        period as i32,
+                        mult as f32,
+                        max_lookback as i32,
+                        d_first.as_device_ptr().as_raw(),
+                        dir_i32,
+                        q_idx_ptr,
+                        q_val_ptr,
+                        lb_cap_i32,
+                        d_out.as_device_ptr().as_raw()
+                    )
                 )
-            )
-            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+            } else {
+                launch!(
+                    func<<<grid, block, 0, stream>>>(
+                        d_high.as_device_ptr().as_raw(),
+                        d_low.as_device_ptr().as_raw(),
+                        cols as i32,
+                        rows as i32,
+                        period as i32,
+                        mult as f32,
+                        max_lookback as i32,
+                        d_first.as_device_ptr().as_raw(),
+                        dir_i32,
+                        0u64,
+                        0u64,
+                        0i32,
+                        d_out.as_device_ptr().as_raw()
+                    )
+                )
+                .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+            }
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+        // Keep optional buffers alive across the launch
+        drop(opt_q_idx);
+        drop(opt_q_val);
+
+        self.stream.synchronize().map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
