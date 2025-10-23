@@ -12,7 +12,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::kst::{KstBatchRange, KstParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -78,18 +78,35 @@ impl DeviceKstPair {
     }
 }
 
+// Packed parameter buffer held alive across the kernel launch; contains device pointers to
+// each parameter segment inside a single DeviceBuffer<i32>.
+struct PackedParamPtrs {
+    _buf: DeviceBuffer<i32>,
+    s1: u64,
+    s2: u64,
+    s3: u64,
+    s4: u64,
+    r1: u64,
+    r2: u64,
+    r3: u64,
+    r4: u64,
+    sg: u64,
+}
+
 pub struct CudaKst {
     module: Module,
     stream: Stream,
     _context: Context,
     policy: CudaKstPolicy,
+    // Device properties
+    sm_count: i32,
 }
 
 impl CudaKst {
     pub fn new(device_id: usize) -> Result<Self, CudaKstError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)
+            .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kst_kernel.ptx"));
@@ -100,7 +117,6 @@ impl CudaKst {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                // fallbacks
                 if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
@@ -109,6 +125,12 @@ impl CudaKst {
                 }
             }
         };
+
+        // SM count for launch shaping
+        let sm_count = device
+            .get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map_err(|e| CudaKstError::Cuda(e.to_string()))? as i32;
+
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
         Ok(Self {
@@ -116,6 +138,7 @@ impl CudaKst {
             stream,
             _context: context,
             policy: CudaKstPolicy::default(),
+            sm_count,
         })
     }
 
@@ -140,6 +163,99 @@ impl CudaKst {
             Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
             Err(_) => true,
         }
+    }
+
+    // -------- Launch shaping and async copy helpers (performance) --------
+
+    #[inline]
+    fn launch_shape_1d(&self, n_items: usize, block_policy: Option<u32>) -> (GridSize, BlockSize) {
+        let block_x = match block_policy {
+            Some(bx) => bx.max(64),
+            None => 256,
+        };
+        let grid_for_data = ((n_items as u32) + block_x - 1) / block_x;
+        let target = (self.sm_count.max(1) as u32) * 32; // ~32 blocks/SM
+        let grid_x = std::cmp::min(grid_for_data.max(1), target.max(1));
+        ((grid_x, 1, 1).into(), (block_x, 1, 1).into())
+    }
+
+    const PIN_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
+
+    #[inline]
+    fn copy_f32_to_device_async(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaKstError> {
+        if src.len() * std::mem::size_of::<f32>() >= Self::PIN_THRESHOLD_BYTES {
+            let h_pinned = LockedBuffer::from_slice(src)
+                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+            let mut d = unsafe {
+                DeviceBuffer::uninitialized_async(src.len(), &self.stream)
+                    .map_err(|e| CudaKstError::Cuda(e.to_string()))?
+            };
+            unsafe {
+                d.async_copy_from(&h_pinned, &self.stream)
+                    .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+            }
+            Ok(d)
+        } else {
+            unsafe { DeviceBuffer::from_slice_async(src, &self.stream) }
+                .map_err(|e| CudaKstError::Cuda(e.to_string()))
+        }
+    }
+
+    // NOTE: This cannot be declared inside impl in stable Rust if referenced in the impl's methods.
+    // Keep it at module scope to avoid self-referential issues.
+
+    fn pack_params_async(&self, combos: &[KstParams]) -> Result<PackedParamPtrs, CudaKstError> {
+        let rows = combos.len();
+        let total = rows * 9;
+        let mut host = Vec::<i32>::with_capacity(total);
+        host.resize(total, 0);
+        let (s1s, rem) = host.split_at_mut(rows);
+        let (s2s, rem) = rem.split_at_mut(rows);
+        let (s3s, rem) = rem.split_at_mut(rows);
+        let (s4s, rem) = rem.split_at_mut(rows);
+        let (r1s, rem) = rem.split_at_mut(rows);
+        let (r2s, rem) = rem.split_at_mut(rows);
+        let (r3s, rem) = rem.split_at_mut(rows);
+        let (r4s, sgs) = rem.split_at_mut(rows);
+
+        for (i, c) in combos.iter().enumerate() {
+            s1s[i] = c.sma_period1.unwrap() as i32;
+            s2s[i] = c.sma_period2.unwrap() as i32;
+            s3s[i] = c.sma_period3.unwrap() as i32;
+            s4s[i] = c.sma_period4.unwrap() as i32;
+            r1s[i] = c.roc_period1.unwrap() as i32;
+            r2s[i] = c.roc_period2.unwrap() as i32;
+            r3s[i] = c.roc_period3.unwrap() as i32;
+            r4s[i] = c.roc_period4.unwrap() as i32;
+            sgs[i] = c.signal_period.unwrap() as i32;
+        }
+
+        let h_pinned = LockedBuffer::from_slice(&host)
+            .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+        let mut d = unsafe {
+            DeviceBuffer::uninitialized_async(total, &self.stream)
+                .map_err(|e| CudaKstError::Cuda(e.to_string()))?
+        };
+        unsafe {
+            d.async_copy_from(&h_pinned, &self.stream)
+                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+        }
+
+        let base = d.as_device_ptr();
+        let off = |seg: usize| unsafe { base.offset((seg * rows) as isize).as_raw() };
+
+        Ok(PackedParamPtrs {
+            _buf: d,
+            s1: off(0),
+            s2: off(1),
+            s3: off(2),
+            s4: off(3),
+            r1: off(4),
+            r2: off(5),
+            r3: off(6),
+            r4: off(7),
+            sg: off(8),
+        })
     }
 
     // ------------- Batch (one series × many params) -----------------
@@ -244,63 +360,20 @@ impl CudaKst {
         }
 
         let rows = combos.len();
-        let req_bytes = len * 4 + 9 * rows * 4 + 2 * rows * len * 4 + 64 * 1024 * 1024; // prices + periods + outputs + headroom
+        let req_bytes = len * 4
+            + (9 * rows) * 4
+            + 2 * rows * len * 4
+            + 64 * 1024 * 1024; // prices + packed periods + outputs + headroom
         if !Self::device_mem_ok(req_bytes) {
             return Err(CudaKstError::InvalidInput(
                 "insufficient device memory".into(),
             ));
         }
 
-        let d_prices: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        // Compact period arrays
-        let to_i32 = |v: usize| -> i32 { v as i32 };
-        let s1: Vec<i32> = combos
-            .iter()
-            .map(|c| to_i32(c.sma_period1.unwrap()))
-            .collect();
-        let s2: Vec<i32> = combos
-            .iter()
-            .map(|c| to_i32(c.sma_period2.unwrap()))
-            .collect();
-        let s3: Vec<i32> = combos
-            .iter()
-            .map(|c| to_i32(c.sma_period3.unwrap()))
-            .collect();
-        let s4: Vec<i32> = combos
-            .iter()
-            .map(|c| to_i32(c.sma_period4.unwrap()))
-            .collect();
-        let r1: Vec<i32> = combos
-            .iter()
-            .map(|c| to_i32(c.roc_period1.unwrap()))
-            .collect();
-        let r2: Vec<i32> = combos
-            .iter()
-            .map(|c| to_i32(c.roc_period2.unwrap()))
-            .collect();
-        let r3: Vec<i32> = combos
-            .iter()
-            .map(|c| to_i32(c.roc_period3.unwrap()))
-            .collect();
-        let r4: Vec<i32> = combos
-            .iter()
-            .map(|c| to_i32(c.roc_period4.unwrap()))
-            .collect();
-        let sg: Vec<i32> = combos
-            .iter()
-            .map(|c| to_i32(c.signal_period.unwrap()))
-            .collect();
-        let d_s1 = DeviceBuffer::from_slice(&s1).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let d_s2 = DeviceBuffer::from_slice(&s2).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let d_s3 = DeviceBuffer::from_slice(&s3).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let d_s4 = DeviceBuffer::from_slice(&s4).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let d_r1 = DeviceBuffer::from_slice(&r1).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let d_r2 = DeviceBuffer::from_slice(&r2).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let d_r3 = DeviceBuffer::from_slice(&r3).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let d_r4 = DeviceBuffer::from_slice(&r4).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let d_sg = DeviceBuffer::from_slice(&sg).map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+        // Prices: use pinned H->D path when large
+        let d_prices: DeviceBuffer<f32> = self.copy_f32_to_device_async(prices)?;
+        // Pack all parameter arrays into one pinned transfer
+        let packed = self.pack_params_async(&combos)?;
 
         let mut d_line: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
@@ -309,17 +382,17 @@ impl CudaKst {
             unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }
                 .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
 
-        self.launch_batch(
+        self.launch_batch_packed(
             &d_prices,
-            &d_s1,
-            &d_s2,
-            &d_s3,
-            &d_s4,
-            &d_r1,
-            &d_r2,
-            &d_r3,
-            &d_r4,
-            &d_sg,
+            packed.s1,
+            packed.s2,
+            packed.s3,
+            packed.s4,
+            packed.r1,
+            packed.r2,
+            packed.r3,
+            packed.r4,
+            packed.sg,
             len,
             rows,
             first_valid,
@@ -344,47 +417,43 @@ impl CudaKst {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn launch_batch(
+    fn launch_batch_packed(
         &self,
         d_prices: &DeviceBuffer<f32>,
-        d_s1: &DeviceBuffer<i32>,
-        d_s2: &DeviceBuffer<i32>,
-        d_s3: &DeviceBuffer<i32>,
-        d_s4: &DeviceBuffer<i32>,
-        d_r1: &DeviceBuffer<i32>,
-        d_r2: &DeviceBuffer<i32>,
-        d_r3: &DeviceBuffer<i32>,
-        d_r4: &DeviceBuffer<i32>,
-        d_sig: &DeviceBuffer<i32>,
+        s1_ptr: u64,
+        s2_ptr: u64,
+        s3_ptr: u64,
+        s4_ptr: u64,
+        r1_ptr: u64,
+        r2_ptr: u64,
+        r3_ptr: u64,
+        r4_ptr: u64,
+        sig_ptr: u64,
         series_len: usize,
         n_combos: usize,
         first_valid: usize,
         d_line: &mut DeviceBuffer<f32>,
         d_signal: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaKstError> {
-        let func = self
-            .module
-            .get_function("kst_batch_f32")
-            .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(64),
+        let (grid, block) = {
+            let bx = match self.policy.batch {
+                BatchKernelPolicy::Auto => None,
+                BatchKernelPolicy::Plain { block_x } => Some(block_x),
+            };
+            self.launch_shape_1d(n_combos, bx)
         };
-        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut p0 = d_prices.as_device_ptr().as_raw();
-            let mut s1 = d_s1.as_device_ptr().as_raw();
-            let mut s2 = d_s2.as_device_ptr().as_raw();
-            let mut s3 = d_s3.as_device_ptr().as_raw();
-            let mut s4 = d_s4.as_device_ptr().as_raw();
-            let mut r1 = d_r1.as_device_ptr().as_raw();
-            let mut r2 = d_r2.as_device_ptr().as_raw();
-            let mut r3 = d_r3.as_device_ptr().as_raw();
-            let mut r4 = d_r4.as_device_ptr().as_raw();
-            let mut sg = d_sig.as_device_ptr().as_raw();
+            let mut s1 = s1_ptr;
+            let mut s2 = s2_ptr;
+            let mut s3 = s3_ptr;
+            let mut s4 = s4_ptr;
+            let mut r1 = r1_ptr;
+            let mut r2 = r2_ptr;
+            let mut r3 = r3_ptr;
+            let mut r4 = r4_ptr;
+            let mut sg = sig_ptr;
             let mut sl = series_len as i32;
             let mut nc = n_combos as i32;
             let mut fv = first_valid as i32;
@@ -408,6 +477,10 @@ impl CudaKst {
                 &mut out_l as *mut _ as *mut c_void,
                 &mut out_s as *mut _ as *mut c_void,
             ];
+            let func = self
+                .module
+                .get_function("kst_batch_f32")
+                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
             self.stream
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
@@ -467,9 +540,7 @@ impl CudaKst {
             ));
         }
 
-        let d_prices_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }
-                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
+        let d_prices_tm: DeviceBuffer<f32> = self.copy_f32_to_device_async(data_tm_f32)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
         let mut d_line_tm: DeviceBuffer<f32> =
@@ -531,17 +602,13 @@ impl CudaKst {
         d_line_tm: &mut DeviceBuffer<f32>,
         d_sig_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaKstError> {
-        let func = self
-            .module
-            .get_function("kst_many_series_one_param_f32")
-            .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 256,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
+        let (grid, block) = {
+            let bx = match self.policy.many_series {
+                ManySeriesKernelPolicy::Auto => None,
+                ManySeriesKernelPolicy::OneD { block_x } => Some(block_x),
+            };
+            self.launch_shape_1d(cols, bx)
         };
-        let grid_x = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
             let mut p = d_prices_tm.as_device_ptr().as_raw();
@@ -576,6 +643,10 @@ impl CudaKst {
                 &mut out_l as *mut _ as *mut c_void,
                 &mut out_s as *mut _ as *mut c_void,
             ];
+            let func = self
+                .module
+                .get_function("kst_many_series_one_param_f32")
+                .map_err(|e| CudaKstError::Cuda(e.to_string()))?;
             self.stream
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaKstError::Cuda(e.to_string()))?;

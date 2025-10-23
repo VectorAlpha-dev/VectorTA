@@ -11,7 +11,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::roc::{RocBatchRange, RocParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -36,10 +36,23 @@ impl fmt::Display for CudaRocError {
 }
 impl std::error::Error for CudaRocError {}
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct CudaRocPolicy {
     pub batch_block_x: Option<u32>,
     pub many_block_x: Option<u32>,
+    /// If true (default), the stream is synchronized before returning.
+    /// Set to false to keep launches fully async and overlap with other work.
+    pub sync_after_launch: bool,
+}
+
+impl Default for CudaRocPolicy {
+    fn default() -> Self {
+        Self {
+            batch_block_x: None,
+            many_block_x: None,
+            sync_after_launch: true,
+        }
+    }
 }
 
 pub struct CudaRoc {
@@ -47,6 +60,9 @@ pub struct CudaRoc {
     stream: Stream,
     _context: Context,
     policy: CudaRocPolicy,
+    // device limits used for chunking & clamping
+    max_grid_x: u32,
+    max_threads_per_block: u32,
 }
 
 impl CudaRoc {
@@ -54,17 +70,28 @@ impl CudaRoc {
         cust::init(CudaFlags::empty()).map_err(|e| CudaRocError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaRocError::Cuda(e.to_string()))?;
+
+        // Query device limits before moving Device into Context
+        let max_grid_x = device
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(|e| CudaRocError::Cuda(e.to_string()))? as u32;
+        let max_threads_per_block = device
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .map_err(|e| CudaRocError::Cuda(e.to_string()))? as u32;
+
         let context = Context::new(device).map_err(|e| CudaRocError::Cuda(e.to_string()))?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/roc_kernel.ptx"));
+        // Use explicit O4 JIT (most optimized) and let the driver pick SASS for current device.
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
+            ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))
             .map_err(|e| CudaRocError::Cuda(e.to_string()))?;
+
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaRocError::Cuda(e.to_string()))?;
 
@@ -73,6 +100,8 @@ impl CudaRoc {
             stream,
             _context: context,
             policy: CudaRocPolicy::default(),
+            max_grid_x,
+            max_threads_per_block,
         })
     }
 
@@ -111,12 +140,17 @@ impl CudaRoc {
             }
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices_f32).map_err(|e| CudaRocError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaRocError::Cuda(e.to_string()))?;
+        // Stream-ordered async copies/allocations (enable overlap)
+        let d_prices = unsafe {
+            DeviceBuffer::from_slice_async(prices_f32, &self.stream)
+                .map_err(|e| CudaRocError::Cuda(e.to_string()))?
+        };
+        let d_periods = unsafe {
+            DeviceBuffer::from_slice_async(&periods_i32, &self.stream)
+                .map_err(|e| CudaRocError::Cuda(e.to_string()))?
+        };
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(len * n_combos)
+            DeviceBuffer::uninitialized_async(len * n_combos, &self.stream)
                 .map_err(|e| CudaRocError::Cuda(e.to_string()))?
         };
 
@@ -147,33 +181,34 @@ impl CudaRoc {
         if n_combos == 0 {
             return Ok(());
         }
-        let func = self
-            .module
-            .get_function("roc_batch_f32")
-            .map_err(|e| CudaRocError::Cuda(e.to_string()))?;
 
-        // Chunk across combos if needed to respect grid limits
-        let block_x = self.policy.batch_block_x.unwrap_or(256);
-        let max_blocks: u32 = 65_535;
+        // Block size heuristic for memory-bound kernels; clamp to device limit
+        let block_x = self
+            .policy
+            .batch_block_x
+            .unwrap_or(256)
+            .min(self.max_threads_per_block);
+
         let mut launched = 0usize;
         while launched < n_combos {
-            let this_chunk = (n_combos - launched).min(max_blocks as usize);
+            // Respect hardware grid.x limit (typically >> 65k on cc >= 3.0)
+            let this_chunk = (n_combos - launched).min(self.max_grid_x as usize);
             let grid_x = this_chunk as u32;
+
             let grid: GridSize = (grid_x.max(1), 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
+            let block: BlockSize = (block_x.max(1), 1, 1).into();
+            let func = self
+                .module
+                .get_function("roc_batch_f32")
+                .map_err(|e| CudaRocError::Cuda(e.to_string()))?;
             unsafe {
+                // Typed device-pointer arithmetic (in elements)
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                let mut periods_ptr = d_periods
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
+                let mut periods_ptr = d_periods.as_device_ptr().add(launched).as_raw();
                 let mut series_len_i = len as i32;
                 let mut first_i = first_valid as i32;
                 let mut combos_i = this_chunk as i32;
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add(((launched * len) * std::mem::size_of::<f32>()) as u64);
+                let mut out_ptr = d_out.as_device_ptr().add(launched * len).as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
                     &mut periods_ptr as *mut _ as *mut c_void,
@@ -188,9 +223,14 @@ impl CudaRoc {
             }
             launched += this_chunk;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRocError::Cuda(e.to_string()))
+
+        if self.policy.sync_after_launch {
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaRocError::Cuda(e.to_string()))
+        } else {
+            Ok(())
+        }
     }
 
     // ---------- Many-series × one-param (time-major) ----------
@@ -246,12 +286,17 @@ impl CudaRoc {
             }
         }
 
-        let d_prices = DeviceBuffer::from_slice(prices_tm_f32)
-            .map_err(|e| CudaRocError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaRocError::Cuda(e.to_string()))?;
+        let d_prices = unsafe {
+            DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream)
+                .map_err(|e| CudaRocError::Cuda(e.to_string()))?
+        };
+        let d_first = unsafe {
+            DeviceBuffer::from_slice_async(&first_valids, &self.stream)
+                .map_err(|e| CudaRocError::Cuda(e.to_string()))?
+        };
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(expected).map_err(|e| CudaRocError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(expected, &self.stream)
+                .map_err(|e| CudaRocError::Cuda(e.to_string()))?
         };
 
         self.launch_many_series(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
@@ -271,14 +316,15 @@ impl CudaRoc {
         period: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaRocError> {
+        let block_x_default = 256u32.min(self.max_threads_per_block);
+        let block_x = self.policy.many_block_x.unwrap_or(block_x_default);
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
         let func = self
             .module
             .get_function("roc_many_series_one_param_f32")
             .map_err(|e| CudaRocError::Cuda(e.to_string()))?;
-        let block_x = self.policy.many_block_x.unwrap_or(128);
-        let grid_x = ((cols as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
             let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
@@ -298,9 +344,13 @@ impl CudaRoc {
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaRocError::Cuda(e.to_string()))?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRocError::Cuda(e.to_string()))
+        if self.policy.sync_after_launch {
+            self.stream
+                .synchronize()
+                .map_err(|e| CudaRocError::Cuda(e.to_string()))
+        } else {
+            Ok(())
+        }
     }
 
     // ---------- Helpers ----------

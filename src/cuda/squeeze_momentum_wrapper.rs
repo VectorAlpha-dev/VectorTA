@@ -165,6 +165,26 @@ impl CudaSqueezeMomentum {
 
     // ---------- Batch helpers ----------
 
+    #[inline]
+    fn sparse_k(n: usize) -> i32 {
+        // floor(log2(n)) + 1 without floating math; assumes n >= 1
+        let mut k: i32 = 1;
+        let mut span: usize = 1;
+        while (span << 1) <= n {
+            span <<= 1;
+            k += 1;
+        }
+        k
+    }
+
+    #[inline]
+    fn precompute_bytes(len: usize, k: usize) -> usize {
+        // tr[N] + ps_close[N] + ps_close2[N] + ps_tr[N] + log2[N+1] + st_max[k*N] + st_min[k*N]
+        let floats = (4 * len) + (2 * k * len);
+        let ints = len + 1;
+        floats * std::mem::size_of::<f32>() + ints * std::mem::size_of::<i32>()
+    }
+
     fn expand_grid(sweep: &SqueezeMomentumBatchRange) -> Vec<SmCombo> {
         fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
             if st == 0 || s == e {
@@ -313,6 +333,159 @@ impl CudaSqueezeMomentum {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn launch_precompute(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        d_tr: &mut DeviceBuffer<f32>,
+        d_ps_close: &mut DeviceBuffer<f32>,
+        d_ps_close2: &mut DeviceBuffer<f32>,
+        d_ps_tr: &mut DeviceBuffer<f32>,
+        d_log2: &mut DeviceBuffer<i32>,
+        d_st_max: &mut DeviceBuffer<f32>,
+        d_st_min: &mut DeviceBuffer<f32>,
+        k_levels: i32,
+    ) -> Result<(), CudaSmiError> {
+        let mut func: Function = self
+            .module
+            .get_function("smi_precompute_shared_f32")
+            .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (256, 1, 1).into();
+        unsafe {
+            let mut p_h = d_high.as_device_ptr().as_raw();
+            let mut p_l = d_low.as_device_ptr().as_raw();
+            let mut p_c = d_close.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut p_tr = d_tr.as_device_ptr().as_raw();
+            let mut p_psc = d_ps_close.as_device_ptr().as_raw();
+            let mut p_psc2 = d_ps_close2.as_device_ptr().as_raw();
+            let mut p_pstr = d_ps_tr.as_device_ptr().as_raw();
+            let mut p_log2 = d_log2.as_device_ptr().as_raw();
+            let mut p_stmax = d_st_max.as_device_ptr().as_raw();
+            let mut p_stmin = d_st_min.as_device_ptr().as_raw();
+            let mut k_i = k_levels as i32;
+            let mut args: [*mut c_void; 12] = [
+                &mut p_h as *mut _ as *mut c_void,
+                &mut p_l as *mut _ as *mut c_void,
+                &mut p_c as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut p_tr as *mut _ as *mut c_void,
+                &mut p_psc as *mut _ as *mut c_void,
+                &mut p_psc2 as *mut _ as *mut c_void,
+                &mut p_pstr as *mut _ as *mut c_void,
+                &mut p_log2 as *mut _ as *mut c_void,
+                &mut p_stmax as *mut _ as *mut c_void,
+                &mut p_stmin as *mut _ as *mut c_void,
+                &mut k_i as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
+                .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_batch_kernel_opt(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_lbb: &DeviceBuffer<i32>,
+        d_mbb: &DeviceBuffer<f32>,
+        d_lkc: &DeviceBuffer<i32>,
+        d_mkc: &DeviceBuffer<f32>,
+        len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_tr: &DeviceBuffer<f32>,
+        d_ps_close: &DeviceBuffer<f32>,
+        d_ps_close2: &DeviceBuffer<f32>,
+        d_ps_tr: &DeviceBuffer<f32>,
+        d_log2: &DeviceBuffer<i32>,
+        d_st_max: &DeviceBuffer<f32>,
+        d_st_min: &DeviceBuffer<f32>,
+        k_levels: i32,
+        max_lkc: usize,
+        d_sq: &mut DeviceBuffer<f32>,
+        d_mo: &mut DeviceBuffer<f32>,
+        d_si: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaSmiError> {
+        let mut func: Function = self
+            .module
+            .get_function("squeeze_momentum_batch_f32_opt")
+            .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::OneD { block_x } => block_x.max(32),
+        };
+        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        let shared_bytes: u32 = (max_lkc as u32) * std::mem::size_of::<f32>() as u32;
+
+        unsafe {
+            let mut p_h = d_high.as_device_ptr().as_raw();
+            let mut p_l = d_low.as_device_ptr().as_raw();
+            let mut p_c = d_close.as_device_ptr().as_raw();
+            let mut p_lbb = d_lbb.as_device_ptr().as_raw();
+            let mut p_mbb = d_mbb.as_device_ptr().as_raw();
+            let mut p_lkc = d_lkc.as_device_ptr().as_raw();
+            let mut p_mkc = d_mkc.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut n_i = n_combos as i32;
+            let mut fv_i = first_valid as i32;
+            let mut p_tr = d_tr.as_device_ptr().as_raw();
+            let mut p_psc = d_ps_close.as_device_ptr().as_raw();
+            let mut p_psc2 = d_ps_close2.as_device_ptr().as_raw();
+            let mut p_pstr = d_ps_tr.as_device_ptr().as_raw();
+            let mut p_log2 = d_log2.as_device_ptr().as_raw();
+            let mut p_stmax = d_st_max.as_device_ptr().as_raw();
+            let mut p_stmin = d_st_min.as_device_ptr().as_raw();
+            let mut k_i = k_levels as i32;
+            let mut p_sq = d_sq.as_device_ptr().as_raw();
+            let mut p_mo = d_mo.as_device_ptr().as_raw();
+            let mut p_si = d_si.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 21] = [
+                &mut p_h as *mut _ as *mut c_void,
+                &mut p_l as *mut _ as *mut c_void,
+                &mut p_c as *mut _ as *mut c_void,
+                &mut p_lbb as *mut _ as *mut c_void,
+                &mut p_mbb as *mut _ as *mut c_void,
+                &mut p_lkc as *mut _ as *mut c_void,
+                &mut p_mkc as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+                &mut fv_i as *mut _ as *mut c_void,
+                &mut p_tr as *mut _ as *mut c_void,
+                &mut p_psc as *mut _ as *mut c_void,
+                &mut p_psc2 as *mut _ as *mut c_void,
+                &mut p_pstr as *mut _ as *mut c_void,
+                &mut p_log2 as *mut _ as *mut c_void,
+                &mut p_stmax as *mut _ as *mut c_void,
+                &mut p_stmin as *mut _ as *mut c_void,
+                &mut k_i as *mut _ as *mut c_void,
+                &mut p_sq as *mut _ as *mut c_void,
+                &mut p_mo as *mut _ as *mut c_void,
+                &mut p_si as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, shared_bytes, &mut args)
+                .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
+        }
+        unsafe {
+            (*(self as *const _ as *mut CudaSqueezeMomentum)).last_batch =
+                Some(BatchKernelSelected::OneD { block_x });
+        }
+        Ok(())
+    }
+
     pub fn squeeze_momentum_batch_dev(
         &self,
         high_f32: &[f32],
@@ -323,12 +496,14 @@ impl CudaSqueezeMomentum {
         let (combos, first_valid, len) =
             Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
 
-        // Rough VRAM budget
+        // Always use optimized path; include precompute in VRAM budget
         let in_bytes = 3 * len * std::mem::size_of::<f32>();
         let params_bytes =
             combos.len() * (2 * std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>());
         let out_bytes = 3 * combos.len() * len * std::mem::size_of::<f32>();
-        let required = in_bytes + params_bytes + out_bytes;
+        let k_levels_us = Self::sparse_k(len) as usize;
+        let pre_bytes = Self::precompute_bytes(len, k_levels_us);
+        let required = in_bytes + params_bytes + out_bytes + pre_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaSmiError::InvalidInput(format!(
                 "estimated device memory {:.2} MB exceeds free VRAM",
@@ -366,7 +541,43 @@ impl CudaSqueezeMomentum {
         let mut d_si: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
 
-        self.launch_batch_kernel(
+        // Allocate precompute buffers
+        let n = len;
+        let mut d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }
+            .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
+        let mut d_ps_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }
+            .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
+        let mut d_ps_close2: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }
+            .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
+        let mut d_ps_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }
+            .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
+        let mut d_log2: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(n + 1) }
+            .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
+        let st_size = k_levels_us * n;
+        let mut d_st_max: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(st_size) }
+            .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
+        let mut d_st_min: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(st_size) }
+            .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
+
+        // Precompute once per series
+        self.launch_precompute(
+            &d_h,
+            &d_l,
+            &d_c,
+            len,
+            &mut d_tr,
+            &mut d_ps_close,
+            &mut d_ps_close2,
+            &mut d_ps_tr,
+            &mut d_log2,
+            &mut d_st_max,
+            &mut d_st_min,
+            Self::sparse_k(len),
+        )?;
+
+        // Optimized batch launch with dynamic shared memory (ring size = max lkc)
+        let max_lkc = combos.iter().map(|c| c.lkc).max().unwrap_or(1);
+        self.launch_batch_kernel_opt(
             &d_h,
             &d_l,
             &d_c,
@@ -377,6 +588,15 @@ impl CudaSqueezeMomentum {
             len,
             combos.len(),
             first_valid,
+            &d_tr,
+            &d_ps_close,
+            &d_ps_close2,
+            &d_ps_tr,
+            &d_log2,
+            &d_st_max,
+            &d_st_min,
+            Self::sparse_k(len),
+            max_lkc,
             &mut d_sq,
             &mut d_mo,
             &mut d_si,
@@ -386,21 +606,9 @@ impl CudaSqueezeMomentum {
             .map_err(|e| CudaSmiError::Cuda(e.to_string()))?;
 
         Ok((
-            DeviceArrayF32 {
-                buf: d_sq,
-                rows: combos.len(),
-                cols: len,
-            },
-            DeviceArrayF32 {
-                buf: d_mo,
-                rows: combos.len(),
-                cols: len,
-            },
-            DeviceArrayF32 {
-                buf: d_si,
-                rows: combos.len(),
-                cols: len,
-            },
+            DeviceArrayF32 { buf: d_sq, rows: combos.len(), cols: len },
+            DeviceArrayF32 { buf: d_mo, rows: combos.len(), cols: len },
+            DeviceArrayF32 { buf: d_si, rows: combos.len(), cols: len },
         ))
     }
 
@@ -556,9 +764,12 @@ pub mod benches {
     const PARAM_SWEEP: usize = 128;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
-        let out_bytes = 3 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        let n = ONE_SERIES_LEN;
+        let k = CudaSqueezeMomentum::sparse_k(n) as usize;
+        let pre = CudaSqueezeMomentum::precompute_bytes(n, k);
+        let in_bytes = 3 * n * std::mem::size_of::<f32>();
+        let out_bytes = 3 * n * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + pre + 64 * 1024 * 1024
     }
 
     struct SmiBatchState {

@@ -14,13 +14,14 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::fisher::{FisherBatchRange, FisherParams};
-use cust::context::Context;
+use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
@@ -216,7 +217,16 @@ impl CudaFisher {
         high_f32: &[f32],
         low_f32: &[f32],
         sweep: &FisherBatchRange,
-    ) -> Result<(Vec<FisherParams>, usize, usize, Vec<f32>), CudaFisherError> {
+    ) -> Result<
+        (
+            Vec<FisherParams>,
+            usize,             // first_valid
+            usize,             // len
+            LockedBuffer<f32>, // pinned HL2
+            usize,             // max period
+        ),
+        CudaFisherError,
+    > {
         if high_f32.len() != low_f32.len() {
             return Err(CudaFisherError::InvalidInput("length mismatch".into()));
         }
@@ -257,12 +267,18 @@ impl CudaFisher {
             ));
         }
 
-        // Precompute HL2 midpoints as batch-shared input (mirrors scalar batch code)
-        let mut hl2 = vec![f32::NAN; len];
-        for i in 0..len {
-            hl2[i] = 0.5f32 * (high_f32[i] + low_f32[i]);
+        // Precompute HL2 midpoints directly into pinned memory for async copies
+        let mut hl2 = unsafe {
+            LockedBuffer::uninitialized(len)
+                .map_err(|e| CudaFisherError::Cuda(e.to_string()))?
+        };
+        {
+            let dst = hl2.as_mut_slice();
+            for i in 0..len {
+                dst[i] = 0.5f32 * (high_f32[i] + low_f32[i]);
+            }
         }
-        Ok((combos, first_valid, len, hl2))
+        Ok((combos, first_valid, len, hl2, max_p))
     }
 
     pub fn fisher_batch_dev(
@@ -271,7 +287,8 @@ impl CudaFisher {
         low_f32: &[f32],
         sweep: &FisherBatchRange,
     ) -> Result<(DeviceFisherPair, Vec<FisherParams>), CudaFisherError> {
-        let (combos, first_valid, len, hl2) = Self::prepare_batch_inputs(high_f32, low_f32, sweep)?;
+        let (combos, first_valid, len, hl2_locked, max_p) =
+            Self::prepare_batch_inputs(high_f32, low_f32, sweep)?;
 
         // VRAM estimate: hl2 + periods + 2 outputs
         let bytes_in = len * std::mem::size_of::<f32>();
@@ -286,13 +303,25 @@ impl CudaFisher {
             )));
         }
 
-        let d_hl = unsafe { DeviceBuffer::from_slice_async(&hl2, &self.stream) }
+        // Periods into pinned memory for true async copy
+        let mut periods_locked = LockedBuffer::new(&0i32, combos.len())
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
-        let periods_i32: Vec<i32> = combos
-            .iter()
-            .map(|c| c.period.unwrap_or(0) as i32)
-            .collect();
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
+        {
+            let p = periods_locked.as_mut_slice();
+            for (i, c) in combos.iter().enumerate() {
+                p[i] = c.period.unwrap_or(0) as i32;
+            }
+        }
+        // Device buffers + async copies from pinned memory
+        let mut d_hl: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }
+                .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        unsafe { d_hl.async_copy_from(&hl2_locked, &self.stream) }
+            .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        let mut d_periods: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized_async(combos.len(), &self.stream) }
+                .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        unsafe { d_periods.async_copy_from(&periods_locked, &self.stream) }
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
 
         let mut d_fish: DeviceBuffer<f32> =
@@ -302,18 +331,50 @@ impl CudaFisher {
             unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
                 .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
 
-        let func = self
+        let mut func = self
             .module
             .get_function("fisher_batch_f32")
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
-        // Policy: one block per combo; thread 0 does the scan
+        // Dynamic shared memory for two int deques (min/max)
+        let shmem_bytes = (2 * max_p * std::mem::size_of::<i32>()) as usize;
+        if shmem_bytes >= 32 * 1024 {
+            func.set_cache_config(CacheConfig::PreferShared)
+                .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        }
+        if shmem_bytes > 48 * 1024 {
+            let res = unsafe {
+                sys::cuFuncSetAttribute(
+                    func.to_raw(),
+                    sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    shmem_bytes as i32,
+                )
+            };
+            if res != sys::CUresult::CUDA_SUCCESS {
+                return Err(CudaFisherError::Cuda(format!(
+                    "cuFuncSetAttribute(MAX_DYNAMIC_SHARED_MEMORY, {}B) failed: {:?}",
+                    shmem_bytes, res
+                )));
+            }
+            let _ = unsafe {
+                sys::cuFuncSetAttribute(
+                    func.to_raw(),
+                    sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                    100,
+                )
+            };
+        }
+        // Occupancy-based suggestion; still one block per combo
+        let (auto_block, _) = func
+            .suggested_launch_configuration(shmem_bytes, BlockSize::x(256))
+            .unwrap_or((128, 0));
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Auto => auto_block.clamp(64, 256),
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
         let grid_x: u32 = combos.len() as u32;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        let shared_bytes: u32 = shmem_bytes as u32;
         unsafe {
             (*(self as *const _ as *mut CudaFisher)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -336,7 +397,7 @@ impl CudaFisher {
                 &mut sig_ptr as *mut _ as *mut c_void,
             ];
             self.stream
-                .launch(&func, grid, block, 0, args)
+                .launch(&func, grid, block, shared_bytes, args)
                 .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
         }
         self.stream
@@ -382,26 +443,37 @@ impl CudaFisher {
             return Err(CudaFisherError::InvalidInput("invalid period".into()));
         }
 
-        // Build HL2 time-major and first_valid per series considering both inputs
-        let mut hl2_tm = vec![f32::NAN; cols * rows];
-        for r in 0..rows {
-            for c in 0..cols {
-                let idx = r * cols + c;
-                hl2_tm[idx] = 0.5f32 * (high_tm_f32[idx] + low_tm_f32[idx]);
-            }
-        }
-        let mut first_valids = vec![-1i32; cols];
-        for s in 0..cols {
-            let mut fv = -1i32;
+        // Build HL2 (time-major) and first_valids into pinned memory for true async copies
+        let n = cols * rows;
+        let mut hl2_tm = unsafe {
+            LockedBuffer::uninitialized(n)
+                .map_err(|e| CudaFisherError::Cuda(e.to_string()))?
+        };
+        {
+            let dst = hl2_tm.as_mut_slice();
             for r in 0..rows {
-                let h = high_tm_f32[r * cols + s];
-                let l = low_tm_f32[r * cols + s];
-                if h == h && l == l {
-                    fv = r as i32;
-                    break;
+                for c in 0..cols {
+                    let idx = r * cols + c;
+                    dst[idx] = 0.5f32 * (high_tm_f32[idx] + low_tm_f32[idx]);
                 }
             }
-            first_valids[s] = fv;
+        }
+        let mut first_valids = LockedBuffer::new(&-1i32, cols)
+            .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        {
+            let fv = first_valids.as_mut_slice();
+            for s in 0..cols {
+                let mut found = -1i32;
+                for r in 0..rows {
+                    let h = high_tm_f32[r * cols + s];
+                    let l = low_tm_f32[r * cols + s];
+                    if h == h && l == l {
+                        found = r as i32;
+                        break;
+                    }
+                }
+                fv[s] = found;
+            }
         }
 
         let bytes_in = (cols * rows) * std::mem::size_of::<f32>();
@@ -416,9 +488,15 @@ impl CudaFisher {
             )));
         }
 
-        let d_hl = unsafe { DeviceBuffer::from_slice_async(&hl2_tm, &self.stream) }
+        let mut d_hl: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
+                .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        unsafe { d_hl.async_copy_from(&hl2_tm, &self.stream) }
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
-        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
+        let mut d_first: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols, &self.stream) }
+                .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        unsafe { d_first.async_copy_from(&first_valids, &self.stream) }
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
         let mut d_fish: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
@@ -431,8 +509,12 @@ impl CudaFisher {
             .module
             .get_function("fisher_many_series_one_param_f32")
             .map_err(|e| CudaFisherError::Cuda(e.to_string()))?;
+        // Occupancy-aware suggestion (no dynamic smem)
+        let (auto_block, _) = func
+            .suggested_launch_configuration(0, BlockSize::x(256))
+            .unwrap_or((128, 0));
         let block_x: u32 = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 128,
+            ManySeriesKernelPolicy::Auto => auto_block.clamp(64, 256),
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
         };
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
