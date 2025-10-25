@@ -1248,10 +1248,8 @@ use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::indicators::roc::RocBatchRange;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::tsf::{TsfBatchRange, TsfParams};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::IntoPyArray;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::PyReadonlyArray1;
+// Redundant with the top-level `use numpy::{IntoPyArray, PyReadonlyArray1, ...};`
+// Keep only PyReadonlyArray2 here; others are already imported module-wide.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyReadonlyArray2;
 #[cfg(all(feature = "python", feature = "cuda"))]
