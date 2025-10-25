@@ -2,6 +2,8 @@
 
 This document is the authoritative reference for working in this repository. It consolidates build/run instructions, development conventions, and gotchas for CUDA, SIMD, WASM, and Python bindings. Do not change unit test reference values — they are the source of truth. Fix root causes instead.
 
+> Agent note (formatting policy): Do not run `rustfmt` or `cargo fmt` automatically. Avoid any auto-formatting that could reorder imports or rewrite code, as it tends to cause merge conflicts here. Only format if a human explicitly requests it for a specific file.
+
 ## Structure
 
 - `src/`: Core library. Indicators under `src/indicators/`. Use `src/indicators/moving_averages/alma.rs` as the reference for API, docs, style, and performance patterns.
@@ -20,7 +22,7 @@ This document is the authoritative reference for working in this repository. It 
 ## Build & Check
 
 - Quick checks: `cargo check` (add `--features wasm|python|nightly-avx|cuda` as needed).
-- Format: `cargo +nightly fmt`.
+- Format: do not run `cargo fmt` by default. Maintainers may run `cargo +nightly fmt` manually when coordinating changes; agents should not auto-format.
 - Lint: `cargo clippy --all-targets --all-features -D warnings`.
 
 ## CUDA Development
