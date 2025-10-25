@@ -41,10 +41,7 @@ pub struct CudaRocpPolicy {
 }
 impl Default for CudaRocpPolicy {
     fn default() -> Self {
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
+        
         Self {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
@@ -81,8 +78,6 @@ impl CudaRocp {
         cust::init(CudaFlags::empty()).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/rocp_kernel.ptx"));
         let jit_opts = &[
@@ -103,27 +98,9 @@ impl CudaRocp {
             debug_batch_logged: false,
             debug_many_logged: false,
         })
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-            policy: CudaRocpPolicy::default(),
-            debug_batch_logged: false,
-            debug_many_logged: false,
-        })
+        
     }
 
-    pub fn set_policy(&mut self, policy: CudaRocpPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaRocpPolicy {
-        &self.policy
-    }
-    pub fn synchronize(&self) -> Result<(), CudaRocpError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRocpError::Cuda(e.to_string()))
-    }
     pub fn set_policy(&mut self, policy: CudaRocpPolicy) {
         self.policy = policy;
     }
@@ -142,10 +119,6 @@ impl CudaRocp {
             Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
             Err(_) => true,
         }
-        match mem_get_info() {
-            Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
-            Err(_) => true,
-        }
     }
 
     fn expand_periods(sweep: &RocpBatchRange) -> Vec<usize> {
@@ -155,20 +128,9 @@ impl CudaRocp {
         } else {
             (start..=end).step_by(step).collect()
         }
-        if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
-        }
     }
 
-    fn prepare_batch(
-        data: &[f32],
-        sweep: &RocpBatchRange,
-    ) -> Result<(Vec<RocpParams>, usize, usize), CudaRocpError> {
-        if data.is_empty() {
-            return Err(CudaRocpError::InvalidInput("empty data".into()));
-        }
+    
     fn prepare_batch(
         data: &[f32],
         sweep: &RocpBatchRange,
@@ -181,25 +143,11 @@ impl CudaRocp {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaRocpError::InvalidInput("all values are NaN".into()))?;
-        let first_valid = data
-            .iter()
-            .position(|v| !v.is_nan())
-            .ok_or_else(|| CudaRocpError::InvalidInput("all values are NaN".into()))?;
         let periods = Self::expand_periods(sweep);
         if periods.is_empty() {
             return Err(CudaRocpError::InvalidInput("empty period sweep".into()));
         }
-        if periods.is_empty() {
-            return Err(CudaRocpError::InvalidInput("empty period sweep".into()));
-        }
         let max_p = *periods.iter().max().unwrap();
-        if len - first_valid < max_p {
-            return Err(CudaRocpError::InvalidInput("not enough valid data".into()));
-        }
-        let combos: Vec<RocpParams> = periods
-            .iter()
-            .map(|&p| RocpParams { period: Some(p) })
-            .collect();
         if len - first_valid < max_p {
             return Err(CudaRocpError::InvalidInput("not enough valid data".into()));
         }
@@ -215,17 +163,9 @@ impl CudaRocp {
         for &v in data {
             inv.push(1.0f32 / v);
         }
-        for &v in data {
-            inv.push(1.0f32 / v);
-        }
         inv
     }
 
-    pub fn rocp_batch_dev(
-        &self,
-        data: &[f32],
-        sweep: &RocpBatchRange,
-    ) -> Result<(DeviceArrayF32, Vec<RocpParams>), CudaRocpError> {
     pub fn rocp_batch_dev(
         &self,
         data: &[f32],
@@ -261,12 +201,7 @@ impl CudaRocp {
         ))
     }
 
-    pub fn rocp_batch_into_host_f32(
-        &self,
-        data: &[f32],
-        sweep: &RocpBatchRange,
-        out: &mut [f32],
-    ) -> Result<(usize, usize, Vec<RocpParams>), CudaRocpError> {
+    
     pub fn rocp_batch_into_host_f32(
         &self,
         data: &[f32],
@@ -295,13 +230,7 @@ impl CudaRocp {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
-            eprintln!(
-                "[rocp] batch kernel: block_x={} rows={} len={}",
-                block_x, rows, len
-            );
-            unsafe {
-                (*(self as *const _ as *mut CudaRocp)).debug_batch_logged = true;
-            }
+            
             eprintln!(
                 "[rocp] batch kernel: block_x={} rows={} len={}",
                 block_x, rows, len
@@ -333,29 +262,12 @@ impl CudaRocp {
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
+            
         }
         Ok(())
     }
 
-    pub fn rocp_many_series_one_param_time_major_dev(
-        &self,
-        data_tm: &[f32],
-        cols: usize,
-        rows: usize,
-        period: usize,
-    ) -> Result<DeviceArrayF32, CudaRocpError> {
-        if cols == 0 || rows == 0 {
-            return Err(CudaRocpError::InvalidInput("empty matrix".into()));
-        }
-        if data_tm.len() != cols * rows {
-            return Err(CudaRocpError::InvalidInput("matrix shape mismatch".into()));
-        }
-        if period == 0 {
-            return Err(CudaRocpError::InvalidInput("period must be > 0".into()));
-        }
+    
     pub fn rocp_many_series_one_param_time_major_dev(
         &self,
         data_tm: &[f32],
@@ -375,15 +287,7 @@ impl CudaRocp {
 
         // Per-series first_valid detection
         let mut firsts = vec![rows as i32; cols];
-        for s in 0..cols {
-            for t in 0..rows {
-                let v = data_tm[t * cols + s];
-                if !v.is_nan() {
-                    firsts[s] = t as i32;
-                    break;
-                }
-            }
-        }
+        
         for s in 0..cols {
             for t in 0..rows {
                 let v = data_tm[t * cols + s];
@@ -394,9 +298,7 @@ impl CudaRocp {
             }
         }
         let max_first = *firsts.iter().max().unwrap_or(&0);
-        if (rows as i32) - max_first < period as i32 {
-            return Err(CudaRocpError::InvalidInput("not enough valid data".into()));
-        }
+        
         if (rows as i32) - max_first < period as i32 {
             return Err(CudaRocpError::InvalidInput("not enough valid data".into()));
         }
@@ -427,13 +329,7 @@ impl CudaRocp {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
         };
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_many_logged {
-            eprintln!(
-                "[rocp] many-series kernel: block_x={} cols={} rows={} period={}",
-                block_x, cols, rows, period
-            );
-            unsafe {
-                (*(self as *const _ as *mut CudaRocp)).debug_many_logged = true;
-            }
+            
             eprintln!(
                 "[rocp] many-series kernel: block_x={} cols={} rows={} period={}",
                 block_x, cols, rows, period
@@ -463,9 +359,7 @@ impl CudaRocp {
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaRocpError::Cuda(e.to_string()))?;
+            
         }
         Ok(())
     }
@@ -595,51 +489,6 @@ pub mod benches {
             )
             .with_sample_size(20),
         );
-        v.push(
-            CudaBenchScenario::new(
-                "rocp",
-                "many_series_one_param",
-                "rocp/many_series",
-                "1024r x 512c",
-                || {
-                    struct State {
-                        cuda: CudaRocp,
-                        data_tm: Vec<f32>,
-                        cols: usize,
-                        rows: usize,
-                        p: usize,
-                    }
-                    impl CudaBenchState for State {
-                        fn launch(&mut self) {
-                            let _ = self.cuda.rocp_many_series_one_param_time_major_dev(
-                                &self.data_tm,
-                                self.cols,
-                                self.rows,
-                                self.p,
-                            );
-                        }
-                    }
-                    let cols = 512usize;
-                    let rows = 1024usize;
-                    let mut tm = vec![f32::NAN; cols * rows];
-                    for s in 0..cols {
-                        for t in s..rows {
-                            let x = t as f32 + (s as f32) * 0.1;
-                            tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
-                        }
-                    }
-                    Box::new(State {
-                        cuda: CudaRocp::new(0).unwrap(),
-                        data_tm: tm,
-                        cols,
-                        rows,
-                        p: 14,
-                    })
-                },
-            )
-            .with_sample_size(20),
-        );
-
         v
     }
 }

@@ -9,8 +9,6 @@
 
 use crate::cuda::moving_averages::alma_wrapper::{BatchKernelPolicy, ManySeriesKernelPolicy};
 use crate::cuda::moving_averages::alma_wrapper::{BatchKernelSelected, ManySeriesKernelSelected};
-use crate::cuda::moving_averages::alma_wrapper::{BatchKernelPolicy, ManySeriesKernelPolicy};
-use crate::cuda::moving_averages::alma_wrapper::{BatchKernelSelected, ManySeriesKernelSelected};
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::lrsi::{LrsiBatchRange, LrsiParams};
 use cust::context::Context;
@@ -47,14 +45,7 @@ pub struct CudaLrsiPolicy {
 
 impl Default for CudaLrsiPolicy {
     fn default() -> Self {
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
     }
 }
 
@@ -195,15 +186,10 @@ impl CudaLrsi {
             if first.is_none() && p.is_finite() {
                 first = Some(i);
             }
-            if first.is_none() && p.is_finite() {
-                first = Some(i);
-            }
         }
         let first = first.ok_or_else(|| CudaLrsiError::InvalidInput("all prices NaN".into()))?;
         if len - first < 4 {
             return Err(CudaLrsiError::InvalidInput(format!(
-                "not enough valid data: needed 4, have {}",
-                len - first
                 "not enough valid data: needed 4, have {}",
                 len - first
             )));
@@ -247,10 +233,6 @@ impl CudaLrsi {
             DeviceBuffer::from_slice(&prices).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
         let d_alphas =
             DeviceBuffer::from_slice(&alphas).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
-        let d_prices =
-            DeviceBuffer::from_slice(&prices).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
-        let d_alphas =
-            DeviceBuffer::from_slice(&alphas).map_err(|e| CudaLrsiError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(len * combos.len())
                 .map_err(|e| CudaLrsiError::Cuda(e.to_string()))?
@@ -258,16 +240,7 @@ impl CudaLrsi {
 
         self.launch_batch_kernel(&d_prices, &d_alphas, len, first, combos.len(), &mut d_out)?;
         self.synchronize()?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: combos.len(),
-            cols: len,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: combos.len(),
-            cols: len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
     }
 
     fn launch_batch_kernel(
@@ -388,18 +361,11 @@ impl CudaLrsi {
                 if fv.is_none() && p.is_finite() {
                     fv = Some(t);
                 }
-                if fv.is_none() && p.is_finite() {
-                    fv = Some(t);
-                }
             }
-            let fv =
-                fv.ok_or_else(|| CudaLrsiError::InvalidInput(format!("series {s} all NaN")))?;
             let fv =
                 fv.ok_or_else(|| CudaLrsiError::InvalidInput(format!("series {s} all NaN")))?;
             if rows - fv < 4 {
                 return Err(CudaLrsiError::InvalidInput(format!(
-                    "series {s} insufficient data: need 4, have {}",
-                    rows - fv
                     "series {s} insufficient data: need 4, have {}",
                     rows - fv
                 )));
@@ -444,16 +410,7 @@ impl CudaLrsi {
             &mut d_out_tm,
         )?;
         self.synchronize()?;
-        Ok(DeviceArrayF32 {
-            buf: d_out_tm,
-            rows,
-            cols,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out_tm,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
     }
 
     fn launch_many_series_kernel(
@@ -465,12 +422,7 @@ impl CudaLrsi {
         d_first_valids: &DeviceBuffer<i32>,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaLrsiError> {
-        if cols == 0 || rows == 0 {
-            return Ok(());
-        }
-        if cols == 0 || rows == 0 {
-            return Ok(());
-        }
+        if cols == 0 || rows == 0 { return Ok(()); }
         if cols > i32::MAX as usize || rows > i32::MAX as usize {
             return Err(CudaLrsiError::InvalidInput(
                 "inputs exceed kernel limits".into(),
@@ -553,19 +505,9 @@ pub mod benches {
                 .lrsi_batch_dev(&self.high, &self.low, &self.sweep)
                 .unwrap();
         }
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .lrsi_batch_dev(&self.high, &self.low, &self.sweep)
-                .unwrap();
-        }
     }
     fn prep_batch() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaLrsi::new(0).expect("cuda lrsi");
-        cuda.set_policy(CudaLrsiPolicy {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        });
         cuda.set_policy(CudaLrsiPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
@@ -584,29 +526,7 @@ pub mod benches {
         let sweep = LrsiBatchRange {
             alpha: (0.05, 0.80, (0.80 - 0.05) / (ROWS as f64 - 1.0)),
         };
-        Box::new(LrsiBatchState {
-            cuda,
-            high,
-            low,
-            sweep,
-        })
-        for i in 0..LEN {
-            if base[i].is_nan() {
-                continue;
-            }
-            let off = (0.003f32 * (i as f32)).sin().abs() + 0.1;
-            high[i] = base[i] + off;
-            low[i] = base[i] - off;
-        }
-        let sweep = LrsiBatchRange {
-            alpha: (0.05, 0.80, (0.80 - 0.05) / (ROWS as f64 - 1.0)),
-        };
-        Box::new(LrsiBatchState {
-            cuda,
-            high,
-            low,
-            sweep,
-        })
+        Box::new(LrsiBatchState { cuda, high, low, sweep })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -616,8 +536,6 @@ pub mod benches {
             "lrsi_cuda_batch_dev",
             "1m_x_256",
             prep_batch,
-        )
-        .with_inner_iters(4)]
         )
         .with_inner_iters(4)]
     }

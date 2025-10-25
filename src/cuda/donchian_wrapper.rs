@@ -48,13 +48,6 @@ pub enum BatchKernelPolicy {
         block_x: u32,
     },
 }
-pub enum BatchKernelPolicy {
-    #[default]
-    Auto,
-    Plain {
-        block_x: u32,
-    },
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ManySeriesKernelPolicy {
@@ -64,19 +57,8 @@ pub enum ManySeriesKernelPolicy {
         block_x: u32,
     },
 }
-pub enum ManySeriesKernelPolicy {
-    #[default]
-    Auto,
-    OneD {
-        block_x: u32,
-    },
-}
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct CudaDonchianPolicy {
-    pub batch: BatchKernelPolicy,
-    pub many_series: ManySeriesKernelPolicy,
-}
 pub struct CudaDonchianPolicy {
     pub batch: BatchKernelPolicy,
     pub many_series: ManySeriesKernelPolicy,
@@ -85,9 +67,6 @@ pub struct CudaDonchianPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected { Rmq { build_bx: u32, query_bx: u32 } }
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected {
-    OneD { block_x: u32 },
-}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -144,15 +123,6 @@ impl CudaDonchian {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
-    pub fn set_policy(&mut self, policy: CudaDonchianPolicy) {
-        self.policy = policy;
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -160,31 +130,17 @@ impl CudaDonchian {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
             Err(_) => true,
         }
-        match env::var("CUDA_MEM_CHECK") {
-            Ok(v) => v != "0" && v.to_lowercase() != "false",
-            Err(_) => true,
-        }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
+        if !Self::mem_check_enabled() { return true; }
         if !Self::mem_check_enabled() {
             return true;
         }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
-        }
         } else {
             true
         }
@@ -241,16 +197,9 @@ impl CudaDonchian {
             if step == 0 || start == end {
                 return vec![start];
             }
-            if step == 0 || start == end {
-                return vec![start];
-            }
             (start..=end).step_by(step).collect()
         }
         let periods = axis_usize(range.period);
-        periods
-            .into_iter()
-            .map(|p| DonchianParams { period: Some(p) })
-            .collect()
         periods
             .into_iter()
             .map(|p| DonchianParams { period: Some(p) })
@@ -261,9 +210,6 @@ impl CudaDonchian {
         high: &[f32],
         low: &[f32],
         sweep: &DonchianBatchRange,
-        high: &[f32],
-        low: &[f32],
-        sweep: &DonchianBatchRange,
     ) -> Result<(Vec<DonchianParams>, usize, usize), CudaDonchianError> {
         if high.len() != low.len() {
             return Err(CudaDonchianError::InvalidInput("length mismatch".into()));
@@ -271,17 +217,7 @@ impl CudaDonchian {
         if high.is_empty() {
             return Err(CudaDonchianError::InvalidInput("empty input".into()));
         }
-        if high.len() != low.len() {
-            return Err(CudaDonchianError::InvalidInput("length mismatch".into()));
-        }
-        if high.is_empty() {
-            return Err(CudaDonchianError::InvalidInput("empty input".into()));
-        }
         let len = high.len();
-        let first_valid = high
-            .iter()
-            .zip(low.iter())
-            .position(|(h, l)| !h.is_nan() && !l.is_nan())
         let first_valid = high
             .iter()
             .zip(low.iter())
@@ -529,36 +465,9 @@ impl CudaDonchian {
 
         Ok((
             DeviceArrayF32Triplet {
-                wt1: DeviceArrayF32 {
-                    buf: d_upper,
-                    rows: combos.len(),
-                    cols: len,
-                },
-                wt2: DeviceArrayF32 {
-                    buf: d_middle,
-                    rows: combos.len(),
-                    cols: len,
-                },
-                hist: DeviceArrayF32 {
-                    buf: d_lower,
-                    rows: combos.len(),
-                    cols: len,
-                },
-                wt1: DeviceArrayF32 {
-                    buf: d_upper,
-                    rows: combos.len(),
-                    cols: len,
-                },
-                wt2: DeviceArrayF32 {
-                    buf: d_middle,
-                    rows: combos.len(),
-                    cols: len,
-                },
-                hist: DeviceArrayF32 {
-                    buf: d_lower,
-                    rows: combos.len(),
-                    cols: len,
-                },
+                wt1: DeviceArrayF32 { buf: d_upper, rows: combos.len(), cols: len },
+                wt2: DeviceArrayF32 { buf: d_middle, rows: combos.len(), cols: len },
+                hist: DeviceArrayF32 { buf: d_lower, rows: combos.len(), cols: len },
             },
             combos,
         ))
@@ -657,14 +566,7 @@ impl CudaDonchian {
         let func = self
             .module
             .get_function("donchian_many_series_one_param_f32")
-        let func = self
-            .module
-            .get_function("donchian_many_series_one_param_f32")
             .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
-        let block_x: u32 = match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => 128,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
-        };
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
@@ -682,7 +584,6 @@ impl CudaDonchian {
         }
         unsafe {
             let mut high_ptr = d_high.as_device_ptr().as_raw();
-            let mut low_ptr = d_low.as_device_ptr().as_raw();
             let mut low_ptr = d_low.as_device_ptr().as_raw();
             let mut first_ptr = d_first.as_device_ptr().as_raw();
             let mut num_series_i = cols as i32;
@@ -704,8 +605,6 @@ impl CudaDonchian {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-            self.stream
-                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
         }
 
@@ -717,61 +616,14 @@ impl CudaDonchian {
             .map_err(|e| CudaDonchianError::Cuda(e.to_string()))?;
         self.maybe_log_many_debug();
         Ok(DeviceArrayF32Triplet {
-            wt1: DeviceArrayF32 {
-                buf: d_upper,
-                rows,
-                cols,
-            },
-            wt2: DeviceArrayF32 {
-                buf: d_middle,
-                rows,
-                cols,
-            },
-            hist: DeviceArrayF32 {
-                buf: d_lower,
-                rows,
-                cols,
-            },
-            wt1: DeviceArrayF32 {
-                buf: d_upper,
-                rows,
-                cols,
-            },
-            wt2: DeviceArrayF32 {
-                buf: d_middle,
-                rows,
-                cols,
-            },
-            hist: DeviceArrayF32 {
-                buf: d_lower,
-                rows,
-                cols,
-            },
+            wt1: DeviceArrayF32 { buf: d_upper, rows, cols },
+            wt2: DeviceArrayF32 { buf: d_middle, rows, cols },
+            hist: DeviceArrayF32 { buf: d_lower, rows, cols },
         })
     }
 }
 
-// ---- Helpers for RMQ levels and sizing ----
-#[inline]
-fn floor_log2_usize(x: usize) -> u32 {
-    debug_assert!(x > 0);
-    (usize::BITS - 1 - x.leading_zeros()) as u32
-}
-
-#[inline]
-fn rmq_levels_for_max_period(max_period: usize) -> usize {
-    (floor_log2_usize(max_period) as usize) + 1
-}
-
-#[inline]
-fn bytes_rmq_tables(len: usize, levels: usize) -> usize {
-    levels * len * (2 * std::mem::size_of::<f32>() + std::mem::size_of::<u8>())
-}
-
-#[inline]
-fn as_raw_offset<T: cust::memory::DeviceCopy>(buf: &DeviceBuffer<T>, elems_offset: usize) -> u64 {
-    buf.as_device_ptr().as_raw() + (elems_offset * std::mem::size_of::<T>()) as u64
-}
+ 
 
 // ---- Helpers for RMQ levels and sizing ----
 #[inline]
@@ -828,38 +680,15 @@ pub mod benches {
                 .expect("donchian batch");
         }
     }
-    impl CudaBenchState for DonchianBatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .donchian_batch_dev(&self.high, &self.low, &self.sweep)
-                .expect("donchian batch");
-        }
-    }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaDonchian::new(0).expect("CudaDonchian");
         let mut high = gen_series(ONE_SERIES_LEN);
         let mut low = vec![0.0f32; ONE_SERIES_LEN];
-        for i in 0..ONE_SERIES_LEN {
-            low[i] = 0.7 * high[i] + 0.1 * (i as f32).sin();
-        }
+        
         for i in 0..ONE_SERIES_LEN {
             low[i] = 0.7 * high[i] + 0.1 * (i as f32).sin();
         }
         // put NaNs at start for warmup semantics
-        for i in 0..32 {
-            high[i] = f32::NAN;
-            low[i] = f32::NAN;
-        }
-        let sweep = DonchianBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1),
-        };
-        Box::new(DonchianBatchState {
-            cuda,
-            high,
-            low,
-            sweep,
-        })
         for i in 0..32 {
             high[i] = f32::NAN;
             low[i] = f32::NAN;

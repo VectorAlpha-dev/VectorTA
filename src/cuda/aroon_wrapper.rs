@@ -32,7 +32,6 @@ impl std::error::Error for CudaAroonError {}
 
 pub struct DeviceArrayF32Pair {
     pub first: DeviceArrayF32,  // up
-    pub first: DeviceArrayF32,  // up
     pub second: DeviceArrayF32, // down
 }
 
@@ -41,13 +40,7 @@ impl DeviceArrayF32Pair {
     pub fn rows(&self) -> usize {
         self.first.rows
     }
-    pub fn rows(&self) -> usize {
-        self.first.rows
-    }
     #[inline]
-    pub fn cols(&self) -> usize {
-        self.first.cols
-    }
     pub fn cols(&self) -> usize {
         self.first.cols
     }
@@ -88,11 +81,6 @@ impl CudaAroon {
             stream,
             _context: context,
         })
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-        })
     }
 
     #[inline]
@@ -115,18 +103,12 @@ impl CudaAroon {
         lens.into_iter()
             .map(|l| AroonParams { length: Some(l) })
             .collect()
-        lens.into_iter()
-            .map(|l| AroonParams { length: Some(l) })
-            .collect()
     }
 
     fn find_first_valid_pair(high: &[f32], low: &[f32]) -> Option<usize> {
         for i in 0..high.len() {
             let h = high[i];
             let l = low[i];
-            if h == h && l == l && h.is_finite() && l.is_finite() {
-                return Some(i);
-            }
             if h == h && l == l && h.is_finite() && l.is_finite() {
                 return Some(i);
             }
@@ -146,15 +128,9 @@ impl CudaAroon {
             return Err(CudaAroonError::InvalidInput(
                 "empty or mismatched inputs".into(),
             ));
-            return Err(CudaAroonError::InvalidInput(
-                "empty or mismatched inputs".into(),
-            ));
         }
         let combos = Self::expand_lengths(sweep);
         if combos.is_empty() {
-            return Err(CudaAroonError::InvalidInput(
-                "no length combinations".into(),
-            ));
             return Err(CudaAroonError::InvalidInput(
                 "no length combinations".into(),
             ));
@@ -175,12 +151,7 @@ impl CudaAroon {
         let headroom = 64 * 1024 * 1024;
         let bytes =
             (high_f32.len() + low_f32.len()) * 4 + lengths_i32.len() * 4 + out_elems * 4 * 2;
-        let bytes =
-            (high_f32.len() + low_f32.len()) * 4 + lengths_i32.len() * 4 + out_elems * 4 * 2;
         if !Self::will_fit(bytes, headroom) {
-            return Err(CudaAroonError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
             return Err(CudaAroonError::InvalidInput(
                 "insufficient device memory".into(),
             ));
@@ -192,12 +163,6 @@ impl CudaAroon {
             .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
         let d_lengths = unsafe { DeviceBuffer::from_slice_async(&lengths_i32, &self.stream) }
             .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
-        let mut d_up: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
-                .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
-        let mut d_down: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
-                .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
         let mut d_up: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
                 .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
@@ -261,16 +226,6 @@ impl CudaAroon {
                 rows: combos.len(),
                 cols: n,
             },
-            first: DeviceArrayF32 {
-                buf: d_up,
-                rows: combos.len(),
-                cols: n,
-            },
-            second: DeviceArrayF32 {
-                buf: d_down,
-                rows: combos.len(),
-                cols: n,
-            },
         };
         Ok(CudaAroonBatchResult { outputs, combos })
     }
@@ -298,8 +253,6 @@ impl CudaAroon {
         }
         if length == 0 || length > rows {
             // lookback cannot exceed series length
-        if length == 0 || length > rows {
-            // lookback cannot exceed series length
             return Err(CudaAroonError::InvalidInput("invalid length".into()));
         }
 
@@ -313,19 +266,12 @@ impl CudaAroon {
                     first_valids[s] = t as i32;
                     break;
                 }
-                if h == h && l == l && h.is_finite() && l.is_finite() {
-                    first_valids[s] = t as i32;
-                    break;
-                }
             }
         }
 
         let headroom = 64 * 1024 * 1024;
         let bytes = (high_tm_f32.len() + low_tm_f32.len()) * 4 + cols * 4 + n * 4 * 2;
         if !Self::will_fit(bytes, headroom) {
-            return Err(CudaAroonError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
             return Err(CudaAroonError::InvalidInput(
                 "insufficient device memory".into(),
             ));
@@ -337,12 +283,6 @@ impl CudaAroon {
             .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
-        let mut d_up: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
-                .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
-        let mut d_down: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
-                .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
         let mut d_up: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
                 .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
@@ -396,16 +336,6 @@ impl CudaAroon {
                 rows,
                 cols,
             },
-            first: DeviceArrayF32 {
-                buf: d_up,
-                rows,
-                cols,
-            },
-            second: DeviceArrayF32 {
-                buf: d_down,
-                rows,
-                cols,
-            },
         })
     }
 
@@ -420,15 +350,10 @@ impl CudaAroon {
     ) -> Result<(usize, usize, Vec<AroonParams>), CudaAroonError> {
         let CudaAroonBatchResult { outputs, combos } =
             self.aroon_batch_dev(high_f32, low_f32, sweep)?;
-        let CudaAroonBatchResult { outputs, combos } =
-            self.aroon_batch_dev(high_f32, low_f32, sweep)?;
         let rows = outputs.rows();
         let cols = outputs.cols();
         let expected = rows * cols;
         if out_up.len() != expected || out_down.len() != expected {
-            return Err(CudaAroonError::InvalidInput(
-                "output length mismatch".into(),
-            ));
             return Err(CudaAroonError::InvalidInput(
                 "output length mismatch".into(),
             ));
@@ -452,12 +377,8 @@ impl CudaAroon {
         let mut pinned_up: LockedBuffer<f32> = unsafe {
             LockedBuffer::uninitialized(expected)
                 .map_err(|e| CudaAroonError::Cuda(e.to_string()))?
-            LockedBuffer::uninitialized(expected)
-                .map_err(|e| CudaAroonError::Cuda(e.to_string()))?
         };
         let mut pinned_dn: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(expected)
-                .map_err(|e| CudaAroonError::Cuda(e.to_string()))?
             LockedBuffer::uninitialized(expected)
                 .map_err(|e| CudaAroonError::Cuda(e.to_string()))?
         };
@@ -466,15 +387,7 @@ impl CudaAroon {
                 .first
                 .buf
                 .async_copy_to(pinned_up.as_mut_slice(), &self.stream)
-            outputs
-                .first
-                .buf
-                .async_copy_to(pinned_up.as_mut_slice(), &self.stream)
                 .map_err(|e| CudaAroonError::Cuda(e.to_string()))?;
-            outputs
-                .second
-                .buf
-                .async_copy_to(pinned_dn.as_mut_slice(), &self.stream)
             outputs
                 .second
                 .buf
@@ -518,24 +431,8 @@ pub mod benches {
                 .aroon_batch_dev(&self.high, &self.low, &self.sweep);
         }
     }
-    struct AroonBatchBench {
-        cuda: CudaAroon,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: AroonBatchRange,
-    }
-    impl CudaBenchState for AroonBatchBench {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .aroon_batch_dev(&self.high, &self.low, &self.sweep);
-        }
-    }
     fn prep_batch() -> Box<dyn CudaBenchState> {
         let (h, l) = gen_series(200_000);
-        let sweep = AroonBatchRange {
-            length: (10, 500, 1),
-        };
         let sweep = AroonBatchRange {
             length: (10, 500, 1),
         };
@@ -546,33 +443,8 @@ pub mod benches {
             low: l,
             sweep,
         })
-        Box::new(AroonBatchBench {
-            cuda,
-            high: h,
-            low: l,
-            sweep,
-        })
     }
 
-    struct AroonManyBench {
-        cuda: CudaAroon,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        cols: usize,
-        rows: usize,
-        length: usize,
-    }
-    impl CudaBenchState for AroonManyBench {
-        fn launch(&mut self) {
-            let _ = self.cuda.aroon_many_series_one_param_time_major_dev(
-                &self.high_tm,
-                &self.low_tm,
-                self.cols,
-                self.rows,
-                self.length,
-            );
-        }
-    }
     struct AroonManyBench {
         cuda: CudaAroon,
         high_tm: Vec<f32>,
@@ -595,18 +467,8 @@ pub mod benches {
     fn prep_many() -> Box<dyn CudaBenchState> {
         let cols = 256usize;
         let rows = 16_384usize;
-        let cols = 256usize;
-        let rows = 16_384usize;
         let mut high_tm = vec![f32::NAN; cols * rows];
         let mut low_tm = vec![f32::NAN; cols * rows];
-        for s in 0..cols {
-            for t in (s % 7)..rows {
-                let i = t * cols + s;
-                let x = (t as f32) * 0.002 + (s as f32) * 0.0007;
-                high_tm[i] = x.sin() + 1.1;
-                low_tm[i] = x.sin() - 1.1;
-            }
-        }
         for s in 0..cols {
             for t in (s % 7)..rows {
                 let i = t * cols + s;
@@ -624,36 +486,12 @@ pub mod benches {
             rows,
             length: 25,
         })
-        Box::new(AroonManyBench {
-            cuda,
-            high_tm,
-            low_tm,
-            cols,
-            rows,
-            length: 25,
-        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let bytes_batch = (200_000usize * 2 + (500 - 10 + 1) * 200_000usize * 2) * 4; // rough
         let bytes_many = 256usize * 16_384usize * 2 * 4 * 3; // 2 inputs + 2 outputs + firsts
         vec![
-            CudaBenchScenario::new(
-                "aroon",
-                "one_series_many_params",
-                "aroon_cuda_batch",
-                "200k_x_491",
-                prep_batch,
-            )
-            .with_mem_required(bytes_batch),
-            CudaBenchScenario::new(
-                "aroon",
-                "many_series_one_param",
-                "aroon_cuda_ms1p",
-                "256x16k_L25",
-                prep_many,
-            )
-            .with_mem_required(bytes_many),
             CudaBenchScenario::new(
                 "aroon",
                 "one_series_many_params",

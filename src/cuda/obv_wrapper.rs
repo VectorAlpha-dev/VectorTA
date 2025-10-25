@@ -57,14 +57,8 @@ impl Default for ObvBatchKernelPolicy {
     fn default() -> Self {
         ObvBatchKernelPolicy::Auto
     }
-    fn default() -> Self {
-        ObvBatchKernelPolicy::Auto
-    }
 }
 impl Default for ObvManySeriesKernelPolicy {
-    fn default() -> Self {
-        ObvManySeriesKernelPolicy::Auto
-    }
     fn default() -> Self {
         ObvManySeriesKernelPolicy::Auto
     }
@@ -543,8 +537,6 @@ pub mod benches {
         // 2 inputs + 1 output + first_valids
         (2 * elems + elems) * std::mem::size_of::<f32>()
             + MANY_COLS * std::mem::size_of::<i32>()
-        (2 * elems + elems) * std::mem::size_of::<f32>()
-            + MANY_COLS * std::mem::size_of::<i32>()
             + 32 * 1024 * 1024
     }
 
@@ -594,11 +586,6 @@ pub mod benches {
         let cuda = CudaObv::new(0).expect("cuda obv");
         let close = gen_series(ONE_SERIES_LEN);
         let volume = synth_volume_from_price(&close);
-        Box::new(ObvBatchState {
-            cuda,
-            close,
-            volume,
-        })
         Box::new(ObvBatchState {
             cuda,
             close,

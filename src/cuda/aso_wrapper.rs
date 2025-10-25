@@ -67,16 +67,12 @@ impl CudaAso {
         cust::init(CudaFlags::empty()).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/aso_kernel.ptx"));
         let jit = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit)
-            .or_else(|_| Module::from_ptx(ptx, &[]))
         let module = Module::from_ptx(ptx, jit)
             .or_else(|_| Module::from_ptx(ptx, &[]))
             .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
@@ -165,26 +161,8 @@ impl CudaAso {
         )?;
 
         Ok((
-            DeviceArrayF32 {
-                buf: d_bulls,
-                rows: n_combos,
-                cols: series_len,
-            },
-            DeviceArrayF32 {
-                buf: d_bears,
-                rows: n_combos,
-                cols: series_len,
-            },
-            DeviceArrayF32 {
-                buf: d_bulls,
-                rows: n_combos,
-                cols: series_len,
-            },
-            DeviceArrayF32 {
-                buf: d_bears,
-                rows: n_combos,
-                cols: series_len,
-            },
+            DeviceArrayF32 { buf: d_bulls, rows: n_combos, cols: series_len },
+            DeviceArrayF32 { buf: d_bears, rows: n_combos, cols: series_len },
         ))
     }
 
@@ -211,10 +189,6 @@ impl CudaAso {
         if n_combos == 0 || series_len == 0 { return Ok(()); }
         let mut func = self.module.get_function("aso_batch_f32")
             .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let block_x = match self.batch_policy {
-            BatchKernelPolicy::Plain { block_x } => block_x,
-            _ => 256,
-        };
         let block_x = match self.batch_policy {
             BatchKernelPolicy::Plain { block_x } => block_x,
             _ => 256,
@@ -262,8 +236,6 @@ impl CudaAso {
             ];
             self.stream
                 .launch(&func, grid, block, smem_bytes, args)
-            self.stream
-                .launch(&func, grid, block, smem_bytes, args)
                 .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
         }
         Ok(())
@@ -284,24 +256,13 @@ impl CudaAso {
         if cols == 0 || rows == 0 || period == 0 {
             return Err(CudaAsoError::InvalidInput("invalid shape or period".into()));
         }
-        if cols == 0 || rows == 0 || period == 0 {
-            return Err(CudaAsoError::InvalidInput("invalid shape or period".into()));
-        }
         let expected = cols * rows;
         if open_tm_f32.len() != expected
             || high_tm_f32.len() != expected
             || low_tm_f32.len() != expected
             || close_tm_f32.len() != expected
         {
-        if open_tm_f32.len() != expected
-            || high_tm_f32.len() != expected
-            || low_tm_f32.len() != expected
-            || close_tm_f32.len() != expected
-        {
             return Err(CudaAsoError::InvalidInput("mismatched input sizes".into()));
-        }
-        if mode > 2 {
-            return Err(CudaAsoError::InvalidInput("invalid mode".into()));
         }
         if mode > 2 {
             return Err(CudaAsoError::InvalidInput("invalid mode".into()));
@@ -317,20 +278,6 @@ impl CudaAso {
                     fv = t as i32;
                     break;
                 }
-                if !close_tm_f32[idx].is_nan() {
-                    fv = t as i32;
-                    break;
-                }
-            }
-            if fv as usize >= rows {
-                return Err(CudaAsoError::InvalidInput(
-                    "all values NaN in a series".into(),
-                ));
-            }
-            if rows - (fv as usize) < period {
-                return Err(CudaAsoError::InvalidInput(
-                    "not enough valid data in a series".into(),
-                ));
             }
             if fv as usize >= rows {
                 return Err(CudaAsoError::InvalidInput(
@@ -371,35 +318,11 @@ impl CudaAso {
             mode,
             &mut d_bulls,
             &mut d_bears,
-            cols,
-            rows,
-            period,
-            mode,
-            &mut d_bulls,
-            &mut d_bears,
         )?;
 
         Ok((
-            DeviceArrayF32 {
-                buf: d_bulls,
-                rows,
-                cols,
-            },
-            DeviceArrayF32 {
-                buf: d_bears,
-                rows,
-                cols,
-            },
-            DeviceArrayF32 {
-                buf: d_bulls,
-                rows,
-                cols,
-            },
-            DeviceArrayF32 {
-                buf: d_bears,
-                rows,
-                cols,
-            },
+            DeviceArrayF32 { buf: d_bulls, rows, cols },
+            DeviceArrayF32 { buf: d_bears, rows, cols },
         ))
     }
 
@@ -420,10 +343,6 @@ impl CudaAso {
         if cols == 0 || rows == 0 { return Ok(()); }
         let mut func = self.module.get_function("aso_many_series_one_param_f32")
             .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let block_x = match self.many_policy {
-            ManySeriesKernelPolicy::OneD { block_x } => block_x,
-            _ => 128,
-        };
         let block_x = match self.many_policy {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => 128,
@@ -459,8 +378,6 @@ impl CudaAso {
                 &mut out_b_ptr as *mut _ as *mut c_void,
                 &mut out_e_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, smem_bytes, args)
             self.stream
                 .launch(&func, grid, block, smem_bytes, args)
                 .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
@@ -543,31 +460,14 @@ fn prepare_batch_inputs(
     low: &[f32],
     close: &[f32],
     sweep: &AsoBatchRange,
-    open: &[f32],
-    high: &[f32],
-    low: &[f32],
-    close: &[f32],
-    sweep: &AsoBatchRange,
 ) -> Result<(Vec<AsoParams>, usize, usize, usize), CudaAsoError> {
     let len = close.len();
     if len == 0 || high.len() != len || low.len() != len || open.len() != len {
         return Err(CudaAsoError::InvalidInput(
             "empty or mismatched inputs".into(),
         ));
-        return Err(CudaAsoError::InvalidInput(
-            "empty or mismatched inputs".into(),
-        ));
     }
     let combos = expand_params(sweep);
-    if combos.is_empty() {
-        return Err(CudaAsoError::InvalidInput("no parameter combos".into()));
-    }
-    let first_valid = (0..len)
-        .find(|&i| !close[i].is_nan())
-        .ok_or_else(|| CudaAsoError::InvalidInput("all values are NaN".into()))?;
-    if combos.is_empty() {
-        return Err(CudaAsoError::InvalidInput("no parameter combos".into()));
-    }
     let first_valid = (0..len)
         .find(|&i| !close[i].is_nan())
         .ok_or_else(|| CudaAsoError::InvalidInput("all values are NaN".into()))?;
@@ -581,7 +481,6 @@ fn prepare_batch_inputs(
 // ---------- Bench profiles ----------
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
@@ -602,21 +501,7 @@ pub mod benches {
         c: Vec<f32>,
         sweep: AsoBatchRange,
     }
-    struct AsoBatchState {
-        cuda: CudaAso,
-        o: Vec<f32>,
-        h: Vec<f32>,
-        l: Vec<f32>,
-        c: Vec<f32>,
-        sweep: AsoBatchRange,
-    }
     impl CudaBenchState for AsoBatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .aso_batch_dev(&self.o, &self.h, &self.l, &self.c, &self.sweep)
-                .unwrap();
-        }
         fn launch(&mut self) {
             let _ = self
                 .cuda
@@ -645,52 +530,10 @@ pub mod benches {
             period: (10, 10 + PARAMS - 1, 1),
             mode: (0, 2, 1),
         };
-        Box::new(AsoBatchState {
-            cuda,
-            o,
-            h,
-            l,
-            c,
-            sweep,
-        })
-        let mut o = c.clone();
-        let mut h = c.clone();
-        let mut l = c.clone();
-        for i in 0..N {
-            let v = c[i];
-            if v.is_nan() {
-                continue;
-            }
-            let x = i as f32 * 0.0031;
-            let off = (0.0019 * x.sin()).abs() + 0.05;
-            o[i] = v - 0.1;
-            h[i] = v + off;
-            l[i] = v - off;
-        }
-        let sweep = AsoBatchRange {
-            period: (10, 10 + PARAMS - 1, 1),
-            mode: (0, 2, 1),
-        };
-        Box::new(AsoBatchState {
-            cuda,
-            o,
-            h,
-            l,
-            c,
-            sweep,
-        })
+        Box::new(AsoBatchState { cuda, o, h, l, c, sweep })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        vec![CudaBenchScenario::new(
-            "aso",
-            "one_series_many_params",
-            "aso_cuda_batch_dev",
-            "1m_x_200",
-            prep_one_series_many_params,
-        )
-        .with_sample_size(10)
-        .with_mem_required(bytes_one_series_many_params())]
         vec![CudaBenchScenario::new(
             "aso",
             "one_series_many_params",

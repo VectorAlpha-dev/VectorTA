@@ -48,13 +48,7 @@ impl DeviceArrayF32Pair {
     pub fn rows(&self) -> usize {
         self.a.rows
     }
-    pub fn rows(&self) -> usize {
-        self.a.rows
-    }
     #[inline]
-    pub fn cols(&self) -> usize {
-        self.a.cols
-    }
     pub fn cols(&self) -> usize {
         self.a.cols
     }
@@ -66,14 +60,7 @@ pub enum BatchKernelPolicy {
     Plain { block_x: u32 },
 }
 impl Default for BatchKernelPolicy {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-impl Default for BatchKernelPolicy {
-    fn default() -> Self {
-        Self::Auto
-    }
+    fn default() -> Self { Self::Auto }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -82,18 +69,7 @@ pub enum ManySeriesKernelPolicy {
     OneD { block_x: u32 },
 }
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-pub enum ManySeriesKernelPolicy {
-    Auto,
-    OneD { block_x: u32 },
-}
-impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self {
-        Self::Auto
-    }
+    fn default() -> Self { Self::Auto }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -118,22 +94,12 @@ impl CudaStochf {
         device_id: usize,
         policy: CudaStochfPolicy,
     ) -> Result<Self, CudaStochfError> {
-    pub fn new_with_policy(
-        device_id: usize,
-        policy: CudaStochfPolicy,
-    ) -> Result<Self, CudaStochfError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/stochf_kernel.ptx"));
-        let jit = [
-            ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
-        ];
         let jit = [
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -144,16 +110,8 @@ impl CudaStochf {
             .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-            policy,
-        })
         Ok(Self {
             module,
             stream,
@@ -169,16 +127,8 @@ impl CudaStochf {
             .filter(|v| v == "0" || v.eq_ignore_ascii_case("false"))
             .is_some()
         {
-        if env::var("CUDA_MEM_CHECK")
-            .ok()
-            .filter(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-            .is_some()
-        {
             return true;
         }
-        mem_get_info()
-            .map(|(free, _)| bytes.saturating_add(headroom) <= free)
-            .unwrap_or(true)
         mem_get_info()
             .map(|(free, _)| bytes.saturating_add(headroom) <= free)
             .unwrap_or(true)
@@ -199,19 +149,8 @@ impl CudaStochf {
         if len == 0 {
             return Err(CudaStochfError::InvalidInput("empty input".into()));
         }
-        if len == 0 {
-            return Err(CudaStochfError::InvalidInput("empty input".into()));
-        }
 
         // Expand parameter grid
-        fn axis(a: (usize, usize, usize)) -> Vec<usize> {
-            let (s, e, st) = a;
-            if st == 0 || s == e {
-                vec![s]
-            } else {
-                (s..=e).step_by(st).collect()
-            }
-        }
         fn axis(a: (usize, usize, usize)) -> Vec<usize> {
             let (s, e, st) = a;
             if st == 0 || s == e {
@@ -237,27 +176,8 @@ impl CudaStochf {
                 "no parameter combinations".into(),
             ));
         }
-        let mut combos = Vec::<StochfParams>::with_capacity(fastks.len() * fastds.len());
-        for &k in &fastks {
-            for &d in &fastds {
-                combos.push(StochfParams {
-                    fastk_period: Some(k),
-                    fastd_period: Some(d),
-                    fastd_matype: Some(0),
-                });
-            }
-        }
-        if combos.is_empty() {
-            return Err(CudaStochfError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
 
         // first_valid
-        let first_valid = (0..len)
-            .find(|&i| {
-                high_f32[i].is_finite() && low_f32[i].is_finite() && close_f32[i].is_finite()
-            })
         let first_valid = (0..len)
             .find(|&i| {
                 high_f32[i].is_finite() && low_f32[i].is_finite() && close_f32[i].is_finite()
@@ -344,16 +264,6 @@ impl CudaStochf {
             .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         let d_nan_ps = DeviceBuffer::from_slice(&tables.nan_psum)
             .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let d_log2 = DeviceBuffer::from_slice(&tables.log2)
-            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let d_offs = DeviceBuffer::from_slice(&tables.level_offsets)
-            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let d_st_max = DeviceBuffer::from_slice(&tables.st_max)
-            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let d_st_min = DeviceBuffer::from_slice(&tables.st_min)
-            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let d_nan_ps = DeviceBuffer::from_slice(&tables.nan_psum)
-            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
 
         // Allocate outputs
         let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }
@@ -393,8 +303,6 @@ impl CudaStochf {
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
                 let mut log2_ptr = d_log2.as_device_ptr().as_raw();
                 let mut offs_ptr = d_offs.as_device_ptr().as_raw();
-                let mut log2_ptr = d_log2.as_device_ptr().as_raw();
-                let mut offs_ptr = d_offs.as_device_ptr().as_raw();
                 let mut stmax_ptr = d_st_max.as_device_ptr().as_raw();
                 let mut stmin_ptr = d_st_min.as_device_ptr().as_raw();
                 let mut npsum_ptr = d_nan_ps.as_device_ptr().as_raw();
@@ -411,23 +319,12 @@ impl CudaStochf {
                 let args: &mut [*mut c_void] = &mut [
                     &mut high_ptr as *mut _ as *mut c_void,
                     &mut low_ptr as *mut _ as *mut c_void,
-                    &mut high_ptr as *mut _ as *mut c_void,
-                    &mut low_ptr as *mut _ as *mut c_void,
                     &mut close_ptr as *mut _ as *mut c_void,
-                    &mut log2_ptr as *mut _ as *mut c_void,
-                    &mut offs_ptr as *mut _ as *mut c_void,
                     &mut log2_ptr as *mut _ as *mut c_void,
                     &mut offs_ptr as *mut _ as *mut c_void,
                     &mut stmax_ptr as *mut _ as *mut c_void,
                     &mut stmin_ptr as *mut _ as *mut c_void,
                     &mut npsum_ptr as *mut _ as *mut c_void,
-                    &mut fk_ptr as *mut _ as *mut c_void,
-                    &mut fd_ptr as *mut _ as *mut c_void,
-                    &mut mt_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                    &mut first_i as *mut _ as *mut c_void,
-                    &mut levels_i as *mut _ as *mut c_void,
-                    &mut n_i as *mut _ as *mut c_void,
                     &mut fk_ptr as *mut _ as *mut c_void,
                     &mut fd_ptr as *mut _ as *mut c_void,
                     &mut mt_ptr as *mut _ as *mut c_void,
@@ -441,9 +338,6 @@ impl CudaStochf {
                 self.stream
                     .launch(&func, grid, block, 0, args)
                     .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
             }
             row0 += n;
         }
@@ -451,32 +345,11 @@ impl CudaStochf {
         self.stream
             .synchronize()
             .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
 
         Ok((
             DeviceArrayF32Pair {
-                a: DeviceArrayF32 {
-                    buf: d_k,
-                    rows,
-                    cols: len,
-                },
-                b: DeviceArrayF32 {
-                    buf: d_d,
-                    rows,
-                    cols: len,
-                },
-                a: DeviceArrayF32 {
-                    buf: d_k,
-                    rows,
-                    cols: len,
-                },
-                b: DeviceArrayF32 {
-                    buf: d_d,
-                    rows,
-                    cols: len,
-                },
+                a: DeviceArrayF32 { buf: d_k, rows, cols: len },
+                b: DeviceArrayF32 { buf: d_d, rows, cols: len },
             },
             combos,
         ))
@@ -492,18 +365,6 @@ impl CudaStochf {
         rows: usize,
         params: &StochfParams,
     ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaStochfError> {
-        if cols == 0 || rows == 0 {
-            return Err(CudaStochfError::InvalidInput(
-                "series dims must be positive".into(),
-            ));
-        }
-        if high_tm_f32.len() != cols * rows
-            || low_tm_f32.len() != cols * rows
-            || close_tm_f32.len() != cols * rows
-        {
-            return Err(CudaStochfError::InvalidInput(
-                "time-major slices mismatch dims".into(),
-            ));
         if cols == 0 || rows == 0 {
             return Err(CudaStochfError::InvalidInput(
                 "series dims must be positive".into(),
@@ -534,21 +395,6 @@ impl CudaStochf {
                     fv = Some(t as i32);
                     break;
                 }
-                if high_tm_f32[idx].is_finite()
-                    && low_tm_f32[idx].is_finite()
-                    && close_tm_f32[idx].is_finite()
-                {
-                    fv = Some(t as i32);
-                    break;
-                }
-            }
-            let f =
-                fv.ok_or_else(|| CudaStochfError::InvalidInput(format!("series {} all NaN", s)))?;
-            if rows - (f as usize) < fk {
-                return Err(CudaStochfError::InvalidInput(format!(
-                    "series {} insufficient data for fk {}",
-                    s, fk
-                )));
             }
             let f =
                 fv.ok_or_else(|| CudaStochfError::InvalidInput(format!("series {} all NaN", s)))?;
@@ -596,20 +442,12 @@ impl CudaStochf {
             .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         let mut d_d = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
             .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
-            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        let mut d_d = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
-            .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
 
         // Prepare kernel
         let mut func: Function = self.module
             .get_function("stochf_many_series_one_param_f32")
             .map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let block_x: u32 = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } => block_x,
-            _ => 128,
-        };
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => 128,
@@ -622,7 +460,6 @@ impl CudaStochf {
             let mut h_ptr = d_h.as_device_ptr().as_raw();
             let mut l_ptr = d_l.as_device_ptr().as_raw();
             let mut c_ptr = d_c.as_device_ptr().as_raw();
-            let mut fv_ptr = d_fv.as_device_ptr().as_raw();
             let mut fv_ptr = d_fv.as_device_ptr().as_raw();
             let mut num_series_i = cols as i32;
             let mut series_len_i = rows as i32;
@@ -652,39 +489,9 @@ impl CudaStochf {
         self.stream.synchronize().map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
         drop(pinned_h); drop(pinned_l); drop(pinned_c);
 
-        // Ensure results are ready (match batch path semantics) and keep pinned buffers alive
-        self.stream.synchronize().map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        drop(pinned_h); drop(pinned_l); drop(pinned_c);
-
-        // Ensure results are ready (match batch path semantics) and keep pinned buffers alive
-        self.stream.synchronize().map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        drop(pinned_h); drop(pinned_l); drop(pinned_c);
-
-        // Ensure results are ready (match batch path semantics) and keep pinned buffers alive
-        self.stream.synchronize().map_err(|e| CudaStochfError::Cuda(e.to_string()))?;
-        drop(pinned_h); drop(pinned_l); drop(pinned_c);
-
         Ok((
-            DeviceArrayF32 {
-                buf: d_k,
-                rows,
-                cols,
-            },
-            DeviceArrayF32 {
-                buf: d_d,
-                rows,
-                cols,
-            },
-            DeviceArrayF32 {
-                buf: d_k,
-                rows,
-                cols,
-            },
-            DeviceArrayF32 {
-                buf: d_d,
-                rows,
-                cols,
-            },
+            DeviceArrayF32 { buf: d_k, rows, cols },
+            DeviceArrayF32 { buf: d_d, rows, cols },
         ))
     }
 }
@@ -704,17 +511,9 @@ pub mod benches {
         let mut low = close.to_vec();
         for i in 0..close.len() {
             let v = close[i];
-            if !v.is_finite() {
-                continue;
-            }
-            let v = close[i];
-            if !v.is_finite() {
-                continue;
-            }
+            if !v.is_finite() { continue; }
             let x = i as f32 * 0.0019;
             let off = (0.0031 * x.sin()).abs() + 0.08;
-            high[i] = v + off;
-            low[i] = v - off;
             high[i] = v + off;
             low[i] = v - off;
         }
@@ -728,21 +527,6 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct StochfBatchState {
-        cuda: CudaStochf,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: StochfBatchRange,
-    }
-    impl CudaBenchState for StochfBatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .stochf_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .expect("stochf batch");
-        }
-    }
     struct StochfBatchState {
         cuda: CudaStochf,
         high: Vec<f32>,
@@ -775,17 +559,6 @@ pub mod benches {
             close,
             sweep,
         })
-        let sweep = StochfBatchRange {
-            fastk_period: (5, 5 + PARAM_SWEEP - 1, 1),
-            fastd_period: (3, 3, 0),
-        };
-        Box::new(StochfBatchState {
-            cuda,
-            high,
-            low,
-            close,
-            sweep,
-        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -795,9 +568,6 @@ pub mod benches {
             "stochf_cuda_batch_dev",
             "1m_x_256",
             prep_one_series_many_params,
-        )
-        .with_mem_required(bytes_one_series_many_params())
-        .with_sample_size(10)]
         )
         .with_mem_required(bytes_one_series_many_params())
         .with_sample_size(10)]

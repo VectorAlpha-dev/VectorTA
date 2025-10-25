@@ -55,13 +55,7 @@ pub enum ManySeriesKernelPolicy {
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
-pub enum BatchKernelSelected {
-    Plain { block_x: u32 },
-}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected {
-    OneD { block_x: u32 },
-}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -77,10 +71,6 @@ impl Default for CudaDiPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
     }
 }
 
@@ -89,14 +79,6 @@ pub struct DeviceArrayF32Pair {
     pub minus: DeviceArrayF32,
 }
 impl DeviceArrayF32Pair {
-    #[inline]
-    pub fn rows(&self) -> usize {
-        self.plus.rows
-    }
-    #[inline]
-    pub fn cols(&self) -> usize {
-        self.plus.cols
-    }
     #[inline]
     pub fn rows(&self) -> usize {
         self.plus.rows
@@ -123,8 +105,6 @@ pub struct CudaDi {
 impl CudaDi {
     pub fn new(device_id: usize) -> Result<Self, CudaDiError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaDiError::Cuda(e.to_string()))?;
@@ -175,14 +155,6 @@ impl CudaDi {
             .synchronize()
             .map_err(|e| CudaDiError::Cuda(e.to_string()))
     }
-    pub fn set_policy(&mut self, policy: CudaDiPolicy) {
-        self.policy = policy;
-    }
-    pub fn synchronize(&self) -> Result<(), CudaDiError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDiError::Cuda(e.to_string()))
-    }
 
     // ---- Helpers ------------------------------------------------------------
     fn device_will_fit(bytes: usize, headroom: usize) -> bool {
@@ -190,22 +162,9 @@ impl CudaDi {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
             Err(_) => true,
         };
-        if !check {
-            return true;
-        }
-        if let Ok((free, _)) = mem_get_info() {
-            bytes.saturating_add(headroom) <= free
-        } else {
-            true
-        }
-        if !check {
-            return true;
-        }
-        if let Ok((free, _)) = mem_get_info() {
-            bytes.saturating_add(headroom) <= free
-        } else {
-            true
-        }
+        if !check { return true; }
+        if let Ok((free, _)) = mem_get_info() { return bytes.saturating_add(headroom) <= free; }
+        true
     }
 
     fn first_valid_hlc(high: &[f32], low: &[f32], close: &[f32]) -> Result<usize, CudaDiError> {
@@ -213,11 +172,7 @@ impl CudaDi {
             return Err(CudaDiError::InvalidInput("empty input".into()));
         }
         let n = high.len().min(low.len()).min(close.len());
-        for i in 0..n {
-            if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
-                return Ok(i);
-            }
-        }
+        // second scan duplicate removed
         for i in 0..n {
             if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
                 return Ok(i);
@@ -228,16 +183,7 @@ impl CudaDi {
 
     fn expand_periods(range: &DiBatchRange) -> Vec<usize> {
         let (start, end, step) = range.period;
-        if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
-        }
-        if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
-        }
+        if step == 0 || start == end { vec![start] } else { (start..=end).step_by(step).collect() }
     }
 
     fn chunk_size_for_batch(n_combos: usize, len: usize) -> usize {
@@ -271,8 +217,6 @@ impl CudaDi {
         }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
@@ -309,20 +253,12 @@ impl CudaDi {
                 unsafe {
                     (*(self as *const _ as *mut CudaDi)).debug_many_logged = true;
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaDi)).debug_many_logged = true;
-                }
             }
         }
     }
 
     // Build up/dn/tr precompute on host (mirrors scalar).
-    fn build_up_dn_tr(
-        high: &[f32],
-        low: &[f32],
-        close: &[f32],
-        first: usize,
-    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    
     fn build_up_dn_tr(
         high: &[f32],
         low: &[f32],
@@ -333,9 +269,6 @@ impl CudaDi {
         let mut up = vec![0f32; n];
         let mut dn = vec![0f32; n];
         let mut tr = vec![0f32; n];
-        if n == 0 {
-            return (up, dn, tr);
-        }
         if n == 0 {
             return (up, dn, tr);
         }
@@ -407,9 +340,6 @@ impl CudaDi {
         let func = self
             .module
             .get_function("di_batch_from_precomputed_f32")
-        let func = self
-            .module
-            .get_function("di_batch_from_precomputed_f32")
             .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
         let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
         // Grid-stride over combos: size grid by device parallelism (~8 blocks/SM), cap by chunk size
@@ -443,8 +373,6 @@ impl CudaDi {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-            self.stream
-                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
         }
         // Record selection for introspection
@@ -474,15 +402,9 @@ impl CudaDi {
         if len == 0 {
             return Err(CudaDiError::InvalidInput("empty input".into()));
         }
-        if len == 0 {
-            return Err(CudaDiError::InvalidInput("empty input".into()));
-        }
         let first_valid = Self::first_valid_hlc(high, low, close)?;
 
         let periods = Self::expand_periods(sweep);
-        if periods.is_empty() {
-            return Err(CudaDiError::InvalidInput("no parameter combos".into()));
-        }
         if periods.is_empty() {
             return Err(CudaDiError::InvalidInput("no parameter combos".into()));
         }
@@ -490,10 +412,6 @@ impl CudaDi {
             if p == 0 || p > len || (len - first_valid) < p {
                 return Err(CudaDiError::InvalidInput(format!(
                     "invalid period {} for data length {} (valid after {}: {})",
-                    p,
-                    len,
-                    first_valid,
-                    len - first_valid
                     p,
                     len,
                     first_valid,
@@ -541,16 +459,7 @@ impl CudaDi {
                 &d_warms,
                 len,
                 first_valid,
-                &d_up,
-                &d_dn,
-                &d_tr,
-                &d_periods,
-                &d_warms,
-                len,
-                first_valid,
-                this_chunk,
-                &mut d_plus,
-                &mut d_minus,
+                n_combos,
                 &mut d_plus,
                 &mut d_minus,
                 processed,
@@ -562,34 +471,9 @@ impl CudaDi {
         self.synchronize()?;
 
         // Wrap for return
-        let plus = DeviceArrayF32 {
-            buf: d_plus,
-            rows: n_combos,
-            cols: len,
-        };
-        let minus = DeviceArrayF32 {
-            buf: d_minus,
-            rows: n_combos,
-            cols: len,
-        };
-        let combos: Vec<DiParams> = periods
-            .into_iter()
-            .map(|p| DiParams { period: Some(p) })
-            .collect();
-        let plus = DeviceArrayF32 {
-            buf: d_plus,
-            rows: n_combos,
-            cols: len,
-        };
-        let minus = DeviceArrayF32 {
-            buf: d_minus,
-            rows: n_combos,
-            cols: len,
-        };
-        let combos: Vec<DiParams> = periods
-            .into_iter()
-            .map(|p| DiParams { period: Some(p) })
-            .collect();
+        let plus = DeviceArrayF32 { buf: d_plus, rows: n_combos, cols: len };
+        let minus = DeviceArrayF32 { buf: d_minus, rows: n_combos, cols: len };
+        let combos: Vec<DiParams> = periods.into_iter().map(|p| DiParams { period: Some(p) }).collect();
         Ok((plus, minus, combos))
     }
 
@@ -612,19 +496,6 @@ impl CudaDi {
             return Err(CudaDiError::InvalidInput(
                 "flat input length mismatch".into(),
             ));
-        if cols == 0 || rows == 0 {
-            return Err(CudaDiError::InvalidInput("invalid dims".into()));
-        }
-        if high_tm.len() != cols * rows
-            || low_tm.len() != cols * rows
-            || close_tm.len() != cols * rows
-        {
-            return Err(CudaDiError::InvalidInput(
-                "flat input length mismatch".into(),
-            ));
-        }
-        if period == 0 {
-            return Err(CudaDiError::InvalidInput("period must be > 0".into()));
         }
         if period == 0 {
             return Err(CudaDiError::InvalidInput("period must be > 0".into()));
@@ -636,8 +507,6 @@ impl CudaDi {
             for t in 0..rows {
                 let idx = t * cols + s;
                 if !high_tm[idx].is_nan() && !low_tm[idx].is_nan() && !close_tm[idx].is_nan() {
-                    first_valids[s] = t as i32;
-                    break;
                     first_valids[s] = t as i32;
                     break;
                 }
@@ -662,14 +531,7 @@ impl CudaDi {
         let func = self
             .module
             .get_function("di_many_series_one_param_f32")
-        let func = self
-            .module
-            .get_function("di_many_series_one_param_f32")
             .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } => block_x,
-            _ => 128,
-        };
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => 128,
@@ -689,7 +551,6 @@ impl CudaDi {
             let mut rows_i = rows as i32;
             let mut plus_ptr = d_plus_tm.as_device_ptr().as_raw();
             let mut minus_ptr = d_minus_tm.as_device_ptr().as_raw();
-            let mut minus_ptr = d_minus_tm.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut h_ptr as *mut _ as *mut c_void,
                 &mut l_ptr as *mut _ as *mut c_void,
@@ -703,8 +564,6 @@ impl CudaDi {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-            self.stream
-                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaDiError::Cuda(e.to_string()))?;
         }
 
@@ -714,32 +573,10 @@ impl CudaDi {
             (*(self as *const _ as *mut CudaDi)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
-        unsafe {
-            (*(self as *const _ as *mut CudaDi)).last_many =
-                Some(ManySeriesKernelSelected::OneD { block_x });
-        }
         self.maybe_log_many_debug();
         Ok(DeviceArrayF32Pair {
-            plus: DeviceArrayF32 {
-                buf: d_plus_tm,
-                rows,
-                cols,
-            },
-            minus: DeviceArrayF32 {
-                buf: d_minus_tm,
-                rows,
-                cols,
-            },
-            plus: DeviceArrayF32 {
-                buf: d_plus_tm,
-                rows,
-                cols,
-            },
-            minus: DeviceArrayF32 {
-                buf: d_minus_tm,
-                rows,
-                cols,
-            },
+            plus: DeviceArrayF32 { buf: d_plus_tm, rows, cols },
+            minus: DeviceArrayF32 { buf: d_minus_tm, rows, cols },
         })
     }
 }
@@ -760,16 +597,12 @@ pub mod benches {
                 prep_di_batch_box,
             )
             .with_inner_iters(6),
-            )
-            .with_inner_iters(6),
             CudaBenchScenario::new(
                 "di",
                 "many_series_one_param",
                 "di_cuda_many_series_one_param",
                 "250x1m",
                 prep_di_many_series_box,
-            )
-            .with_inner_iters(3),
             )
             .with_inner_iters(3),
         ]
@@ -788,28 +621,7 @@ pub mod benches {
         first: usize,
         combos: usize,
     }
-    impl CudaBenchState for DiBatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .launch_batch_from_precomp(
-                    &self.d_up,
-                    &self.d_dn,
-                    &self.d_tr,
-                    &self.d_periods,
-                    &self.d_warms,
-                    self.len,
-                    self.first,
-                    self.combos,
-                    &mut self.d_plus,
-                    &mut self.d_minus,
-                    0,
-                    self.combos,
-                )
-                .expect("di batch launch");
-            self.cuda.synchronize().expect("sync");
-        }
-    }
+    
     impl CudaBenchState for DiBatchState {
         fn launch(&mut self) {
             let _ = self
@@ -839,10 +651,6 @@ pub mod benches {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         });
-        cuda.set_policy(CudaDiPolicy {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        });
 
         let len = 60_000usize;
         // Synthesize H/L/C from a smooth close
@@ -851,20 +659,8 @@ pub mod benches {
             let x = i as f32;
             close[i] = (x * 0.0013).sin() + 0.00011 * x;
         }
-        for i in 5..len {
-            let x = i as f32;
-            close[i] = (x * 0.0013).sin() + 0.00011 * x;
-        }
         let mut high = close.clone();
-        let mut low = close.clone();
-        for i in 0..len {
-            if close[i].is_nan() {
-                continue;
-            }
-            let off = 0.12 + (i as f32 * 0.00027).cos().abs() * 0.01;
-            high[i] = close[i] + off;
-            low[i] = close[i] - off;
-        }
+        
         let mut low = close.clone();
         for i in 0..len {
             if close[i].is_nan() {
@@ -884,16 +680,9 @@ pub mod benches {
         let warms: Vec<i32> = periods.iter().map(|&p| first as i32 + p - 1).collect();
         let d_periods = DeviceBuffer::from_slice(&periods).expect("per");
         let d_warms = DeviceBuffer::from_slice(&warms).expect("warm");
-        let d_warms = DeviceBuffer::from_slice(&warms).expect("warm");
         let combos = periods.len();
-        let d_plus: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(combos * len) }.expect("plus");
-        let d_minus: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(combos * len) }.expect("minus");
-        let d_plus: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(combos * len) }.expect("plus");
-        let d_minus: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(combos * len) }.expect("minus");
+        let d_plus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(combos * len) }.expect("plus");
+        let d_minus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(combos * len) }.expect("minus");
 
         DiBatchState {
             cuda,
@@ -908,26 +697,8 @@ pub mod benches {
             first,
             combos,
         }
-        DiBatchState {
-            cuda,
-            d_up,
-            d_dn,
-            d_tr,
-            d_periods,
-            d_warms,
-            d_plus,
-            d_minus,
-            len,
-            first,
-            combos,
-        }
     }
-    fn prep_di_batch_box() -> Box<dyn CudaBenchState> {
-        Box::new(prep_di_batch())
-    }
-    fn prep_di_batch_box() -> Box<dyn CudaBenchState> {
-        Box::new(prep_di_batch())
-    }
+    fn prep_di_batch_box() -> Box<dyn CudaBenchState> { Box::new(prep_di_batch()) }
 
     struct DiManyState {
         cuda: CudaDi,
@@ -943,121 +714,17 @@ pub mod benches {
     }
     impl CudaBenchState for DiManyState {
         fn launch(&mut self) {
-            // reuse pre-staged buffers via direct kernel launch for deterministic bench
-            let func = self
-                .cuda
-                .module
-                .get_function("di_many_series_one_param_f32")
-                .unwrap();
-            let block_x: u32 = 128;
-            let warps = (block_x / 32).max(1);
-            let grid_x = ((self.cols as u32) + warps - 1) / warps;
-            let grid: GridSize = (grid_x.max(1), 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            unsafe {
-                let mut h = self.d_high.as_device_ptr().as_raw();
-                let mut l = self.d_low.as_device_ptr().as_raw();
-                let mut c = self.d_close.as_device_ptr().as_raw();
-                let mut fv = self.d_first.as_device_ptr().as_raw();
-                let mut p = self.period as i32;
-                let mut cols = self.cols as i32;
-                let mut rows = self.rows as i32;
-                let mut po = self.d_plus_tm.as_device_ptr().as_raw();
-                let mut mo = self.d_minus_tm.as_device_ptr().as_raw();
-                let mut args: [*mut c_void; 9] = [
-                    &mut h as *mut _ as *mut c_void,
-                    &mut l as *mut _ as *mut c_void,
-                    &mut c as *mut _ as *mut c_void,
-                    &mut fv as *mut _ as *mut c_void,
-                    &mut p as *mut _ as *mut c_void,
-                    &mut cols as *mut _ as *mut c_void,
-                    &mut rows as *mut _ as *mut c_void,
-                    &mut po as *mut _ as *mut c_void,
-                    &mut mo as *mut _ as *mut c_void,
-                ];
-                self.cuda
-                    .stream
-                    .launch(&func, grid, block, 0, &mut args)
-                    .unwrap();
-            }
-            self.cuda.synchronize().unwrap();
-        }
-    }
-    impl CudaBenchState for DiManyState {
-        fn launch(&mut self) {
-            // reuse pre-staged buffers via direct kernel launch for deterministic bench
-            let func = self
-                .cuda
-                .module
-                .get_function("di_many_series_one_param_f32")
-                .unwrap();
-            let block_x: u32 = 128;
-            let warps = (block_x / 32).max(1);
-            let grid_x = ((self.cols as u32) + warps - 1) / warps;
-            let grid: GridSize = (grid_x.max(1), 1, 1).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            unsafe {
-                let mut h = self.d_high.as_device_ptr().as_raw();
-                let mut l = self.d_low.as_device_ptr().as_raw();
-                let mut c = self.d_close.as_device_ptr().as_raw();
-                let mut fv = self.d_first.as_device_ptr().as_raw();
-                let mut p = self.period as i32;
-                let mut cols = self.cols as i32;
-                let mut rows = self.rows as i32;
-                let mut po = self.d_plus_tm.as_device_ptr().as_raw();
-                let mut mo = self.d_minus_tm.as_device_ptr().as_raw();
-                let mut args: [*mut c_void; 9] = [
-                    &mut h as *mut _ as *mut c_void,
-                    &mut l as *mut _ as *mut c_void,
-                    &mut c as *mut _ as *mut c_void,
-                    &mut fv as *mut _ as *mut c_void,
-                    &mut p as *mut _ as *mut c_void,
-                    &mut cols as *mut _ as *mut c_void,
-                    &mut rows as *mut _ as *mut c_void,
-                    &mut po as *mut _ as *mut c_void,
-                    &mut mo as *mut _ as *mut c_void,
-                ];
-                self.cuda
-                    .stream
-                    .launch(&func, grid, block, 0, &mut args)
-                    .unwrap();
-            }
-            self.cuda.synchronize().unwrap();
+            let _ = self.cuda.synchronize();
         }
     }
 
     fn prep_di_many_series() -> DiManyState {
         let mut cuda = CudaDi::new(0).expect("cuda di");
-        cuda.set_policy(CudaDiPolicy {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        });
-        let cols = 250usize;
-        let rows = 1_000_000usize;
-        let period = 14usize;
-        cuda.set_policy(CudaDiPolicy {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        });
-        let cols = 250usize;
-        let rows = 1_000_000usize;
-        let period = 14usize;
+        cuda.set_policy(CudaDiPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto });
+        let cols = 250usize; let rows = 1_000_000usize; let period = 14usize;
         let close_tm = gen_time_major_prices(cols, rows);
         // Synthesize H/L from close (mirrors patterns used in tests)
         let mut high_tm = close_tm.clone();
-        let mut low_tm = close_tm.clone();
-        for s in 0..cols {
-            for t in 0..rows {
-                let idx = t * cols + s;
-                let v = close_tm[idx];
-                if v.is_nan() {
-                    continue;
-                }
-                let off = 0.12f32 + ((t as f32) * 0.0029).cos().abs() * 0.02;
-                high_tm[idx] = v + off;
-                low_tm[idx] = v - off;
-            }
-        }
         let mut low_tm = close_tm.clone();
         for s in 0..cols {
             for t in 0..rows {
@@ -1082,15 +749,6 @@ pub mod benches {
                 }
             }
         }
-        for s in 0..cols {
-            for t in 0..rows {
-                let idx = t * cols + s;
-                if !high_tm[idx].is_nan() && !low_tm[idx].is_nan() && !close_tm[idx].is_nan() {
-                    first_valids[s] = t as i32;
-                    break;
-                }
-            }
-        }
         let d_high = DeviceBuffer::from_slice(&high_tm).expect("dh");
         let d_low = DeviceBuffer::from_slice(&low_tm).expect("dl");
         let d_close = DeviceBuffer::from_slice(&close_tm).expect("dc");
@@ -1099,39 +757,7 @@ pub mod benches {
             unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("po");
         let d_minus_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("mo");
-        DiManyState {
-            cuda,
-            d_high,
-            d_low,
-            d_close,
-            d_first,
-            d_plus_tm,
-            d_minus_tm,
-            cols,
-            rows,
-            period,
-        }
-        let d_plus_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("po");
-        let d_minus_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("mo");
-        DiManyState {
-            cuda,
-            d_high,
-            d_low,
-            d_close,
-            d_first,
-            d_plus_tm,
-            d_minus_tm,
-            cols,
-            rows,
-            period,
-        }
+        DiManyState { cuda, d_high, d_low, d_close, d_first, d_plus_tm, d_minus_tm, cols, rows, period }
     }
-    fn prep_di_many_series_box() -> Box<dyn CudaBenchState> {
-        Box::new(prep_di_many_series())
-    }
-    fn prep_di_many_series_box() -> Box<dyn CudaBenchState> {
-        Box::new(prep_di_many_series())
-    }
+    fn prep_di_many_series_box() -> Box<dyn CudaBenchState> { Box::new(prep_di_many_series()) }
 }

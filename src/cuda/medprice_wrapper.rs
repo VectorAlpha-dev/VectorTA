@@ -41,16 +41,8 @@ pub enum BatchKernelPolicy {
     Auto,
     Plain { block_x: u32 },
 }
-pub enum BatchKernelPolicy {
-    Auto,
-    Plain { block_x: u32 },
-}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy {
-    Auto,
-    OneD { block_x: u32 },
-}
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
@@ -143,9 +135,6 @@ impl CudaMedprice {
             return Err(CudaMedpriceError::InvalidInput(
                 "len must be positive".into(),
             ));
-            return Err(CudaMedpriceError::InvalidInput(
-                "len must be positive".into(),
-            ));
         }
 
         let func = self
@@ -213,17 +202,9 @@ impl CudaMedprice {
             .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
         let d_low = DeviceBuffer::from_slice(&low[..len])
             .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let d_high = DeviceBuffer::from_slice(&high[..len])
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(&low[..len])
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
             .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
 
-        let func = self
-            .module
-            .get_function("medprice_batch_f32")
-            .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
         let func = self
             .module
             .get_function("medprice_batch_f32")
@@ -252,21 +233,10 @@ impl CudaMedprice {
             ];
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
         }
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: 1,
-            cols: len,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: 1,
-            cols: len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows: 1, cols: len })
     }
 
     // -------- Many-series × one-param (time-major) --------
@@ -277,11 +247,6 @@ impl CudaMedprice {
         cols: usize,
         rows: usize,
     ) -> Result<DeviceArrayF32, CudaMedpriceError> {
-        if cols == 0 || rows == 0 {
-            return Err(CudaMedpriceError::InvalidInput(
-                "cols/rows must be > 0".into(),
-            ));
-        }
         if cols == 0 || rows == 0 {
             return Err(CudaMedpriceError::InvalidInput(
                 "cols/rows must be > 0".into(),
@@ -298,11 +263,6 @@ impl CudaMedprice {
         if let Ok((free, _)) = mem_get_info() {
             let need: usize = 3 * n * std::mem::size_of::<f32>()
                 + 64 * 1024 * 1024;
-            if need > free {
-                return Err(CudaMedpriceError::InvalidInput(
-                    "insufficient device memory".into(),
-                ));
-            }
             if need > free {
                 return Err(CudaMedpriceError::InvalidInput(
                     "insufficient device memory".into(),
@@ -336,21 +296,10 @@ impl CudaMedprice {
             ];
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaMedpriceError::Cuda(e.to_string()))?;
         }
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 }
 

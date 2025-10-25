@@ -51,8 +51,6 @@ impl CudaPvi {
         cust::init(CudaFlags::empty()).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
         let ctx = Context::new(device).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/pvi_kernel.ptx"));
         let jit_opts = &[
@@ -88,9 +86,6 @@ impl CudaPvi {
             .ok_or_else(|| {
                 CudaPviError::InvalidInput("all values are NaN in one/both inputs".into())
             })?;
-            .ok_or_else(|| {
-                CudaPviError::InvalidInput("all values are NaN in one/both inputs".into())
-            })?;
         if close.len() - first < 2 {
             return Err(CudaPviError::InvalidInput(
                 "not enough valid data (need >= 2 after first valid)".into(),
@@ -119,9 +114,6 @@ impl CudaPvi {
         let len = close.len();
         let rows = initial_values.len();
         if rows == 0 {
-            return Err(CudaPviError::InvalidInput(
-                "no initial values provided".into(),
-            ));
             return Err(CudaPviError::InvalidInput(
                 "no initial values provided".into(),
             ));
@@ -212,11 +204,6 @@ impl CudaPvi {
             rows,
             cols: len,
         })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols: len,
-        })
     }
 
     /// Many series × one initial value (time-major layout)
@@ -271,12 +258,6 @@ impl CudaPvi {
             DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let d_volume =
-            DeviceBuffer::from_slice(volume_tm).map_err(|e| CudaPviError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
             .map_err(|e| CudaPviError::Cuda(e.to_string()))?;
 
@@ -318,11 +299,6 @@ impl CudaPvi {
             rows,
             cols,
         })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
     }
 }
 
@@ -338,8 +314,6 @@ pub mod benches {
 
     fn bytes_one_series(rows: usize) -> usize {
         // close + volume + scale + init_values + out + ~64MB
-        (2 * ONE_SERIES_LEN + ONE_SERIES_LEN + rows + rows * ONE_SERIES_LEN)
-            * std::mem::size_of::<f32>()
         (2 * ONE_SERIES_LEN + ONE_SERIES_LEN + rows + rows * ONE_SERIES_LEN)
             * std::mem::size_of::<f32>()
             + (64 << 20)
@@ -378,12 +352,6 @@ pub mod benches {
         for i in 0..inits.len() {
             inits[i] = 500.0 + (i as f32) * 25.0;
         }
-        Box::new(PviOneSeriesState {
-            cuda,
-            close,
-            volume,
-            inits,
-        })
         Box::new(PviOneSeriesState {
             cuda,
             close,
@@ -429,23 +397,10 @@ pub mod benches {
             close_tm,
             volume_tm,
         })
-        Box::new(PviManySeriesState {
-            cuda,
-            close_tm,
-            volume_tm,
-        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new(
-                "pvi",
-                "pvi",
-                "pvi_cuda_one_series",
-                "1m x 64",
-                prep_one_series,
-            )
-            .with_mem_required(bytes_one_series(64)),
             CudaBenchScenario::new(
                 "pvi",
                 "pvi",

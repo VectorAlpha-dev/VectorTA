@@ -109,14 +109,7 @@ impl CudaAdosc {
         device_id: usize,
         policy: CudaAdoscPolicy,
     ) -> Result<Self, CudaAdoscError> {
-    pub fn new_with_policy(
-        device_id: usize,
-        policy: CudaAdoscPolicy,
-    ) -> Result<Self, CudaAdoscError> {
         let mut s = Self::new(device_id)?;
-        unsafe {
-            (*(&s as *const _ as *mut CudaAdosc)).policy = policy;
-        }
         unsafe {
             (*(&s as *const _ as *mut CudaAdosc)).policy = policy;
         }
@@ -126,13 +119,7 @@ impl CudaAdosc {
     pub fn set_policy(&mut self, policy: CudaAdoscPolicy) {
         self.policy = policy;
     }
-    pub fn set_policy(&mut self, policy: CudaAdoscPolicy) {
-        self.policy = policy;
-    }
     #[inline]
-    pub fn policy(&self) -> &CudaAdoscPolicy {
-        &self.policy
-    }
     pub fn policy(&self) -> &CudaAdoscPolicy {
         &self.policy
     }
@@ -267,9 +254,12 @@ impl CudaAdosc {
             return Ok(DeviceArrayF32 { buf: d_out_full, rows, cols });
         }
 
-        // Last resort: pinned host assembly, then single async H2D
-        let mut host_out = unsafe { LockedBuffer::<f32>::uninitialized(rows * cols) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        // If we cannot hold the full output in VRAM, fall back to chunked device fill
+        // into a single preallocated device buffer (no host re-upload).
+        let mut d_out_full: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
+                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+        };
         let mut start = 0usize;
         while start < rows {
             let remain = rows - start;
@@ -282,22 +272,19 @@ impl CudaAdosc {
                 DeviceBuffer::from_slice_async(&longs[start..start + chunk], &self.stream)
                     .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
             };
+            // launch directly into the correct offset inside the final output using a scratch chunk
             let mut d_out_chunk: DeviceBuffer<f32> = unsafe {
                 DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)
                     .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
             };
             self.launch_batch_from_adl(&d_adl, &d_shorts_off, &d_longs_off, cols, chunk, &mut d_out_chunk)?;
             let base = start * cols;
-            unsafe {
-                d_out_chunk.async_copy_to(&mut host_out[base..base + chunk * cols], &self.stream)
-            }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            let mut dst_slice = d_out_full.index(base..base + chunk * cols);
+            unsafe { dst_slice.async_copy_from(&d_out_chunk, &self.stream) }
+                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
             start += chunk;
         }
-        self.stream.synchronize().map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_out = unsafe { DeviceBuffer::from_slice_async(&host_out, &self.stream) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 { buf: d_out_full, rows, cols })
     }
 
     /// Many-series × one-param (time-major). Returns a (rows x cols) device matrix
@@ -540,10 +527,6 @@ impl Default for CudaAdoscPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
     }
 }
 
@@ -634,13 +617,6 @@ pub mod benches {
         fn launch(&mut self) {
             let _ = self
                 .cuda
-                .adosc_batch_dev(
-                    &self.high,
-                    &self.low,
-                    &self.close,
-                    &self.volume,
-                    &self.sweep,
-                )
                 .adosc_batch_dev(
                     &self.high,
                     &self.low,

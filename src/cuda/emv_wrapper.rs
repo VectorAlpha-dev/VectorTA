@@ -71,14 +71,7 @@ pub struct CudaEmvPolicy {
 }
 impl Default for CudaEmvPolicy {
     fn default() -> Self {
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
     }
 }
 
@@ -150,18 +143,6 @@ impl CudaEmv {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
-    pub fn set_policy(&mut self, policy: CudaEmvPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaEmvPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
     pub fn synchronize(&self) -> Result<(), CudaEmvError> {
         self.stream
             .synchronize()
@@ -171,54 +152,28 @@ impl CudaEmv {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged {
-            return;
-        }
-        if self.debug_batch_logged {
-            return;
-        }
+        if self.debug_batch_logged { return; }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EMV batch selected kernel: {:?}", sel);
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaEmv)).debug_batch_logged = true;
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaEmv)).debug_batch_logged = true;
-                }
+                unsafe { (*(self as *const _ as *mut CudaEmv)).debug_batch_logged = true; }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged {
-            return;
-        }
-        if self.debug_many_logged {
-            return;
-        }
+        if self.debug_many_logged { return; }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EMV many-series selected kernel: {:?}", sel);
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaEmv)).debug_many_logged = true;
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaEmv)).debug_many_logged = true;
-                }
+                unsafe { (*(self as *const _ as *mut CudaEmv)).debug_many_logged = true; }
             }
         }
     }
@@ -231,20 +186,10 @@ impl CudaEmv {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if !Self::mem_check_enabled() {
-            return true;
-        }
+        if !Self::mem_check_enabled() { return true; }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else { true }
@@ -392,16 +337,7 @@ impl CudaEmv {
             .map_err(|e| CudaEmvError::Cuda(e.to_string()))?;
         // Selection introspection optional; launcher already logged.
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: 1,
-            cols: len,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: 1,
-            cols: len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows: 1, cols: len })
     }
 
     // ---- Many-series × one-param (time-major) ----
@@ -580,11 +516,6 @@ impl CudaEmv {
             rows,
             cols,
         })
-        Ok(DeviceArrayF32 {
-            buf: d_out_tm,
-            rows,
-            cols,
-        })
     }
 }
 
@@ -649,10 +580,6 @@ pub mod benches {
                 .cuda
                 .emv_batch_dev(&self.high, &self.low, &self.vol)
                 .expect("emv_batch_dev");
-            let _ = self
-                .cuda
-                .emv_batch_dev(&self.high, &self.low, &self.vol)
-                .expect("emv_batch_dev");
         }
     }
     fn prep_one_series() -> Box<dyn CudaBenchState> {
@@ -660,18 +587,7 @@ pub mod benches {
         let (high, low) = synth_hl_from_price(&price);
         let vol = synth_volume(ONE_SERIES_LEN);
         let cuda = CudaEmv::new(0).expect("cuda");
-        Box::new(BatchState {
-            cuda,
-            high,
-            low,
-            vol,
-        })
-        Box::new(BatchState {
-            cuda,
-            high,
-            low,
-            vol,
-        })
+        Box::new(BatchState { cuda, high, low, vol })
     }
 
     struct ManyState {
@@ -703,22 +619,7 @@ pub mod benches {
         let (high_tm, low_tm) = synth_hl_from_price(&price_tm);
         let vol_tm = gen_time_major_volumes(cols, rows);
         let cuda = CudaEmv::new(0).expect("cuda");
-        Box::new(ManyState {
-            cuda,
-            high_tm,
-            low_tm,
-            vol_tm,
-            cols,
-            rows,
-        })
-        Box::new(ManyState {
-            cuda,
-            high_tm,
-            low_tm,
-            vol_tm,
-            cols,
-            rows,
-        })
+        Box::new(ManyState { cuda, high_tm, low_tm, vol_tm, cols, rows })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

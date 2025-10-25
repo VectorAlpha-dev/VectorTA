@@ -116,37 +116,20 @@ impl CudaGatorOsc {
     }
 
     #[inline]
-    pub fn set_policy(&mut self, p: CudaGatorOscPolicy) {
-        self.policy = p;
-    }
-    pub fn set_policy(&mut self, p: CudaGatorOscPolicy) {
-        self.policy = p;
-    }
+    pub fn set_policy(&mut self, p: CudaGatorOscPolicy) { self.policy = p; }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged {
-            return;
-        }
-        if self.debug_batch_logged {
-            return;
-        }
+        if self.debug_batch_logged { return; }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] GATOR batch selected kernel: {:?}", sel);
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaGatorOsc)).debug_batch_logged = true;
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaGatorOsc)).debug_batch_logged = true;
-                }
+                unsafe { (*(self as *const _ as *mut CudaGatorOsc)).debug_batch_logged = true; }
             }
         }
     }
@@ -544,37 +527,12 @@ impl CudaGatorOsc {
                 rows,
                 cols,
             },
-            upper: DeviceArrayF32 {
-                buf: d_upper,
-                rows,
-                cols,
-            },
-            lower: DeviceArrayF32 {
-                buf: d_lower,
-                rows,
-                cols,
-            },
-            upper_change: DeviceArrayF32 {
-                buf: d_uchn,
-                rows,
-                cols,
-            },
-            lower_change: DeviceArrayF32 {
-                buf: d_lchn,
-                rows,
-                cols,
-            },
         })
     }
 }
 
 // ---- Local helpers ----
 fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-    if step == 0 || start == end {
-        vec![start]
-    } else {
-        (start..=end).step_by(step).collect()
-    }
     if step == 0 || start == end {
         vec![start]
     } else {
@@ -588,8 +546,6 @@ fn expand_grid(r: &GatorOscBatchRange) -> Vec<GatorOscParams> {
     let ts = axis(r.teeth_shift);
     let ll = axis(r.lips_length);
     let ls = axis(r.lips_shift);
-    let mut out =
-        Vec::with_capacity(jl.len() * js.len() * tl.len() * ts.len() * ll.len() * ls.len());
     let mut out =
         Vec::with_capacity(jl.len() * js.len() * tl.len() * ts.len() * ll.len() * ls.len());
     for &a in &jl {
@@ -644,17 +600,8 @@ pub mod benches {
         data: Vec<f32>,
         sweep: GatorOscBatchRange,
     }
-    struct GatorBatchState {
-        cuda: CudaGatorOsc,
-        data: Vec<f32>,
-        sweep: GatorOscBatchRange,
-    }
     impl CudaBenchState for GatorBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .gatorosc_batch_dev(&self.data, &self.sweep)
-                .expect("gator batch");
             let _ = self
                 .cuda
                 .gatorosc_batch_dev(&self.data, &self.sweep)
@@ -666,12 +613,6 @@ pub mod benches {
         let data = gen_series(ONE_SERIES_LEN);
         // 3×(length) × 2×(shift) grid ~ 96 rows
         let sweep = GatorOscBatchRange {
-            jaws_length: (8, 14, 2),
-            jaws_shift: (2, 6, 2),
-            teeth_length: (6, 10, 2),
-            teeth_shift: (1, 5, 2),
-            lips_length: (4, 8, 2),
-            lips_shift: (0, 4, 2),
             jaws_length: (8, 14, 2),
             jaws_shift: (2, 6, 2),
             teeth_length: (6, 10, 2),

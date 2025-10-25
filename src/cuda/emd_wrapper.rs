@@ -321,7 +321,7 @@ impl CudaEmd {
         let params_bytes = n * (std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>());
         let out_bytes = 3 * n * len * std::mem::size_of::<f32>();
         // Scratch rings: sp/sv (50 each) + bp (2*max_period)
-        let ring_stride_mid = 2 * max_p;
+        let mut ring_stride_mid = 2 * max_p;
         let ring_bytes = n * (50 + 50 + ring_stride_mid) * std::mem::size_of::<f32>();
         let required = in_bytes + params_bytes + out_bytes + ring_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
@@ -371,16 +371,13 @@ impl CudaEmd {
         let mut d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
             .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
-        // Allocate zero-initialized ring buffers (global memory scratch)
-        let zero_sp = vec![0f32; n * 50];
-        let zero_sv = vec![0f32; n * 50];
-        let zero_bp = vec![0f32; n * ring_stride_mid];
-        let mut d_sp_ring =
-            DeviceBuffer::from_slice(&zero_sp).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let mut d_sv_ring =
-            DeviceBuffer::from_slice(&zero_sv).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
-        let mut d_bp_ring =
-            DeviceBuffer::from_slice(&zero_bp).map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        // Allocate zero-initialized ring buffers on device (no host copy)
+        let mut d_sp_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(n * 50)
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let mut d_sv_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(n * 50)
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+        let mut d_bp_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(n * ring_stride_mid)
+            .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
 
         // Chunk grid.y to <= 65_535 if needed (rows == combos). Use x dimension like other wrappers.
         // Kernel uses dynamic shared memory for 2*50 rings; choose safe block size
@@ -423,6 +420,10 @@ impl CudaEmd {
             let mut p_ub = d_ub.as_device_ptr().as_raw();
             let mut p_mb = d_mb.as_device_ptr().as_raw();
             let mut p_lb = d_lb.as_device_ptr().as_raw();
+            // ring buffers for peaks/valleys/bridge
+            let mut p_sp = d_sp_ring.as_device_ptr().as_raw();
+            let mut p_sv = d_sv_ring.as_device_ptr().as_raw();
+            let mut p_bp = d_bp_ring.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut p_prices as *mut _ as *mut c_void,
                 &mut p_p as *mut _ as *mut c_void,
@@ -434,7 +435,7 @@ impl CudaEmd {
                 &mut p_ub as *mut _ as *mut c_void,
                 &mut p_mb as *mut _ as *mut c_void,
                 &mut p_lb as *mut _ as *mut c_void,
-                &mut ring_stride_i as *mut _ as *mut c_void,
+                &mut ring_stride_mid as *mut _ as *mut c_void,
                 &mut p_sp as *mut _ as *mut c_void,
                 &mut p_sv as *mut _ as *mut c_void,
                 &mut p_bp as *mut _ as *mut c_void,
@@ -562,9 +563,22 @@ impl CudaEmd {
             let mut delta_f = delta;
             let mut frac_f = fraction;
             let mut p_fv = d_fv.as_device_ptr().as_raw();
+            // Allocate ring buffers for many-series scratch (zeroed on device)
+            let mut ring_stride_mid: i32 = per_mid as i32;
             let mut p_ub = d_ub.as_device_ptr().as_raw();
             let mut p_mb = d_mb.as_device_ptr().as_raw();
             let mut p_lb = d_lb.as_device_ptr().as_raw();
+            // ring buffers pointers again for many-series variant (allocate zeroed on device)
+            let mut d_sp_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(cols * 50)
+                .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+            let mut d_sv_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(cols * 50)
+                .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+            let mut d_bp_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(cols * per_mid)
+                .map_err(|e| CudaEmdError::Cuda(e.to_string()))?;
+            let mut ring_stride_mid: i32 = per_mid as i32;
+            let mut p_sp = d_sp_ring.as_device_ptr().as_raw();
+            let mut p_sv = d_sv_ring.as_device_ptr().as_raw();
+            let mut p_bp = d_bp_ring.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut p_prices as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
@@ -576,7 +590,7 @@ impl CudaEmd {
                 &mut p_ub as *mut _ as *mut c_void,
                 &mut p_mb as *mut _ as *mut c_void,
                 &mut p_lb as *mut _ as *mut c_void,
-                &mut ring_stride_i as *mut _ as *mut c_void,
+                &mut ring_stride_mid as *mut _ as *mut c_void,
                 &mut p_sp as *mut _ as *mut c_void,
                 &mut p_sv as *mut _ as *mut c_void,
                 &mut p_bp as *mut _ as *mut c_void,

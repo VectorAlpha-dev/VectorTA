@@ -60,10 +60,6 @@ impl Default for CudaChandePolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
     }
 }
 
@@ -102,11 +98,6 @@ impl CudaChande {
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaChandeError::Cuda(e.to_string()))?
                 }
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaChandeError::Cuda(e.to_string()))?
-                }
             }
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
@@ -126,14 +117,6 @@ impl CudaChande {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaChandePolicy) {
-        self.policy = policy;
-    }
-    pub fn synchronize(&self) -> Result<(), CudaChandeError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaChandeError::Cuda(e.to_string()))
-    }
     pub fn set_policy(&mut self, policy: CudaChandePolicy) {
         self.policy = policy;
     }
@@ -238,27 +221,13 @@ impl CudaChande {
         if ps == 0 {
             return Err(CudaChandeError::InvalidInput("period must be > 0".into()));
         }
-        if ps == 0 {
-            return Err(CudaChandeError::InvalidInput("period must be > 0".into()));
-        }
         if !(direction.eq_ignore_ascii_case("long") || direction.eq_ignore_ascii_case("short")) {
             return Err(CudaChandeError::InvalidInput(
                 "direction must be 'long' or 'short'".into(),
             ));
-            return Err(CudaChandeError::InvalidInput(
-                "direction must be 'long' or 'short'".into(),
-            ));
         }
-        let dir_flag = if direction.eq_ignore_ascii_case("long") {
-            1i32
-        } else {
-            0i32
-        };
-        let periods: Vec<usize> = if pst == 0 || ps == pe {
-            vec![ps]
-        } else {
-            (ps..=pe).step_by(pst).collect()
-        };
+        let dir_flag = if direction.eq_ignore_ascii_case("long") { 1i32 } else { 0i32 };
+        let periods: Vec<usize> = if pst == 0 || ps == pe { vec![ps] } else { (ps..=pe).step_by(pst).collect() };
         let dir_flag = if direction.eq_ignore_ascii_case("long") {
             1i32
         } else {
@@ -272,13 +241,6 @@ impl CudaChande {
         let mults_host: Vec<f32> = if mst.abs() < f64::EPSILON || (ms - me).abs() < f64::EPSILON {
             vec![ms as f32]
         } else {
-            let mut v = Vec::new();
-            let mut x = ms;
-            while x <= me + 1e-12 {
-                v.push(x as f32);
-                x += mst;
-            }
-            v
             let mut v = Vec::new();
             let mut x = ms;
             while x <= me + 1e-12 {
@@ -300,10 +262,6 @@ impl CudaChande {
             if p == 0 || p > len || (len - first_valid) < p {
                 return Err(CudaChandeError::InvalidInput(format!(
                     "invalid period {} for data length {} (valid after {}: {})",
-                    p,
-                    len,
-                    first_valid,
-                    len - first_valid
                     p,
                     len,
                     first_valid,
@@ -531,11 +489,6 @@ impl CudaChande {
             rows: n_combos,
             cols: len,
         })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: len,
-        })
     }
 
     fn first_valids_time_major(
@@ -548,20 +501,7 @@ impl CudaChande {
         let n = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaChandeError::InvalidInput("rows*cols overflow".into()))?;
-    fn first_valids_time_major(
-        high_tm: &[f32],
-        low_tm: &[f32],
-        close_tm: &[f32],
-        cols: usize,
-        rows: usize,
-    ) -> Result<Vec<i32>, CudaChandeError> {
-        let n = cols
-            .checked_mul(rows)
-            .ok_or_else(|| CudaChandeError::InvalidInput("rows*cols overflow".into()))?;
         if high_tm.len() != n || low_tm.len() != n || close_tm.len() != n {
-            return Err(CudaChandeError::InvalidInput(
-                "time-major input length mismatch".into(),
-            ));
             return Err(CudaChandeError::InvalidInput(
                 "time-major input length mismatch".into(),
             ));
@@ -608,13 +548,7 @@ impl CudaChande {
         if period == 0 {
             return Err(CudaChandeError::InvalidInput("period must be > 0".into()));
         }
-        if period == 0 {
-            return Err(CudaChandeError::InvalidInput("period must be > 0".into()));
-        }
         if !(direction.eq_ignore_ascii_case("long") || direction.eq_ignore_ascii_case("short")) {
-            return Err(CudaChandeError::InvalidInput(
-                "direction must be 'long' or 'short'".into(),
-            ));
             return Err(CudaChandeError::InvalidInput(
                 "direction must be 'long' or 'short'".into(),
             ));
@@ -631,36 +565,17 @@ impl CudaChande {
             ));
         }
 
-        let d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+        let d_low  = DeviceBuffer::from_slice(low_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+        let d_close= DeviceBuffer::from_slice(close_tm).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
+        let d_fv   = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
 
         let func = self
             .module
             .get_function("chande_many_series_one_param_f32")
-        let func = self
-            .module
-            .get_function("chande_many_series_one_param_f32")
             .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } => block_x,
-            ManySeriesKernelPolicy::Auto => 256,
-        };
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Auto => 256,
@@ -669,37 +584,19 @@ impl CudaChande {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        let dir_flag: i32 = if direction.eq_ignore_ascii_case("long") {
-            1
-        } else {
-            0
-        };
-        let dir_flag: i32 = if direction.eq_ignore_ascii_case("long") {
-            1
-        } else {
-            0
-        };
+        let dir_flag: i32 = if direction.eq_ignore_ascii_case("long") { 1 } else { 0 };
         let alpha = 1.0f32 / (period as f32);
         unsafe {
             let mut high_ptr = d_high.as_device_ptr().as_raw();
-            let mut low_ptr = d_low.as_device_ptr().as_raw();
-            let mut close_ptr = d_close.as_device_ptr().as_raw();
-            let mut fv_ptr = d_fv.as_device_ptr().as_raw();
+            let mut low_ptr  = d_low.as_device_ptr().as_raw();
+            let mut close_ptr= d_close.as_device_ptr().as_raw();
+            let mut fv_ptr   = d_fv.as_device_ptr().as_raw();
             let mut period_i = period as i32;
-            let mut mult_f = mult;
-            let mut dir_i = dir_flag;
-            let mut alpha_f = alpha;
-            let mut high_ptr = d_high.as_device_ptr().as_raw();
-            let mut low_ptr = d_low.as_device_ptr().as_raw();
-            let mut close_ptr = d_close.as_device_ptr().as_raw();
-            let mut fv_ptr = d_fv.as_device_ptr().as_raw();
-            let mut period_i = period as i32;
-            let mut mult_f = mult;
-            let mut dir_i = dir_flag;
-            let mut alpha_f = alpha;
+            let mut mult_f   = mult;
+            let mut dir_i    = dir_flag;
+            let mut alpha_f  = alpha;
             let mut num_series_i = cols as i32;
             let mut series_len_i = rows as i32;
-            let mut out_ptr = d_out.as_device_ptr().as_raw();
             let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut high_ptr as *mut _ as *mut c_void,
@@ -717,16 +614,8 @@ impl CudaChande {
             self.stream
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaChandeError::Cuda(e.to_string()))?;
         }
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -760,8 +649,6 @@ pub mod benches {
             let off = (0.004 * x.sin()).abs() + 0.12;
             high[i] = v + off;
             low[i] = v - off;
-            high[i] = v + off;
-            low[i] = v - off;
         }
         (high, low)
     }
@@ -782,22 +669,7 @@ pub mod benches {
                 .unwrap();
         }
     }
-    struct ChandeBatchState {
-        cuda: CudaChande,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: ChandeBatchRange,
-        dir: String,
-    }
-    impl CudaBenchState for ChandeBatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .chande_batch_dev(&self.high, &self.low, &self.close, &self.sweep, &self.dir)
-                .unwrap();
-        }
-    }
+    
 
     struct ChandeManyState {
         cuda: CudaChande,
@@ -827,51 +699,9 @@ pub mod benches {
                 .unwrap();
         }
     }
-    struct ChandeManyState {
-        cuda: CudaChande,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
-        cols: usize,
-        rows: usize,
-        period: usize,
-        mult: f32,
-        dir: String,
-    }
-    impl CudaBenchState for ChandeManyState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .chande_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
-                    self.cols,
-                    self.rows,
-                    self.period,
-                    self.mult,
-                    &self.dir,
-                )
-                .unwrap();
-        }
-    }
+    
 
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
-        let len = ONE_SERIES_LEN;
-        let close = gen_series(len);
-        let (high, low) = synth_hlc_from_close(&close);
-        let sweep = ChandeBatchRange {
-            period: (10, 40, 5),
-            mult: (2.0, 4.0, 1.0),
-        };
-        Box::new(ChandeBatchState {
-            cuda: CudaChande::new(0).unwrap(),
-            high,
-            low,
-            close,
-            sweep,
-            dir: "long".into(),
-        })
         let len = ONE_SERIES_LEN;
         let close = gen_series(len);
         let (high, low) = synth_hlc_from_close(&close);
@@ -898,36 +728,7 @@ pub mod benches {
                 close_tm[t * cols + s] = (x * 0.0017).sin() + 0.00015 * x;
             }
         }
-        for s in 0..cols {
-            for t in s..rows {
-                let x = (t as f32) + (s as f32) * 0.2;
-                close_tm[t * cols + s] = (x * 0.0017).sin() + 0.00015 * x;
-            }
-        }
         let (mut high_tm, mut low_tm) = (close_tm.clone(), close_tm.clone());
-        for s in 0..cols {
-            for t in 0..rows {
-                let v = close_tm[t * cols + s];
-                if v.is_nan() {
-                    continue;
-                }
-                let x = (t as f32) * 0.002;
-                let off = (0.004 * x.cos()).abs() + 0.11;
-                high_tm[t * cols + s] = v + off;
-                low_tm[t * cols + s] = v - off;
-            }
-        }
-        Box::new(ChandeManyState {
-            cuda: CudaChande::new(0).unwrap(),
-            high_tm,
-            low_tm,
-            close_tm,
-            cols,
-            rows,
-            period,
-            mult,
-            dir: "long".into(),
-        })
         for s in 0..cols {
             for t in 0..rows {
                 let v = close_tm[t * cols + s];

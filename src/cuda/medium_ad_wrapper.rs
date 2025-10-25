@@ -21,7 +21,6 @@ use cust::device::Device;
 use cust::function::{BlockSize, GridSize, Function};
 use cust::launch;
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -283,11 +282,6 @@ impl CudaMediumAd {
             rows: combos.len(),
             cols: len,
         })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: combos.len(),
-            cols: len,
-        })
     }
 
     pub fn medium_ad_batch_dev(
@@ -418,30 +412,18 @@ impl CudaMediumAd {
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
-
+        
         unsafe { d_prices.async_copy_from(&h_prices, &self.stream) }
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
         unsafe { d_first.async_copy_from(&h_first, &self.stream) }
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
         self.launch_many_series_kernel(&d_prices, cols, rows, period, &d_first, &mut d_out)?;
-        self.launch_many_series_kernel(&d_prices, cols, rows, period, &d_first, &mut d_out)?;
 
         self.stream
             .synchronize()
             .map_err(|e| CudaMediumAdError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -486,9 +468,6 @@ pub mod benches {
         let price = gen_series(ONE_SERIES_LEN);
         let start = 5usize;
         let end = start + PARAM_SWEEP - 1;
-        let sweep = MediumAdBatchRange {
-            period: (start, end, 1),
-        };
         let sweep = MediumAdBatchRange {
             period: (start, end, 1),
         };

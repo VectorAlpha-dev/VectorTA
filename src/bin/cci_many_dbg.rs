@@ -1,16 +1,16 @@
-#![cfg(feature = "cuda")]
-
-use cust::memory::CopyDestination;
-use my_project::cuda::cuda_available;
-use my_project::cuda::oscillators::CudaCci;
-use my_project::indicators::cci::{CciInput, CciParams};
-
+#[cfg(feature = "cuda")]
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() { return true; }
     (a - b).abs() <= tol
 }
 
+#[cfg(feature = "cuda")]
 fn main() {
+    use cust::memory::CopyDestination;
+    use my_project::cuda::cuda_available;
+    use my_project::cuda::oscillators::CudaCci;
+    use my_project::indicators::cci::{CciInput, CciParams};
+
     if !cuda_available() {
         eprintln!("No CUDA device; exiting");
         return;
@@ -32,7 +32,12 @@ fn main() {
         let mut col = vec![f64::NAN; rows];
         for r in 0..rows { col[r] = tm[r * cols + s]; }
         let input = CciInput::from_slice(&col, CciParams { period: Some(period) });
-        let out = my_project::indicators::cci::cci_with_kernel(&input, my_project::utilities::enums::Kernel::Scalar).unwrap().values;
+        let out = my_project::indicators::cci::cci_with_kernel(
+            &input,
+            my_project::utilities::enums::Kernel::Scalar,
+        )
+        .unwrap()
+        .values;
         for r in 0..rows { cpu_tm[r * cols + s] = out[r]; }
     }
 
@@ -58,4 +63,9 @@ fn main() {
         "max diff = {} at idx {} (s={}, t={}) cpu={} gpu={}",
         max_diff, max_idx, s, t, cpu_tm[max_idx], host[max_idx]
     );
+}
+
+#[cfg(not(feature = "cuda"))]
+fn main() {
+    eprintln!("cci_many_dbg requires --features cuda; skipping build of debug binary");
 }

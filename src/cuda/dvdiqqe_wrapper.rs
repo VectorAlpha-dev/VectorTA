@@ -10,7 +10,6 @@
 //! - Public device entry points mirror other wrappers
 
 use crate::cuda::moving_averages::DeviceArrayF32;
-use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::dvdiqqe::DvdiqqeBatchRange;
 use cust::context::Context;
 use cust::device::Device;
@@ -48,26 +47,12 @@ impl Default for CudaDvdiqqePolicy {
             many_series: ManySeriesKernelPolicy::Auto,
         }
     }
-    fn default() -> Self {
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
-    }
 }
 
 #[derive(Debug)]
 pub enum CudaDvdiqqeError {
     Cuda(String),
     InvalidInput(String),
-}
-impl fmt::Display for CudaDvdiqqeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Cuda(e) => write!(f, "CUDA error: {}", e),
-            Self::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
 }
 impl fmt::Display for CudaDvdiqqeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -292,9 +277,6 @@ impl CudaDvdiqqe {
         let func = self
             .module
             .get_function("dvdiqqe_batch_f32")
-        let func = self
-            .module
-            .get_function("dvdiqqe_batch_f32")
             .map_err(|e| CudaDvdiqqeError::Cuda(e.to_string()))?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => Self::align_to_warp(block_x).max(32),
@@ -409,8 +391,6 @@ impl CudaDvdiqqe {
                 ];
                 self.stream
                     .launch(&func, grid, block, 0, args)
-                self.stream
-                    .launch(&func, grid, block, 0, args)
                     .map_err(|e| CudaDvdiqqeError::Cuda(e.to_string()))?;
             }
             launched += cur;
@@ -418,31 +398,8 @@ impl CudaDvdiqqe {
         self.stream
             .synchronize()
             .map_err(|e| CudaDvdiqqeError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDvdiqqeError::Cuda(e.to_string()))?;
 
         Ok(DeviceDvdiqqeQuad {
-            dvdi: DeviceArrayF32 {
-                buf: d_dvdi,
-                rows: n_combos,
-                cols: len,
-            },
-            fast: DeviceArrayF32 {
-                buf: d_fast,
-                rows: n_combos,
-                cols: len,
-            },
-            slow: DeviceArrayF32 {
-                buf: d_slow,
-                rows: n_combos,
-                cols: len,
-            },
-            center: DeviceArrayF32 {
-                buf: d_cent,
-                rows: n_combos,
-                cols: len,
-            },
             dvdi: DeviceArrayF32 {
                 buf: d_dvdi,
                 rows: n_combos,
@@ -587,9 +544,6 @@ impl CudaDvdiqqe {
         let func = self
             .module
             .get_function("dvdiqqe_many_series_one_param_f32")
-        let func = self
-            .module
-            .get_function("dvdiqqe_many_series_one_param_f32")
             .map_err(|e| CudaDvdiqqeError::Cuda(e.to_string()))?;
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => Self::align_to_warp(block_x),
@@ -657,8 +611,6 @@ impl CudaDvdiqqe {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-            self.stream
-                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaDvdiqqeError::Cuda(e.to_string()))?;
         }
         self.stream
@@ -669,46 +621,10 @@ impl CudaDvdiqqe {
             .map_err(|e| CudaDvdiqqeError::Cuda(e.to_string()))?;
 
         Ok(DeviceDvdiqqeQuad {
-            dvdi: DeviceArrayF32 {
-                buf: d_dvdi,
-                rows,
-                cols,
-            },
-            fast: DeviceArrayF32 {
-                buf: d_fast,
-                rows,
-                cols,
-            },
-            slow: DeviceArrayF32 {
-                buf: d_slow,
-                rows,
-                cols,
-            },
-            center: DeviceArrayF32 {
-                buf: d_cent,
-                rows,
-                cols,
-            },
-            dvdi: DeviceArrayF32 {
-                buf: d_dvdi,
-                rows,
-                cols,
-            },
-            fast: DeviceArrayF32 {
-                buf: d_fast,
-                rows,
-                cols,
-            },
-            slow: DeviceArrayF32 {
-                buf: d_slow,
-                rows,
-                cols,
-            },
-            center: DeviceArrayF32 {
-                buf: d_cent,
-                rows,
-                cols,
-            },
+            dvdi: DeviceArrayF32 { buf: d_dvdi, rows, cols },
+            fast: DeviceArrayF32 { buf: d_fast, rows, cols },
+            slow: DeviceArrayF32 { buf: d_slow, rows, cols },
+            center: DeviceArrayF32 { buf: d_cent, rows, cols },
         })
     }
 }
@@ -717,7 +633,6 @@ impl CudaDvdiqqe {
 #[cfg(not(test))]
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
@@ -823,33 +738,12 @@ pub mod benches {
             open[i] = close[i] - 0.15 + (0.03 * x).sin();
             vol[i] = (0.5 + (x * 0.77).cos().abs()).max(0.0);
         }
-        for i in 0..len {
-            let x = i as f32 * 0.0023;
-            open[i] = close[i] - 0.15 + (0.03 * x).sin();
-            vol[i] = (0.5 + (x * 0.77).cos().abs()).max(0.0);
-        }
         (open, close, vol)
     }
 
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let len = 512_000usize;
         let (open, close, volume) = synth_ohlcv(len);
-        let sweep = DvdiqqeBatchRange {
-            period: (10, 28, 3),
-            smoothing_period: (3, 9, 3),
-            fast_multiplier: (1.5, 3.0, 0.5),
-            slow_multiplier: (3.0, 6.0, 1.0),
-        };
-        Box::new(DvdiqqeBatchState {
-            cuda: CudaDvdiqqe::new(0).unwrap(),
-            open,
-            close,
-            volume,
-            sweep,
-            vt: "default".into(),
-            ct: "dynamic".into(),
-            tick: 0.01,
-        })
         let sweep = DvdiqqeBatchRange {
             period: (10, 28, 3),
             smoothing_period: (3, 9, 3),
@@ -897,32 +791,6 @@ pub mod benches {
             ct: "dynamic".into(),
             tick: 0.01,
         })
-        let mut open_tm = vec![f32::NAN; cols * rows];
-        let mut vol_tm = vec![0f32; cols * rows];
-        for s in 0..cols {
-            for t in s..rows {
-                let x = (t as f32) + (s as f32) * 0.2;
-                let c = (x * 0.0017).sin() + 0.00012 * x;
-                close_tm[t * cols + s] = c;
-                open_tm[t * cols + s] = c - 0.12 + (0.03 * x).cos();
-                vol_tm[t * cols + s] = (0.4 + (x * 0.77).cos().abs()).max(0.0);
-            }
-        }
-        Box::new(DvdiqqeManyState {
-            cuda: CudaDvdiqqe::new(0).unwrap(),
-            open_tm,
-            close_tm,
-            volume_tm: vol_tm,
-            cols,
-            rows,
-            period: 13,
-            smoothing: 6,
-            fast: 2.618,
-            slow: 4.236,
-            vt: "default".into(),
-            ct: "dynamic".into(),
-            tick: 0.01,
-        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -932,18 +800,8 @@ pub mod benches {
             "dvdiqqe_cuda_batch_dev",
             "512k_x_params",
             prep_one_series_many_params,
-            "dvdiqqe",
-            "one_series_many_params",
-            "dvdiqqe_cuda_batch_dev",
-            "512k_x_params",
-            prep_one_series_many_params,
         );
         let scen_many = CudaBenchScenario::new(
-            "dvdiqqe",
-            "many_series_one_param",
-            "dvdiqqe_cuda_many_series_one_param_dev",
-            "128x262k",
-            prep_many_series_one_param,
             "dvdiqqe",
             "many_series_one_param",
             "dvdiqqe_cuda_many_series_one_param_dev",

@@ -16,7 +16,6 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::mem_get_info;
-use cust::memory::mem_get_info;
 use cust::memory::DeviceBuffer;
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
@@ -52,13 +51,7 @@ pub struct CudaAoPolicy {
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
-pub enum BatchKernelSelected {
-    Plain { block_x: u32 },
-}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected {
-    OneD { block_x: u32 },
-}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -109,8 +102,6 @@ impl CudaAo {
         cust::init(CudaFlags::empty()).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/ao_kernel.ptx"));
@@ -141,9 +132,6 @@ impl CudaAo {
     pub fn set_policy(&mut self, p: CudaAoPolicy) {
         self.policy = p;
     }
-    pub fn set_policy(&mut self, p: CudaAoPolicy) {
-        self.policy = p;
-    }
 
     // ---------- Batch (one series × many params) ----------
     pub fn ao_batch_dev(
@@ -155,22 +143,13 @@ impl CudaAo {
         if len == 0 {
             return Err(CudaAoError::InvalidInput("empty series".into()));
         }
-        if len == 0 {
-            return Err(CudaAoError::InvalidInput("empty series".into()));
-        }
 
-        let first_valid = hl2
-            .iter()
-            .position(|v| !v.is_nan())
         let first_valid = hl2
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaAoError::InvalidInput("all values are NaN".into()))?;
 
         let combos = expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaAoError::InvalidInput("no parameter combos".into()));
-        }
         if combos.is_empty() {
             return Err(CudaAoError::InvalidInput("no parameter combos".into()));
         }
@@ -185,16 +164,11 @@ impl CudaAo {
                 return Err(CudaAoError::InvalidInput(format!(
                     "invalid params: short={} long={}",
                     s, l
-                    "invalid params: short={} long={}",
-                    s, l
                 )));
             }
             if len - first_valid < (l as usize) {
                 return Err(CudaAoError::InvalidInput(format!(
                     "not enough valid data for long={}, tail={} (first_valid={})",
-                    l,
-                    len - first_valid,
-                    first_valid
                     l,
                     len - first_valid,
                     first_valid
@@ -218,10 +192,6 @@ impl CudaAo {
             Ok((free, _)) => required.saturating_add(headroom) <= free,
             Err(_) => true,
         };
-        let fits = match mem_get_info() {
-            Ok((free, _)) => required.saturating_add(headroom) <= free,
-            Err(_) => true,
-        };
 
         // Device buffers
         let d_prefix: DeviceBuffer<Float2> = DeviceBuffer::from_slice(&prefix)
@@ -237,11 +207,6 @@ impl CudaAo {
             unsafe { (*(self as *const _ as *mut CudaAo)).last_batch = Some(BatchKernelSelected::Plain { block_x: 256 }); }
             self.launch_batch_into(&d_prefix, len, first_valid, &d_shorts_full, &d_longs_full, rows, &d_out, 0)?;
             self.maybe_log_batch_debug();
-            return Ok(DeviceArrayF32 {
-                buf: d_out,
-                rows,
-                cols: len,
-            });
             return Ok(DeviceArrayF32 {
                 buf: d_out,
                 rows,
@@ -281,10 +246,6 @@ impl CudaAo {
             .module
             .get_function("ao_batch_f32")
             .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
-        let func = self
-            .module
-            .get_function("ao_batch_f32")
-            .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
         let block_x = self.policy.batch_block_x.unwrap_or(256);
         let grid_x = ((len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
@@ -310,16 +271,11 @@ impl CudaAo {
             self.stream
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
         }
         self.stream
             .synchronize()
-            .map_err(|e| CudaAoError::Cuda(e.to_string()))
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAoError::Cuda(e.to_string()))
+            .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
+        Ok(())
     }
 
     // ---------- Many-series × one-param (time-major) ----------
@@ -334,14 +290,8 @@ impl CudaAo {
         if cols == 0 || rows == 0 {
             return Err(CudaAoError::InvalidInput("invalid dims".into()));
         }
-        if cols == 0 || rows == 0 {
-            return Err(CudaAoError::InvalidInput("invalid dims".into()));
-        }
         if hl2_tm.len() != cols * rows {
             return Err(CudaAoError::InvalidInput(format!(
-                "time-major input length mismatch (expected {}, got {})",
-                cols * rows,
-                hl2_tm.len()
                 "time-major input length mismatch (expected {}, got {})",
                 cols * rows,
                 hl2_tm.len()
@@ -361,21 +311,11 @@ impl CudaAo {
                     fv = Some(t as i32);
                     break;
                 }
-                if !hl2_tm[idx].is_nan() {
-                    fv = Some(t as i32);
-                    break;
-                }
             }
-            let fv =
-                fv.ok_or_else(|| CudaAoError::InvalidInput(format!("series {} all NaN", s)))?;
             let fv =
                 fv.ok_or_else(|| CudaAoError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - (fv as usize) < long {
                 return Err(CudaAoError::InvalidInput(format!(
-                    "series {} insufficient data for long {} (tail={})",
-                    s,
-                    long,
-                    rows - fv as usize
                     "series {} insufficient data for long {} (tail={})",
                     s,
                     long,
@@ -389,23 +329,10 @@ impl CudaAo {
             DeviceBuffer::from_slice(hl2_tm).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
             .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
-        let d_prices =
-            DeviceBuffer::from_slice(hl2_tm).map_err(|e| CudaAoError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
             .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
         self.launch_many_series(&d_prices, &d_first, cols, rows, short, long, &mut d_out)?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 
     fn launch_many_series(
@@ -443,16 +370,11 @@ impl CudaAo {
             self.stream
                 .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
         }
         self.stream
             .synchronize()
-            .map_err(|e| CudaAoError::Cuda(e.to_string()))
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAoError::Cuda(e.to_string()))
+            .map_err(|e| CudaAoError::Cuda(e.to_string()))?;
+        Ok(())
     }
 
     fn maybe_log_batch_debug(&self) {
@@ -460,20 +382,12 @@ impl CudaAo {
         if self.debug_batch_logged {
             return;
         }
-        if self.debug_batch_logged {
-            return;
-        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] AO batch selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaAo)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaAo)).debug_batch_logged = true;
@@ -486,20 +400,12 @@ impl CudaAo {
         if self.debug_many_logged {
             return;
         }
-        if self.debug_many_logged {
-            return;
-        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] AO many-series selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaAo)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaAo)).debug_many_logged = true;
@@ -515,24 +421,11 @@ fn expand_grid(r: &AoBatchRange) -> Vec<AoParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        if step == 0 || start == end {
-            return vec![start];
-        }
         (start..=end).step_by(step).collect()
     }
     let shorts = axis(r.short_period);
     let longs = axis(r.long_period);
     let mut out = Vec::new();
-    for &s in &shorts {
-        for &l in &longs {
-            if s > 0 && l > 0 && s < l {
-                out.push(AoParams {
-                    short_period: Some(s),
-                    long_period: Some(l),
-                });
-            }
-        }
-    }
     for &s in &shorts {
         for &l in &longs {
             if s > 0 && l > 0 && s < l {
@@ -575,26 +468,9 @@ pub mod benches {
                 .expect("ao batch");
         }
     }
-    struct AoBatchState {
-        cuda: CudaAo,
-        hl2: Vec<f32>,
-        sweep: AoBatchRange,
-    }
-    impl CudaBenchState for AoBatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .ao_batch_dev(&self.hl2, &self.sweep)
-                .expect("ao batch");
-        }
-    }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaAo::new(0).expect("cuda ao");
         let hl2 = gen_series(ONE_SERIES_LEN);
-        let sweep = AoBatchRange {
-            short_period: (4, 4 + PARAM_SWEEP / 5, 1),
-            long_period: (20, 20 + PARAM_SWEEP, 2),
-        };
         let sweep = AoBatchRange {
             short_period: (4, 4 + PARAM_SWEEP / 5, 1),
             long_period: (20, 20 + PARAM_SWEEP, 2),

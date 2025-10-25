@@ -63,10 +63,6 @@ impl Default for CudaNetMyrsiPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
     }
 }
 
@@ -139,37 +135,14 @@ impl CudaNetMyrsi {
             .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))
     }
 
-    pub fn set_policy(&mut self, policy: CudaNetMyrsiPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaNetMyrsiPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
-    pub fn set_policy(&mut self, policy: CudaNetMyrsiPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaNetMyrsiPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
+    pub fn set_policy(&mut self, policy: CudaNetMyrsiPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaNetMyrsiPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged {
-            return;
-        }
         if self.debug_batch_logged {
             return;
         }
@@ -178,9 +151,6 @@ impl CudaNetMyrsi {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] NET_MyRSI batch selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaNetMyrsi)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaNetMyrsi)).debug_batch_logged = true;
@@ -194,17 +164,11 @@ impl CudaNetMyrsi {
         if self.debug_many_logged {
             return;
         }
-        if self.debug_many_logged {
-            return;
-        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] NET_MyRSI many-series selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaNetMyrsi)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaNetMyrsi)).debug_many_logged = true;
@@ -221,23 +185,15 @@ impl CudaNetMyrsi {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
     #[inline]
     fn will_fit(required: usize, headroom: usize) -> bool {
         if !Self::mem_check_enabled() {
             return true;
         }
         if let Some((free, _)) = Self::device_mem_info() {
-            required.saturating_add(headroom) <= free
+            return required.saturating_add(headroom) <= free;
         } else {
-            true
-        }
-        if !Self::mem_check_enabled() {
             return true;
         }
         if let Some((free, _)) = Self::device_mem_info() {
@@ -286,8 +242,6 @@ impl CudaNetMyrsi {
         for p in periods {
             if p == 0 || p > len {
                 return Err(CudaNetMyrsiError::InvalidInput(format!(
-                    "invalid period {} for length {}",
-                    p, len
                     "invalid period {} for length {}",
                     p, len
                 )));
@@ -387,14 +341,6 @@ impl CudaNetMyrsi {
             },
             combos,
         ))
-        Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows: combos.len(),
-                cols: series_len,
-            },
-            combos,
-        ))
     }
 
     // ---------- Many-series × one param (time-major) ----------
@@ -406,9 +352,6 @@ impl CudaNetMyrsi {
         params: &NetMyrsiParams,
     ) -> Result<(Vec<i32>, usize), CudaNetMyrsiError> {
         if cols == 0 || rows == 0 || data_tm_f32.len() != cols * rows {
-            return Err(CudaNetMyrsiError::InvalidInput(
-                "invalid matrix shape".into(),
-            ));
             return Err(CudaNetMyrsiError::InvalidInput(
                 "invalid matrix shape".into(),
             ));
@@ -426,13 +369,7 @@ impl CudaNetMyrsi {
                     fv = Some(t);
                     break;
                 }
-                if !v.is_nan() {
-                    fv = Some(t);
-                    break;
-                }
             }
-            let fv =
-                fv.ok_or_else(|| CudaNetMyrsiError::InvalidInput(format!("series {} all NaN", s)))?;
             let fv =
                 fv.ok_or_else(|| CudaNetMyrsiError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv < period + 1 {
@@ -479,17 +416,17 @@ impl CudaNetMyrsi {
             for r in 0..rows { out_tm_host[r * cols + s] = out.values[r] as f32; }
         }
 
-        // Upload final time-major result to device
-        let d_out = unsafe {
-            DeviceBuffer::from_slice_async(&out_tm_host, &self.stream)
+        // Upload final time-major result to device with zero-copy allocation
+        let mut d_out = unsafe {
+            DeviceBuffer::uninitialized_async(cols * rows, &self.stream)
                 .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?
         };
+        unsafe {
+            d_out
+                .async_copy_from(out_tm_host.as_slice(), &self.stream)
+                .map_err(|e| CudaNetMyrsiError::Cuda(e.to_string()))?;
+        }
         self.synchronize()?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -513,9 +450,6 @@ pub mod benches {
         for i in 5..len {
             v[i] = (i as f32 * 0.00087).sin() + 0.001 * (i % 9) as f32;
         }
-        for i in 5..len {
-            v[i] = (i as f32 * 0.00087).sin() + 0.001 * (i % 9) as f32;
-        }
         v
     }
 
@@ -525,9 +459,6 @@ pub mod benches {
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let sweep = NetMyrsiBatchRange {
-                period: (8, 128, 8),
-            };
             let sweep = NetMyrsiBatchRange {
                 period: (8, 128, 8),
             };
@@ -561,27 +492,11 @@ pub mod benches {
             cuda: CudaNetMyrsi::new(0).expect("cuda"),
             data: gen_prices(LEN_1M),
         })
-        Box::new(BatchState {
-            cuda: CudaNetMyrsi::new(0).expect("cuda"),
-            data: gen_prices(LEN_1M),
-        })
     }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
         let cols = COLS_256;
         let rows = ROWS_1M / COLS_256;
         let mut data_tm = vec![f32::NAN; cols * rows];
-        for s in 0..cols {
-            for r in s..rows {
-                data_tm[r * cols + s] = (r as f32 * 0.0013 + s as f32 * 0.01).sin();
-            }
-        }
-        Box::new(ManyState {
-            cuda: CudaNetMyrsi::new(0).expect("cuda"),
-            data_tm,
-            cols,
-            rows,
-            params: NetMyrsiParams { period: Some(64) },
-        })
         for s in 0..cols {
             for r in s..rows {
                 data_tm[r * cols + s] = (r as f32 * 0.0013 + s as f32 * 0.01).sin();

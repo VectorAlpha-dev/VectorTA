@@ -368,16 +368,7 @@ impl CudaCg {
             self.maybe_log_batch_debug();
         }
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: combos.len(),
-            cols: len,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: combos.len(),
-            cols: len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
     }
 
     // -------- Many-series × one param (time-major) --------
@@ -392,9 +383,6 @@ impl CudaCg {
             return Err(CudaCgError::InvalidInput("empty matrix shape".into()));
         }
         if prices_tm_f32.len() != cols * rows {
-            return Err(CudaCgError::InvalidInput(
-                "time-major input size mismatch".into(),
-            ));
             return Err(CudaCgError::InvalidInput(
                 "time-major input size mismatch".into(),
             ));

@@ -150,9 +150,6 @@ impl CudaPivot {
                 unsafe {
                     (*(self as *const _ as *mut CudaPivot)).debug_batch_logged = true;
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaPivot)).debug_batch_logged = true;
-                }
             }
         }
     }
@@ -169,9 +166,6 @@ impl CudaPivot {
                 let per = env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] pivot many-series selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaPivot)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaPivot)).debug_many_logged = true;
@@ -365,11 +359,6 @@ impl CudaPivot {
             || close_tm.len() != elems
             || open_tm.len() != elems
         {
-        if high_tm.len() != elems
-            || low_tm.len() != elems
-            || close_tm.len() != elems
-            || open_tm.len() != elems
-        {
             return Err(CudaPivotError::InvalidInput(
                 "time-major inputs must all be cols*rows".into(),
             ));
@@ -438,11 +427,6 @@ impl CudaPivot {
             rows: 9 * rows,
             cols,
         })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: 9 * rows,
-            cols,
-        })
     }
 
     fn launch_pivot_many_series_tm(
@@ -497,10 +481,6 @@ impl CudaPivot {
             (*(self as *const _ as *mut CudaPivot)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
-        unsafe {
-            (*(self as *const _ as *mut CudaPivot)).last_many =
-                Some(ManySeriesKernelSelected::OneD { block_x });
-        }
         self.maybe_log_many_debug();
         Ok(())
     }
@@ -522,8 +502,6 @@ pub mod benches {
     }
     fn bytes_many() -> usize {
         let elems = MANY_ROWS * MANY_COLS;
-        (4 * elems + 9 * elems) * std::mem::size_of::<f32>()
-            + MANY_COLS * std::mem::size_of::<i32>()
         (4 * elems + 9 * elems) * std::mem::size_of::<f32>()
             + MANY_COLS * std::mem::size_of::<i32>()
             + 64 * 1024 * 1024
@@ -563,7 +541,6 @@ pub mod benches {
                 .cuda
                 .pivot_many_series_one_param_time_major_dev(
                     &self.h_tm, &self.l_tm, &self.c_tm, &self.o_tm, MANY_COLS, MANY_ROWS, 3,
-                    &self.h_tm, &self.l_tm, &self.c_tm, &self.o_tm, MANY_COLS, MANY_ROWS, 3,
                 )
                 .unwrap();
         }
@@ -585,14 +562,6 @@ pub mod benches {
             h[i] = base + range;
         }
         let sweep = PivotBatchRange { mode: (0, 4, 1) };
-        Box::new(BatchState {
-            cuda,
-            h,
-            l,
-            c,
-            o,
-            sweep,
-        })
         Box::new(BatchState {
             cuda,
             h,
@@ -629,36 +598,11 @@ pub mod benches {
             c_tm,
             o_tm,
         })
-        Box::new(ManyState {
-            cuda,
-            h_tm,
-            l_tm,
-            c_tm,
-            o_tm,
-        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let combos = 5usize; // modes 0..4
         vec![
-            CudaBenchScenario::new(
-                "pivot",
-                "batch",
-                "pivot_cuda_batch",
-                "1m × 5 modes",
-                prep_batch,
-            )
-            .with_sample_size(10)
-            .with_mem_required(bytes_batch(combos)),
-            CudaBenchScenario::new(
-                "pivot",
-                "many_series",
-                "pivot_cuda_many_series_tm",
-                "200k × 128",
-                prep_many,
-            )
-            .with_sample_size(10)
-            .with_mem_required(bytes_many()),
             CudaBenchScenario::new(
                 "pivot",
                 "batch",

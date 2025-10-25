@@ -63,10 +63,6 @@ impl Default for CudaVossPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
     }
 }
 
@@ -80,8 +76,6 @@ pub struct CudaVoss {
 impl CudaVoss {
     pub fn new(device_id: usize) -> Result<Self, CudaVossError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaVossError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaVossError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaVossError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaVossError::Cuda(e.to_string()))?;
@@ -114,24 +108,10 @@ impl CudaVoss {
             _context: context,
             policy: CudaVossPolicy::default(),
         })
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-            policy: CudaVossPolicy::default(),
-        })
     }
 
-    pub fn set_policy(&mut self, p: CudaVossPolicy) {
-        self.policy = p;
-    }
-    pub fn set_policy(&mut self, p: CudaVossPolicy) {
-        self.policy = p;
-    }
+    pub fn set_policy(&mut self, p: CudaVossPolicy) { self.policy = p; }
     pub fn synchronize(&self) -> Result<(), CudaVossError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVossError::Cuda(e.to_string()))
         self.stream
             .synchronize()
             .map_err(|e| CudaVossError::Cuda(e.to_string()))
@@ -143,10 +123,6 @@ impl CudaVoss {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(64 * 1024 * 1024)
-        env::var("CUDA_MEM_HEADROOM")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(64 * 1024 * 1024)
     }
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -154,29 +130,11 @@ impl CudaVoss {
             Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
             Err(_) => true,
         }
-        match env::var("CUDA_MEM_CHECK") {
-            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
-            Err(_) => true,
-        }
     }
     #[inline]
     fn will_fit(bytes: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if let Ok((free, _)) = mem_get_info() {
-            bytes.saturating_add(headroom) <= free
-        } else {
-            true
-        }
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if let Ok((free, _)) = mem_get_info() {
-            bytes.saturating_add(headroom) <= free
-        } else {
-            true
-        }
+        if !Self::mem_check_enabled() { return true; }
+        if let Ok((free, _)) = mem_get_info() { bytes.saturating_add(headroom) <= free } else { true }
     }
 
     // -------------------- Batch (one series × many params) --------------------
@@ -188,25 +146,13 @@ impl CudaVoss {
         if data_f32.is_empty() {
             return Err(CudaVossError::InvalidInput("empty input".into()));
         }
-        if data_f32.is_empty() {
-            return Err(CudaVossError::InvalidInput("empty input".into()));
-        }
         let len = data_f32.len();
-        let first = data_f32
-            .iter()
-            .position(|x| !x.is_nan())
-            .ok_or_else(|| CudaVossError::InvalidInput("all values are NaN".into()))?;
         let first = data_f32
             .iter()
             .position(|x| !x.is_nan())
             .ok_or_else(|| CudaVossError::InvalidInput("all values are NaN".into()))?;
 
         let combos = expand_grid_voss(sweep);
-        if combos.is_empty() {
-            return Err(CudaVossError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
         if combos.is_empty() {
             return Err(CudaVossError::InvalidInput(
                 "no parameter combinations".into(),
@@ -223,16 +169,7 @@ impl CudaVoss {
             if len - first < min_index {
                 return Err(CudaVossError::InvalidInput("not enough valid data".into()));
             }
-            if p == 0 || p > len {
-                return Err(CudaVossError::InvalidInput("invalid period".into()));
-            }
-            if len - first < min_index {
-                return Err(CudaVossError::InvalidInput("not enough valid data".into()));
-            }
             let b = prm.bandwidth.unwrap_or(0.25);
-            if !b.is_finite() || b <= 0.0 || b > 1.0 {
-                return Err(CudaVossError::InvalidInput("invalid bandwidth".into()));
-            }
             if !b.is_finite() || b <= 0.0 || b > 1.0 {
                 return Err(CudaVossError::InvalidInput("invalid bandwidth".into()));
             }
@@ -245,9 +182,6 @@ impl CudaVoss {
             + 2 * rows * len * 4
             + Self::headroom_bytes();
         if !Self::will_fit(bytes, 0) {
-            return Err(CudaVossError::InvalidInput(
-                "insufficient device memory for voss batch".into(),
-            ));
             return Err(CudaVossError::InvalidInput(
                 "insufficient device memory for voss batch".into(),
             ));
@@ -266,12 +200,6 @@ impl CudaVoss {
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap_or(20) as i32).collect();
         let predicts: Vec<i32> = combos.iter().map(|c| c.predict.unwrap_or(3) as i32).collect();
         let bws: Vec<f64> = combos.iter().map(|c| c.bandwidth.unwrap_or(0.25)).collect();
-        let d_p =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaVossError::Cuda(e.to_string()))?;
-        let d_q =
-            DeviceBuffer::from_slice(&predicts).map_err(|e| CudaVossError::Cuda(e.to_string()))?;
-        let d_bw =
-            DeviceBuffer::from_slice(&bws).map_err(|e| CudaVossError::Cuda(e.to_string()))?;
         let d_p =
             DeviceBuffer::from_slice(&periods).map_err(|e| CudaVossError::Cuda(e.to_string()))?;
         let d_q =
@@ -324,22 +252,6 @@ impl CudaVoss {
             start_row += count;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVossError::Cuda(e.to_string()))?;
-        Ok((
-            DeviceArrayF32 {
-                buf: d_voss,
-                rows,
-                cols: len,
-            },
-            DeviceArrayF32 {
-                buf: d_filt,
-                rows,
-                cols: len,
-            },
-            combos,
-        ))
         self.stream
             .synchronize()
             .map_err(|e| CudaVossError::Cuda(e.to_string()))?;
@@ -487,21 +399,6 @@ impl CudaVoss {
                 cols,
             },
         ))
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVossError::Cuda(e.to_string()))?;
-        Ok((
-            DeviceArrayF32 {
-                buf: d_voss,
-                rows,
-                cols,
-            },
-            DeviceArrayF32 {
-                buf: d_filt,
-                rows,
-                cols,
-            },
-        ))
     }
 }
 
@@ -534,17 +431,8 @@ pub mod benches {
         data: Vec<f32>,
         sweep: VossBatchRange,
     }
-    struct VossBatchState {
-        cuda: CudaVoss,
-        data: Vec<f32>,
-        sweep: VossBatchRange,
-    }
     impl CudaBenchState for VossBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .voss_batch_dev(&self.data, &self.sweep)
-                .expect("voss batch");
             let _ = self
                 .cuda
                 .voss_batch_dev(&self.data, &self.sweep)
@@ -555,14 +443,7 @@ pub mod benches {
     fn prep_batch() -> Box<dyn CudaBenchState> {
         let cuda = CudaVoss::new(0).expect("cuda voss");
         let mut data = gen_series(ONE_SERIES_LEN);
-        for i in 0..4 {
-            data[i] = f32::NAN;
-        }
-        let sweep = VossBatchRange {
-            period: (10, 34, 2),
-            predict: (1, 4, 1),
-            bandwidth: (0.1, 0.4, 0.05),
-        };
+        // data first few NaNs and sweep already set above
         for i in 0..4 {
             data[i] = f32::NAN;
         }
@@ -581,23 +462,10 @@ pub mod benches {
         rows: usize,
         params: VossParams,
     }
-    struct VossManyState {
-        cuda: CudaVoss,
-        data_tm: Vec<f32>,
-        cols: usize,
-        rows: usize,
-        params: VossParams,
-    }
     impl CudaBenchState for VossManyState {
         fn launch(&mut self) {
             let _ = self
                 .cuda
-                .voss_many_series_one_param_time_major_dev(
-                    &self.data_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                )
                 .voss_many_series_one_param_time_major_dev(
                     &self.data_tm,
                     self.cols,
@@ -611,22 +479,7 @@ pub mod benches {
         let cuda = CudaVoss::new(0).expect("cuda voss");
         let mut tm = gen_time_major_prices(MANY_SERIES_ROWS, MANY_SERIES_COLS);
         // ensure a few NaNs at start of each series
-        for s in 0..MANY_SERIES_COLS {
-            tm[s] = f32::NAN;
-            tm[s + MANY_SERIES_COLS] = f32::NAN;
-        }
-        let params = VossParams {
-            period: Some(20),
-            predict: Some(3),
-            bandwidth: Some(0.25),
-        };
-        Box::new(VossManyState {
-            cuda,
-            data_tm: tm,
-            cols: MANY_SERIES_COLS,
-            rows: MANY_SERIES_ROWS,
-            params,
-        })
+        // data tm NaNs and params set above
         for s in 0..MANY_SERIES_COLS {
             tm[s] = f32::NAN;
             tm[s + MANY_SERIES_COLS] = f32::NAN;

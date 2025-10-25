@@ -49,9 +49,6 @@ impl Error for CudaErError {}
 struct ErCombo {
     period: i32,
 }
-struct ErCombo {
-    period: i32,
-}
 
 pub struct CudaEr {
     module: Module,
@@ -62,8 +59,6 @@ pub struct CudaEr {
 impl CudaEr {
     pub fn new(device_id: usize) -> Result<Self, CudaErError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaErError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let ctx = Context::new(device).map_err(|e| CudaErError::Cuda(e.to_string()))?;
@@ -78,11 +73,6 @@ impl CudaEr {
             .map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaErError::Cuda(e.to_string()))?;
-        Ok(Self {
-            module,
-            stream,
-            _ctx: ctx,
-        })
         Ok(Self {
             module,
             stream,
@@ -110,19 +100,8 @@ impl CudaEr {
             .into_iter()
             .map(|p| ErCombo { period: p as i32 })
             .collect()
-        periods
-            .into_iter()
-            .map(|p| ErCombo { period: p as i32 })
-            .collect()
     }
 
-    fn prepare_batch_inputs(
-        data_f32: &[f32],
-        sweep: &ErBatchRange,
-    ) -> Result<(Vec<ErCombo>, usize), CudaErError> {
-        if data_f32.is_empty() {
-            return Err(CudaErError::InvalidInput("empty data".into()));
-        }
     fn prepare_batch_inputs(
         data_f32: &[f32],
         sweep: &ErBatchRange,
@@ -227,21 +206,10 @@ impl CudaEr {
                     .max(1)
                     .min(max_grid_y);
             }
-            if free > headroom {
-                return (free - headroom)
-                    .saturating_div(len * std::mem::size_of::<f32>())
-                    .max(1)
-                    .min(max_grid_y);
-            }
         }
         max_grid_y.min(n_rows).max(1)
     }
 
-    pub fn er_batch_dev(
-        &self,
-        data_f32: &[f32],
-        sweep: &ErBatchRange,
-    ) -> Result<DeviceArrayF32, CudaErError> {
     pub fn er_batch_dev(
         &self,
         data_f32: &[f32],
@@ -264,8 +232,6 @@ impl CudaEr {
         }
 
         // Device buffers
-        let d_data =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let d_data =
             DeviceBuffer::from_slice(data_f32).map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
@@ -406,14 +372,6 @@ impl CudaEr {
                     s
                 )));
             }
-            let fv =
-                fv.ok_or_else(|| CudaErError::InvalidInput(format!("series {} all NaN", s)))?;
-            if rows - (fv as usize) < period {
-                return Err(CudaErError::InvalidInput(format!(
-                    "series {} not enough valid data",
-                    s
-                )));
-            }
             first_valids[s] = fv;
         }
 
@@ -431,10 +389,6 @@ impl CudaEr {
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
             .map_err(|e| CudaErError::Cuda(e.to_string()))?;
 
-        let func = self
-            .module
-            .get_function("er_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaErError::Cuda(e.to_string()))?;
         let func = self
             .module
             .get_function("er_many_series_one_param_time_major_f32")
@@ -460,35 +414,19 @@ impl CudaEr {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-            self.stream
-                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaErError::Cuda(e.to_string()))?;
         }
         self.stream
             .synchronize()
             .map_err(|e| CudaErError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaErError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 
     pub fn synchronize(&self) -> Result<(), CudaErError> {
         self.stream
             .synchronize()
-            .map_err(|e| CudaErError::Cuda(e.to_string()))
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaErError::Cuda(e.to_string()))
+            .map_err(|e| CudaErError::Cuda(e.to_string()))?;
+        Ok(())
     }
 }
 
@@ -540,11 +478,6 @@ pub mod benches {
                 .module
                 .get_function("er_batch_prefix_f32")
                 .expect("func");
-            let func = self
-                .cuda
-                .module
-                .get_function("er_batch_prefix_f32")
-                .expect("func");
             let block_x: u32 = 256;
             let grid_x: u32 = ((self.len as u32) + block_x - 1) / block_x;
             let grid: GridSize = (grid_x.max(1), self.n_combos as u32, 1).into();
@@ -566,10 +499,6 @@ pub mod benches {
                     &mut ncomb_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.cuda
-                    .stream
-                    .launch(&func, grid, block, 0, args)
-                    .expect("launch");
                 self.cuda
                     .stream
                     .launch(&func, grid, block, 0, args)
@@ -619,23 +548,8 @@ pub mod benches {
             n_combos: combos.len(),
             first_valid,
         }
-        let d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(combos.len() * len) }.expect("d_out");
-        ErBatchState {
-            cuda,
-            d_data,
-            d_periods,
-            d_prefix,
-            d_out,
-            len,
-            n_combos: combos.len(),
-            first_valid,
-        }
     }
 
-    fn prep_er_batch_box() -> Box<dyn CudaBenchState> {
-        Box::new(prep_er_batch())
-    }
     fn prep_er_batch_box() -> Box<dyn CudaBenchState> {
         Box::new(prep_er_batch())
     }
@@ -651,11 +565,6 @@ pub mod benches {
     }
     impl CudaBenchState for ErManySeriesState {
         fn launch(&mut self) {
-            let func = self
-                .cuda
-                .module
-                .get_function("er_many_series_one_param_time_major_f32")
-                .expect("func");
             let func = self
                 .cuda
                 .module
@@ -684,10 +593,6 @@ pub mod benches {
                     .stream
                     .launch(&func, grid, block, 0, args)
                     .expect("launch");
-                self.cuda
-                    .stream
-                    .launch(&func, grid, block, 0, args)
-                    .expect("launch");
             }
             self.cuda.synchronize().expect("sync");
         }
@@ -695,9 +600,6 @@ pub mod benches {
 
     fn prep_er_many_series() -> ErManySeriesState {
         let cuda = CudaEr::new(0).expect("cuda er");
-        let cols = 250usize;
-        let rows = 1_000_000usize;
-        let period = 20usize;
         let cols = 250usize;
         let rows = 1_000_000usize;
         let period = 20usize;
@@ -722,13 +624,6 @@ pub mod benches {
             }
             fvs[s] = fv as i32;
         }
-        for s in 0..cols {
-            let mut fv = 0usize;
-            while fv < rows && tm[fv * cols + s].is_nan() {
-                fv += 1;
-            }
-            fvs[s] = fv as i32;
-        }
         let d_tm = DeviceBuffer::from_slice(&tm).expect("d_tm");
         let d_fv = DeviceBuffer::from_slice(&fvs).expect("d_fv");
         let d_out: DeviceBuffer<f32> =
@@ -742,22 +637,8 @@ pub mod benches {
             rows,
             period,
         }
-        let d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
-        ErManySeriesState {
-            cuda,
-            d_tm,
-            d_fv,
-            d_out,
-            cols,
-            rows,
-            period,
-        }
     }
 
-    fn prep_er_many_series_box() -> Box<dyn CudaBenchState> {
-        Box::new(prep_er_many_series())
-    }
     fn prep_er_many_series_box() -> Box<dyn CudaBenchState> {
         Box::new(prep_er_many_series())
     }

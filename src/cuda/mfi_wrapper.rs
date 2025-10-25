@@ -44,18 +44,12 @@ pub enum BatchKernelPolicy {
     Plain {
         block_x: u32,
     },
-    Plain {
-        block_x: u32,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
-    OneD {
-        block_x: u32,
-    },
     OneD {
         block_x: u32,
     },
@@ -71,13 +65,7 @@ pub struct CudaMfiPolicy {
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
-pub enum BatchKernelSelected {
-    Plain { block_x: u32 },
-}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected {
-    OneD { block_x: u32 },
-}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -96,8 +84,6 @@ pub struct CudaMfi {
 impl CudaMfi {
     pub fn new(device_id: usize) -> Result<Self, CudaMfiError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
@@ -129,30 +115,10 @@ impl CudaMfi {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaMfiPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaMfiPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
-    pub fn set_policy(&mut self, policy: CudaMfiPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaMfiPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
+    pub fn set_policy(&mut self, policy: CudaMfiPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaMfiPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -165,22 +131,13 @@ impl CudaMfi {
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
             return true;
         }
-        if !Self::mem_check_enabled() {
-            return true;
-        }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
-        }
         } else {
             true
         }
@@ -190,23 +147,13 @@ impl CudaMfi {
     fn maybe_log_batch_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged {
-            return;
-        }
-        if self.debug_batch_logged {
-            return;
-        }
+        if self.debug_batch_logged { return; }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] mfi batch selected kernel: {:?}", sel);
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaMfi)).debug_batch_logged = true;
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaMfi)).debug_batch_logged = true;
-                }
+                unsafe { (*(self as *const _ as *mut CudaMfi)).debug_batch_logged = true; }
             }
         }
     }
@@ -214,23 +161,13 @@ impl CudaMfi {
     fn maybe_log_many_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged {
-            return;
-        }
-        if self.debug_many_logged {
-            return;
-        }
+        if self.debug_many_logged { return; }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] mfi many-series selected kernel: {:?}", sel);
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaMfi)).debug_many_logged = true;
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaMfi)).debug_many_logged = true;
-                }
+                unsafe { (*(self as *const _ as *mut CudaMfi)).debug_many_logged = true; }
             }
         }
     }
@@ -242,18 +179,8 @@ impl CudaMfi {
         } else {
             (start..=end).step_by(step).collect()
         };
-        let periods = if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
-        };
         let mut out = Vec::with_capacity(periods.len());
-        for &p in &periods {
-            out.push(MfiParams { period: Some(p) });
-        }
-        for &p in &periods {
-            out.push(MfiParams { period: Some(p) });
-        }
+        for &p in &periods { out.push(MfiParams { period: Some(p) }); }
         out
     }
 
@@ -268,17 +195,10 @@ impl CudaMfi {
         if typical.is_empty() {
             return Err(CudaMfiError::InvalidInput("empty input".into()));
         }
-        if typical.len() != volume.len() {
-            return Err(CudaMfiError::InvalidInput("length mismatch".into()));
-        }
-        if typical.is_empty() {
-            return Err(CudaMfiError::InvalidInput("empty input".into()));
-        }
         let len = typical.len();
         let first_valid = typical
             .iter()
             .zip(volume.iter())
-            .position(|(p, v)| p.is_finite() && v.is_finite())
             .position(|(p, v)| p.is_finite() && v.is_finite())
             .ok_or_else(|| CudaMfiError::InvalidInput("all values are NaN".into()))?;
         let combos = Self::expand_grid(sweep);
@@ -287,24 +207,8 @@ impl CudaMfi {
                 "no parameter combinations".into(),
             ));
         }
-        if combos.is_empty() {
-            return Err(CudaMfiError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
         for c in &combos {
             let p = c.period.unwrap_or(0);
-            if p == 0 {
-                return Err(CudaMfiError::InvalidInput("period must be > 0".into()));
-            }
-            if p > len {
-                return Err(CudaMfiError::InvalidInput(
-                    "period exceeds data length".into(),
-                ));
-            }
-            if len - first_valid < p {
-                return Err(CudaMfiError::InvalidInput("not enough valid data".into()));
-            }
             if p == 0 {
                 return Err(CudaMfiError::InvalidInput("period must be > 0".into()));
             }
@@ -520,19 +424,7 @@ impl CudaMfi {
         self.stream.synchronize().map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
         self.maybe_log_batch_debug();
         Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows: combos.len(),
-                cols: len,
-            },
-            combos,
-        ))
-        Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows: combos.len(),
-                cols: len,
-            },
+            DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len },
             combos,
         ))
     }
@@ -550,9 +442,6 @@ impl CudaMfi {
         }
         if typical_tm_f32.len() != cols * rows {
             return Err(CudaMfiError::InvalidInput("unexpected matrix size".into()));
-        }
-        if period == 0 {
-            return Err(CudaMfiError::InvalidInput("period must be > 0".into()));
         }
         if period == 0 {
             return Err(CudaMfiError::InvalidInput("period must be > 0".into()));
@@ -632,16 +521,7 @@ impl CudaMfi {
             .synchronize()
             .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
         self.maybe_log_many_debug();
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 }
 
@@ -680,14 +560,6 @@ pub mod benches {
                 .expect("mfi batch");
         }
     }
-    impl CudaBenchState for MfiBatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .mfi_batch_dev(&self.tp, &self.vol, &self.sweep)
-                .expect("mfi batch");
-        }
-    }
 
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaMfi::new(0).expect("CudaMfi");
@@ -701,25 +573,7 @@ pub mod benches {
         let sweep = MfiBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(MfiBatchState {
-            cuda,
-            tp,
-            vol,
-            sweep,
-        })
-        for i in 0..16 {
-            tp[i] = f32::NAN;
-            vol[i] = f32::NAN;
-        }
-        let sweep = MfiBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1),
-        };
-        Box::new(MfiBatchState {
-            cuda,
-            tp,
-            vol,
-            sweep,
-        })
+        Box::new(MfiBatchState { cuda, tp, vol, sweep })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -729,9 +583,6 @@ pub mod benches {
             "mfi_cuda_batch_dev",
             "1m_x_250",
             prep_one_series_many_params,
-        )
-        .with_sample_size(10)
-        .with_mem_required(bytes_one_series_many_params())]
         )
         .with_sample_size(10)
         .with_mem_required(bytes_one_series_many_params())]

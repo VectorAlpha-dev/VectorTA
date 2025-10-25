@@ -46,16 +46,12 @@ pub struct CudaEriPolicy {
     pub many_series: ManySeriesKernelPolicy,
 }
 impl Default for CudaEriPolicy {
-    fn default() -> Self {
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
+        fn default() -> Self {
+            Self {
+                batch: BatchKernelPolicy::Auto,
+                many_series: ManySeriesKernelPolicy::Auto,
+            }
         }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -89,8 +85,6 @@ impl CudaEri {
         cust::init(CudaFlags::empty()).map_err(|e| CudaEriError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaEriError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaEriError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaEriError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/eri_kernel.ptx"));
         let jit_opts = &[
@@ -111,14 +105,6 @@ impl CudaEri {
             debug_batch_logged: false,
             debug_many_logged: false,
         })
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-            policy: CudaEriPolicy::default(),
-            debug_batch_logged: false,
-            debug_many_logged: false,
-        })
     }
 
     pub fn set_policy(&mut self, policy: CudaEriPolicy) {
@@ -132,24 +118,10 @@ impl CudaEri {
             .synchronize()
             .map_err(|e| CudaEriError::Cuda(e.to_string()))
     }
-    pub fn set_policy(&mut self, policy: CudaEriPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaEriPolicy {
-        &self.policy
-    }
-    pub fn synchronize(&self) -> Result<(), CudaEriError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEriError::Cuda(e.to_string()))
-    }
+    
 
     #[inline]
     fn device_mem_ok(bytes: usize) -> bool {
-        match mem_get_info() {
-            Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
-            Err(_) => true,
-        }
         match mem_get_info() {
             Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
             Err(_) => true,
@@ -163,22 +135,9 @@ impl CudaEri {
         } else {
             (start..=end).step_by(step).collect()
         }
-        if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
-        }
     }
 
-    fn validate_and_first_valid(
-        high: &[f32],
-        low: &[f32],
-        src: &[f32],
-        max_period: usize,
-    ) -> Result<usize, CudaEriError> {
-        if high.is_empty() || low.is_empty() || src.is_empty() {
-            return Err(CudaEriError::InvalidInput("empty input".into()));
-        }
+    
     fn validate_and_first_valid(
         high: &[f32],
         low: &[f32],
@@ -191,12 +150,7 @@ impl CudaEri {
         let n = high.len().min(low.len()).min(src.len());
         let first = (0..n)
             .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !src[i].is_nan())
-        let first = (0..n)
-            .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !src[i].is_nan())
             .ok_or_else(|| CudaEriError::InvalidInput("all values are NaN".into()))?;
-        if n - first < max_period {
-            return Err(CudaEriError::InvalidInput("not enough valid data".into()));
-        }
         if n - first < max_period {
             return Err(CudaEriError::InvalidInput("not enough valid data".into()));
         }
@@ -261,12 +215,6 @@ impl CudaEri {
                 let range = crate::indicators::moving_averages::ema::EmaBatchRange {
                     period: sweep.period,
                 };
-                let cuda = crate::cuda::moving_averages::ema_wrapper::CudaEma::new(0)
-                    .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
-                Some(
-                    cuda.ema_batch_dev(source, &range)
-                        .map_err(|e| CudaEriError::Cuda(e.to_string()))?,
-                )
                 let range = crate::indicators::moving_averages::ema::EmaBatchRange {
                     period: sweep.period,
                 };
@@ -302,10 +250,6 @@ impl CudaEri {
                 };
                 let cuda = crate::cuda::moving_averages::wma_wrapper::CudaWma::new(0)
                     .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
-                Some(
-                    cuda.wma_batch_dev(source, &range)
-                        .map_err(|e| CudaEriError::Cuda(e.to_string()))?,
-                )
                 let range = crate::indicators::moving_averages::wma::WmaBatchRange {
                     period: sweep.period,
                 };
@@ -491,43 +435,15 @@ impl CudaEri {
                         .launch(&func, grid, block, 0, &mut args)
                         .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
                 }
-                combos.push(EriParams {
-                    period: Some(p),
-                    ma_type: Some(sweep.ma_type.clone()),
-                });
-                combos.push(EriParams {
-                    period: Some(p),
-                    ma_type: Some(sweep.ma_type.clone()),
-                });
+                combos.push(EriParams { period: Some(p), ma_type: Some(sweep.ma_type.clone()) });
             }
         }
 
         self.stream
             .synchronize()
             .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
-        let bull = DeviceArrayF32 {
-            buf: d_bull,
-            rows: periods.len(),
-            cols: len,
-        };
-        let bear = DeviceArrayF32 {
-            buf: d_bear,
-            rows: periods.len(),
-            cols: len,
-        };
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
-        let bull = DeviceArrayF32 {
-            buf: d_bull,
-            rows: periods.len(),
-            cols: len,
-        };
-        let bear = DeviceArrayF32 {
-            buf: d_bear,
-            rows: periods.len(),
-            cols: len,
-        };
+        let bull = DeviceArrayF32 { buf: d_bull, rows: periods.len(), cols: len };
+        let bear = DeviceArrayF32 { buf: d_bear, rows: periods.len(), cols: len };
         Ok(((bull, bear), combos))
     }
 
@@ -542,13 +458,6 @@ impl CudaEri {
         period: usize,
         ma_type: &str,
     ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaEriError> {
-        if cols == 0 || rows == 0 {
-            return Err(CudaEriError::InvalidInput("empty matrix".into()));
-        }
-        if high_tm.len() != cols * rows
-            || low_tm.len() != cols * rows
-            || source_tm.len() != cols * rows
-        {
         if cols == 0 || rows == 0 {
             return Err(CudaEriError::InvalidInput("empty matrix".into()));
         }
@@ -684,37 +593,13 @@ impl CudaEri {
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
         }
 
         self.stream
             .synchronize()
             .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
-        let bull = DeviceArrayF32 {
-            buf: d_bull,
-            rows,
-            cols,
-        };
-        let bear = DeviceArrayF32 {
-            buf: d_bear,
-            rows,
-            cols,
-        };
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
-        let bull = DeviceArrayF32 {
-            buf: d_bull,
-            rows,
-            cols,
-        };
-        let bear = DeviceArrayF32 {
-            buf: d_bear,
-            rows,
-            cols,
-        };
+        let bull = DeviceArrayF32 { buf: d_bull, rows, cols };
+        let bear = DeviceArrayF32 { buf: d_bear, rows, cols };
         Ok((bull, bear))
     }
 
@@ -731,14 +616,9 @@ impl CudaEri {
         // Map common MA types; extend as needed.
         match t.as_str() {
             "ema" => {
-                let params = crate::indicators::moving_averages::ema::EmaParams {
-                    period: Some(period),
-                };
                 let cuda = crate::cuda::moving_averages::ema_wrapper::CudaEma::new(0)
                     .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
-                let params = crate::indicators::moving_averages::ema::EmaParams {
-                    period: Some(period),
-                };
+                let params = crate::indicators::moving_averages::ema::EmaParams { period: Some(period) };
                 let cuda = crate::cuda::moving_averages::ema_wrapper::CudaEma::new(0)
                     .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
                 cuda.ema_many_series_one_param_time_major_dev(source_tm, cols, rows, &params)
@@ -752,22 +632,10 @@ impl CudaEri {
                     .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
                 let dev = cuda
                     .sma_multi_series_one_param_time_major_dev(source_tm, cols, rows, &params)
-                let params = crate::indicators::moving_averages::sma::SmaParams {
-                    period: Some(period),
-                };
-                let cuda = crate::cuda::moving_averages::sma_wrapper::CudaSma::new(0)
-                    .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
-                let dev = cuda
-                    .sma_multi_series_one_param_time_major_dev(source_tm, cols, rows, &params)
                     .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
                 Ok(dev)
             }
             "wma" => {
-                let params = crate::indicators::moving_averages::wma::WmaParams {
-                    period: Some(period),
-                };
-                let cuda = crate::cuda::moving_averages::wma_wrapper::CudaWma::new(0)
-                    .map_err(|e| CudaEriError::Cuda(e.to_string()))?;
                 let params = crate::indicators::moving_averages::wma::WmaParams {
                     period: Some(period),
                 };
@@ -839,48 +707,7 @@ pub mod benches {
                 .unwrap();
         }
     }
-    struct BatchState {
-        cuda: CudaEri,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: EriBatchRange,
-    }
-    impl CudaBenchState for BatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .eri_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .unwrap();
-        }
-    }
 
-    struct ManySeriesState {
-        cuda: CudaEri,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
-        cols: usize,
-        rows: usize,
-        period: usize,
-        ma_type: &'static str,
-    }
-    impl CudaBenchState for ManySeriesState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .eri_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
-                    self.cols,
-                    self.rows,
-                    self.period,
-                    self.ma_type,
-                )
-                .unwrap();
-        }
-    }
     struct ManySeriesState {
         cuda: CudaEri,
         high_tm: Vec<f32>,
@@ -923,33 +750,14 @@ pub mod benches {
             close,
             sweep,
         })
-        let sweep = EriBatchRange {
-            period: (8, 64, 8),
-            ma_type: "ema".to_string(),
-        };
-        Box::new(BatchState {
-            cuda,
-            high,
-            low,
-            close,
-            sweep,
-        })
     }
 
     fn prep_many() -> Box<dyn CudaBenchState> {
         let cuda = CudaEri::new(0).expect("cuda eri");
         let cols = COLS_512;
         let rows = ROWS_16K;
-        let cols = COLS_512;
-        let rows = ROWS_16K;
         let close_tm = {
             let mut v = vec![f32::NAN; cols * rows];
-            for s in 0..cols {
-                for t in s..rows {
-                    let x = (t as f32) + (s as f32) * 0.2;
-                    v[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
-                }
-            }
             for s in 0..cols {
                 for t in s..rows {
                     let x = (t as f32) + (s as f32) * 0.2;
@@ -961,44 +769,16 @@ pub mod benches {
         let (high_tm, low_tm) = synth_hl_from_close(&close_tm);
         let period = 14usize;
         let ma_type = "ema";
-        Box::new(ManySeriesState {
-            cuda,
-            high_tm,
-            low_tm,
-            close_tm,
-            cols,
-            rows,
-            period,
-            ma_type,
-        })
-        let period = 14usize;
-        let ma_type = "ema";
-        Box::new(ManySeriesState {
-            cuda,
-            high_tm,
-            low_tm,
-            close_tm,
-            cols,
-            rows,
-            period,
-            ma_type,
-        })
+        Box::new(ManySeriesState { cuda, high_tm, low_tm, close_tm, cols, rows, period, ma_type })
     }
 
-    fn bytes_batch() -> usize {
-        (3 * LEN_1M + 2 * ((64 - 8) / 8 + 1) * LEN_1M) * std::mem::size_of::<f32>()
-            + 64 * 1024 * 1024
-    }
+    
     fn bytes_many() -> usize {
         (3 * COLS_512 * ROWS_16K + COLS_512 + 2 * COLS_512 * ROWS_16K) * std::mem::size_of::<f32>()
             + 64 * 1024 * 1024
     }
     fn bytes_batch() -> usize {
         (3 * LEN_1M + 2 * ((64 - 8) / 8 + 1) * LEN_1M) * std::mem::size_of::<f32>()
-            + 64 * 1024 * 1024
-    }
-    fn bytes_many() -> usize {
-        (3 * COLS_512 * ROWS_16K + COLS_512 + 2 * COLS_512 * ROWS_16K) * std::mem::size_of::<f32>()
             + 64 * 1024 * 1024
     }
 
@@ -1006,14 +786,7 @@ pub mod benches {
         vec![
             CudaBenchScenario::new("eri", "batch", "eri_cuda_batch", "1m", prep_batch)
                 .with_mem_required(bytes_batch()),
-            CudaBenchScenario::new(
-                "eri",
-                "many_series_one_param",
-                "eri_cuda_many_series",
-                "16k x 512",
-                prep_many,
-            )
-            .with_mem_required(bytes_many()),
+            
             CudaBenchScenario::new(
                 "eri",
                 "many_series_one_param",

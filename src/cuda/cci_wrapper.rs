@@ -133,14 +133,8 @@ impl CudaCci {
         if !Self::mem_check_enabled() {
             return true;
         }
-        if !Self::mem_check_enabled() {
-            return true;
-        }
         if let Ok((free, _)) = cust::memory::mem_get_info() {
             required_bytes.saturating_add(headroom) <= free
-        } else {
-            true
-        }
         } else {
             true
         }
@@ -149,19 +143,10 @@ impl CudaCci {
     fn expand_periods(range: &CciBatchRange) -> Vec<CciParams> {
         let (start, end, step) = range.period;
         if step == 0 || start == end {
-            return vec![CciParams {
-                period: Some(start),
-            }];
-            return vec![CciParams {
-                period: Some(start),
-            }];
+            return vec![CciParams { period: Some(start) }];
         }
         let mut v = Vec::new();
         let mut p = start;
-        while p <= end {
-            v.push(CciParams { period: Some(p) });
-            p = p.saturating_add(step);
-        }
         while p <= end {
             v.push(CciParams { period: Some(p) });
             p = p.saturating_add(step);
@@ -187,21 +172,9 @@ impl CudaCci {
             return Err(CudaCciError::InvalidInput(
                 "no parameter combinations".into(),
             ));
-            return Err(CudaCciError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
         }
         for c in &combos {
             let p = c.period.unwrap_or(0);
-            if p == 0 {
-                return Err(CudaCciError::InvalidInput("period must be >=1".into()));
-            }
-            if p > len {
-                return Err(CudaCciError::InvalidInput(format!(
-                    "period {} > len {}",
-                    p, len
-                )));
-            }
             if p == 0 {
                 return Err(CudaCciError::InvalidInput("period must be >=1".into()));
             }
@@ -390,16 +363,7 @@ impl CudaCci {
                     "[cci] batch kernel: Plain, block_x=auto, chunked={} rows",
                     rows
                 );
-                eprintln!(
-                    "[cci] batch kernel: Plain, block_x=auto, chunked={} rows",
-                    rows
-                );
             }
-            Ok(DeviceArrayF32 {
-                buf: d_out,
-                rows,
-                cols: len,
-            })
             Ok(DeviceArrayF32 {
                 buf: d_out,
                 rows,
@@ -441,16 +405,7 @@ impl CudaCci {
                     "[cci] batch kernel: Plain, block_x=auto, chunked={} rows",
                     rows
                 );
-                eprintln!(
-                    "[cci] batch kernel: Plain, block_x=auto, chunked={} rows",
-                    rows
-                );
             }
-            Ok(DeviceArrayF32 {
-                buf: d_out,
-                rows,
-                cols: len,
-            })
             Ok(DeviceArrayF32 {
                 buf: d_out,
                 rows,
@@ -469,9 +424,6 @@ impl CudaCci {
             return Err(CudaCciError::InvalidInput(
                 "time-major buffer shape mismatch".into(),
             ));
-            return Err(CudaCciError::InvalidInput(
-                "time-major buffer shape mismatch".into(),
-            ));
         }
         if period == 0 || period > rows {
             return Err(CudaCciError::InvalidInput("invalid period".into()));
@@ -484,13 +436,7 @@ impl CudaCci {
                     fv = Some(r);
                     break;
                 }
-                if !data_tm_f32[r * cols + s].is_nan() {
-                    fv = Some(r);
-                    break;
-                }
             }
-            let fv =
-                fv.ok_or_else(|| CudaCciError::InvalidInput(format!("series {} all NaN", s)))?;
             let fv =
                 fv.ok_or_else(|| CudaCciError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv < period {
@@ -604,16 +550,7 @@ impl CudaCci {
             self.stream
                 .synchronize()
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
-            Ok(DeviceArrayF32 {
-                buf: d_out,
-                rows,
-                cols,
-            })
-            Ok(DeviceArrayF32 {
-                buf: d_out,
-                rows,
-                cols,
-            })
+            Ok(DeviceArrayF32 { buf: d_out, rows, cols })
         } else {
             let d_prices = DeviceBuffer::from_slice(data_tm_f32)
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
@@ -622,16 +559,7 @@ impl CudaCci {
             let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
                 .map_err(|e| CudaCciError::Cuda(e.to_string()))?;
             self.launch_many_series_kernel(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
-            Ok(DeviceArrayF32 {
-                buf: d_out,
-                rows,
-                cols,
-            })
-            Ok(DeviceArrayF32 {
-                buf: d_out,
-                rows,
-                cols,
-            })
+            Ok(DeviceArrayF32 { buf: d_out, rows, cols })
         }
     }
 }

@@ -17,11 +17,10 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::cuda::moving_averages::{CudaEma, CudaSma};
 use crate::indicators::moving_averages::ema::{EmaBatchRange, EmaParams};
-use crate::cuda::moving_averages::{CudaEma, CudaSma};
-use crate::indicators::moving_averages::ema::{EmaBatchRange, EmaParams};
+// (deduped)
 use crate::indicators::moving_averages::sma::{SmaBatchRange, SmaParams};
 use crate::indicators::ppo::{PpoBatchRange, PpoParams};
-use crate::indicators::ppo::{PpoBatchRange, PpoParams};
+// (deduped)
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
@@ -56,19 +55,12 @@ pub enum BatchKernelPolicy {
     OneD {
         block_x: u32,
     },
-    OneD {
-        block_x: u32,
-    },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
     /// 2D grid (x=time, y=series) for SMA; EMA uses 1 thread along x per series
-    Tiled2D {
-        tx: u32,
-        ty: u32,
-    },
     Tiled2D {
         tx: u32,
         ty: u32,
@@ -125,20 +117,8 @@ impl CudaPpo {
             _context: context,
             policy: CudaPpoPolicy::default(),
         })
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-            policy: CudaPpoPolicy::default(),
-        })
     }
 
-    pub fn set_policy(&mut self, p: CudaPpoPolicy) {
-        self.policy = p;
-    }
-    pub fn policy(&self) -> &CudaPpoPolicy {
-        &self.policy
-    }
     pub fn set_policy(&mut self, p: CudaPpoPolicy) {
         self.policy = p;
     }
@@ -344,13 +324,9 @@ impl CudaPpo {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => {
                 if ma_mode == 0 {
                     // SMA: time-parallel
-                if ma_mode == 0 {
-                    // SMA: time-parallel
                     let bx = block_x;
                     let gx = ((len as u32) + bx - 1) / bx;
                     ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
-                } else {
-                    // EMA: one block per combo; let thread 0 run
                 } else {
                     // EMA: one block per combo; let thread 0 run
                     ((1, 1, 1).into(), (block_x, 1, 1).into())
@@ -833,15 +809,9 @@ fn axis_vals(start: usize, end: usize, step: usize) -> Vec<usize> {
     if step == 0 || start == end {
         return vec![start];
     }
-    if step == 0 || start == end {
-        return vec![start];
-    }
     (start..=end).step_by(step).collect()
 }
 #[inline]
-fn axis_len(start: usize, end: usize, step: usize) -> usize {
-    axis_vals(start, end, step).len()
-}
 fn axis_len(start: usize, end: usize, step: usize) -> usize {
     axis_vals(start, end, step).len()
 }
@@ -862,19 +832,11 @@ pub mod benches {
             let x = i as f32;
             v[i] = (x * 0.00123).sin() + 0.00011 * x;
         }
-        for i in 10..n {
-            let x = i as f32;
-            v[i] = (x * 0.00123).sin() + 0.00011 * x;
-        }
         v
     }
     fn gen_tm(cols: usize, rows: usize) -> Vec<f32> {
         let mut v = vec![f32::NAN; cols * rows];
         for s in 0..cols {
-            for t in (s % 11)..rows {
-                let x = (t as f32) + (s as f32) * 0.37;
-                v[t * cols + s] = (x * 0.0019).sin() + 0.00021 * x;
-            }
             for t in (s % 11)..rows {
                 let x = (t as f32) + (s as f32) * 0.37;
                 v[t * cols + s] = (x * 0.0019).sin() + 0.00021 * x;
@@ -887,27 +849,12 @@ pub mod benches {
         let len = SERIES_LEN;
         let combos = PARAM_SWEEP * PARAM_SWEEP; // fast×slow grid
         len * 4 + (len + 1) * 8 + combos * 2 * 4 + combos * len * 4 + 64 * 1024 * 1024
-        let len = SERIES_LEN;
-        let combos = PARAM_SWEEP * PARAM_SWEEP; // fast×slow grid
-        len * 4 + (len + 1) * 8 + combos * 2 * 4 + combos * len * 4 + 64 * 1024 * 1024
     }
     fn bytes_many_series_one() -> usize {
         let elems = MANY_COLS * MANY_ROWS;
         elems * 4 + (elems + 1) * 8 + MANY_COLS * 4 + elems * 4 + 64 * 1024 * 1024
-        let elems = MANY_COLS * MANY_ROWS;
-        elems * 4 + (elems + 1) * 8 + MANY_COLS * 4 + elems * 4 + 64 * 1024 * 1024
     }
 
-    struct BatchState {
-        cuda: CudaPpo,
-        data: Vec<f32>,
-        sweep: PpoBatchRange,
-    }
-    impl CudaBenchState for BatchState {
-        fn launch(&mut self) {
-            let _ = self.cuda.ppo_batch_dev(&self.data, &self.sweep).unwrap();
-        }
-    }
     struct BatchState {
         cuda: CudaPpo,
         data: Vec<f32>,
@@ -928,37 +875,8 @@ pub mod benches {
                 ma_type: "sma".into(),
             },
         })
-        Box::new(BatchState {
-            cuda: CudaPpo::new(0).unwrap(),
-            data: gen_prices(SERIES_LEN),
-            sweep: PpoBatchRange {
-                fast_period: (10, 10 + PARAM_SWEEP - 1, 1),
-                slow_period: (20, 20 + PARAM_SWEEP - 1, 1),
-                ma_type: "sma".into(),
-            },
-        })
     }
     fn prep_many_series_ema() -> Box<dyn CudaBenchState> {
-        struct St {
-            cuda: CudaPpo,
-            data_tm: Vec<f32>,
-            cols: usize,
-            rows: usize,
-            params: PpoParams,
-        }
-        impl CudaBenchState for St {
-            fn launch(&mut self) {
-                let _ = self
-                    .cuda
-                    .ppo_many_series_one_param_time_major_dev(
-                        &self.data_tm,
-                        self.cols,
-                        self.rows,
-                        &self.params,
-                    )
-                    .unwrap();
-            }
-        }
         struct St {
             cuda: CudaPpo,
             data_tm: Vec<f32>,
@@ -995,43 +913,10 @@ pub mod benches {
             rows,
             params,
         })
-        let cols = MANY_COLS;
-        let rows = MANY_ROWS;
-        let data_tm = gen_tm(cols, rows);
-        let params = PpoParams {
-            fast_period: Some(12),
-            slow_period: Some(26),
-            ma_type: Some("ema".into()),
-        };
-        Box::new(St {
-            cuda,
-            data_tm,
-            cols,
-            rows,
-            params,
-        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new(
-                "ppo",
-                "one_series_many_params",
-                "ppo_cuda_batch_dev",
-                "1m_x_250",
-                prep_batch_sma,
-            )
-            .with_sample_size(10)
-            .with_mem_required(bytes_one_series_many()),
-            CudaBenchScenario::new(
-                "ppo",
-                "many_series_one_param",
-                "ppo_cuda_many_series_one_param",
-                "250x1m",
-                prep_many_series_ema,
-            )
-            .with_sample_size(5)
-            .with_mem_required(bytes_many_series_one()),
             CudaBenchScenario::new(
                 "ppo",
                 "one_series_many_params",

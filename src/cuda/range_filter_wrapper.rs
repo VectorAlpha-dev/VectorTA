@@ -53,10 +53,6 @@ impl DeviceRangeFilterTrio {
     pub fn len(&self) -> usize {
         self.rows * self.cols
     }
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.rows * self.cols
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -69,26 +65,8 @@ impl Default for BatchKernelPolicy {
         BatchKernelPolicy::Auto
     }
 }
-pub enum BatchKernelPolicy {
-    Auto,
-    Plain { block_x: u32 },
-}
-impl Default for BatchKernelPolicy {
-    fn default() -> Self {
-        BatchKernelPolicy::Auto
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelPolicy {
-    Auto,
-    OneD { block_x: u32 },
-}
-impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self {
-        ManySeriesKernelPolicy::Auto
-    }
-}
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
@@ -154,24 +132,15 @@ impl CudaRangeFilter {
     pub fn set_policy(&mut self, p: CudaRangeFilterPolicy) {
         self.policy = p;
     }
-    pub fn set_policy(&mut self, p: CudaRangeFilterPolicy) {
-        self.policy = p;
-    }
     pub fn synchronize(&self) -> Result<(), CudaRangeFilterError> {
         self.stream
             .synchronize()
-            .map_err(|e| CudaRangeFilterError::Cuda(e.to_string()))
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRangeFilterError::Cuda(e.to_string()))
+            .map_err(|e| CudaRangeFilterError::Cuda(e.to_string()))?;
+        Ok(())
     }
 
     #[inline]
     fn headroom_bytes() -> usize {
-        env::var("CUDA_MEM_HEADROOM")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(64 * 1024 * 1024)
         env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -183,21 +152,9 @@ impl CudaRangeFilter {
             Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
             Err(_) => true,
         }
-        match env::var("CUDA_MEM_CHECK") {
-            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
-            Err(_) => true,
-        }
     }
     #[inline]
     fn will_fit(bytes: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if let Ok((free, _)) = mem_get_info() {
-            bytes.saturating_add(headroom) <= free
-        } else {
-            true
-        }
         if !Self::mem_check_enabled() {
             return true;
         }
@@ -245,13 +202,7 @@ impl CudaRangeFilter {
         if data_f32.is_empty() {
             return Err(CudaRangeFilterError::InvalidInput("empty data".into()));
         }
-        if data_f32.is_empty() {
-            return Err(CudaRangeFilterError::InvalidInput("empty data".into()));
-        }
         let len = data_f32.len();
-        let first_valid = data_f32
-            .iter()
-            .position(|v| v.is_finite())
         let first_valid = data_f32
             .iter()
             .position(|v| v.is_finite())
@@ -263,26 +214,8 @@ impl CudaRangeFilter {
                 "no parameter combinations".into(),
             ));
         }
-        if combos.is_empty() {
-            return Err(CudaRangeFilterError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
-
+        
         // Validate periods and warmup coverage like scalar
-        let max_needed = combos
-            .iter()
-            .map(|c| {
-                let rp = c.range_period.unwrap_or(14);
-                let sp = if c.smooth_range.unwrap_or(true) {
-                    c.smooth_period.unwrap_or(27)
-                } else {
-                    0
-                };
-                rp.max(sp)
-            })
-            .max()
-            .unwrap_or(0);
         let max_needed = combos
             .iter()
             .map(|c| {
@@ -309,9 +242,6 @@ impl CudaRangeFilter {
                 return Err(CudaRangeFilterError::InvalidInput(
                     "invalid range_size".into(),
                 ));
-                return Err(CudaRangeFilterError::InvalidInput(
-                    "invalid range_size".into(),
-                ));
             }
             let rp = p.range_period.unwrap_or(14);
             if rp == 0 || rp > len {
@@ -319,18 +249,8 @@ impl CudaRangeFilter {
                     "invalid range_period".into(),
                 ));
             }
-            if rp == 0 || rp > len {
-                return Err(CudaRangeFilterError::InvalidInput(
-                    "invalid range_period".into(),
-                ));
-            }
             let sr = p.smooth_range.unwrap_or(true);
             let sp = p.smooth_period.unwrap_or(27);
-            if sr && (sp == 0 || sp > len) {
-                return Err(CudaRangeFilterError::InvalidInput(
-                    "invalid smooth_period".into(),
-                ));
-            }
             if sr && (sp == 0 || sp > len) {
                 return Err(CudaRangeFilterError::InvalidInput(
                     "invalid smooth_period".into(),
@@ -345,9 +265,6 @@ impl CudaRangeFilter {
         let out_bytes = 3 * rows * len * std::mem::size_of::<f32>();
         let required = in_bytes + params_bytes + out_bytes;
         if !Self::will_fit(required, Self::headroom_bytes()) {
-            return Err(CudaRangeFilterError::InvalidInput(
-                "insufficient device memory for range_filter batch".into(),
-            ));
             return Err(CudaRangeFilterError::InvalidInput(
                 "insufficient device memory for range_filter batch".into(),
             ));
@@ -465,16 +382,6 @@ impl CudaRangeFilter {
             },
             combos,
         ))
-        Ok((
-            DeviceRangeFilterTrio {
-                filter: d_f,
-                high: d_h,
-                low: d_l,
-                rows,
-                cols: len,
-            },
-            combos,
-        ))
     }
 
     // ------------- Many series × one param (time‑major) -------------
@@ -488,23 +395,12 @@ impl CudaRangeFilter {
         if rows == 0 || cols == 0 {
             return Err(CudaRangeFilterError::InvalidInput("empty dims".into()));
         }
-        if rows == 0 || cols == 0 {
-            return Err(CudaRangeFilterError::InvalidInput("empty dims".into()));
-        }
         if data_tm_f32.len() != rows * cols {
-            return Err(CudaRangeFilterError::InvalidInput(
-                "time-major input must be rows*cols".into(),
-            ));
             return Err(CudaRangeFilterError::InvalidInput(
                 "time-major input must be rows*cols".into(),
             ));
         }
         let rs_f64 = params.range_size.unwrap_or(2.618);
-        if !rs_f64.is_finite() || rs_f64 <= 0.0 {
-            return Err(CudaRangeFilterError::InvalidInput(
-                "invalid range_size".into(),
-            ));
-        }
         if !rs_f64.is_finite() || rs_f64 <= 0.0 {
             return Err(CudaRangeFilterError::InvalidInput(
                 "invalid range_size".into(),
@@ -517,19 +413,12 @@ impl CudaRangeFilter {
         if rp <= 0 || (sr && sp <= 0) {
             return Err(CudaRangeFilterError::InvalidInput("invalid period".into()));
         }
-        if rp <= 0 || (sr && sp <= 0) {
-            return Err(CudaRangeFilterError::InvalidInput("invalid period".into()));
-        }
-
+        
         // first_valid per series (column) scanning time-major layout
         let mut first_valids = vec![cols as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
                 let idx = t * cols + s;
-                if data_tm_f32[idx].is_finite() {
-                    first_valids[s] = t as i32;
-                    break;
-                }
                 if data_tm_f32[idx].is_finite() {
                     first_valids[s] = t as i32;
                     break;
@@ -544,15 +433,8 @@ impl CudaRangeFilter {
             return Err(CudaRangeFilterError::InvalidInput(
                 "insufficient device memory".into(),
             ));
-            return Err(CudaRangeFilterError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
         }
 
-        let d_data = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaRangeFilterError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaRangeFilterError::Cuda(e.to_string()))?;
         let d_data = DeviceBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaRangeFilterError::Cuda(e.to_string()))?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
@@ -567,14 +449,7 @@ impl CudaRangeFilter {
         let func = self
             .module
             .get_function("range_filter_many_series_one_param_f32")
-        let func = self
-            .module
-            .get_function("range_filter_many_series_one_param_f32")
             .map_err(|e| CudaRangeFilterError::Cuda(e.to_string()))?;
-        let block_x = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
-            _ => 1,
-        };
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
             _ => 1,
@@ -609,24 +484,12 @@ impl CudaRangeFilter {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-            self.stream
-                .launch(&func, grid, block, 0, args)
                 .map_err(|e| CudaRangeFilterError::Cuda(e.to_string()))?;
         }
         self.stream
             .synchronize()
             .map_err(|e| CudaRangeFilterError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRangeFilterError::Cuda(e.to_string()))?;
 
-        Ok(DeviceRangeFilterTrio {
-            filter: d_f,
-            high: d_h,
-            low: d_l,
-            rows,
-            cols,
-        })
         Ok(DeviceRangeFilterTrio {
             filter: d_f,
             high: d_h,
@@ -697,28 +560,11 @@ pub mod benches {
             let _ = &self.cuda;
         }
     }
-    struct RfBatchState {
-        cuda: CudaRangeFilter,
-    }
-    impl CudaBenchState for RfBatchState {
-        fn launch(&mut self) {
-            let _ = &self.cuda;
-        }
-    }
 
     fn prep_rf_batch() -> Box<dyn CudaBenchState> {
         let len = 120_000usize;
         let mut data = vec![f32::NAN; len];
-        for i in 5..len {
-            let x = i as f32;
-            data[i] = (x * 0.0021).sin() + 0.00021 * x;
-        }
-        let sweep = RangeFilterBatchRange {
-            range_size: (2.0, 4.0, 0.2),
-            range_period: (8, 64, 8),
-            smooth_range: Some(true),
-            smooth_period: Some(27),
-        };
+        
         for i in 5..len {
             let x = i as f32;
             data[i] = (x * 0.0021).sin() + 0.00021 * x;
@@ -734,14 +580,6 @@ pub mod benches {
         Box::new(RfBatchState { cuda })
     }
 
-    struct RfManySeriesState {
-        cuda: CudaRangeFilter,
-    }
-    impl CudaBenchState for RfManySeriesState {
-        fn launch(&mut self) {
-            let _ = &self.cuda;
-        }
-    }
     struct RfManySeriesState {
         cuda: CudaRangeFilter,
     }

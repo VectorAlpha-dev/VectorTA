@@ -47,21 +47,11 @@ impl Default for BatchKernelPolicy {
         BatchKernelPolicy::Auto
     }
 }
-impl Default for BatchKernelPolicy {
-    fn default() -> Self {
-        BatchKernelPolicy::Auto
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
-}
-impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self {
-        ManySeriesKernelPolicy::Auto
-    }
 }
 impl Default for ManySeriesKernelPolicy {
     fn default() -> Self {
@@ -79,13 +69,7 @@ pub struct CudaDecOscPolicy {
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
-pub enum BatchKernelSelected {
-    Plain { block_x: u32 },
-}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected {
-    OneD { block_x: u32 },
-}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -104,8 +88,6 @@ pub struct CudaDecOsc {
 impl CudaDecOsc {
     pub fn new(device_id: usize) -> Result<Self, CudaDecOscError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
         let device = Device::get_device(device_id as u32)
             .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
@@ -133,74 +115,34 @@ impl CudaDecOsc {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaDecOscPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaDecOscPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
-    pub fn set_policy(&mut self, policy: CudaDecOscPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaDecOscPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
+    pub fn set_policy(&mut self, policy: CudaDecOscPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaDecOscPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if self.debug_batch_logged {
-            return;
-        }
-        if self.debug_batch_logged {
-            return;
-        }
+        if self.debug_batch_logged { return; }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!("[DEBUG] dec_osc batch selected kernel: {:?}", sel);
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaDecOsc)).debug_batch_logged = true;
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaDecOsc)).debug_batch_logged = true;
-                }
+                unsafe { (*(self as *const _ as *mut CudaDecOsc)).debug_batch_logged = true; }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if self.debug_many_logged {
-            return;
-        }
-        if self.debug_many_logged {
-            return;
-        }
+        if self.debug_many_logged { return; }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!("[DEBUG] dec_osc many-series selected kernel: {:?}", sel);
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaDecOsc)).debug_many_logged = true;
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaDecOsc)).debug_many_logged = true;
-                }
+                unsafe { (*(self as *const _ as *mut CudaDecOsc)).debug_many_logged = true; }
             }
         }
     }
@@ -241,10 +183,6 @@ impl CudaDecOsc {
                 v.push(x);
                 x = x.saturating_add(st);
             }
-            while x <= e {
-                v.push(x);
-                x = x.saturating_add(st);
-            }
             v
         }
         fn axis_f64(a: (f64, f64, f64)) -> Vec<f64> {
@@ -258,10 +196,6 @@ impl CudaDecOsc {
                 v.push(x);
                 x += st;
             }
-            while x <= e + 1e-12 {
-                v.push(x);
-                x += st;
-            }
             v
         }
         let periods = axis_usize(range.hp_period);
@@ -269,14 +203,7 @@ impl CudaDecOsc {
         let mut out = Vec::with_capacity(periods.len() * ks.len());
         for &p in &periods {
             for &k in &ks {
-                out.push(DecOscParams {
-                    hp_period: Some(p),
-                    k: Some(k),
-                });
-                out.push(DecOscParams {
-                    hp_period: Some(p),
-                    k: Some(k),
-                });
+                out.push(DecOscParams { hp_period: Some(p), k: Some(k) });
             }
         }
         out
@@ -297,9 +224,6 @@ impl CudaDecOsc {
 
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaDecOscError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
             return Err(CudaDecOscError::InvalidInput(
                 "no parameter combinations".into(),
             ));
@@ -444,9 +368,6 @@ impl CudaDecOsc {
         let mut d_out =
             unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }
                 .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
-        let mut d_out =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }
-                .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
         unsafe {
             d_prices
                 .async_copy_from(&h_prices, &self.stream)
@@ -454,8 +375,8 @@ impl CudaDecOsc {
             d_periods
                 .async_copy_from(&h_periods, &self.stream)
                 .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
-            d_ks.async_copy_from(&h_ks, &self.stream)
-            d_ks.async_copy_from(&h_ks, &self.stream)
+            d_ks
+                .async_copy_from(&h_ks, &self.stream)
                 .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
         }
 
@@ -496,16 +417,7 @@ impl CudaDecOsc {
             .synchronize()
             .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols: len,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols: len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols: len })
     }
 
     fn prepare_many_series(
@@ -518,9 +430,6 @@ impl CudaDecOsc {
             return Err(CudaDecOscError::InvalidInput("cols or rows is zero".into()));
         }
         if data_tm_f32.len() != cols * rows {
-            return Err(CudaDecOscError::InvalidInput(
-                "time-major shape mismatch".into(),
-            ));
             return Err(CudaDecOscError::InvalidInput(
                 "time-major shape mismatch".into(),
             ));
@@ -542,13 +451,7 @@ impl CudaDecOsc {
                     fv = Some(t);
                     break;
                 }
-                if !v.is_nan() {
-                    fv = Some(t);
-                    break;
-                }
             }
-            let fv =
-                fv.ok_or_else(|| CudaDecOscError::InvalidInput(format!("series {} all NaN", s)))?;
             let fv =
                 fv.ok_or_else(|| CudaDecOscError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv < 2 {
@@ -586,10 +489,6 @@ impl CudaDecOsc {
             ManySeriesKernelPolicy::Auto => suggested_block_x.max(128),
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
         };
-        unsafe {
-            (*(self as *const _ as *mut CudaDecOsc)).last_many =
-                Some(ManySeriesKernelSelected::OneD { block_x });
-        }
         unsafe {
             (*(self as *const _ as *mut CudaDecOsc)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -674,16 +573,7 @@ impl CudaDecOsc {
             .synchronize()
             .map_err(|e| CudaDecOscError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 }
 
@@ -702,10 +592,6 @@ pub mod benches {
         crate::indicators::dec_osc::DecOscBatchRange {
             hp_period: (50, 50 + PARAM_SWEEP - 1, 1),
             k: (1.0, 1.0, 0.0)
-        },
-        crate::indicators::dec_osc::DecOscParams {
-            hp_period: Some(125),
-            k: Some(1.0)
         },
         crate::indicators::dec_osc::DecOscParams {
             hp_period: Some(125),

@@ -49,10 +49,6 @@ impl Default for CudaRviPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
     }
 }
 
@@ -85,8 +81,6 @@ impl CudaRvi {
         cust::init(CudaFlags::empty()).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/rvi_kernel.ptx"));
         let jit = &[
@@ -107,27 +101,8 @@ impl CudaRvi {
             debug_batch_logged: false,
             debug_many_logged: false,
         })
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-            policy: CudaRviPolicy::default(),
-            debug_batch_logged: false,
-            debug_many_logged: false,
-        })
     }
 
-    pub fn set_policy(&mut self, policy: CudaRviPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaRviPolicy {
-        &self.policy
-    }
-    pub fn synchronize(&self) -> Result<(), CudaRviError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaRviError::Cuda(e.to_string()))
-    }
     pub fn set_policy(&mut self, policy: CudaRviPolicy) {
         self.policy = policy;
     }
@@ -146,10 +121,6 @@ impl CudaRvi {
             Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
             Err(_) => true,
         }
-        match mem_get_info() {
-            Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
-            Err(_) => true,
-        }
     }
 
     #[inline]
@@ -162,11 +133,6 @@ impl CudaRvi {
     }
 
     fn expand_axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
-        }
         if step == 0 || start == end {
             vec![start]
         } else {
@@ -194,32 +160,9 @@ impl CudaRvi {
                 }
             }
         }
-        let mut out =
-            Vec::with_capacity(periods.len() * ma_lens.len() * matypes.len() * devtypes.len());
-        for &p in &periods {
-            for &m in &ma_lens {
-                for &t in &matypes {
-                    for &d in &devtypes {
-                        out.push(RviParams {
-                            period: Some(p),
-                            ma_len: Some(m),
-                            matype: Some(t),
-                            devtype: Some(d),
-                        });
-                    }
-                }
-            }
-        }
         out
     }
 
-    fn prepare_batch(
-        data: &[f32],
-        sweep: &RviBatchRange,
-    ) -> Result<(Vec<RviParams>, usize, usize, usize, usize), CudaRviError> {
-        if data.is_empty() {
-            return Err(CudaRviError::InvalidInput("empty data".into()));
-        }
     fn prepare_batch(
         data: &[f32],
         sweep: &RviBatchRange,
@@ -231,16 +174,9 @@ impl CudaRvi {
         let first_valid = data
             .iter()
             .position(|v| !v.is_nan())
-        let first_valid = data
-            .iter()
-            .position(|v| !v.is_nan())
             .ok_or_else(|| CudaRviError::InvalidInput("all values are NaN".into()))?;
         let combos = Self::expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaRviError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        
         if combos.is_empty() {
             return Err(CudaRviError::InvalidInput(
                 "no parameter combinations".into(),
@@ -252,9 +188,6 @@ impl CudaRvi {
             return Err(CudaRviError::InvalidInput(
                 "devtype=2 (median abs dev) not supported by CUDA kernel yet".into(),
             ));
-            return Err(CudaRviError::InvalidInput(
-                "devtype=2 (median abs dev) not supported by CUDA kernel yet".into(),
-            ));
         }
 
         let max_period = combos
@@ -270,16 +203,6 @@ impl CudaRvi {
         if max_period == 0 || max_ma_len == 0 {
             return Err(CudaRviError::InvalidInput("invalid period/ma_len".into()));
         }
-        let max_period = combos
-            .iter()
-            .map(|c| c.period.unwrap_or(0))
-            .max()
-            .unwrap_or(0);
-        let max_ma_len = combos
-            .iter()
-            .map(|c| c.ma_len.unwrap_or(0))
-            .max()
-            .unwrap_or(0);
         if max_period == 0 || max_ma_len == 0 {
             return Err(CudaRviError::InvalidInput("invalid period/ma_len".into()));
         }
@@ -287,18 +210,10 @@ impl CudaRvi {
             return Err(CudaRviError::InvalidInput(
                 "not enough valid data for warmup".into(),
             ));
-            return Err(CudaRviError::InvalidInput(
-                "not enough valid data for warmup".into(),
-            ));
         }
         Ok((combos, first_valid, len, max_period, max_ma_len))
     }
 
-    pub fn rvi_batch_dev(
-        &self,
-        data: &[f32],
-        sweep: &RviBatchRange,
-    ) -> Result<(DeviceArrayF32, Vec<RviParams>), CudaRviError> {
     pub fn rvi_batch_dev(
         &self,
         data: &[f32],
@@ -609,8 +524,6 @@ impl CudaRvi {
             ];
             self.stream
                 .launch(&func, grid, block, (shmem_bytes as u32), &mut args)
-            self.stream
-                .launch(&func, grid, block, (shmem_bytes as u32), &mut args)
                 .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
         }
         Ok(())
@@ -725,11 +638,6 @@ impl CudaRvi {
         self.stream
             .synchronize()
             .map_err(|e| CudaRviError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
         self.launch_many_series(
             &d_data, &d_firsts, cols, rows, period, ma_len, matype, devtype, &mut d_out,
         )?;

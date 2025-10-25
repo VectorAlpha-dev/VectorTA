@@ -74,21 +74,10 @@ impl CudaRsx {
             _context: context,
             policy: CudaRsxPolicy::default(),
         })
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-            policy: CudaRsxPolicy::default(),
-        })
     }
 
     #[inline]
-    pub fn set_policy(&mut self, p: CudaRsxPolicy) {
-        self.policy = p;
-    }
-    pub fn set_policy(&mut self, p: CudaRsxPolicy) {
-        self.policy = p;
-    }
+    pub fn set_policy(&mut self, p: CudaRsxPolicy) { self.policy = p; }
 
     // ---------- Batch (one series × many params) ----------
     pub fn rsx_batch_dev(
@@ -135,24 +124,7 @@ impl CudaRsx {
             n_combos,
             &mut d_out,
         )?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: len,
-        })
-        self.launch_batch(
-            &d_prices,
-            &d_periods,
-            len,
-            first_valid,
-            n_combos,
-            &mut d_out,
-        )?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
     }
 
     fn launch_batch(
@@ -255,8 +227,6 @@ impl CudaRsx {
             let n = expected;
             let bytes = (2 * n) * std::mem::size_of::<f32>()
                 + cols * std::mem::size_of::<i32>()
-            let bytes = (2 * n) * std::mem::size_of::<f32>()
-                + cols * std::mem::size_of::<i32>()
                 + 64 * 1024 * 1024;
             if bytes > free {
                 return Err(CudaRsxError::InvalidInput(
@@ -272,16 +242,7 @@ impl CudaRsx {
         };
 
         self.launch_many_series(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 
     fn launch_many_series(
@@ -322,7 +283,8 @@ impl CudaRsx {
         }
         self.stream
             .synchronize()
-            .map_err(|e| CudaRsxError::Cuda(e.to_string()))
+            .map_err(|e| CudaRsxError::Cuda(e.to_string()))?;
+        Ok(())
     }
 
     // ---------- Helpers ----------
@@ -338,12 +300,7 @@ impl CudaRsx {
         let (start, end, step) = sweep.period;
         let mut combos = Vec::new();
         if step == 0 || start == end {
-            combos.push(RsxParams {
-                period: Some(start),
-            });
-            combos.push(RsxParams {
-                period: Some(start),
-            });
+            combos.push(RsxParams { period: Some(start) });
         } else {
             let mut v = start;
             while v <= end {
@@ -416,18 +373,12 @@ pub mod benches {
                 .cuda
                 .rsx_batch_dev(&self.prices, &self.sweep)
                 .expect("rsx batch");
-            let _ = self
-                .cuda
-                .rsx_batch_dev(&self.prices, &self.sweep)
-                .expect("rsx batch");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaRsx::new(0).expect("cuda rsx");
         let mut prices = gen_series(ONE_SERIES_LEN);
-        for i in 0..8 {
-            prices[i] = f32::NAN;
-        }
+        
         for i in 0..8 {
             prices[i] = f32::NAN;
         }
@@ -438,19 +389,7 @@ pub mod benches {
         let sweep = RsxBatchRange {
             period: (2, 1 + PARAM_SWEEP, 1),
         };
-        Box::new(RsxBatchState {
-            cuda,
-            prices,
-            sweep,
-        })
-        let sweep = RsxBatchRange {
-            period: (2, 1 + PARAM_SWEEP, 1),
-        };
-        Box::new(RsxBatchState {
-            cuda,
-            prices,
-            sweep,
-        })
+        Box::new(RsxBatchState { cuda, prices, sweep })
     }
 
     struct RsxManyState {
@@ -477,14 +416,7 @@ pub mod benches {
                 prices[idx] = base[idx] + 0.05 * x.sin();
             }
         }
-        Box::new(RsxManyState {
-            cuda,
-            prices_tm: prices,
-        })
-        Box::new(RsxManyState {
-            cuda,
-            prices_tm: prices,
-        })
+        Box::new(RsxManyState { cuda, prices_tm: prices })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

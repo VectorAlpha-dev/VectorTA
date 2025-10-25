@@ -433,9 +433,6 @@ impl CudaBop {
             .find(|&i| {
                 !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan()
             })
-            .find(|&i| {
-                !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan()
-            })
             .ok_or_else(|| CudaBopError::InvalidInput("all values are NaN".into()))?;
         Ok((first_valid, len))
     }
@@ -479,21 +476,6 @@ pub mod benches {
                 .expect("bop batch");
         }
     }
-    struct BopBatchState {
-        cuda: CudaBop,
-        open: Vec<f32>,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-    }
-    impl CudaBenchState for BopBatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .bop_batch_dev(&self.open, &self.high, &self.low, &self.close)
-                .expect("bop batch");
-        }
-    }
     fn prep_one_series_batch() -> Box<dyn CudaBenchState> {
         let cuda = CudaBop::new(0).expect("cuda bop");
         let mut open = gen_series(ONE_SERIES_LEN);
@@ -514,37 +496,9 @@ pub mod benches {
             low,
             close,
         })
-        Box::new(BopBatchState {
-            cuda,
-            open,
-            high,
-            low,
-            close,
-        })
     }
 
-    struct BopManyState {
-        cuda: CudaBop,
-        open_tm: Vec<f32>,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
-    }
-    impl CudaBenchState for BopManyState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .bop_many_series_one_param_time_major_dev(
-                    &self.open_tm,
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
-                    MANY_COLS,
-                    MANY_ROWS,
-                )
-                .expect("bop many");
-        }
-    }
+    
     struct BopManyState {
         cuda: CudaBop,
         open_tm: Vec<f32>,
@@ -575,24 +529,6 @@ pub mod benches {
         let mut high = vec![f32::NAN; n];
         let mut low = vec![f32::NAN; n];
         let mut close = vec![f32::NAN; n];
-        for s in 0..MANY_COLS {
-            for t in s..MANY_ROWS {
-                let idx = t * MANY_COLS + s;
-                let x = (t as f32) * 0.002 + (s as f32) * 0.01;
-                let b = base[idx];
-                open[idx] = b + 0.001 * x.cos();
-                high[idx] = b + 0.3 + 0.02 * x.sin();
-                low[idx] = b - 0.3 - 0.02 * x.cos();
-                close[idx] = b + 0.05 * x.sin();
-            }
-        }
-        Box::new(BopManyState {
-            cuda,
-            open_tm: open,
-            high_tm: high,
-            low_tm: low,
-            close_tm: close,
-        })
         for s in 0..MANY_COLS {
             for t in s..MANY_ROWS {
                 let idx = t * MANY_COLS + s;

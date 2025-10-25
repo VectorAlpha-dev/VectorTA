@@ -72,18 +72,14 @@ impl CudaSafeZoneStop {
             stream,
             _context: context,
         })
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-        })
     }
 
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaSafeZoneStopError> {
         self.stream
             .synchronize()
-            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))
+            .map_err(|e| CudaSafeZoneStopError::Cuda(e.to_string()))?;
+        Ok(())
     }
 
     #[inline]
@@ -109,9 +105,6 @@ impl CudaSafeZoneStop {
             if h.is_finite() && l.is_finite() {
                 return Some(i);
             }
-            if h.is_finite() && l.is_finite() {
-                return Some(i);
-            }
         }
         None
     }
@@ -121,15 +114,9 @@ impl CudaSafeZoneStop {
             if step == 0 || start == end {
                 return vec![start];
             }
-            if step == 0 || start == end {
-                return vec![start];
-            }
             (start..=end).step_by(step).collect()
         }
         fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-            if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-                return vec![start];
-            }
             if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
                 return vec![start];
             }
@@ -193,27 +180,9 @@ impl CudaSafeZoneStop {
             let up_pos = if up > 0.0 { up } else { 0.0 };
             let dn_pos = if dn > 0.0 { dn } else { 0.0 };
             let v = if dir_long {
-                if dn_pos > up_pos {
-                    dn_pos
-                } else {
-                    0.0
-                }
-                if dn_pos > up_pos {
-                    dn_pos
-                } else {
-                    0.0
-                }
+                if dn_pos > up_pos { dn_pos } else { 0.0 }
             } else {
-                if up_pos > dn_pos {
-                    up_pos
-                } else {
-                    0.0
-                }
-                if up_pos > dn_pos {
-                    up_pos
-                } else {
-                    0.0
-                }
+                if up_pos > dn_pos { up_pos } else { 0.0 }
             };
             dm[i] = v;
             prev_h = h;
@@ -245,15 +214,7 @@ impl CudaSafeZoneStop {
             return Err(CudaSafeZoneStopError::InvalidInput(
                 "empty or mismatched inputs".into(),
             ));
-            return Err(CudaSafeZoneStopError::InvalidInput(
-                "empty or mismatched inputs".into(),
-            ));
         }
-        let dir_long = match direction.as_bytes().get(0) {
-            Some(b'l') => true,
-            Some(b's') => false,
-            _ => true,
-        };
         let dir_long = match direction.as_bytes().get(0) {
             Some(b'l') => true,
             Some(b's') => false,
@@ -264,9 +225,6 @@ impl CudaSafeZoneStop {
 
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaSafeZoneStopError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
             return Err(CudaSafeZoneStopError::InvalidInput(
                 "no parameter combinations".into(),
             ));
@@ -290,23 +248,9 @@ impl CudaSafeZoneStop {
                     "period/lookback exceed length".into(),
                 ));
             }
-            if p == 0 || lb == 0 {
-                return Err(CudaSafeZoneStopError::InvalidInput(
-                    "period/lookback must be > 0".into(),
-                ));
-            }
-            if p > n || lb > n {
-                return Err(CudaSafeZoneStopError::InvalidInput(
-                    "period/lookback exceed length".into(),
-                ));
-            }
             if n - first < (p + 1).max(lb) {
                 return Err(CudaSafeZoneStopError::InvalidInput(format!(
                     "not enough valid data for period={}, lb={} (valid after first={} is {})",
-                    p,
-                    lb,
-                    first,
-                    n - first
                     p,
                     lb,
                     first,
@@ -335,9 +279,6 @@ impl CudaSafeZoneStop {
             bytes += combos.len() * (max_look + 1) * (4 + 4); // q_idx + q_val
         }
         if !Self::will_fit(bytes, headroom) {
-            return Err(CudaSafeZoneStopError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
             return Err(CudaSafeZoneStopError::InvalidInput(
                 "insufficient device memory".into(),
             ));
@@ -448,14 +389,6 @@ impl CudaSafeZoneStop {
             },
             combos,
         ))
-        Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows: combos.len(),
-                cols: n,
-            },
-            combos,
-        ))
     }
 
     /// Many-series × one-param (time-major)
@@ -535,9 +468,6 @@ impl CudaSafeZoneStop {
             if rows - f < (period + 1).max(max_lookback) {
                 return Err(CudaSafeZoneStopError::InvalidInput(format!(
                     "series {} not enough valid data (need >= {}, have {})",
-                    s,
-                    (period + 1).max(max_lookback),
-                    rows - f
                     s,
                     (period + 1).max(max_lookback),
                     rows - f
@@ -649,11 +579,6 @@ impl CudaSafeZoneStop {
             rows,
             cols,
         })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
     }
 }
 
@@ -719,21 +644,6 @@ pub mod benches {
             sweep,
             dir: "long",
         }
-        let sweep = SafeZoneStopBatchRange {
-            period: (10, 22, 6),
-            mult: (1.5, 3.0, 0.75),
-            max_lookback: (3, 5, 1),
-        };
-        BatchState {
-            cuda,
-            high,
-            low,
-            sweep,
-            dir: "long",
-        }
-    }
-    fn prep_batch_box() -> Box<dyn CudaBenchState> {
-        Box::new(prep_batch())
     }
     fn prep_batch_box() -> Box<dyn CudaBenchState> {
         Box::new(prep_batch())
@@ -787,27 +697,6 @@ pub mod benches {
             mult: 2.5,
             lb: 3,
         }
-        for s in 0..cols {
-            for t in s..rows {
-                let x = (t as f32) + (s as f32) * 0.17;
-                let base = (x * 0.001).sin() + 0.0002 * x;
-                high_tm[t * cols + s] = base + 0.5;
-                low_tm[t * cols + s] = base - 0.5;
-            }
-        }
-        ManySeriesState {
-            cuda,
-            high_tm,
-            low_tm,
-            cols,
-            rows,
-            period: 22,
-            mult: 2.5,
-            lb: 3,
-        }
-    }
-    fn prep_many_series_box() -> Box<dyn CudaBenchState> {
-        Box::new(prep_many_series())
     }
     fn prep_many_series_box() -> Box<dyn CudaBenchState> {
         Box::new(prep_many_series())

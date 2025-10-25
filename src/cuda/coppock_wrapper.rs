@@ -238,11 +238,9 @@ impl CudaCoppock {
             return Ok(DeviceArrayF32 { buf: d_out_full, rows, cols: len });
         }
 
-        // Fallback: host staging, use pinned memory for better throughput
-        let mut host_out = unsafe {
-            LockedBuffer::<f32>::uninitialized(rows * len)
-                .map_err(|e| CudaCoppockError::Cuda(e.to_string()))?
-        };
+        // Allocate final output on device once; stream chunks directly into it
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }
+            .map_err(|e| CudaCoppockError::Cuda(e.to_string()))?;
         let mut start = 0usize;
         let max_chunk = 65_535usize;
         while start < rows {
@@ -254,9 +252,6 @@ impl CudaCoppock {
                 .map_err(|e| CudaCoppockError::Cuda(e.to_string()))?;
             let d_m = DeviceBuffer::from_slice(&ma_periods[start..start + chunk])
                 .map_err(|e| CudaCoppockError::Cuda(e.to_string()))?;
-            let mut d_out_chunk: DeviceBuffer<f32> =
-                unsafe { DeviceBuffer::uninitialized(chunk * len) }
-                    .map_err(|e| CudaCoppockError::Cuda(e.to_string()))?;
             self.launch_batch(
                 &d_price,
                 &d_inv,
@@ -266,16 +261,12 @@ impl CudaCoppock {
                 &d_l,
                 &d_m,
                 chunk,
-                &mut d_out_chunk,
-                0,
+                &mut d_out,
+                start * len,
             )?;
-            d_out_chunk
-                .copy_to(&mut host_out.as_mut_slice()[start * len .. start * len + chunk * len])
-                .map_err(|e| CudaCoppockError::Cuda(e.to_string()))?;
+            // Kernel wrote into the final device buffer at the correct offset
             start += chunk;
         }
-        let d_out = DeviceBuffer::from_slice(&host_out)
-            .map_err(|e| CudaCoppockError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32 { buf: d_out, rows, cols: len })
     }
 

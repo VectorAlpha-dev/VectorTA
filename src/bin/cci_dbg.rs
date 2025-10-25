@@ -1,17 +1,17 @@
-#![cfg(feature = "cuda")]
-
-use my_project::cuda::cuda_available;
-use cust::memory::CopyDestination;
-use my_project::cuda::oscillators::CudaCci;
-use my_project::indicators::cci::{CciBatchBuilder, CciBatchRange, CciBuilder, CciInput, CciParams};
-use my_project::utilities::enums::Kernel;
-
+#[cfg(feature = "cuda")]
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() { return true; }
     (a - b).abs() <= tol
 }
 
+#[cfg(feature = "cuda")]
 fn main() {
+    use cust::memory::CopyDestination;
+    use my_project::cuda::cuda_available;
+    use my_project::cuda::oscillators::CudaCci;
+    use my_project::indicators::cci::{CciBatchBuilder, CciBatchRange};
+    use my_project::utilities::enums::Kernel;
+
     if !cuda_available() {
         eprintln!("No CUDA device; exiting");
         return;
@@ -71,7 +71,10 @@ fn main() {
         if !approx_eq(r, y, tol) {
             let row = idx / len;
             let col = idx % len;
-            println!("first mismatch @ idx={} (row={}, t={}): cpu={} gpu={} diff={} tol={}", idx, row, col, r, y, (r - y).abs(), tol);
+            println!(
+                "first mismatch @ idx={} (row={}, t={}): cpu={} gpu={} diff={} tol={}",
+                idx, row, col, r, y, (r - y).abs(), tol
+            );
             // Print a tiny neighborhood
             for dt in -2..=2 {
                 let t = (col as isize + dt) as usize;
@@ -104,4 +107,9 @@ fn main() {
         }
     }
     println!("No mismatch within tolerance");
+}
+
+#[cfg(not(feature = "cuda"))]
+fn main() {
+    eprintln!("cci_dbg requires --features cuda; skipping build of debug binary");
 }

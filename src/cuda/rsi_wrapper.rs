@@ -84,12 +84,7 @@ impl CudaRsi {
     }
 
     #[inline]
-    pub fn set_policy(&mut self, p: CudaRsiPolicy) {
-        self.policy = p;
-    }
-    pub fn set_policy(&mut self, p: CudaRsiPolicy) {
-        self.policy = p;
-    }
+    pub fn set_policy(&mut self, p: CudaRsiPolicy) { self.policy = p; }
 
     // ---------- Batch (one series × many params) ----------
     pub fn rsi_batch_dev(
@@ -271,8 +266,6 @@ impl CudaRsi {
             let n = expected;
             let bytes = (2 * n) * std::mem::size_of::<f32>()
                 + cols * std::mem::size_of::<i32>()
-            let bytes = (2 * n) * std::mem::size_of::<f32>()
-                + cols * std::mem::size_of::<i32>()
                 + 64 * 1024 * 1024;
             if bytes > free {
                 return Err(CudaRsiError::InvalidInput(
@@ -440,9 +433,7 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaRsi::new(0).expect("cuda rsi");
         let mut prices = gen_series(ONE_SERIES_LEN);
-        for i in 0..8 {
-            prices[i] = f32::NAN;
-        }
+        
         for i in 0..8 {
             prices[i] = f32::NAN;
         }
@@ -453,19 +444,7 @@ pub mod benches {
         let sweep = RsiBatchRange {
             period: (2, 1 + PARAM_SWEEP, 1),
         };
-        Box::new(RsiBatchState {
-            cuda,
-            prices,
-            sweep,
-        })
-        let sweep = RsiBatchRange {
-            period: (2, 1 + PARAM_SWEEP, 1),
-        };
-        Box::new(RsiBatchState {
-            cuda,
-            prices,
-            sweep,
-        })
+        Box::new(RsiBatchState { cuda, prices, sweep })
     }
 
     struct RsiManyState {
@@ -492,14 +471,7 @@ pub mod benches {
                 prices[idx] = base[idx] + 0.05 * x.sin();
             }
         }
-        Box::new(RsiManyState {
-            cuda,
-            prices_tm: prices,
-        })
-        Box::new(RsiManyState {
-            cuda,
-            prices_tm: prices,
-        })
+        Box::new(RsiManyState { cuda, prices_tm: prices })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

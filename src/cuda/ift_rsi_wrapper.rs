@@ -145,19 +145,9 @@ impl CudaIftRsi {
     #[inline]
     pub fn set_policy(&mut self, policy: CudaIftRsiPolicy) { self.policy = policy; }
     #[inline]
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
     #[inline]
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -167,20 +157,10 @@ impl CudaIftRsi {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if !Self::mem_check_enabled() {
-            return true;
-        }
+        if !Self::mem_check_enabled() { return true; }
         if let Some((free, _)) = Self::device_mem_info() {
             required_bytes.saturating_add(headroom_bytes) <= free
         } else {
@@ -191,12 +171,7 @@ impl CudaIftRsi {
     #[inline]
     fn expand_grid(r: &IftRsiBatchRange) -> Vec<IftRsiParams> {
         fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-            if step == 0 || start == end {
-                return vec![start];
-            }
-            if step == 0 || start == end {
-                return vec![start];
-            }
+            if step == 0 || start == end { return vec![start]; }
             (start..=end).step_by(step).collect()
         }
         let rsi = axis(r.rsi_period);
@@ -204,10 +179,7 @@ impl CudaIftRsi {
         let mut out = Vec::with_capacity(rsi.len() * wma.len());
         for &rp in &rsi {
             for &wp in &wma {
-                out.push(IftRsiParams {
-                    rsi_period: Some(rp),
-                    wma_period: Some(wp),
-                });
+                out.push(IftRsiParams { rsi_period: Some(rp), wma_period: Some(wp) });
             }
         }
         for &rp in &rsi {
@@ -233,15 +205,6 @@ impl CudaIftRsi {
             return Err(CudaIftRsiError::InvalidInput("empty input".into()));
         }
         let mut first_valid: Option<usize> = None;
-        for i in 0..len {
-            let v = data_f32[i];
-            if v == v {
-                first_valid = Some(i);
-                break;
-            }
-        }
-        let first_valid = first_valid
-            .ok_or_else(|| CudaIftRsiError::InvalidInput("all values are NaN".into()))?;
         for i in 0..len {
             let v = data_f32[i];
             if v == v {
@@ -329,9 +292,6 @@ impl CudaIftRsi {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
                 .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }
-                .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
 
         let func = self
             .module
@@ -386,16 +346,7 @@ impl CudaIftRsi {
         self.maybe_log_batch_debug();
 
         Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows: combos.len(),
-                cols: len,
-            },
-            DeviceArrayF32 {
-                buf: d_out,
-                rows: combos.len(),
-                cols: len,
-            },
+            DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len },
             combos,
         ))
     }
@@ -523,16 +474,7 @@ impl CudaIftRsi {
                 .map_err(|e| CudaIftRsiError::Cuda(e.to_string()))?;
         }
         self.maybe_log_many_debug();
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 
     #[inline]

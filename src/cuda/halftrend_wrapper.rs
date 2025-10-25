@@ -140,30 +140,10 @@ impl CudaHalftrend {
         })
     }
 
-    pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) {
-        self.batch_policy = p;
-    }
-    pub fn set_many_series_policy(&mut self, p: ManySeriesKernelPolicy) {
-        self.many_policy = p;
-    }
-    pub fn batch_policy(&self) -> BatchKernelPolicy {
-        self.batch_policy
-    }
-    pub fn many_series_policy(&self) -> ManySeriesKernelPolicy {
-        self.many_policy
-    }
-    pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) {
-        self.batch_policy = p;
-    }
-    pub fn set_many_series_policy(&mut self, p: ManySeriesKernelPolicy) {
-        self.many_policy = p;
-    }
-    pub fn batch_policy(&self) -> BatchKernelPolicy {
-        self.batch_policy
-    }
-    pub fn many_series_policy(&self) -> ManySeriesKernelPolicy {
-        self.many_policy
-    }
+    pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) { self.batch_policy = p; }
+    pub fn set_many_series_policy(&mut self, p: ManySeriesKernelPolicy) { self.many_policy = p; }
+    pub fn batch_policy(&self) -> BatchKernelPolicy { self.batch_policy }
+    pub fn many_series_policy(&self) -> ManySeriesKernelPolicy { self.many_policy }
 
     #[inline]
     fn mem_ok(required_bytes: usize, headroom: usize) -> bool {
@@ -417,21 +397,9 @@ impl CudaHalftrend {
                 ))
                 .map_err(|e| CudaHalftrendError::InvalidInput(e.to_string()))?
                 .values,
-                sma(&SmaInput::from_slice(
-                    &high_f64,
-                    SmaParams { period: Some(a) },
-                ))
-                .map_err(|e| CudaHalftrendError::InvalidInput(e.to_string()))?
-                .values,
             );
             lma_map.insert(
                 a,
-                sma(&SmaInput::from_slice(
-                    &low_f64,
-                    SmaParams { period: Some(a) },
-                ))
-                .map_err(|e| CudaHalftrendError::InvalidInput(e.to_string()))?
-                .values,
                 sma(&SmaInput::from_slice(
                     &low_f64,
                     SmaParams { period: Some(a) },
@@ -749,13 +717,6 @@ impl CudaHalftrend {
             return Err(CudaHalftrendError::InvalidInput(
                 "matrix shape mismatch".into(),
             ));
-        if high_tm.len() != cols * rows
-            || low_tm.len() != cols * rows
-            || close_tm.len() != cols * rows
-        {
-            return Err(CudaHalftrendError::InvalidInput(
-                "matrix shape mismatch".into(),
-            ));
         }
 
         // Per-series first_valid and warm
@@ -766,14 +727,9 @@ impl CudaHalftrend {
                 if !high_tm[idx].is_nan() && !low_tm[idx].is_nan() && !close_tm[idx].is_nan() {
                     firsts[s] = t as i32;
                     break;
-                    firsts[s] = t as i32;
-                    break;
                 }
             }
             if firsts[s] as usize >= rows {
-                return Err(CudaHalftrendError::InvalidInput(
-                    "all values are NaN for a series".into(),
-                ));
                 return Err(CudaHalftrendError::InvalidInput(
                     "all values are NaN for a series".into(),
                 ));
@@ -799,38 +755,6 @@ impl CudaHalftrend {
             let mut h = vec![f64::NAN; rows];
             let mut l = vec![f64::NAN; rows];
             let mut c = vec![f64::NAN; rows];
-            for t in 0..rows {
-                let idx = t * cols + s;
-                h[t] = high_tm[idx] as f64;
-                l[t] = low_tm[idx] as f64;
-                c[t] = close_tm[idx] as f64;
-            }
-            let atr_v = atr(&AtrInput::from_slices(
-                &h,
-                &l,
-                &c,
-                AtrParams {
-                    length: Some(atr_period),
-                },
-            ))
-            .map_err(|e| CudaHalftrendError::InvalidInput(e.to_string()))?
-            .values;
-            let hma_v = sma(&SmaInput::from_slice(
-                &h,
-                SmaParams {
-                    period: Some(amplitude),
-                },
-            ))
-            .map_err(|e| CudaHalftrendError::InvalidInput(e.to_string()))?
-            .values;
-            let lma_v = sma(&SmaInput::from_slice(
-                &l,
-                SmaParams {
-                    period: Some(amplitude),
-                },
-            ))
-            .map_err(|e| CudaHalftrendError::InvalidInput(e.to_string()))?
-            .values;
             for t in 0..rows {
                 let idx = t * cols + s;
                 h[t] = high_tm[idx] as f64;
@@ -959,14 +883,8 @@ impl CudaHalftrend {
         // Launch
         let func = self
             .module
-        let func = self
-            .module
             .get_function("halftrend_many_series_one_param_time_major_f32")
             .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        let block_x = match self.many_policy {
-            ManySeriesKernelPolicy::Auto => 256,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
-        };
         let block_x = match self.many_policy {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
@@ -1040,48 +958,13 @@ impl CudaHalftrend {
             ];
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
                 .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         }
 
         self.stream
             .synchronize()
             .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHalftrendError::Cuda(e.to_string()))?;
         Ok(CudaHalftrendMany {
-            halftrend: DeviceArrayF32 {
-                buf: d_ht,
-                rows,
-                cols,
-            },
-            trend: DeviceArrayF32 {
-                buf: d_tr,
-                rows,
-                cols,
-            },
-            atr_high: DeviceArrayF32 {
-                buf: d_ah,
-                rows,
-                cols,
-            },
-            atr_low: DeviceArrayF32 {
-                buf: d_al,
-                rows,
-                cols,
-            },
-            buy: DeviceArrayF32 {
-                buf: d_bs,
-                rows,
-                cols,
-            },
-            sell: DeviceArrayF32 {
-                buf: d_ss,
-                rows,
-                cols,
-            },
             halftrend: DeviceArrayF32 {
                 buf: d_ht,
                 rows,
@@ -1121,16 +1004,7 @@ impl CudaHalftrend {
         high: &[f32],
         low: &[f32],
         close: &[f32],
-        high: &[f32],
-        low: &[f32],
-        close: &[f32],
         sweep: &HalfTrendBatchRange,
-        out_ht: &mut [f32],
-        out_tr: &mut [f32],
-        out_ah: &mut [f32],
-        out_al: &mut [f32],
-        out_bs: &mut [f32],
-        out_ss: &mut [f32],
         out_ht: &mut [f32],
         out_tr: &mut [f32],
         out_ah: &mut [f32],
@@ -1141,23 +1015,7 @@ impl CudaHalftrend {
         let dev = self.halftrend_batch_dev(high, low, close, sweep)?;
         let rows = dev.halftrend.rows;
         let cols = dev.halftrend.cols;
-        let rows = dev.halftrend.rows;
-        let cols = dev.halftrend.cols;
         let need = rows * cols;
-        if [
-            out_ht.len(),
-            out_tr.len(),
-            out_ah.len(),
-            out_al.len(),
-            out_bs.len(),
-            out_ss.len(),
-        ]
-        .iter()
-        .any(|&m| m != need)
-        {
-            return Err(CudaHalftrendError::InvalidInput(
-                "output slice wrong length".into(),
-            ));
         if [
             out_ht.len(),
             out_tr.len(),
@@ -1251,9 +1109,6 @@ pub mod benches {
         high: Vec<f32>,
         low: Vec<f32>,
         close: Vec<f32>,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
         sweep: HalfTrendBatchRange,
     }
     impl CudaBenchState for BatchState {
@@ -1264,43 +1119,7 @@ pub mod benches {
                 .unwrap();
         }
     }
-    impl CudaBenchState for BatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .halftrend_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .unwrap();
-        }
-    }
 
-    struct ManyState {
-        cuda: CudaHalftrend,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
-        cols: usize,
-        rows: usize,
-        amp: usize,
-        ch: f64,
-        atr: usize,
-    }
-    impl CudaBenchState for ManyState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .halftrend_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
-                    self.cols,
-                    self.rows,
-                    self.amp,
-                    self.ch,
-                    self.atr,
-                )
-                .unwrap();
-        }
-    }
     struct ManyState {
         cuda: CudaHalftrend,
         high_tm: Vec<f32>,
@@ -1348,23 +1167,9 @@ pub mod benches {
                 close,
                 sweep,
             })
-            let sweep = HalfTrendBatchRange {
-                amplitude: (2, 32, 2),
-                channel_deviation: (2.0, 2.0, 0.0),
-                atr_period: (14, 14, 0),
-            };
-            Box::new(BatchState {
-                cuda,
-                high,
-                low,
-                close,
-                sweep,
-            })
         };
         let bytes_batch = || -> usize {
             // Rough: inputs 3N + helpers 5*32*N + outputs 6*32*N + headroom
-            (3 * LEN_1M + 5 * 16 * LEN_1M + 6 * 16 * LEN_1M) * std::mem::size_of::<f32>()
-                + 64 * 1024 * 1024
             (3 * LEN_1M + 5 * 16 * LEN_1M + 6 * 16 * LEN_1M) * std::mem::size_of::<f32>()
                 + 64 * 1024 * 1024
         }();
@@ -1374,16 +1179,7 @@ pub mod benches {
             let cuda = CudaHalftrend::new(0).expect("cuda halftrend");
             let cols = COLS_256;
             let rows = ROWS_8K;
-            let cols = COLS_256;
-            let rows = ROWS_8K;
             let close_tm = {
-                let mut v = vec![f32::NAN; cols * rows];
-                for s in 0..cols {
-                    for t in s..rows {
-                        let x = (t as f32) + (s as f32) * 0.2;
-                        v[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
-                    }
-                }
                 let mut v = vec![f32::NAN; cols * rows];
                 for s in 0..cols {
                     for t in s..rows {
@@ -1405,22 +1201,7 @@ pub mod benches {
                 ch: 2.0,
                 atr: 14,
             })
-            Box::new(ManyState {
-                cuda,
-                high_tm,
-                low_tm,
-                close_tm,
-                cols,
-                rows,
-                amp: 2,
-                ch: 2.0,
-                atr: 14,
-            })
         };
-        let bytes_many =
-            (3 * COLS_256 * ROWS_8K + 5 * COLS_256 * ROWS_8K + COLS_256 + 6 * COLS_256 * ROWS_8K)
-                * std::mem::size_of::<f32>()
-                + 64 * 1024 * 1024;
         let bytes_many =
             (3 * COLS_256 * ROWS_8K + 5 * COLS_256 * ROWS_8K + COLS_256 + 6 * COLS_256 * ROWS_8K)
                 * std::mem::size_of::<f32>()
@@ -1429,14 +1210,6 @@ pub mod benches {
         vec![
             CudaBenchScenario::new(
                 "halftrend",
-                "batch",
-                "halftrend_cuda_batch",
-                "1m",
-                prep_batch,
-            )
-            .with_mem_required(bytes_batch),
-            CudaBenchScenario::new(
-                "halftrend",
                 "many_series_one_param",
                 "halftrend_cuda_many_series",
                 "8k x 256",
@@ -1451,14 +1224,6 @@ pub mod benches {
                 prep_batch,
             )
             .with_mem_required(bytes_batch),
-            CudaBenchScenario::new(
-                "halftrend",
-                "many_series_one_param",
-                "halftrend_cuda_many_series",
-                "8k x 256",
-                prep_many,
-            )
-            .with_mem_required(bytes_many),
         ]
     }
 }

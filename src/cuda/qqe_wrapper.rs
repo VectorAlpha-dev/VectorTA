@@ -84,8 +84,6 @@ impl CudaQqe {
         cust::init(CudaFlags::empty()).map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/qqe_kernel.ptx"));
         let jit_opts = &[
@@ -97,16 +95,12 @@ impl CudaQqe {
             Err(_) => {
                 if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaQqeError::Cuda(e.to_string()))?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
         Ok(Self {
@@ -127,13 +121,7 @@ impl CudaQqe {
     pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) {
         self.policy_batch = p;
     }
-    pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) {
-        self.policy_batch = p;
-    }
     #[inline]
-    pub fn set_many_series_policy(&mut self, p: ManySeriesKernelPolicy) {
-        self.policy_many = p;
-    }
     pub fn set_many_series_policy(&mut self, p: ManySeriesKernelPolicy) {
         self.policy_many = p;
     }
@@ -141,21 +129,12 @@ impl CudaQqe {
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch
     }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
     #[inline]
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaQqeError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))
         self.stream
             .synchronize()
             .map_err(|e| CudaQqeError::Cuda(e.to_string()))
@@ -167,17 +146,11 @@ impl CudaQqe {
         if self.debug_batch_logged {
             return;
         }
-        if self.debug_batch_logged {
-            return;
-        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per = env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] QQE batch selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaQqe)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaQqe)).debug_batch_logged = true;
@@ -191,17 +164,11 @@ impl CudaQqe {
         if self.debug_many_logged {
             return;
         }
-        if self.debug_many_logged {
-            return;
-        }
         if env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per = env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] QQE many-series selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaQqe)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaQqe)).debug_many_logged = true;
@@ -216,19 +183,8 @@ impl CudaQqe {
             Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
             Err(_) => true,
         }
-        match mem_get_info() {
-            Ok((free, _)) => bytes.saturating_add(64 * 1024 * 1024) <= free,
-            Err(_) => true,
-        }
     }
     fn first_valid_f32(series: &[f32]) -> Result<usize, CudaQqeError> {
-        if series.is_empty() {
-            return Err(CudaQqeError::InvalidInput("empty series".into()));
-        }
-        series
-            .iter()
-            .position(|x| x.is_finite())
-            .ok_or_else(|| CudaQqeError::InvalidInput("all values are NaN".into()))
         if series.is_empty() {
             return Err(CudaQqeError::InvalidInput("empty series".into()));
         }
@@ -245,24 +201,7 @@ impl CudaQqe {
                 (t.0..=t.1).step_by(t.2).collect()
             }
         }
-        fn axis_usize(t: (usize, usize, usize)) -> Vec<usize> {
-            if t.2 == 0 || t.0 == t.1 {
-                vec![t.0]
-            } else {
-                (t.0..=t.1).step_by(t.2).collect()
-            }
-        }
         fn axis_f64(t: (f64, f64, f64)) -> Vec<f64> {
-            if t.2.abs() < 1e-12 || (t.0 - t.1).abs() < 1e-12 {
-                vec![t.0]
-            } else {
-                let mut v = Vec::new();
-                let mut x = t.0;
-                while x <= t.1 + 1e-12 {
-                    v.push(x);
-                    x += t.2;
-                }
-                v
             if t.2.abs() < 1e-12 || (t.0 - t.1).abs() < 1e-12 {
                 vec![t.0]
             } else {
@@ -290,17 +229,6 @@ impl CudaQqe {
                 }
             }
         }
-        for &r in &rs {
-            for &s in &sm {
-                for &k in &ff {
-                    out.push(QqeParams {
-                        rsi_period: Some(r),
-                        smoothing_factor: Some(s),
-                        fast_factor: Some(k),
-                    });
-                }
-            }
-        }
         out
     }
 
@@ -313,19 +241,9 @@ impl CudaQqe {
         if prices_f32.is_empty() {
             return Err(CudaQqeError::InvalidInput("empty price input".into()));
         }
-    pub fn qqe_batch_dev(
-        &self,
-        prices_f32: &[f32],
-        sweep: &QqeBatchRange,
-    ) -> Result<(DeviceArrayF32, Vec<QqeParams>), CudaQqeError> {
-        if prices_f32.is_empty() {
-            return Err(CudaQqeError::InvalidInput("empty price input".into()));
-        }
         let first_valid = Self::first_valid_f32(prices_f32)?;
         let combos = Self::expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaQqeError::InvalidInput("empty parameter sweep".into()));
-        }
+        
         if combos.is_empty() {
             return Err(CudaQqeError::InvalidInput("empty parameter sweep".into()));
         }
@@ -419,10 +337,6 @@ impl CudaQqe {
                 (*(self as *const _ as *mut CudaQqe)).last_batch =
                     Some(BatchKernelSelected::Plain { block_x });
             }
-            unsafe {
-                (*(self as *const _ as *mut CudaQqe)).last_batch =
-                    Some(BatchKernelSelected::Plain { block_x });
-            }
             self.maybe_log_batch_debug();
             base += take;
         }
@@ -437,17 +351,7 @@ impl CudaQqe {
             },
             combos,
         ))
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
-        Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows: 2 * rows,
-                cols: len,
-            },
-            combos,
-        ))
+        
     }
 
     // ---- Many-series: time-major, one param ----
@@ -458,20 +362,7 @@ impl CudaQqe {
         rows: usize,
         params: &QqeParams,
     ) -> Result<DeviceArrayF32, CudaQqeError> {
-        if cols == 0 || rows == 0 {
-            return Err(CudaQqeError::InvalidInput("cols/rows must be > 0".into()));
-        }
-        if prices_tm_f32.len() != cols * rows {
-            return Err(CudaQqeError::InvalidInput(
-                "data length != cols*rows".into(),
-            ));
-        }
-        let rsi_p = params.rsi_period.unwrap_or(0);
-        let ema_p = params.smoothing_factor.unwrap_or(0);
-        let fast_k = params.fast_factor.unwrap_or(4.236) as f32;
-        if rsi_p == 0 || ema_p == 0 {
-            return Err(CudaQqeError::InvalidInput("invalid rsi/ema period".into()));
-        }
+        // dims and input already validated above
         if cols == 0 || rows == 0 {
             return Err(CudaQqeError::InvalidInput("cols/rows must be > 0".into()));
         }
@@ -493,21 +384,11 @@ impl CudaQqe {
             let mut fv = None;
             for t in 0..rows {
                 let v = prices_tm_f32[t * cols + s];
+                // de-duped
                 if v.is_finite() {
                     fv = Some(t);
                     break;
                 }
-                if v.is_finite() {
-                    fv = Some(t);
-                    break;
-                }
-            }
-            let fv =
-                fv.ok_or_else(|| CudaQqeError::InvalidInput(format!("series {} all NaN", s)))?;
-            if rows - fv < rsi_p + ema_p {
-                return Err(CudaQqeError::InvalidInput(
-                    "not enough valid data per series".into(),
-                ));
             }
             let fv =
                 fv.ok_or_else(|| CudaQqeError::InvalidInput(format!("series {} all NaN", s)))?;
@@ -585,14 +466,7 @@ impl CudaQqe {
             rows,
             cols: 2 * cols,
         })
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaQqeError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols: 2 * cols,
-        })
+        
     }
 }
 
@@ -612,23 +486,10 @@ pub mod benches {
             let x = i as f32;
             v[i] = (x * 0.00123).sin() + 0.00025 * x;
         }
-        for i in 64..n {
-            let x = i as f32;
-            v[i] = (x * 0.00123).sin() + 0.00025 * x;
-        }
         v
     }
 
-    struct BatchState {
-        cuda: CudaQqe,
-        prices: Vec<f32>,
-        sweep: QqeBatchRange,
-    }
-    impl CudaBenchState for BatchState {
-        fn launch(&mut self) {
-            let _ = self.cuda.qqe_batch_dev(&self.prices, &self.sweep).unwrap();
-        }
-    }
+    
     struct BatchState {
         cuda: CudaQqe,
         prices: Vec<f32>,
@@ -640,26 +501,7 @@ pub mod benches {
         }
     }
 
-    struct ManyState {
-        cuda: CudaQqe,
-        prices_tm: Vec<f32>,
-        cols: usize,
-        rows: usize,
-        params: QqeParams,
-    }
-    impl CudaBenchState for ManyState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .qqe_many_series_one_param_time_major_dev(
-                    &self.prices_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                )
-                .unwrap();
-        }
-    }
+    
     struct ManyState {
         cuda: CudaQqe,
         prices_tm: Vec<f32>,
@@ -694,42 +536,12 @@ pub mod benches {
             prices,
             sweep,
         })
-        let sweep = QqeBatchRange {
-            rsi_period: (8, 8 + PARAM_SWEEP - 1, 1),
-            smoothing_factor: (5, 5, 0),
-            fast_factor: (4.236, 4.236, 0.0),
-        };
-        Box::new(BatchState {
-            cuda,
-            prices,
-            sweep,
-        })
     }
     fn prep_many() -> Box<dyn CudaBenchState> {
         let cuda = CudaQqe::new(0).expect("cuda qqe");
         let cols = MANY_COLS;
         let rows = MANY_ROWS;
-        let cols = MANY_COLS;
-        let rows = MANY_ROWS;
         let mut tm = vec![f32::NAN; cols * rows];
-        for s in 0..cols {
-            for t in s..rows {
-                let x = (t as f32) + 0.1 * (s as f32);
-                tm[t * cols + s] = (0.002 * x).sin() + 0.0003 * x;
-            }
-        }
-        let params = QqeParams {
-            rsi_period: Some(14),
-            smoothing_factor: Some(5),
-            fast_factor: Some(4.236),
-        };
-        Box::new(ManyState {
-            cuda,
-            prices_tm: tm,
-            cols,
-            rows,
-            params,
-        })
         for s in 0..cols {
             for t in s..rows {
                 let x = (t as f32) + 0.1 * (s as f32);
@@ -752,26 +564,6 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new(
-                "qqe",
-                "one_series_many_params",
-                "qqe_cuda_batch_dev",
-                "1m_x_192",
-                prep_batch,
-            )
-            .with_sample_size(12)
-            .with_mem_required(
-                ONE_SERIES_LEN * 4 + (2 * PARAM_SWEEP * ONE_SERIES_LEN) * 4 + 64 * 1024 * 1024,
-            ),
-            CudaBenchScenario::new(
-                "qqe",
-                "many_series_one_param",
-                "qqe_cuda_many_series_one_param_dev",
-                "256x16k",
-                prep_many,
-            )
-            .with_sample_size(12)
-            .with_mem_required(MANY_COLS * MANY_ROWS * 3 * 4 + 64 * 1024 * 1024),
             CudaBenchScenario::new(
                 "qqe",
                 "one_series_many_params",

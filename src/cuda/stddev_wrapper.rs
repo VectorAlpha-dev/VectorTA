@@ -45,21 +45,7 @@ pub enum BatchKernelPolicy {
         block_x: u32,
     },
 }
-pub enum BatchKernelPolicy {
-    #[default]
-    Auto,
-    Plain {
-        block_x: u32,
-    },
-}
 #[derive(Clone, Copy, Debug, Default)]
-pub enum ManySeriesKernelPolicy {
-    #[default]
-    Auto,
-    OneD {
-        block_x: u32,
-    },
-}
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
@@ -73,21 +59,11 @@ pub struct CudaStddevPolicy {
     pub batch: BatchKernelPolicy,
     pub many_series: ManySeriesKernelPolicy,
 }
-pub struct CudaStddevPolicy {
-    pub batch: BatchKernelPolicy,
-    pub many_series: ManySeriesKernelPolicy,
-}
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
 }
-pub enum BatchKernelSelected {
-    Plain { block_x: u32 },
-}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected {
-    OneD { block_x: u32 },
-}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -143,51 +119,11 @@ impl CudaStddev {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaStddevPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaStddevPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
-    pub fn set_policy(&mut self, policy: CudaStddevPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaStddevPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
+    pub fn set_policy(&mut self, policy: CudaStddevPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaStddevPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
 
-    #[inline]
-    fn mem_check_enabled() -> bool {
-        env::var("CUDA_MEM_CHECK")
-            .map(|v| v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(true)
-    }
-    #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
-    #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
-        }
     #[inline]
     fn mem_check_enabled() -> bool {
         env::var("CUDA_MEM_CHECK")
@@ -215,16 +151,10 @@ impl CudaStddev {
         if self.debug_batch_logged {
             return;
         }
-        if self.debug_batch_logged {
-            return;
-        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] stddev batch selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaStddev)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaStddev)).debug_batch_logged = true;
@@ -238,16 +168,10 @@ impl CudaStddev {
         if self.debug_many_logged {
             return;
         }
-        if self.debug_many_logged {
-            return;
-        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] stddev many-series selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaStddev)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaStddev)).debug_many_logged = true;
@@ -264,24 +188,7 @@ impl CudaStddev {
                 (s..=e).step_by(st).collect()
             }
         }
-        fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
-            if st == 0 || s == e {
-                vec![s]
-            } else {
-                (s..=e).step_by(st).collect()
-            }
-        }
         fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
-            if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
-                return vec![s];
-            }
-            let mut v = Vec::new();
-            let mut x = s;
-            while x <= e + 1e-12 {
-                v.push(x);
-                x += st;
-            }
-            v
             if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
                 return vec![s];
             }
@@ -322,20 +229,13 @@ impl CudaStddev {
         if data_f32.is_empty() {
             return Err(CudaStddevError::InvalidInput("empty data".into()));
         }
-        if data_f32.is_empty() {
-            return Err(CudaStddevError::InvalidInput("empty data".into()));
-        }
         let len = data_f32.len();
         let first_valid = data_f32
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaStddevError::InvalidInput("all values are NaN".into()))?;
         let combos = Self::expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaStddevError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        
         if combos.is_empty() {
             return Err(CudaStddevError::InvalidInput(
                 "no parameter combinations".into(),
@@ -474,13 +374,7 @@ impl CudaStddev {
                 let mut periods = d_periods
                     .as_device_ptr()
                     .as_raw()
-                let mut periods = d_periods
-                    .as_device_ptr()
-                    .as_raw()
                     .saturating_add((launched as u64) * (std::mem::size_of::<i32>() as u64));
-                let mut nbdevs = d_nbdevs
-                    .as_device_ptr()
-                    .as_raw()
                 let mut nbdevs = d_nbdevs
                     .as_device_ptr()
                     .as_raw()
@@ -534,7 +428,6 @@ impl CudaStddev {
             return Err(CudaStddevError::Cuda(format!(
                 "insufficient VRAM (need ~{} MiB incl. headroom)",
                 (required + headroom + (1 << 20) - 1) / (1 << 20)
-                (required + headroom + (1 << 20) - 1) / (1 << 20)
             )));
         }
 
@@ -569,20 +462,6 @@ impl CudaStddev {
         self.stream
             .synchronize()
             .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
-        self.launch_batch(
-            &d_ps1,
-            &d_ps2,
-            &d_psn,
-            len,
-            first_valid,
-            &d_periods,
-            &d_nbdevs,
-            combos.len(),
-            &mut d_out,
-        )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
         self.maybe_log_batch_debug();
 
         let params: Vec<StdDevParams> = combos
@@ -591,19 +470,7 @@ impl CudaStddev {
                 period: Some(*p),
                 nbdev: Some(*nb as f64),
             })
-            .map(|(p, nb)| StdDevParams {
-                period: Some(*p),
-                nbdev: Some(*nb as f64),
-            })
             .collect();
-        Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows: params.len(),
-                cols: len,
-            },
-            params,
-        ))
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -748,11 +615,7 @@ impl CudaStddev {
             (*(self as *const _ as *mut CudaStddev)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
-        unsafe {
-            (*(self as *const _ as *mut CudaStddev)).last_many =
-                Some(ManySeriesKernelSelected::OneD { block_x });
-        }
-
+        
         unsafe {
             let mut in_ptr = d_in.as_device_ptr().as_raw();
             let mut fv_ptr = d_fv.as_device_ptr().as_raw();
@@ -777,16 +640,8 @@ impl CudaStddev {
         self.stream
             .synchronize()
             .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaStddevError::Cuda(e.to_string()))?;
         self.maybe_log_many_debug();
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -825,27 +680,10 @@ pub mod benches {
                 .expect("stddev batch");
         }
     }
-    struct StddevBatchState {
-        cuda: CudaStddev,
-        price: Vec<f32>,
-        sweep: StdDevBatchRange,
-    }
-    impl CudaBenchState for StddevBatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .stddev_batch_dev(&self.price, &self.sweep)
-                .expect("stddev batch");
-        }
-    }
 
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaStddev::new(0).expect("cuda stddev");
         let price = gen_series(ONE_SERIES_LEN);
-        let sweep = StdDevBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1),
-            nbdev: (2.0, 2.0, 0.0),
-        };
         let sweep = StdDevBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             nbdev: (2.0, 2.0, 0.0),

@@ -59,27 +59,14 @@ pub struct CudaDtiPolicy {
 }
 impl Default for CudaDtiPolicy {
     fn default() -> Self {
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
+        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
     }
 }
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     OneD { block_x: u32 },
 }
-pub enum BatchKernelSelected {
-    OneD { block_x: u32 },
-}
 #[derive(Clone, Copy, Debug)]
-pub enum ManySeriesKernelSelected {
-    OneD { block_x: u32 },
-}
 pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
@@ -98,8 +85,6 @@ pub struct CudaDti {
 impl CudaDti {
     pub fn new(device_id: usize) -> Result<Self, CudaDtiError> {
         cust::init(CudaFlags::empty()).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
@@ -144,22 +129,7 @@ impl CudaDti {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
-    pub fn set_policy(&mut self, policy: CudaDtiPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaDtiPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
     pub fn synchronize(&self) -> Result<(), CudaDtiError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDtiError::Cuda(e.to_string()))
         self.stream
             .synchronize()
             .map_err(|e| CudaDtiError::Cuda(e.to_string()))
@@ -224,15 +194,8 @@ impl CudaDti {
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
     #[inline]
     fn mem_check_enabled() -> bool {
-        match std::env::var("CUDA_MEM_CHECK") {
-            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
-            Err(_) => true,
-        }
         match std::env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
             Err(_) => true,
@@ -240,14 +203,6 @@ impl CudaDti {
     }
     #[inline]
     fn will_fit(bytes: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if let Some((free, _)) = Self::device_mem_info() {
-            bytes.saturating_add(headroom) <= free
-        } else {
-            true
-        }
         if !Self::mem_check_enabled() {
             return true;
         }
@@ -274,17 +229,6 @@ impl CudaDti {
         let ss = axis_usize(range.s);
         let uu = axis_usize(range.u);
         let mut combos = Vec::with_capacity(rr.len() * ss.len() * uu.len());
-        for &r in &rr {
-            for &s in &ss {
-                for &u in &uu {
-                    combos.push(DtiParams {
-                        r: Some(r),
-                        s: Some(s),
-                        u: Some(u),
-                    });
-                }
-            }
-        }
         for &r in &rr {
             for &s in &ss {
                 for &u in &uu {
@@ -408,9 +352,6 @@ impl CudaDti {
             return Err(CudaDtiError::InvalidInput(
                 "empty or mismatched inputs".into(),
             ));
-            return Err(CudaDtiError::InvalidInput(
-                "empty or mismatched inputs".into(),
-            ));
         }
         let len = high_f32.len();
         let first_valid = high_f32
@@ -421,9 +362,6 @@ impl CudaDti {
 
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaDtiError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
             return Err(CudaDtiError::InvalidInput(
                 "no parameter combinations".into(),
             ));
@@ -452,9 +390,6 @@ impl CudaDti {
             return Err(CudaDtiError::InvalidInput(
                 "insufficient VRAM for DTI batch".into(),
             ));
-            return Err(CudaDtiError::InvalidInput(
-                "insufficient VRAM for DTI batch".into(),
-            ));
         }
 
         // Precompute x and |x| directly into pinned memory (page-locked)
@@ -474,37 +409,20 @@ impl CudaDti {
         let hu = LockedBuffer::from_slice(&u_vec).map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
 
         let mut d_x = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-        let mut d_x = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
             .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
         let mut d_ax = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
             .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
         let mut d_r = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
-        let mut d_r = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
             .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-        let mut d_s = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
         let mut d_s = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
             .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
         let mut d_u = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
-        let mut d_u = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
             .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-        let mut d_out =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }
-                .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
         let mut d_out =
             unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }
                 .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
 
         unsafe {
-            d_x.async_copy_from(&hx, &self.stream)
-                .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-            d_ax.async_copy_from(&hax, &self.stream)
-                .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-            d_r.async_copy_from(&hr, &self.stream)
-                .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-            d_s.async_copy_from(&hs, &self.stream)
-                .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-            d_u.async_copy_from(&hu, &self.stream)
-                .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
             d_x.async_copy_from(&hx, &self.stream)
                 .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
             d_ax.async_copy_from(&hax, &self.stream)
@@ -521,26 +439,8 @@ impl CudaDti {
         self.stream
             .synchronize()
             .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
 
-        Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows,
-                cols: len,
-            },
-            combos,
-        ))
-        Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows,
-                cols: len,
-            },
-            combos,
-        ))
+        Ok((DeviceArrayF32 { buf: d_out, rows, cols: len }, combos))
     }
 
     // -------------------- Many series × one param (time-major) --------------------
@@ -578,15 +478,8 @@ impl CudaDti {
             (*(self as *const _ as *mut CudaDti)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
-        unsafe {
-            (*(self as *const _ as *mut CudaDti)).last_many =
-                Some(ManySeriesKernelSelected::OneD { block_x });
-        }
 
         unsafe {
-            let mut ph = d_high_tm.as_device_ptr().as_raw();
-            let mut pl = d_low_tm.as_device_ptr().as_raw();
-            let mut pfv = d_first.as_device_ptr().as_raw();
             let mut ph = d_high_tm.as_device_ptr().as_raw();
             let mut pl = d_low_tm.as_device_ptr().as_raw();
             let mut pfv = d_first.as_device_ptr().as_raw();
@@ -695,20 +588,8 @@ impl CudaDti {
         self.stream
             .synchronize()
             .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDtiError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 }
 
@@ -735,18 +616,8 @@ pub mod benches {
             + (MANY_SERIES_COLS * std::mem::size_of::<i32>())
             + (elems * std::mem::size_of::<f32>())
             + 64 * 1024 * 1024
-        (elems * 2 * std::mem::size_of::<f32>())
-            + (MANY_SERIES_COLS * std::mem::size_of::<i32>())
-            + (elems * std::mem::size_of::<f32>())
-            + 64 * 1024 * 1024
     }
 
-    struct BatchState {
-        cuda: CudaDti,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: DtiBatchRange,
-    }
     struct BatchState {
         cuda: CudaDti,
         high: Vec<f32>,
@@ -770,12 +641,10 @@ pub mod benches {
         let base = crate::cuda::bench::helpers::gen_series(ONE_SERIES_LEN);
         let mut high = vec![f32::NAN; ONE_SERIES_LEN];
         let mut low = vec![f32::NAN; ONE_SERIES_LEN];
-        let mut low = vec![f32::NAN; ONE_SERIES_LEN];
         for i in 1..ONE_SERIES_LEN {
             let x = base[i];
             let prev = base[i - 1];
             high[i] = x.max(prev) + 0.7;
-            low[i] = x.min(prev) - 0.7;
             low[i] = x.min(prev) - 0.7;
         }
         // modest sweep (cartesian product of 6×5×6 ~= 180)
@@ -784,33 +653,9 @@ pub mod benches {
             s: (6, 14, 2),
             u: (3, 13, 2),
         };
-        Box::new(BatchState {
-            cuda,
-            high,
-            low,
-            sweep,
-        })
-        let sweep = DtiBatchRange {
-            r: (8, 18, 2),
-            s: (6, 14, 2),
-            u: (3, 13, 2),
-        };
-        Box::new(BatchState {
-            cuda,
-            high,
-            low,
-            sweep,
-        })
+        Box::new(BatchState { cuda, high, low, sweep })
     }
 
-    struct ManyState {
-        cuda: CudaDti,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        cols: usize,
-        rows: usize,
-        params: DtiParams,
-    }
     struct ManyState {
         cuda: CudaDti,
         high_tm: Vec<f32>,
@@ -847,11 +692,8 @@ pub mod benches {
         let cuda = CudaDti::new(0).expect("cuda");
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_LEN;
-        let cols = MANY_SERIES_COLS;
-        let rows = MANY_SERIES_LEN;
         let mid = gen_time_major_prices(cols, rows);
         let mut high_tm = vec![f32::NAN; cols * rows];
-        let mut low_tm = vec![f32::NAN; cols * rows];
         let mut low_tm = vec![f32::NAN; cols * rows];
         for t in 0..rows {
             for s in 0..cols {
@@ -859,12 +701,8 @@ pub mod benches {
                 if m.is_nan() {
                     continue;
                 }
-                if m.is_nan() {
-                    continue;
-                }
                 // synthesize high/low around mid
                 high_tm[t * cols + s] = m + 0.6;
-                low_tm[t * cols + s] = m - 0.6;
                 low_tm[t * cols + s] = m - 0.6;
             }
         }
@@ -873,27 +711,7 @@ pub mod benches {
             s: Some(10),
             u: Some(5),
         };
-        Box::new(ManyState {
-            cuda,
-            high_tm,
-            low_tm,
-            cols,
-            rows,
-            params,
-        })
-        let params = DtiParams {
-            r: Some(14),
-            s: Some(10),
-            u: Some(5),
-        };
-        Box::new(ManyState {
-            cuda,
-            high_tm,
-            low_tm,
-            cols,
-            rows,
-            params,
-        })
+        Box::new(ManyState { cuda, high_tm, low_tm, cols, rows, params })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

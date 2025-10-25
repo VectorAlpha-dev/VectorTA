@@ -244,12 +244,9 @@ impl CudaCmo {
     }
 
     // No longer needed (batch computes from prices). Kept for potential future use.
-    fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<f64>) {
-        unimplemented!()
-    }
-    fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<f64>) {
-        unimplemented!()
-    }
+fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<f64>) {
+    unimplemented!()
+}
 
     fn launch_batch_kernel(
         &self,
@@ -328,12 +325,8 @@ impl CudaCmo {
         let bytes = (len * std::mem::size_of::<f32>())   /* prices */
             + (rows * std::mem::size_of::<i32>())        /* periods */
             + (rows * len * std::mem::size_of::<f32>()); /* out */
-            + (rows * len * std::mem::size_of::<f32>()); /* out */
         let headroom = 64 * 1024 * 1024; // 64MB
         if !Self::will_fit(bytes, headroom) {
-            return Err(CudaCmoError::InvalidInput(
-                "insufficient VRAM for CMO batch".into(),
-            ));
             return Err(CudaCmoError::InvalidInput(
                 "insufficient VRAM for CMO batch".into(),
             ));
@@ -347,16 +340,12 @@ impl CudaCmo {
         // Async path with pinned buffers
         let h_prices =
             LockedBuffer::from_slice(prices).map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let h_prices =
-            LockedBuffer::from_slice(prices).map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
         let h_p = LockedBuffer::from_slice(&periods_i32)
             .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
 
         let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
             .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
         let mut d_periods = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
-            .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
-        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
             .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
         let mut d_periods = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }
             .map_err(|e| CudaCmoError::Cuda(e.to_string()))?;
@@ -420,8 +409,6 @@ impl CudaCmo {
                     break;
                 }
             }
-            let fv =
-                fv.ok_or_else(|| CudaCmoError::InvalidInput(format!("series {} all NaN", s)))?;
             let fv =
                 fv.ok_or_else(|| CudaCmoError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv <= period {

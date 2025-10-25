@@ -65,10 +65,6 @@ impl Default for CudaPnrPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         }
-        Self {
-            batch: BatchKernelPolicy::Auto,
-            many_series: ManySeriesKernelPolicy::Auto,
-        }
     }
 }
 
@@ -98,14 +94,8 @@ impl CudaPercentileNearestRank {
         cust::init(CudaFlags::empty()).map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaPnrError::Cuda(e.to_string()))?;
 
-        let ptx: &str = include_str!(concat!(
-            env!("OUT_DIR"),
-            "/percentile_nearest_rank_kernel.ptx"
-        ));
         let ptx: &str = include_str!(concat!(
             env!("OUT_DIR"),
             "/percentile_nearest_rank_kernel.ptx"
@@ -140,41 +130,12 @@ impl CudaPercentileNearestRank {
             .map_err(|e| CudaPnrError::Cuda(e.to_string()))
     }
 
-    pub fn set_policy(&mut self, policy: CudaPnrPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaPnrPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
-    pub fn set_policy(&mut self, policy: CudaPnrPolicy) {
-        self.policy = policy;
-    }
-    pub fn policy(&self) -> &CudaPnrPolicy {
-        &self.policy
-    }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
-        self.last_batch
-    }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
-        self.last_many
-    }
+    pub fn set_policy(&mut self, policy: CudaPnrPolicy) { self.policy = policy; }
+    pub fn policy(&self) -> &CudaPnrPolicy { &self.policy }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
 
     #[inline]
-    fn maybe_log(
-        sel: Option<impl fmt::Debug>,
-        which: &str,
-        once_flag: &AtomicBool,
-        printed: &mut bool,
-    ) {
-        if *printed {
-            return;
-        }
     fn maybe_log(
         sel: Option<impl fmt::Debug>,
         which: &str,
@@ -201,28 +162,13 @@ impl CudaPercentileNearestRank {
             Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
             Err(_) => true,
         }
-        match std::env::var("CUDA_MEM_CHECK") {
-            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
-            Err(_) => true,
-        }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
     #[inline]
     fn will_fit(required: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
-        if let Some((free, _)) = Self::device_mem_info() {
-            required.saturating_add(headroom) <= free
-        } else {
-            true
-        }
         if !Self::mem_check_enabled() {
             return true;
         }
@@ -237,12 +183,6 @@ impl CudaPercentileNearestRank {
 
     fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
         let (start, end, step) = axis;
-        if step == 0 || start == end {
-            return vec![start];
-        }
-        if start > end {
-            return Vec::new();
-        }
         if step == 0 || start == end {
             return vec![start];
         }
@@ -272,10 +212,6 @@ impl CudaPercentileNearestRank {
             out.push(v);
             v += step;
         }
-        while v <= lim {
-            out.push(v);
-            v += step;
-        }
         out
     }
 
@@ -285,10 +221,6 @@ impl CudaPercentileNearestRank {
         let mut combos = Vec::with_capacity(lengths.len() * percentages.len());
         for &l in &lengths {
             for &p in &percentages {
-                combos.push(PercentileNearestRankParams {
-                    length: Some(l),
-                    percentage: Some(p),
-                });
                 combos.push(PercentileNearestRankParams {
                     length: Some(l),
                     percentage: Some(p),
@@ -332,9 +264,6 @@ impl CudaPercentileNearestRank {
         if data_f32.is_empty() {
             return Err(CudaPnrError::InvalidInput("empty data".into()));
         }
-        if data_f32.is_empty() {
-            return Err(CudaPnrError::InvalidInput("empty data".into()));
-        }
         let len = data_f32.len();
         let first_valid = data_f32
             .iter()
@@ -348,19 +277,11 @@ impl CudaPercentileNearestRank {
                 "no parameter combinations".into(),
             ));
         }
-        if combos.is_empty() {
-            return Err(CudaPnrError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
         let max_len = combos.iter().map(|c| c.length.unwrap_or(15)).max().unwrap();
         if len - first_valid < max_len {
             return Err(CudaPnrError::InvalidInput("not enough valid data".into()));
         }
-        if len - first_valid < max_len {
-            return Err(CudaPnrError::InvalidInput("not enough valid data".into()));
-        }
-
+        
         // Flattened parameter axes
         let periods: Vec<i32> = combos
             .iter()
@@ -613,17 +534,6 @@ impl CudaPercentileNearestRank {
         if length == 0 || length > rows {
             return Err(CudaPnrError::InvalidInput("invalid length".into()));
         }
-        if cols == 0 || rows == 0 {
-            return Err(CudaPnrError::InvalidInput("empty shape".into()));
-        }
-        if data_tm_f32.len() != cols * rows {
-            return Err(CudaPnrError::InvalidInput(
-                "time-major input shape mismatch".into(),
-            ));
-        }
-        if length == 0 || length > rows {
-            return Err(CudaPnrError::InvalidInput("invalid length".into()));
-        }
 
         // Per-series first_valid (index of first non-NaN)
         let mut firsts = vec![0i32; cols];
@@ -631,10 +541,6 @@ impl CudaPercentileNearestRank {
             let mut fv = -1i32;
             for t in 0..rows {
                 let v = data_tm_f32[t * cols + s];
-                if !v.is_nan() {
-                    fv = t as i32;
-                    break;
-                }
                 if !v.is_nan() {
                     fv = t as i32;
                     break;
@@ -764,11 +670,6 @@ impl CudaPercentileNearestRank {
             rows,
             cols,
         })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
     }
 }
 
@@ -780,6 +681,7 @@ mod benches_dummy_compile_only {}
 pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
 
     struct PnrBatchState {
         cuda: CudaPercentileNearestRank,
@@ -796,40 +698,6 @@ pub mod benches {
         grid: GridSize,
     }
     impl CudaBenchState for PnrBatchState {
-        fn launch(&mut self) {
-            unsafe {
-                let func = self
-                    .cuda
-                    .module
-                    .get_function("percentile_nearest_rank_batch_f32")
-                    .expect("get_function pnr batch");
-                let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
-                let mut periods_ptr = self.d_periods.as_device_ptr().as_raw();
-                let mut percs_ptr = self.d_percs.as_device_ptr().as_raw();
-                let mut series_len_i = self.len as i32;
-                let mut combos_i = self.n_combos as i32;
-                let mut first_valid_i = self.first_valid;
-                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
-                let mut scratch_ptr = self.d_scratch.as_device_ptr().as_raw();
-                let mut max_len_i = self.max_len;
-                let args: &mut [*mut c_void] = &mut [
-                    &mut prices_ptr as *mut _ as *mut c_void,
-                    &mut periods_ptr as *mut _ as *mut c_void,
-                    &mut percs_ptr as *mut _ as *mut c_void,
-                    &mut series_len_i as *mut _ as *mut c_void,
-                    &mut combos_i as *mut _ as *mut c_void,
-                    &mut first_valid_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                    &mut scratch_ptr as *mut _ as *mut c_void,
-                    &mut max_len_i as *mut _ as *mut c_void,
-                ];
-                let _ = self
-                    .cuda
-                    .stream
-                    .launch(&func, self.grid, self.block, 0, args);
-                let _ = self.cuda.stream.synchronize();
-            }
-        }
         fn launch(&mut self) {
             unsafe {
                 let func = self
@@ -914,303 +782,128 @@ pub mod benches {
                 let _ = self.cuda.stream.synchronize();
             }
         }
-        fn launch(&mut self) {
-            unsafe {
-                let func = self
-                    .cuda
-                    .module
-                    .get_function("percentile_nearest_rank_many_series_one_param_time_major_f32")
-                    .expect("get_function pnr many");
-                let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
-                let mut cols_i = self.cols as i32;
-                let mut rows_i = self.rows as i32;
-                let mut length_i = self.length;
-                let mut perc_f = self.perc;
-                let mut firsts_ptr = self.d_firsts.as_device_ptr().as_raw();
-                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
-                let mut scratch_ptr = self.d_scratch.as_device_ptr().as_raw();
-                let mut max_len_i = self.length;
-                let args: &mut [*mut c_void] = &mut [
-                    &mut prices_ptr as *mut _ as *mut c_void,
-                    &mut cols_i as *mut _ as *mut c_void,
-                    &mut rows_i as *mut _ as *mut c_void,
-                    &mut length_i as *mut _ as *mut c_void,
-                    &mut perc_f as *mut _ as *mut c_void,
-                    &mut firsts_ptr as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                    &mut scratch_ptr as *mut _ as *mut c_void,
-                    &mut max_len_i as *mut _ as *mut c_void,
-                ];
-                let _ = self
-                    .cuda
-                    .stream
-                    .launch(&func, self.grid, self.block, 0, args);
-                let _ = self.cuda.stream.synchronize();
-            }
+    }
+
+    // Non-capturing prep functions for benches
+    fn prep_pnr_batch() -> Box<dyn CudaBenchState> {
+        let len = 100_000usize;
+        let prices = gen_series(len);
+        let periods: Vec<i32> = (10..=50)
+            .step_by(10)
+            .flat_map(|l| std::iter::repeat(l as i32).take(3))
+            .collect();
+        let percs: Vec<f32> = [25.0f32, 50.0, 75.0].repeat(5);
+        let n_combos = periods.len();
+        let first_valid = prices.iter().position(|v| !v.is_nan()).unwrap_or(0) as i32;
+        let max_len = *periods.iter().max().unwrap_or(&10);
+
+        let cuda = CudaPercentileNearestRank::new(0).expect("cuda ctx");
+        let block_x: u32 = 128;
+        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.unwrap();
+        let mut d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(n_combos) }.unwrap();
+        let mut d_percs: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos) }.unwrap();
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }.unwrap();
+        let mut d_scratch: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * (max_len as usize)) }.unwrap();
+
+        let hp = LockedBuffer::from_slice(&prices).unwrap();
+        let hperiods = LockedBuffer::from_slice(&periods).unwrap();
+        let hpercs = LockedBuffer::from_slice(&percs).unwrap();
+        unsafe {
+            d_prices.async_copy_from(hp.as_slice(), &cuda.stream).unwrap();
+            d_periods.async_copy_from(hperiods.as_slice(), &cuda.stream).unwrap();
+            d_percs.async_copy_from(hpercs.as_slice(), &cuda.stream).unwrap();
         }
+        let _ = cuda.stream.synchronize();
+
+        Box::new(PnrBatchState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_percs,
+            d_scratch,
+            d_out,
+            len,
+            n_combos,
+            first_valid,
+            max_len,
+            block,
+            grid,
+        })
+    }
+
+    fn prep_pnr_many() -> Box<dyn CudaBenchState> {
+        let cols = 128usize;
+        let rows = 4096usize;
+        let prices = gen_time_major_prices(cols, rows);
+        let length = 21i32;
+        let perc = 50.0f32;
+        let mut firsts = vec![0i32; cols];
+        for s in 0..cols {
+            firsts[s] = (0..rows)
+                .find(|&t| !prices[t * cols + s].is_nan())
+                .unwrap_or(0) as i32;
+        }
+        let cuda = CudaPercentileNearestRank::new(0).expect("cuda ctx");
+        let block_x: u32 = 128;
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.unwrap();
+        let mut d_firsts: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(cols) }.unwrap();
+        let mut d_scratch: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * (length as usize)) }.unwrap();
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.unwrap();
+
+        let hp = LockedBuffer::from_slice(&prices).unwrap();
+        let hf = LockedBuffer::from_slice(&firsts).unwrap();
+        unsafe {
+            d_prices.async_copy_from(hp.as_slice(), &cuda.stream).unwrap();
+            d_firsts.async_copy_from(hf.as_slice(), &cuda.stream).unwrap();
+        }
+        let _ = cuda.stream.synchronize();
+
+        Box::new(PnrManyState {
+            cuda,
+            d_prices,
+            d_firsts,
+            d_scratch,
+            d_out,
+            cols,
+            rows,
+            length,
+            perc,
+            block,
+            grid,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
         let mut v = Vec::new();
 
-        // Batch: 1 series × many params (moderate sizes to avoid OOM/timeouts)
         v.push(
             CudaBenchScenario::new(
                 "pnr",
                 "one_series_many_params",
                 "pnr/batch",
                 "pnr_batch/100k",
-                || {
-                    let len = 100_000usize;
-                    let prices = gen_series(len);
-                    let periods: Vec<i32> = (10..=50)
-                        .step_by(10)
-                        .flat_map(|l| std::iter::repeat(l as i32).take(3))
-                        .collect();
-                    let percs: Vec<f32> = [25.0f32, 50.0, 75.0].repeat(5);
-                    let n_combos = periods.len();
-                    let first_valid = prices.iter().position(|v| !v.is_nan()).unwrap_or(0) as i32;
-                    let max_len = *periods.iter().max().unwrap_or(&10);
-        v.push(
-            CudaBenchScenario::new(
-                "pnr",
-                "one_series_many_params",
-                "pnr/batch",
-                "pnr_batch/100k",
-                || {
-                    let len = 100_000usize;
-                    let prices = gen_series(len);
-                    let periods: Vec<i32> = (10..=50)
-                        .step_by(10)
-                        .flat_map(|l| std::iter::repeat(l as i32).take(3))
-                        .collect();
-                    let percs: Vec<f32> = [25.0f32, 50.0, 75.0].repeat(5);
-                    let n_combos = periods.len();
-                    let first_valid = prices.iter().position(|v| !v.is_nan()).unwrap_or(0) as i32;
-                    let max_len = *periods.iter().max().unwrap_or(&10);
-
-                    let cuda = CudaPercentileNearestRank::new(0).expect("cuda ctx");
-                    let block_x: u32 = 128;
-                    let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
-                    let grid: GridSize = (grid_x.max(1), 1, 1).into();
-                    let block: BlockSize = (block_x, 1, 1).into();
-                    let cuda = CudaPercentileNearestRank::new(0).expect("cuda ctx");
-                    let block_x: u32 = 128;
-                    let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
-                    let grid: GridSize = (grid_x.max(1), 1, 1).into();
-                    let block: BlockSize = (block_x, 1, 1).into();
-
-                    let mut d_prices: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(len) }.unwrap();
-                    let mut d_periods: DeviceBuffer<i32> =
-                        unsafe { DeviceBuffer::uninitialized(n_combos) }.unwrap();
-                    let mut d_percs: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(n_combos) }.unwrap();
-                    let mut d_out: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(n_combos * len) }.unwrap();
-                    let mut d_scratch: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(n_combos * (max_len as usize)) }
-                            .unwrap();
-                    let mut d_prices: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(len) }.unwrap();
-                    let mut d_periods: DeviceBuffer<i32> =
-                        unsafe { DeviceBuffer::uninitialized(n_combos) }.unwrap();
-                    let mut d_percs: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(n_combos) }.unwrap();
-                    let mut d_out: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(n_combos * len) }.unwrap();
-                    let mut d_scratch: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(n_combos * (max_len as usize)) }
-                            .unwrap();
-
-                    let hp = LockedBuffer::from_slice(&prices).unwrap();
-                    let hperiods = LockedBuffer::from_slice(&periods).unwrap();
-                    let hpercs = LockedBuffer::from_slice(&percs).unwrap();
-                    unsafe {
-                        d_prices
-                            .async_copy_from(hp.as_slice(), &cuda.stream)
-                            .unwrap();
-                        d_periods
-                            .async_copy_from(hperiods.as_slice(), &cuda.stream)
-                            .unwrap();
-                        d_percs
-                            .async_copy_from(hpercs.as_slice(), &cuda.stream)
-                            .unwrap();
-                    }
-                    let _ = cuda.stream.synchronize();
-                    let hp = LockedBuffer::from_slice(&prices).unwrap();
-                    let hperiods = LockedBuffer::from_slice(&periods).unwrap();
-                    let hpercs = LockedBuffer::from_slice(&percs).unwrap();
-                    unsafe {
-                        d_prices
-                            .async_copy_from(hp.as_slice(), &cuda.stream)
-                            .unwrap();
-                        d_periods
-                            .async_copy_from(hperiods.as_slice(), &cuda.stream)
-                            .unwrap();
-                        d_percs
-                            .async_copy_from(hpercs.as_slice(), &cuda.stream)
-                            .unwrap();
-                    }
-                    let _ = cuda.stream.synchronize();
-
-                    Box::new(PnrBatchState {
-                        cuda,
-                        d_prices,
-                        d_periods,
-                        d_percs,
-                        d_scratch,
-                        d_out,
-                        len,
-                        n_combos,
-                        first_valid,
-                        max_len,
-                        block,
-                        grid,
-                    }) as Box<dyn CudaBenchState>
-                },
-            )
-            .with_mem_required((100_000 * 4) + (15 * 100_000 * 4) + (15 * 64 * 4)),
-        );
-                    Box::new(PnrBatchState {
-                        cuda,
-                        d_prices,
-                        d_periods,
-                        d_percs,
-                        d_scratch,
-                        d_out,
-                        len,
-                        n_combos,
-                        first_valid,
-                        max_len,
-                        block,
-                        grid,
-                    }) as Box<dyn CudaBenchState>
-                },
+                prep_pnr_batch,
             )
             .with_mem_required((100_000 * 4) + (15 * 100_000 * 4) + (15 * 64 * 4)),
         );
 
-        // Many-series: time-major, one param
         v.push(
             CudaBenchScenario::new(
                 "pnr",
                 "many_series_one_param",
                 "pnr/many_series",
                 "pnr_many/cols=128,rows=4096",
-                || {
-                    let cols = 128usize;
-                    let rows = 4096usize;
-                    let prices = gen_time_major_prices(cols, rows);
-                    let length = 21i32;
-                    let perc = 50.0f32;
-                    let mut firsts = vec![0i32; cols];
-                    for s in 0..cols {
-                        firsts[s] = (0..rows)
-                            .find(|&t| !prices[t * cols + s].is_nan())
-                            .unwrap_or(0) as i32;
-                    }
-                    let cuda = CudaPercentileNearestRank::new(0).expect("cuda ctx");
-                    let block_x: u32 = 128;
-                    let grid_x = ((cols as u32) + block_x - 1) / block_x;
-                    let grid: GridSize = (grid_x.max(1), 1, 1).into();
-                    let block: BlockSize = (block_x, 1, 1).into();
-        v.push(
-            CudaBenchScenario::new(
-                "pnr",
-                "many_series_one_param",
-                "pnr/many_series",
-                "pnr_many/cols=128,rows=4096",
-                || {
-                    let cols = 128usize;
-                    let rows = 4096usize;
-                    let prices = gen_time_major_prices(cols, rows);
-                    let length = 21i32;
-                    let perc = 50.0f32;
-                    let mut firsts = vec![0i32; cols];
-                    for s in 0..cols {
-                        firsts[s] = (0..rows)
-                            .find(|&t| !prices[t * cols + s].is_nan())
-                            .unwrap_or(0) as i32;
-                    }
-                    let cuda = CudaPercentileNearestRank::new(0).expect("cuda ctx");
-                    let block_x: u32 = 128;
-                    let grid_x = ((cols as u32) + block_x - 1) / block_x;
-                    let grid: GridSize = (grid_x.max(1), 1, 1).into();
-                    let block: BlockSize = (block_x, 1, 1).into();
-
-                    let mut d_prices: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(cols * rows) }.unwrap();
-                    let mut d_firsts: DeviceBuffer<i32> =
-                        unsafe { DeviceBuffer::uninitialized(cols) }.unwrap();
-                    let mut d_scratch: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(cols * (length as usize)) }.unwrap();
-                    let mut d_out: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(cols * rows) }.unwrap();
-                    let mut d_prices: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(cols * rows) }.unwrap();
-                    let mut d_firsts: DeviceBuffer<i32> =
-                        unsafe { DeviceBuffer::uninitialized(cols) }.unwrap();
-                    let mut d_scratch: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(cols * (length as usize)) }.unwrap();
-                    let mut d_out: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(cols * rows) }.unwrap();
-
-                    let hp = LockedBuffer::from_slice(&prices).unwrap();
-                    let hf = LockedBuffer::from_slice(&firsts).unwrap();
-                    unsafe {
-                        d_prices
-                            .async_copy_from(hp.as_slice(), &cuda.stream)
-                            .unwrap();
-                        d_firsts
-                            .async_copy_from(hf.as_slice(), &cuda.stream)
-                            .unwrap();
-                    }
-                    let _ = cuda.stream.synchronize();
-                    let hp = LockedBuffer::from_slice(&prices).unwrap();
-                    let hf = LockedBuffer::from_slice(&firsts).unwrap();
-                    unsafe {
-                        d_prices
-                            .async_copy_from(hp.as_slice(), &cuda.stream)
-                            .unwrap();
-                        d_firsts
-                            .async_copy_from(hf.as_slice(), &cuda.stream)
-                            .unwrap();
-                    }
-                    let _ = cuda.stream.synchronize();
-
-                    Box::new(PnrManyState {
-                        cuda,
-                        d_prices,
-                        d_firsts,
-                        d_scratch,
-                        d_out,
-                        cols,
-                        rows,
-                        length,
-                        perc,
-                        block,
-                        grid,
-                    }) as Box<dyn CudaBenchState>
-                },
-            )
-            .with_mem_required((128 * 4096 * 4) + (128 * 4096 * 4) + (128 * 21 * 4)),
-        );
-                    Box::new(PnrManyState {
-                        cuda,
-                        d_prices,
-                        d_firsts,
-                        d_scratch,
-                        d_out,
-                        cols,
-                        rows,
-                        length,
-                        perc,
-                        block,
-                        grid,
-                    }) as Box<dyn CudaBenchState>
-                },
+                prep_pnr_many,
             )
             .with_mem_required((128 * 4096 * 4) + (128 * 4096 * 4) + (128 * 21 * 4)),
         );

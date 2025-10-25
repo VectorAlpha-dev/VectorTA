@@ -206,8 +206,6 @@ impl CudaChop {
                 "not enough valid data: needed >= {}, have {}",
                 max_period,
                 n - first
-                max_period,
-                n - first
             )));
         }
 
@@ -312,19 +310,7 @@ impl CudaChop {
             .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
 
         Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows,
-                cols: n,
-            },
-            combos,
-        ))
-        Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows,
-                cols: n,
-            },
+            DeviceArrayF32 { buf: d_out, rows, cols: n },
             combos,
         ))
     }
@@ -520,16 +506,7 @@ impl CudaChop {
             .synchronize()
             .map_err(|e| CudaChopError::Cuda(e.to_string()))?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 
     // ---------- Host-copy helpers (optional) ----------
@@ -582,13 +559,6 @@ pub mod benches {
                 .chop_batch_dev(&self.h, &self.l, &self.c, &self.sweep);
         }
     }
-    impl CudaBenchState for ChopBatchBench {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .chop_batch_dev(&self.h, &self.l, &self.c, &self.sweep);
-        }
-    }
 
     struct ChopManyBench {
         cuda: CudaChop,
@@ -602,13 +572,6 @@ pub mod benches {
     impl CudaBenchState for ChopManyBench {
         fn launch(&mut self) {
             let _ = self.cuda.chop_many_series_one_param_time_major_dev(
-                &self.h_tm,
-                &self.l_tm,
-                &self.c_tm,
-                self.cols,
-                self.rows,
-                &self.params,
-            );
                 &self.h_tm,
                 &self.l_tm,
                 &self.c_tm,
@@ -633,16 +596,6 @@ pub mod benches {
             c[i] = (hi + lo) * 0.5;
         }
         (h, l, c)
-        for i in 1..n {
-            let x = i as f32 * 0.0013;
-            let base = x.sin() + 0.0002 * (i as f32);
-            let hi = base + 0.6 + 0.07 * (x * 2.4).cos();
-            let lo = base - 0.6 - 0.06 * (x * 1.7).sin();
-            h[i] = hi;
-            l[i] = lo;
-            c[i] = (hi + lo) * 0.5;
-        }
-        (h, l, c)
     }
 
     fn prep_batch() -> Box<dyn CudaBenchState> {
@@ -652,20 +605,7 @@ pub mod benches {
             scalar: (100.0, 100.0, 0.0),
             drift: (1, 5, 2),
         };
-        let (h, l, c) = make_ohlc(50_000);
-        let sweep = ChopBatchRange {
-            period: (5, 55, 5),
-            scalar: (100.0, 100.0, 0.0),
-            drift: (1, 5, 2),
-        };
         let cuda = CudaChop::new(0).expect("cuda chop");
-        Box::new(ChopBatchBench {
-            cuda,
-            h,
-            l,
-            c,
-            sweep,
-        })
         Box::new(ChopBatchBench {
             cuda,
             h,
@@ -683,29 +623,7 @@ pub mod benches {
             l[s] = f32::NAN;
             c[s] = f32::NAN;
         }
-        let cols = 128usize;
-        let rows = 8192usize;
-        let (mut h, mut l, mut c) = make_ohlc(cols * rows);
-        for s in 0..cols {
-            h[s] = f32::NAN;
-            l[s] = f32::NAN;
-            c[s] = f32::NAN;
-        }
         let cuda = CudaChop::new(0).expect("cuda chop");
-        let params = ChopParams {
-            period: Some(14),
-            scalar: Some(100.0),
-            drift: Some(1),
-        };
-        Box::new(ChopManyBench {
-            cuda,
-            h_tm: h,
-            l_tm: l,
-            c_tm: c,
-            cols,
-            rows,
-            params,
-        })
         let params = ChopParams {
             period: Some(14),
             scalar: Some(100.0),
@@ -725,19 +643,9 @@ pub mod benches {
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let bytes_batch = (50_000usize * 3 + (1 + (55 - 5) / 5) * 50_000 + 50_000 * 8) * 4; // rough
         let bytes_many = 128usize * 8192usize * 4usize * 4usize; // 3 inputs + psum + out
-        let bytes_batch = (50_000usize * 3 + (1 + (55 - 5) / 5) * 50_000 + 50_000 * 8) * 4; // rough
-        let bytes_many = 128usize * 8192usize * 4usize * 4usize; // 3 inputs + psum + out
         vec![
             CudaBenchScenario::new("chop", "one_series", "chop_cuda_batch", "50k", prep_batch)
                 .with_mem_required(bytes_batch),
-            CudaBenchScenario::new(
-                "chop",
-                "many_series",
-                "chop_cuda_many_series",
-                "128x8k",
-                prep_many,
-            )
-            .with_mem_required(bytes_many),
             CudaBenchScenario::new(
                 "chop",
                 "many_series",

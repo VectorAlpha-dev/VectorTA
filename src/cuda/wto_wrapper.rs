@@ -72,9 +72,6 @@ impl Default for BatchKernelPolicy {
     fn default() -> Self {
         BatchKernelPolicy::Auto
     }
-    fn default() -> Self {
-        BatchKernelPolicy::Auto
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -84,9 +81,6 @@ pub enum ManySeriesKernelPolicy {
 }
 
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self {
-        ManySeriesKernelPolicy::Auto
-    }
     fn default() -> Self {
         ManySeriesKernelPolicy::Auto
     }

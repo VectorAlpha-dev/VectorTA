@@ -319,6 +319,8 @@ extern "C" __global__ void mod_god_mode_batch_f32(
         // NaN prefixes already set by initialization
     }
 }
+// Close missing brace for mod_god_mode_batch_f32
+}
 
 // Many-series (time-major), one param
 extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
@@ -914,4 +916,3 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
 
 }
 // ==== end: optimized small-window kernel ====
-}

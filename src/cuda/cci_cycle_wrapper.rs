@@ -9,7 +9,6 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::cci_cycle::{CciCycleBatchRange, CciCycleParams};
-use crate::indicators::cci_cycle::{CciCycleBatchRange, CciCycleParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
@@ -163,19 +162,7 @@ impl CudaCciCycle {
         self.stream
             .synchronize()
             .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols: series_len,
-        })
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols: series_len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols: series_len })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -330,19 +317,7 @@ impl CudaCciCycle {
         self.stream
             .synchronize()
             .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaCciCycleError::Cuda(e.to_string()))?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 
     fn prepare_batch_inputs(
@@ -494,31 +469,10 @@ pub mod benches {
                 .expect("cci_cycle batch");
         }
     }
-    struct CciCycleBatchState {
-        cuda: CudaCciCycle,
-        data: Vec<f32>,
-        sweep: CciCycleBatchRange,
-    }
-    impl CudaBenchState for CciCycleBatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .cci_cycle_batch_dev(&self.data, &self.sweep)
-                .expect("cci_cycle batch");
-        }
-    }
 
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaCciCycle::new(0).expect("cuda cci_cycle");
         let mut data = vec![f32::NAN; ONE_SERIES_LEN];
-        for i in 128..ONE_SERIES_LEN {
-            let x = i as f32;
-            data[i] = (x * 0.0013).sin() * 0.8 + (x * 0.00077).cos();
-        }
-        let sweep = CciCycleBatchRange {
-            length: (10, 10 + PARAM_SWEEP as usize - 1, 1),
-            factor: (0.3, 0.7, 0.0016),
-        };
         for i in 128..ONE_SERIES_LEN {
             let x = i as f32;
             data[i] = (x * 0.0013).sin() * 0.8 + (x * 0.00077).cos();
@@ -537,9 +491,6 @@ pub mod benches {
             "cci_cycle_cuda_batch_dev",
             "1m_x_250",
             prep_one_series_many_params,
-        )
-        .with_sample_size(10)
-        .with_mem_required(mem_bytes())]
         )
         .with_sample_size(10)
         .with_mem_required(mem_bytes())]

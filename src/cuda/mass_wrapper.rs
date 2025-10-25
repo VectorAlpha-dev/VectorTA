@@ -23,7 +23,7 @@ use crate::utilities::enums::Kernel;
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -57,9 +57,6 @@ impl Default for BatchKernelPolicy {
     fn default() -> Self {
         BatchKernelPolicy::Auto
     }
-    fn default() -> Self {
-        BatchKernelPolicy::Auto
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -69,9 +66,6 @@ pub enum ManySeriesKernelPolicy {
 }
 
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self {
-        ManySeriesKernelPolicy::Auto
-    }
     fn default() -> Self {
         ManySeriesKernelPolicy::Auto
     }
@@ -117,8 +111,6 @@ impl CudaMass {
         cust::init(CudaFlags::empty()).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
         let device =
             Device::get_device(device_id as u32).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
         let context = Context::new(device).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mass_kernel.ptx"));
@@ -129,10 +121,7 @@ impl CudaMass {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
                     Module::from_ptx(ptx, &[]).map_err(|e| CudaMassError::Cuda(e.to_string()))?
@@ -141,16 +130,7 @@ impl CudaMass {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
             .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
 
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-            policy: CudaMassPolicy::default(),
-            debug_logged: false,
-        })
         Ok(Self {
             module,
             stream,
@@ -160,17 +140,11 @@ impl CudaMass {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaMassPolicy) {
-        self.policy = policy;
-    }
     pub fn set_policy(&mut self, policy: CudaMassPolicy) {
         self.policy = policy;
     }
 
     fn maybe_log_selected(&mut self, which: &str, block_x: u32) {
-        if self.debug_logged {
-            return;
-        }
         if self.debug_logged {
             return;
         }
@@ -186,9 +160,6 @@ impl CudaMass {
         high.iter()
             .zip(low.iter())
             .position(|(&h, &l)| h.is_finite() && l.is_finite())
-        high.iter()
-            .zip(low.iter())
-            .position(|(&h, &l)| h.is_finite() && l.is_finite())
     }
 
     fn precompute_ratio_prefix_one_series_ds(
@@ -199,13 +170,8 @@ impl CudaMass {
             return Err(CudaMassError::InvalidInput(
                 "mismatched or empty inputs".into(),
             ));
-            return Err(CudaMassError::InvalidInput(
-                "mismatched or empty inputs".into(),
-            ));
         }
         let n = high.len();
-        let first = Self::first_valid_hilo(high, low)
-            .ok_or_else(|| CudaMassError::InvalidInput("all values are NaN".into()))?;
         let first = Self::first_valid_hilo(high, low)
             .ok_or_else(|| CudaMassError::InvalidInput("all values are NaN".into()))?;
 
@@ -364,13 +330,6 @@ impl CudaMass {
                     break;
                 }
             }
-            let fv = match fv {
-                Some(x) => x,
-                None => {
-                    first_valids[s] = rows as i32;
-                    continue;
-                }
-            };
             let fv = match fv {
                 Some(x) => x,
                 None => {
@@ -541,18 +500,6 @@ impl CudaMass {
         self.stream
             .synchronize()
             .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
-
-        Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows: combos.len(),
-                cols: len,
-            },
-            combos,
-        ))
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -585,7 +532,16 @@ impl CudaMass {
             for t in 0..rows { host_tm[t * cols + s] = out.values[t] as f32; }
         }
 
-        let d_out_tm = DeviceBuffer::from_slice(&host_tm).map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
+            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        unsafe {
+            d_out_tm
+                .async_copy_from(host_tm.as_slice(), &self.stream)
+                .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
+        }
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaMassError::Cuda(e.to_string()))?;
         Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
     }
 }
@@ -663,18 +619,8 @@ pub mod benches {
             let p = MassParams {
                 period: Some(self.period),
             };
-            let p = MassParams {
-                period: Some(self.period),
-            };
             let _ = self
                 .cuda
-                .mass_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    self.cols,
-                    self.rows,
-                    &p,
-                )
                 .mass_many_series_one_param_time_major_dev(
                     &self.high_tm,
                     &self.low_tm,
@@ -701,12 +647,6 @@ pub mod benches {
             low,
             sweep,
         })
-        Box::new(MassBatchState {
-            cuda: CudaMass::new(0).expect("cuda mass"),
-            high,
-            low,
-            sweep,
-        })
     }
 
     fn prep_mass_many_series() -> Box<dyn CudaBenchState> {
@@ -723,14 +663,6 @@ pub mod benches {
                 low_tm[t * cols + s] = l;
             }
         }
-        Box::new(MassManySeriesState {
-            cuda: CudaMass::new(0).expect("cuda mass"),
-            high_tm,
-            low_tm,
-            cols,
-            rows,
-            period: 9,
-        })
         Box::new(MassManySeriesState {
             cuda: CudaMass::new(0).expect("cuda mass"),
             high_tm,

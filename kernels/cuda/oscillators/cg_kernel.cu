@@ -188,8 +188,8 @@ extern "C" __global__ void cg_many_series_one_param_f32(
         return;
     }
 
-    const int warm = first_valid + period;
-    const int W    = period - 1;
+    const int warm   = first_valid + period;
+    const int window = period - 1;
 
     // Prefill NaN prefix
     for (int row = 0; row < warm; ++row)
