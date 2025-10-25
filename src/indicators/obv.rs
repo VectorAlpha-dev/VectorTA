@@ -1152,8 +1152,23 @@ pub fn obv_py<'py>(
     volume: PyReadonlyArray1<'py, f64>,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let close_slice = close.as_slice()?;
-    let volume_slice = volume.as_slice()?;
+    // Accept non-contiguous inputs; copy only when necessary
+    let close_slice: &[f64];
+    let volume_slice: &[f64];
+    let owned_close;
+    let owned_volume;
+    close_slice = if let Ok(s) = close.as_slice() {
+        s
+    } else {
+        owned_close = close.to_owned_array();
+        owned_close.as_slice().unwrap()
+    };
+    volume_slice = if let Ok(s) = volume.as_slice() {
+        s
+    } else {
+        owned_volume = volume.to_owned_array();
+        owned_volume.as_slice().unwrap()
+    };
     let kern = validate_kernel(kernel, false)?;
 
     let input = ObvInput::from_slices(close_slice, volume_slice, ObvParams::default());
@@ -1195,8 +1210,23 @@ pub fn obv_batch_py<'py>(
     volume: PyReadonlyArray1<'py, f64>,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let close_slice = close.as_slice()?;
-    let volume_slice = volume.as_slice()?;
+    // Accept non-contiguous inputs; copy only when necessary
+    let close_slice: &[f64];
+    let volume_slice: &[f64];
+    let owned_close;
+    let owned_volume;
+    close_slice = if let Ok(s) = close.as_slice() {
+        s
+    } else {
+        owned_close = close.to_owned_array();
+        owned_close.as_slice().unwrap()
+    };
+    volume_slice = if let Ok(s) = volume.as_slice() {
+        s
+    } else {
+        owned_volume = volume.to_owned_array();
+        owned_volume.as_slice().unwrap()
+    };
     let kern = validate_kernel(kernel, true)?;
 
     // OBV has no parameters, so batch is just single calculation

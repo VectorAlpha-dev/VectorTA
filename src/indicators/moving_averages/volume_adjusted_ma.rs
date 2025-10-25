@@ -1722,8 +1722,25 @@ pub fn volume_adjusted_ma_py<'py>(
     sample_period: usize,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let slice_in = data.as_slice()?;
-    let volume_in = volume.as_slice()?;
+    // Accept non-contiguous inputs by copying to owned arrays when needed
+    let slice_in: &[f64];
+    let volume_in: &[f64];
+    let owned_price;
+    let owned_vol;
+    let try_price = data.as_slice();
+    let try_vol = volume.as_slice();
+    match (try_price, try_vol) {
+        (Ok(p), Ok(v)) => {
+            slice_in = p;
+            volume_in = v;
+        }
+        _ => {
+            owned_price = data.to_owned_array();
+            owned_vol = volume.to_owned_array();
+            slice_in = owned_price.as_slice().unwrap();
+            volume_in = owned_vol.as_slice().unwrap();
+        }
+    }
     let kern = validate_kernel(kernel, false)?;
     let params = VolumeAdjustedMaParams {
         length: Some(length),
@@ -1755,8 +1772,23 @@ pub fn volume_adjusted_ma_batch_py<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
-    let d = data.as_slice()?;
-    let v = volume.as_slice()?;
+    // Accept non-contiguous inputs by copying to owned arrays when needed
+    let d: &[f64];
+    let v: &[f64];
+    let owned_d;
+    let owned_v;
+    match (data.as_slice(), volume.as_slice()) {
+        (Ok(dp), Ok(vp)) => {
+            d = dp;
+            v = vp;
+        }
+        _ => {
+            owned_d = data.to_owned_array();
+            owned_v = volume.to_owned_array();
+            d = owned_d.as_slice().unwrap();
+            v = owned_v.as_slice().unwrap();
+        }
+    }
     if d.len() != v.len() {
         return Err(PyValueError::new_err("price and volume length mismatch"));
     }

@@ -1425,22 +1425,39 @@ pub fn vama_batch_with_kernel(
 // ==================== PYTHON BINDINGS ====================
 #[cfg(feature = "python")]
 #[pyfunction(name = "vama")]
-#[pyo3(signature = (data, base_period=113, vol_period=51, smoothing=true, smooth_type=3, smooth_period=5, kernel=None))]
+#[pyo3(signature = (data, base_period=None, vol_period=51, smoothing=true, smooth_type=3, smooth_period=5, kernel=None, length=None))]
 pub fn vama_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
-    base_period: usize,
+    base_period: Option<usize>,
     vol_period: usize,
     smoothing: bool,
     smooth_type: usize,
     smooth_period: usize,
     kernel: Option<&str>,
+    length: Option<usize>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let k = validate_kernel(kernel, false)?;
-    let data_slice = data.as_slice()?;
-
+    // Accept non-contiguous inputs without adding unnecessary copies: copy only on failure
+    let data_slice: &[f64];
+    let owned;
+    match data.as_slice() {
+        Ok(s) => {
+            data_slice = s;
+        }
+        Err(_) => {
+            owned = data.to_owned_array();
+            data_slice = owned.as_slice().unwrap();
+        }
+    }
+    // Accept both `length` (alias used across MAs) and `base_period`.
+    let base_p = match (length, base_period) {
+        (Some(len), _) => len,
+        (None, Some(bp)) => bp,
+        (None, None) => 113,
+    };
     let params = VamaParams {
-        base_period: Some(base_period),
+        base_period: Some(base_p),
         vol_period: Some(vol_period),
         smoothing: Some(smoothing),
         smooth_type: Some(smooth_type),
@@ -1457,18 +1474,34 @@ pub fn vama_py<'py>(
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "vama_batch")]
-#[pyo3(signature = (data, base_period_range=(100,130,10), vol_period_range=(40,60,10), kernel=None))]
+#[pyo3(signature = (data, base_period_range=None, vol_period_range=(40,60,10), kernel=None, length_range=None))]
 pub fn vama_batch_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
-    base_period_range: (usize, usize, usize),
+    base_period_range: Option<(usize, usize, usize)>,
     vol_period_range: (usize, usize, usize),
     kernel: Option<&str>,
+    length_range: Option<(usize, usize, usize)>,
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
-    let slice_in = data.as_slice()?;
+    // Accept non-contiguous input; copy only when needed
+    let slice_in: &[f64];
+    let owned;
+    match data.as_slice() {
+        Ok(s) => slice_in = s,
+        Err(_) => {
+            owned = data.to_owned_array();
+            slice_in = owned.as_slice().unwrap();
+        }
+    }
+    // Accept both `length_range` alias and `base_period_range`.
+    let base_rng = match (length_range, base_period_range) {
+        (Some(lr), _) => lr,
+        (None, Some(br)) => br,
+        (None, None) => (100, 130, 10),
+    };
     let ranges = VamaBatchRange {
-        base_period: base_period_range,
+        base_period: base_rng,
         vol_period: vol_period_range,
     };
     let kern = validate_kernel(kernel, true)?;
@@ -1480,6 +1513,7 @@ pub fn vama_batch_py<'py>(
 
     // Pre-allocate NumPy array and write directly into it
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    // Newly allocated 1D array is contiguous; as_slice_mut() must succeed.
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let simd = match kern {

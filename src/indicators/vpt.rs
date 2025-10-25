@@ -1207,8 +1207,13 @@ pub fn vpt_py<'py>(
     volume: PyReadonlyArray1<'py, f64>,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let price_slice = price.as_slice()?;
-    let volume_slice = volume.as_slice()?;
+    // Accept non-contiguous inputs; copy only when necessary
+    let price_slice: &[f64];
+    let volume_slice: &[f64];
+    let owned_price;
+    let owned_volume;
+    price_slice = if let Ok(s) = price.as_slice() { s } else { owned_price = price.to_owned_array(); owned_price.as_slice().unwrap() };
+    volume_slice = if let Ok(s) = volume.as_slice() { s } else { owned_volume = volume.to_owned_array(); owned_volume.as_slice().unwrap() };
     let kern = validate_kernel(kernel, false)?;
 
     let input = VptInput::from_slices(price_slice, volume_slice);
@@ -1250,8 +1255,13 @@ pub fn vpt_batch_py<'py>(
     volume: PyReadonlyArray1<'py, f64>,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let price_slice = price.as_slice()?;
-    let volume_slice = volume.as_slice()?;
+    // Accept non-contiguous inputs; copy only when necessary
+    let price_slice: &[f64];
+    let volume_slice: &[f64];
+    let owned_price;
+    let owned_volume;
+    price_slice = if let Ok(s) = price.as_slice() { s } else { owned_price = price.to_owned_array(); owned_price.as_slice().unwrap() };
+    volume_slice = if let Ok(s) = volume.as_slice() { s } else { owned_volume = volume.to_owned_array(); owned_volume.as_slice().unwrap() };
     let kern = validate_kernel(kernel, true)?;
 
     // VPT has no parameters, so single row output

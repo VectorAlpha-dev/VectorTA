@@ -989,6 +989,8 @@ impl CciCycleStream {
             pf_smooth: f64::NAN,
             out_prev: f64::NAN,
 
+            // Conservative gating to ensure all prerequisites are satisfied
+            // before producing a finite value.
             warmup_after: length * 4,
         })
     }
@@ -1125,11 +1127,7 @@ impl CciCycleStream {
                 // SMMA recurrence: prev + (x - prev)/p  (Wilder RMA)
                 self.smma = fmadd(de - self.smma, self.inv_smma_p, self.smma);
             }
-            ccis = if self.smma_inited {
-                self.smma
-            } else {
-                f64::NAN
-            };
+            ccis = if self.smma_inited { self.smma } else { f64::NAN };
         }
 
         // Store ccis in ring and update deques (first stoch window)
@@ -1535,6 +1533,8 @@ pub fn cci_cycle_py<'py>(
 #[pyclass(name = "CciCycleStream")]
 pub struct CciCycleStreamPy {
     stream: CciCycleStream,
+    gate: usize,
+    i: usize,
 }
 
 #[cfg(feature = "python")]
@@ -1548,11 +1548,15 @@ impl CciCycleStreamPy {
         };
         let stream =
             CciCycleStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(CciCycleStreamPy { stream })
+        let gate = length.saturating_add(2);
+        Ok(CciCycleStreamPy { stream, gate, i: 0 })
     }
 
     fn update(&mut self, value: f64) -> Option<f64> {
-        self.stream.update(value)
+        let out = self.stream.update(value);
+        let idx = self.i;
+        self.i = self.i.wrapping_add(1);
+        if idx < self.gate { None } else { out }
     }
 }
 

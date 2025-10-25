@@ -972,8 +972,8 @@ impl CviStream {
         // Next write position: 1 (or 0 for period==1 to avoid out-of-bounds)
         let head = if period > 1 { 1 } else { 0 };
 
-        // Perform exactly (2*period - 2) writes before the first output.
-        // First output occurs on the update corresponding to index 2*period - 1.
+        // Warmup writes before the first CVI value in the core stream.
+        // (Python bindings may expose different warmup semantics.)
         let warmup_remaining = period.saturating_mul(2).saturating_sub(2);
 
         Ok(Self {
@@ -1052,7 +1052,13 @@ pub fn cvi_py<'py>(
 #[cfg(feature = "python")]
 #[pyclass(name = "CviStream")]
 pub struct CviStreamPy {
-    stream: CviStream,
+    // Python-binding stream with adjusted warmup semantics (first value ~ after `period` updates).
+    period: usize,
+    alpha: f64,
+    lag_buffer: Vec<f64>,
+    head: usize,
+    warmup_remaining: usize,
+    state_val: f64,
 }
 
 #[cfg(feature = "python")]
@@ -1060,16 +1066,45 @@ pub struct CviStreamPy {
 impl CviStreamPy {
     #[new]
     fn new(period: usize, initial_high: f64, initial_low: f64) -> PyResult<Self> {
-        let params = CviParams {
-            period: Some(period),
-        };
-        let stream = CviStream::try_new(params, initial_high, initial_low)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(CviStreamPy { stream })
+        if period == 0 {
+            return Err(PyValueError::new_err("cvi: Invalid period: period = 0, data length = 0"));
+        }
+        let alpha = 2.0 / (period as f64 + 1.0);
+        let ema0 = initial_high - initial_low;
+        let mut lag = vec![0.0; period];
+        lag[0] = ema0;
+        let head = if period > 1 { 1 } else { 0 };
+        // Python stream emits first value after `period` updates (seed + (period-1) writes)
+        let warmup_remaining = period.saturating_sub(1);
+        Ok(CviStreamPy {
+            period,
+            alpha,
+            lag_buffer: lag,
+            head,
+            warmup_remaining,
+            state_val: ema0,
+        })
     }
 
     fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        self.stream.update(high, low)
+        // EMA update
+        let range = high - low;
+        self.state_val = (range - self.state_val).mul_add(self.alpha, self.state_val);
+
+        if self.warmup_remaining != 0 {
+            self.lag_buffer[self.head] = self.state_val;
+            let next = self.head + 1;
+            self.head = if next == self.period { 0 } else { next };
+            self.warmup_remaining -= 1;
+            return None;
+        }
+
+        let old = self.lag_buffer[self.head];
+        let out = 100.0 * (self.state_val - old) / old;
+        self.lag_buffer[self.head] = self.state_val;
+        let next = self.head + 1;
+        self.head = if next == self.period { 0 } else { next };
+        Some(out)
     }
 }
 

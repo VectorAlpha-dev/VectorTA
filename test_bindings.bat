@@ -1,18 +1,12 @@
 @echo off
-REM Windows batch file for testing bindings
-REM This script works from any directory by changing to its own location first
-REM Usage:
-REM   test_bindings.bat              - Run all tests
-REM   test_bindings.bat alma         - Run only alma tests
-REM   test_bindings.bat --python     - Run only Python tests
-REM   test_bindings.bat --wasm       - Run only WASM tests
+REM Windows batch file for testing Python and WASM bindings without parentheses blocks
 
-setlocal enabledelayedexpansion
+setlocal EnableExtensions EnableDelayedExpansion
 
 REM Get the directory where this batch file is located
-set SCRIPT_DIR=%~dp0
+set "SCRIPT_DIR=%~dp0"
 
-REM Change to the script directory (removes trailing backslash)
+REM Change to the script directory (remove trailing backslash)
 cd /d "%SCRIPT_DIR:~0,-1%"
 
 REM Store the project root directory name for display
@@ -20,146 +14,228 @@ for %%I in ("%CD%") do set PROJECT_NAME=%%~nxI
 
 echo Working directory: %PROJECT_NAME% (%CD%)
 
-REM Colors don't work the same in Windows, so using simple text
+REM Defaults
 set "RUN_PYTHON=true"
 set "RUN_WASM=true"
 set "TEST_PATTERN="
+set "USE_NIGHTLY_AVX=true"
+set "FAILED=false"
 
-REM Parse arguments
+REM Parse args without parentheses blocks
 :parse_args
-if "%~1"=="" goto :start_tests
-if "%~1"=="--python" (
-    set "RUN_WASM=false"
-    shift
-    goto :parse_args
-)
-if "%~1"=="--wasm" (
-    set "RUN_PYTHON=false"
-    shift
-    goto :parse_args
-)
-if "%~1"=="--help" (
-    echo Usage: %0 [options] [test_pattern]
-    echo Options:
-    echo   --python     Run only Python tests
-    echo   --wasm       Run only WASM tests
-    echo   --help       Show this help message
-    echo.
-    echo Examples:
-    echo   %0                    # Run all tests
-    echo   %0 alma               # Run only alma tests
-    echo   %0 --python alma      # Run only Python alma tests
-    exit /b 0
-)
+if "%~1"=="" goto start_tests
+if /I "%~1"=="--python" set "RUN_WASM=false" & shift & goto parse_args
+REM common typo
+if /I "%~1"=="--pytohn" set "RUN_WASM=false" & shift & goto parse_args
+if /I "%~1"=="--wasm"   set "RUN_PYTHON=false" & shift & goto parse_args
+if /I "%~1"=="--avx"    set "USE_NIGHTLY_AVX=true" & shift & goto parse_args
+if /I "%~1"=="--help" goto show_help
 set "TEST_PATTERN=%~1"
 shift
-goto :parse_args
+goto parse_args
+
+:show_help
+echo Usage: %~nx0 [options] [test_pattern]
+echo   --python     Run only Python tests
+echo   --wasm       Run only WASM tests
+echo   --avx        Build Python bindings with nightly AVX (requires rustup nightly)
+echo   --help       Show this help message
+echo.
+echo Examples:
+echo   %~nx0
+echo   %~nx0 alma
+echo   %~nx0 --python alma
+echo   %~nx0 --python --avx alma
+exit /b 0
 
 :start_tests
 echo Running binding tests...
 echo ==================================
 
-REM Python tests
-if "%RUN_PYTHON%"=="true" (
-    echo.
-    echo Setting up Python environment...
-    
-    REM Check if venv exists
-    if not exist ".venv" (
-        echo Creating Python virtual environment...
-        python -m venv .venv
-    )
-    
-    REM Activate virtual environment
-    call .venv\Scripts\activate.bat
-    
-    REM Install dependencies using venv Python explicitly
-    .venv\Scripts\python.exe -m pip install --upgrade pip --quiet
-    .venv\Scripts\python.exe -m pip install maturin pytest pytest-xdist numpy --quiet
-    
-    REM Ensure maturin is in PATH for this session
-    for /f %%i in ('.venv\Scripts\python.exe -m site --user-base') do set PATH=%%i\Scripts;!PATH!
-    
-    echo.
-    echo Cleaning Python module cache...
-    REM Remove cached compiled modules to ensure fresh build
-    .venv\Scripts\python.exe -c "import sys; import shutil; import pathlib; [shutil.rmtree(p, ignore_errors=True) for p in pathlib.Path('.venv/Lib/site-packages').glob('my_project*')]" 2>nul
-    .venv\Scripts\python.exe -c "import sys; sys.path_importer_cache.clear() if hasattr(sys, 'path_importer_cache') else None" 2>nul
-    
-    echo Building Python bindings...
-    REM Enable dylib-lto for Python builds
-    set "RUSTFLAGS=-Zdylib-lto"
-    REM Build with release optimizations
-    maturin develop --features python,nightly-avx --release
-    if !errorlevel! equ 0 (
-        echo Python build successful
-        
-        echo.
-        echo Running Python tests...
-        if "%TEST_PATTERN%"=="" (
-            .venv\Scripts\python.exe tests/python/run_all_tests.py
-        ) else (
-            .venv\Scripts\python.exe tests/python/run_all_tests.py %TEST_PATTERN%
-        )
-        if !errorlevel! neq 0 (
-            echo Python tests failed
-            set "FAILED=true"
-        ) else (
-            echo Python tests passed
-        )
-    ) else (
-        echo Python build failed
-        set "FAILED=true"
-    )
+if /I "%RUN_PYTHON%"=="true" goto py_tests
+goto after_python
+
+:py_tests
+echo.
+echo Setting up Python environment...
+
+REM Clear conflicting global python envs that can point to WSL paths
+set "PYO3_PYTHON="
+set "MATURIN_PYTHON="
+set "PYTHONHOME="
+set "PYTHONPATH="
+
+if not exist ".venv" goto make_venv
+goto venv_ready
+
+:make_venv
+echo Creating Python virtual environment...
+python -m venv .venv
+if errorlevel 1 goto try_py_launcher
+goto venv_ready
+
+:try_py_launcher
+where py >nul 2>&1
+if errorlevel 1 goto venv_create_fail
+py -3 -m venv .venv
+if errorlevel 1 goto venv_create_fail
+
+:venv_ready
+REM Prefer direct venv Python to avoid activation issues on some systems
+set "VENV_PY=.venv\Scripts\python.exe"
+
+call :ensure_venv_layout
+if errorlevel 1 goto venv_create_fail
+
+REM Try to activate for nice PATH/prompt, but continue even if it fails
+if exist ".venv\Scripts\activate.bat" call ".venv\Scripts\activate.bat" >nul 2>&1
+
+REM Ensure pyo3/maturin use the venv python, not any host overrides
+set "PYO3_PYTHON=%VENV_PY%"
+set "MATURIN_PYTHON=%VENV_PY%"
+set "PYTHON=%VENV_PY%"
+set "VIRTUAL_ENV=%CD%\.venv"
+set "PATH=%CD%\.venv\Scripts;%PATH%"
+
+"%VENV_PY%" -m pip install --upgrade pip --quiet
+"%VENV_PY%" -m pip install maturin pytest pytest-xdist numpy pandas --quiet
+
+echo Building Python bindings...
+set "RUSTFLAGS="
+if /I "%USE_NIGHTLY_AVX%"=="true" goto build_py_avx
+"%VENV_PY%" -m maturin develop --features python --release --pip-path "%CD%\.venv\Scripts\pip.exe"
+if errorlevel 1 goto py_build_fail
+goto py_built
+
+:build_py_avx
+set "RUSTUP_TOOLCHAIN=nightly"
+"%VENV_PY%" -m maturin develop --features python,nightly-avx --release --pip-path "%CD%\.venv\Scripts\pip.exe"
+if errorlevel 1 goto py_build_fail
+
+:py_built
+echo Python build successful
+echo Pre-generating reference outputs to avoid test-time Cargo locks...
+if /I "%USE_NIGHTLY_AVX%"=="true" (
+  set "RUSTUP_TOOLCHAIN=nightly"
+  cargo build --quiet --release --features nightly-avx --bin generate_references >nul 2>&1
+) else (
+  cargo build --quiet --release --bin generate_references >nul 2>&1
+)
+REM Point tests to the prebuilt binary (nightly build if available)
+set "RUST_REF_BIN=%CD%\target\release\generate_references.exe"
+if not exist "%RUST_REF_BIN%" set "RUST_REF_BIN=%CD%\target-py\release\generate_references.exe"
+echo Using reference binary: %RUST_REF_BIN%
+echo.
+echo Running Python tests...
+if "%TEST_PATTERN%"=="" goto run_all_py
+"%VENV_PY%" tests\python\run_all_tests.py %TEST_PATTERN%
+if errorlevel 1 goto py_tests_fail
+echo Python tests passed
+goto after_python
+
+:run_all_py
+"%VENV_PY%" tests\python\run_all_tests.py
+if errorlevel 1 goto py_tests_fail
+echo Python tests passed
+goto after_python
+
+:venv_create_fail
+echo Failed to create virtual environment. Ensure Python is installed and on PATH.
+set "FAILED=true"
+goto after_python
+
+REM ------------------------
+REM Subroutines
+REM ------------------------
+
+:ensure_venv_layout
+if exist ".venv\Scripts\python.exe" (
+  for /f "usebackq tokens=*" %%P in (`".venv\Scripts\python.exe" -c "import sys; print(sys.executable)" 2^>nul`) do set "_VENV_EXE=%%P"
+  if not defined _VENV_EXE goto recreate_venv
+  echo %_VENV_EXE% | findstr /I "/usr/bin\\python.exe" >nul 2>&1
+  if %errorlevel%==0 goto recreate_venv
+  exit /b 0
+)
+if exist ".venv\bin\activate" (
+  echo Detected POSIX virtual environment at .venv\bin; recreating for Windows...
+  rmdir /s /q .venv
 )
 
-REM WASM tests
-if "%RUN_WASM%"=="true" (
-    echo.
-    echo Cleaning WASM build artifacts...
-    REM Clean any existing WASM artifacts to ensure fresh build
-    if exist "pkg" (
-        rmdir /s /q pkg 2>nul
-    )
-    if exist "target\wasm32-unknown-unknown" (
-        rmdir /s /q "target\wasm32-unknown-unknown" 2>nul
-    )
-    
-    echo Building WASM bindings...
-    REM Disable LTO for WASM builds
-    set "CARGO_PROFILE_RELEASE_LTO=off"
-    wasm-pack build --target nodejs --features wasm
-    if !errorlevel! equ 0 (
-        echo WASM build successful
-        
-        echo.
-        echo Running WASM tests...
-        pushd tests\wasm
-        call npm install
-        if "%TEST_PATTERN%"=="" (
-            call npm test
-        ) else (
-            call npm test -- %TEST_PATTERN%
-        )
-        if !errorlevel! neq 0 (
-            echo WASM tests failed
-            set "FAILED=true"
-        ) else (
-            echo WASM tests passed
-        )
-        popd
-    ) else (
-        echo WASM build failed
-        set "FAILED=true"
-    )
+:recreate_venv
+echo Recreating Python virtual environment with Windows launcher...
+where py >nul 2>&1
+if errorlevel 1 (
+  python -m venv .venv
+  if errorlevel 1 exit /b 1
+  exit /b 0
 )
+py -3 -m venv .venv
+if errorlevel 1 exit /b 1
+exit /b 0
 
+:py_build_fail
+echo Python build failed
+set "FAILED=true"
+goto after_python
+
+:py_tests_fail
+echo Python tests failed
+set "FAILED=true"
+goto after_python
+
+:after_python
+
+if /I "%RUN_WASM%"=="true" goto wasm_tests
+goto epilogue
+
+:wasm_tests
+echo.
+echo Cleaning WASM build artifacts...
+if exist "pkg" rmdir /s /q pkg 2>nul
+if exist "target\wasm32-unknown-unknown" rmdir /s /q "target\wasm32-unknown-unknown" 2>nul
+
+echo Building WASM bindings...
+set "CARGO_PROFILE_RELEASE_LTO=off"
+wasm-pack build --target nodejs --features wasm
+if errorlevel 1 goto wasm_build_fail
+
+echo WASM build successful
+echo.
+echo Running WASM tests...
+pushd tests\wasm >nul
+call npm install
+if "%TEST_PATTERN%"=="" goto run_all_wasm
+call npm test -- %TEST_PATTERN%
+if errorlevel 1 goto wasm_tests_fail
+echo WASM tests passed
+popd >nul
+goto epilogue
+
+:run_all_wasm
+call npm test
+if errorlevel 1 goto wasm_tests_fail
+echo WASM tests passed
+popd >nul
+goto epilogue
+
+:wasm_build_fail
+echo WASM build failed
+set "FAILED=true"
+goto epilogue
+
+:wasm_tests_fail
+echo WASM tests failed
+set "FAILED=true"
+popd >nul
+goto epilogue
+
+:epilogue
 echo.
 echo ==================================
-if "%FAILED%"=="true" (
-    echo Tests completed with failures
-    exit /b 1
-) else (
-    echo All tests passed!
-    exit /b 0
-)
+if /I "%FAILED%"=="true" goto fail_summary
+echo All tests passed!
+exit /b 0
+
+:fail_summary
+echo Tests completed with failures
+exit /b 1

@@ -77,6 +77,14 @@ use my_project::indicators::moving_averages::jma::{jma, JmaInput, JmaParams};
 use my_project::indicators::moving_averages::jsa::{jsa, JsaInput, JsaParams};
 use my_project::indicators::moving_averages::kama::{kama, KamaInput, KamaParams};
 use my_project::indicators::moving_averages::linreg::{linreg, LinRegInput, LinRegParams};
+use my_project::indicators::moving_averages::volatility_adjusted_ma::{
+    vama, VamaInput, VamaParams,
+};
+use my_project::indicators::moving_averages::volume_adjusted_ma::{
+    VolumeAdjustedMa as volu_ma,
+    VolumeAdjustedMaInput as VoluMaInput,
+    VolumeAdjustedMaParams as VoluMaParams,
+};
 use my_project::indicators::moving_averages::maaq::{maaq, MaaqInput, MaaqParams};
 use my_project::indicators::moving_averages::mama::{mama, MamaInput, MamaParams};
 use my_project::indicators::moving_averages::mwdx::{mwdx, MwdxInput, MwdxParams};
@@ -1999,6 +2007,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "length": length,
                     "maj_length": maj_length,
                     "min_length": min_length
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        }
+        "vama" => {
+            // Volatility Adjusted MA uses only price; accept any source but default to close
+            let price = candles.select_candle_field(match source {
+                "open" | "high" | "low" | "close" | "hl2" | "hlc3" | "ohlc4" | "hlcc4" => source,
+                _ => "close",
+            })?;
+            let params = VamaParams::default();
+            let base_period = params.base_period.unwrap_or(113);
+            let vol_period = params.vol_period.unwrap_or(51);
+            let smoothing = params.smoothing.unwrap_or(true);
+            let smooth_type = params.smooth_type.unwrap_or(3);
+            let smooth_period = params.smooth_period.unwrap_or(5);
+            let input = VamaInput::from_slice(price, params);
+            let result = vama(&input)?;
+            json!({
+                "indicator": "vama",
+                "source": "close",
+                "params": {
+                    "base_period": base_period,
+                    "vol_period": vol_period,
+                    "smoothing": smoothing,
+                    "smooth_type": smooth_type,
+                    "smooth_period": smooth_period
+                },
+                "values": result.values,
+                "length": result.values.len()
+            })
+        }
+        "volume_adjusted_ma" => {
+            // Volume Adjusted MA requires price and volume; tests pass 'close_volume'
+            let price = candles.select_candle_field("close")?;
+            let volume = candles.select_candle_field("volume")?;
+            let params = VoluMaParams::default();
+            let length = params.length.unwrap_or(13);
+            let vi_factor = params.vi_factor.unwrap_or(0.67);
+            let strict = params.strict.unwrap_or(true);
+            let sample_period = params.sample_period.unwrap_or(0);
+            let input = VoluMaInput::from_slices(price, volume, params);
+            let result = volu_ma(&input)?;
+            json!({
+                "indicator": "volume_adjusted_ma",
+                "source": "close_volume",
+                "params": {
+                    "length": length,
+                    "vi_factor": vi_factor,
+                    "strict": strict,
+                    "sample_period": sample_period
                 },
                 "values": result.values,
                 "length": result.values.len()

@@ -6,33 +6,48 @@ import os
 from pathlib import Path
 
 def get_rust_output(indicator_name, source='close'):
-    """Run the Rust reference generator to get expected outputs"""
-    # Build the reference generator if needed
+    """Run the Rust reference generator to get expected outputs.
+
+    Prefers a prebuilt binary to avoid Cargo lock contention during pytest. If
+    the binary is not present, falls back to `cargo build` + `cargo run`.
+    Honor env var `RUST_REF_BIN` when set.
+    """
     project_root = Path(__file__).parent.parent.parent
-    
-    # Run cargo build to ensure binary exists
+
+    # 1) Preferred path: call prebuilt binary directly
+    bin_hint = os.environ.get('RUST_REF_BIN', '').strip()
+    candidates = []
+    if bin_hint:
+        candidates.append(Path(bin_hint))
+    # platform-aware default locations
+    candidates.append(project_root / 'target' / 'release' / ('generate_references.exe' if os.name == 'nt' else 'generate_references'))
+    candidates.append(project_root / 'target-py' / 'release' / ('generate_references.exe' if os.name == 'nt' else 'generate_references'))
+
+    for cand in candidates:
+        if cand.is_file():
+            result = subprocess.run([str(cand), indicator_name, source], cwd=project_root, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to generate reference for {indicator_name}: {result.stderr}")
+            return json.loads(result.stdout)
+
+    # 2) Fallback: build and run via Cargo
     build_result = subprocess.run(
         ['cargo', 'build', '--release', '--bin', 'generate_references'],
         cwd=project_root,
         capture_output=True,
         text=True
     )
-    
     if build_result.returncode != 0:
         raise RuntimeError(f"Failed to build reference generator: {build_result.stderr}")
-    
-    # Run the reference generator
+
     result = subprocess.run(
         ['cargo', 'run', '--release', '--bin', 'generate_references', '--', indicator_name, source],
         cwd=project_root,
         capture_output=True,
         text=True
     )
-    
     if result.returncode != 0:
         raise RuntimeError(f"Failed to generate reference for {indicator_name}: {result.stderr}")
-    
-    # Parse JSON output
     return json.loads(result.stdout)
 
 def compare_with_rust(indicator_name, python_output, source='close', params=None, rtol=1e-10, atol=1e-12):

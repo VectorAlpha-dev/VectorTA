@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 
 // Re-export all Python functions and classes from indicators
 // Add module initialization here
@@ -642,17 +643,327 @@ use crate::indicators::moving_averages::uma::{
     uma_cuda_batch_dev_py, uma_cuda_many_series_one_param_dev_py,
 };
 #[cfg(feature = "python")]
-use crate::indicators::moving_averages::volatility_adjusted_ma::{
-    vama_batch_py, vama_py, VamaStreamPy,
-};
+use crate::indicators::moving_averages::volatility_adjusted_ma as vama_vol;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::volatility_adjusted_ma::{
     vama_cuda_batch_dev_py, vama_cuda_many_series_one_param_dev_py,
 };
 #[cfg(feature = "python")]
-use crate::indicators::moving_averages::volume_adjusted_ma::{
-    volume_adjusted_ma_batch_py, volume_adjusted_ma_py, VolumeAdjustedMaStreamPy,
-};
+use crate::indicators::moving_averages::volume_adjusted_ma as vama_volu;
+
+// -----------------------------
+// Unified VAMA Python functions
+// -----------------------------
+#[cfg(feature = "python")]
+#[pyfunction(name = "vama")]
+#[pyo3(signature = (*args, **kwargs))]
+fn vama_unified_py<'py>(
+    py: Python<'py>,
+    args: &'py Bound<'py, pyo3::types::PyTuple>,
+    kwargs: Option<&'py Bound<'py, pyo3::types::PyDict>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    // Decide variant: volume-adjusted if a second ndarray is present or 'volume' kw is provided
+    let is_volume_variant = || -> PyResult<bool> {
+        if args.len() >= 2 {
+            if args.get_item(1)?.downcast::<PyArray1<f64>>().is_ok() {
+                return Ok(true);
+            }
+        }
+        if let Some(kw) = &kwargs {
+            if let Ok(Some(_v)) = kw.get_item("volume") {
+                if _v.downcast::<PyArray1<f64>>().is_ok() {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }()?;
+
+    if is_volume_variant {
+        // Expect: (data, volume, [length, vi_factor, strict, sample_period, kernel]) with kw overrides
+        let data: PyReadonlyArray1<'_, f64> = args.get_item(0)?.extract()?;
+        // 2nd arg may be positional or kw
+        let volume: PyReadonlyArray1<'_, f64> = if args.len() >= 2 {
+            args.get_item(1)?.extract()?
+        } else {
+            kwargs
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "vama: missing volume array",
+                ))?
+                .get_item("volume")?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "vama: missing volume array",
+                ))?
+                .extract()?
+        };
+
+        // helpers to read either kw or positional with defaults
+        let get_kw = |name: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
+            kwargs.and_then(|k| k.get_item(name).ok().flatten())
+        };
+        let mut idx = 2usize; // after data, volume
+        let length: usize = if let Some(v) = get_kw("length") {
+            v.extract()?
+        } else if args.len() > idx {
+            let out: usize = args.get_item(idx)?.extract()?;
+            idx += 1;
+            out
+        } else {
+            13
+        };
+        let vi_factor: f64 = if let Some(v) = get_kw("vi_factor") {
+            v.extract()?
+        } else if args.len() > idx {
+            let out: f64 = args.get_item(idx)?.extract()?;
+            idx += 1;
+            out
+        } else {
+            0.67
+        };
+        let strict: bool = if let Some(v) = get_kw("strict") {
+            v.extract()?
+        } else if args.len() > idx {
+            let out: bool = args.get_item(idx)?.extract()?;
+            idx += 1;
+            out
+        } else {
+            true
+        };
+        let sample_period: usize = if let Some(v) = get_kw("sample_period") {
+            v.extract()?
+        } else if args.len() > idx {
+            let out: usize = args.get_item(idx)?.extract()?;
+            idx += 1;
+            out
+        } else {
+            0
+        };
+        let kernel_s: Option<String> = get_kw("kernel").map(|v| v.extract()).transpose()?;
+        let kernel = kernel_s.as_deref();
+
+        let arr = vama_volu::volume_adjusted_ma_py(
+            py,
+            data,
+            volume,
+            length,
+            vi_factor,
+            strict,
+            sample_period,
+            kernel,
+        )?;
+        return Ok(arr.into_any());
+    }
+
+    // Volatility-adjusted variant: (data, [base_period, vol_period, smoothing, smooth_type, smooth_period, kernel])
+    let data: PyReadonlyArray1<'_, f64> = args.get_item(0)?.extract()?;
+    let get_kw = |name: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
+        kwargs.and_then(|k| k.get_item(name).ok().flatten())
+    };
+    let mut idx = 1usize;
+    let base_period: usize = if let Some(v) = get_kw("base_period") {
+        v.extract()?
+    } else if let Some(v) = get_kw("length") {
+        // allow alias 'length' for base_period
+        v.extract()?
+    } else if args.len() > idx && args.get_item(idx)?.extract::<usize>().is_ok() {
+        let out: usize = args.get_item(idx)?.extract()?;
+        idx += 1;
+        out
+    } else {
+        113
+    };
+    let vol_period: usize = if let Some(v) = get_kw("vol_period") {
+        v.extract()?
+    } else if args.len() > idx {
+        let out: usize = args.get_item(idx)?.extract()?;
+        idx += 1;
+        out
+    } else {
+        51
+    };
+    let smoothing: bool = if let Some(v) = get_kw("smoothing") {
+        v.extract()?
+    } else if args.len() > idx {
+        let out: bool = args.get_item(idx)?.extract()?;
+        idx += 1;
+        out
+    } else {
+        true
+    };
+    let smooth_type: usize = if let Some(v) = get_kw("smooth_type") {
+        v.extract()?
+    } else if args.len() > idx {
+        let out: usize = args.get_item(idx)?.extract()?;
+        idx += 1;
+        out
+    } else {
+        3
+    };
+    let smooth_period: usize = if let Some(v) = get_kw("smooth_period") {
+        v.extract()?
+    } else if args.len() > idx {
+        let out: usize = args.get_item(idx)?.extract()?;
+        idx += 1;
+        out
+    } else {
+        5
+    };
+    let kernel_s: Option<String> = get_kw("kernel").map(|v| v.extract()).transpose()?;
+    let kernel = kernel_s.as_deref();
+    let arr = vama_vol::vama_py(
+        py, data, Some(base_period), vol_period, smoothing, smooth_type, smooth_period, kernel, None,
+    )?;
+    Ok(arr.into_any())
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "vama_batch")]
+#[pyo3(signature = (*args, **kwargs))]
+fn vama_batch_unified_py<'py>(
+    py: Python<'py>,
+    args: &'py Bound<'py, pyo3::types::PyTuple>,
+    kwargs: Option<&'py Bound<'py, pyo3::types::PyDict>>,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let is_volume_variant = || -> PyResult<bool> {
+        if args.len() >= 2 {
+            if args.get_item(1)?.downcast::<PyArray1<f64>>().is_ok() {
+                return Ok(true);
+            }
+        }
+        if let Some(kw) = &kwargs {
+            if kw.get_item("volume").ok().flatten().is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }()?;
+
+    if is_volume_variant {
+        // (data, volume, length_range=(...), vi_factor_range=(...), sample_period_range=(...), strict=None, kernel=None)
+        let data: PyReadonlyArray1<'_, f64> = args.get_item(0)?.extract()?;
+        let volume: PyReadonlyArray1<'_, f64> = if args.len() >= 2 {
+            args.get_item(1)?.extract()?
+        } else {
+            kwargs
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "vama_batch: missing volume array",
+                ))?
+                .get_item("volume")?
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "vama_batch: missing volume array",
+                ))?
+                .extract()?
+        };
+        let get_kw = |name: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
+            kwargs.and_then(|k| k.get_item(name).ok().flatten())
+        };
+        let length_range: (usize, usize, usize) = get_kw("length_range")
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or((13, 13, 0));
+        let vi_factor_range: (f64, f64, f64) = get_kw("vi_factor_range")
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or((0.67, 0.67, 0.0));
+        let sample_period_range: (usize, usize, usize) = get_kw("sample_period_range")
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or((0, 0, 0));
+        let strict: Option<bool> = get_kw("strict").map(|v| v.extract()).transpose()?;
+        let kernel_s: Option<String> = get_kw("kernel").map(|v| v.extract()).transpose()?;
+        let kernel = kernel_s.as_deref();
+        return vama_volu::volume_adjusted_ma_batch_py(
+            py,
+            data,
+            volume,
+            length_range,
+            vi_factor_range,
+            sample_period_range,
+            strict,
+            kernel,
+        );
+    }
+
+    // Volatility-adjusted batch: (data, base_period_range=(...), vol_period_range=(...), kernel=None)
+    let data: PyReadonlyArray1<'_, f64> = args.get_item(0)?.extract()?;
+    let get_kw = |name: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
+        kwargs.and_then(|k| k.get_item(name).ok().flatten())
+    };
+    let base_period_range: (usize, usize, usize) = get_kw("base_period_range")
+        .map(|v| v.extract())
+        .transpose()?
+        .or_else(|| get_kw("length_range").map(|v| v.extract()).transpose().ok().flatten())
+        .unwrap_or((100, 130, 10));
+    let vol_period_range: (usize, usize, usize) = get_kw("vol_period_range")
+        .map(|v| v.extract())
+        .transpose()?
+        .unwrap_or((40, 60, 10));
+    let kernel_s: Option<String> = get_kw("kernel").map(|v| v.extract()).transpose()?;
+    let kernel = kernel_s.as_deref();
+    vama_vol::vama_batch_py(py, data, Some(base_period_range), vol_period_range, kernel, None)
+}
+
+// Unified stream with dual signatures
+#[cfg(feature = "python")]
+#[pyclass(name = "VamaStream")]
+pub struct VamaStreamUnifiedPy {
+    inner: VamaStreamKind,
+}
+
+#[cfg(feature = "python")]
+enum VamaStreamKind {
+    Volatility(vama_vol::VamaStream),
+    Volume(vama_volu::VolumeAdjustedMaStream),
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl VamaStreamUnifiedPy {
+    #[new]
+    #[pyo3(signature = (length=None, vi_factor=None, strict=None, sample_period=None, base_period=None, vol_period=None, smoothing=None, smooth_type=None, smooth_period=None))]
+    fn new(
+        length: Option<usize>,
+        vi_factor: Option<f64>,
+        strict: Option<bool>,
+        sample_period: Option<usize>,
+        base_period: Option<usize>,
+        vol_period: Option<usize>,
+        smoothing: Option<bool>,
+        smooth_type: Option<usize>,
+        smooth_period: Option<usize>,
+    ) -> PyResult<Self> {
+        // Prefer volume-adjusted when any of its params are specified
+        if length.is_some() || vi_factor.is_some() || strict.is_some() || sample_period.is_some() {
+            let s = vama_volu::VolumeAdjustedMaStream::try_new(vama_volu::VolumeAdjustedMaParams {
+                length: Some(length.unwrap_or(13)),
+                vi_factor: Some(vi_factor.unwrap_or(0.67)),
+                strict: Some(strict.unwrap_or(true)),
+                sample_period: Some(sample_period.unwrap_or(0)),
+            })
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            return Ok(Self { inner: VamaStreamKind::Volume(s) });
+        }
+        // Otherwise assume volatility-adjusted
+        let s = vama_vol::VamaStream::try_new(vama_vol::VamaParams {
+            base_period: Some(base_period.unwrap_or(113)),
+            vol_period: Some(vol_period.unwrap_or(51)),
+            smoothing: Some(smoothing.unwrap_or(true)),
+            smooth_type: Some(smooth_type.unwrap_or(3)),
+            smooth_period: Some(smooth_period.unwrap_or(5)),
+        })
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(Self { inner: VamaStreamKind::Volatility(s) })
+    }
+
+    /// Update with one (price) or two (price, volume) arguments.
+    #[pyo3(signature = (price, volume=None))]
+    fn update(&mut self, price: f64, volume: Option<f64>) -> Option<f64> {
+        match &mut self.inner {
+            VamaStreamKind::Volatility(s) => s.update(price),
+            VamaStreamKind::Volume(s) => s.update(price, volume.unwrap_or(f64::NAN)),
+        }
+    }
+}
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::volume_adjusted_ma::{
     volume_adjusted_ma_cuda_batch_dev_py, volume_adjusted_ma_cuda_many_series_one_param_dev_py,
@@ -2738,10 +3049,10 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register VAMA functions
-    m.add_function(wrap_pyfunction!(vama_py, m)?)?;
-    m.add_function(wrap_pyfunction!(vama_batch_py, m)?)?;
-    m.add_class::<VamaStreamPy>()?;
+    // Register unified VAMA (Volatility/Volume Adjusted MA combined under `vama`)
+    m.add_function(wrap_pyfunction!(vama_unified_py, m)?)?;
+    m.add_function(wrap_pyfunction!(vama_batch_unified_py, m)?)?;
+    m.add_class::<VamaStreamUnifiedPy>()?;
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(vama_cuda_batch_dev_py, m)?)?;
@@ -2846,10 +3157,10 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(qqe_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Volume Adjusted MA
-    m.add_function(wrap_pyfunction!(volume_adjusted_ma_py, m)?)?;
-    m.add_function(wrap_pyfunction!(volume_adjusted_ma_batch_py, m)?)?;
-    m.add_class::<VolumeAdjustedMaStreamPy>()?;
+    // Volume Adjusted MA (explicit API)
+    m.add_function(wrap_pyfunction!(vama_volu::volume_adjusted_ma_py, m)?)?;
+    m.add_function(wrap_pyfunction!(vama_volu::volume_adjusted_ma_batch_py, m)?)?;
+    m.add_class::<vama_volu::VolumeAdjustedMaStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(volume_adjusted_ma_cuda_batch_dev_py, m)?)?;
