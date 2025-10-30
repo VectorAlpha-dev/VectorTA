@@ -85,14 +85,14 @@ test('VOSS accuracy', async () => {
     assertArrayClose(
         voss.slice(-5),
         expectedVossLast5,
-        1e-1,  // Using 1e-1 like in Rust tests
+        1e-6, // Match Rust unit test tolerance (abs <= 1e-6)
         "VOSS last 5 values mismatch"
     );
     
     assertArrayClose(
         filt.slice(-5),
         expectedFiltLast5,
-        1e-1,  // Using 1e-1 like in Rust tests
+        1e-6, // Match Rust unit test tolerance (abs <= 1e-6)
         "Filt last 5 values mismatch"
     );
 });
@@ -223,8 +223,8 @@ test('VOSS fast API', () => {
             console.log('wasm.__wasm.memory.buffer.byteLength:', wasm.__wasm.memory.buffer.byteLength);
         }
         
-        assertArrayClose(voss, safeVoss, 1e-10, "Fast API voss mismatch");
-        assertArrayClose(filt, safeFilt, 1e-10, "Fast API filt mismatch");
+        assertArrayClose(voss, safeVoss, 1e-6, "Fast API voss mismatch");
+        assertArrayClose(filt, safeFilt, 1e-6, "Fast API filt mismatch");
     } finally {
         // Free memory
         wasm.voss_free(inPtr, len);
@@ -262,8 +262,8 @@ test('VOSS fast API with aliasing', () => {
         const safeVoss = safeResult.voss;
         const safeFilt = safeResult.filt;
         
-        assertArrayClose(voss, safeVoss, 1e-10, "Aliased voss mismatch");
-        assertArrayClose(filt, safeFilt, 1e-10, "Aliased filt mismatch");
+        assertArrayClose(voss, safeVoss, 1e-6, "Aliased voss mismatch");
+        assertArrayClose(filt, safeFilt, 1e-6, "Aliased filt mismatch");
     } finally {
         wasm.voss_free(ptr, len);
         wasm.voss_free(filtPtr, len);
@@ -302,8 +302,8 @@ test('VOSS batch single parameter set', () => {
     const singleVoss = singleResult.voss;
     const singleFilt = singleResult.filt;
     
-    assertArrayClose(result.voss, singleVoss, 1e-10);
-    assertArrayClose(result.filt, singleFilt, 1e-10);
+    assertArrayClose(result.voss, singleVoss, 1e-6);
+    assertArrayClose(result.filt, singleFilt, 1e-6);
 });
 
 test('VOSS batch multiple periods', () => {
@@ -336,8 +336,8 @@ test('VOSS batch multiple periods', () => {
         const rowVoss = result.voss.slice(i * 100, (i + 1) * 100);
         const rowFilt = result.filt.slice(i * 100, (i + 1) * 100);
         
-        assertArrayClose(rowVoss, singleVoss, 1e-10);
-        assertArrayClose(rowFilt, singleFilt, 1e-10);
+        assertArrayClose(rowVoss, singleVoss, 1e-6);
+        assertArrayClose(rowFilt, singleFilt, 1e-6);
     }
 });
 

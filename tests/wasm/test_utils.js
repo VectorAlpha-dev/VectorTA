@@ -1236,19 +1236,35 @@ const EXPECTED_OUTPUTS = {
             sed_std: 100,
             threshold: 1.4
         },
+        // Close-only reference (binding single-series path uses close for H/L/C)
         volLast5Values: [
-            0.8539059,  // These are the actual values when using close-only data
+            0.8539059,
             0.75935611,
             0.73610448,
             0.76744843,
             0.84842545
         ],
         antiLast5Values: [
-            1.1250333,  // These are the actual values when using close-only data
+            1.1250333,
             1.1325502,
             1.14038661,
             1.13929192,
             1.12982407
+        ],
+        // Candles-based Rust references from src/indicators/damiani_volatmeter.rs tests (check_damiani_accuracy)
+        rustVolLast5Values: [
+            0.9009485470514558,
+            0.8333604467044887,
+            0.815318380178986,
+            0.8276892636184923,
+            0.879447954127426
+        ],
+        rustAntiLast5Values: [
+            1.1227721577887388,
+            1.1250333024152703,
+            1.1325501989919875,
+            1.1403866079746106,
+            1.1392919184055932
         ],
         warmupPeriod: 101  // max(vis_atr, vis_std, sed_atr, sed_std, 3) + 1
     },
