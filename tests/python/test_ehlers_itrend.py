@@ -170,9 +170,10 @@ class TestEhlersITrend:
         assert len(batch_result) == len(stream_result)
         
         # They should match within tolerance after warmup
+        # Match Rust test tolerance (1e-7) for streaming parity
         for i in range(12, len(batch_result)):
             if not (np.isnan(batch_result[i]) and np.isnan(stream_result[i])):
-                assert abs(batch_result[i] - stream_result[i]) < 1e-9, \
+                assert abs(batch_result[i] - stream_result[i]) < 1e-7, \
                     f"Batch/stream mismatch at index {i}: {batch_result[i]} vs {stream_result[i]}"
     
     def test_ehlers_itrend_batch_single_params(self):

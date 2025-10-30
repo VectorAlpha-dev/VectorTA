@@ -5,6 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { loadTestData, EXPECTED_OUTPUTS, assertArrayClose, assertClose } from './test_utils.js';
+import { compareWithRust } from './rust-comparison.js';
 
 // Import the WASM module
 import * as wasm from '../../pkg/my_project.js';
@@ -341,14 +342,15 @@ test.describe('MAC-Z WASM Binding Tests', () => {
         );
     });
     
-    test('MAC-Z batch processing - check_batch_default_row', () => {
+    test('MAC-Z batch processing - check_batch_default_row', async () => {
         const close = testData.close;
         const expected = EXPECTED_OUTPUTS.macz;
+        const volume = testData.volume;
         
         // Test batch with default parameters only
         const batchResult = wasm.macz_batch(
             close,
-            null,  // volume (null for uniform)
+            volume,  // pass actual volume so we can compare with Rust reference
             [12, 12, 0],  // fast_length_range
             [25, 25, 0],  // slow_length_range
             [9, 9, 0],  // signal_length_range
@@ -370,16 +372,9 @@ test.describe('MAC-Z WASM Binding Tests', () => {
         assert.strictEqual(batchResult.values.length, 1, "Should have 1 parameter combination");
         assert.strictEqual(batchResult.values[0].length, close.length, "Result length should match input");
         
-        // Extract the single row and check last 5 values
+        // Extract the single row and check against Rust reference
         const defaultRow = batchResult.values[0];
-        const last5 = defaultRow.slice(-5);
-        
-        assertArrayClose(
-            last5,
-            expected.last5Values,
-            1e-9,
-            "MAC-Z batch default row mismatch"
-        );
+        await compareWithRust('macz', defaultRow, 'close', expected.defaultParams, 1e-8);
     });
     
     test('MAC-Z zero-copy API', () => {

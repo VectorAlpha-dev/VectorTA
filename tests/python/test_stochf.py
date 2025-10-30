@@ -69,16 +69,19 @@ class TestStochF:
         ]
         
         # Check last 5 values match expected
+        # Match Rust test tolerance: absolute error <= 1e-4
         assert_close(
-            k[-5:], 
+            k[-5:],
             expected_k,
-            rtol=1e-4,
+            rtol=0.0,
+            atol=1e-4,
             msg="StochF K last 5 values mismatch"
         )
         assert_close(
-            d[-5:], 
+            d[-5:],
             expected_d,
-            rtol=1e-4,
+            rtol=0.0,
+            atol=1e-4,
             msg="StochF D last 5 values mismatch"
         )
         

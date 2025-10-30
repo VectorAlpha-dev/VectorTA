@@ -23,19 +23,18 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    // Load WASM module from pkg (node target glue)
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
     } catch (error) {
-        console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
+        console.error('Failed to load WASM module. Run "wasm-pack build --target nodejs -- --features wasm" first');
         throw error;
     }
-    
+
     testData = loadTestData();
 });
 

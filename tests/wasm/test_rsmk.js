@@ -57,6 +57,20 @@ test('RSMK basic functionality', () => {
     assert.strictEqual(signal.length, close.length);
 });
 
+test('RSMK accuracy (last 5 values)', () => {
+    const close = new Float64Array(testData.close);
+    const result = wasm.rsmk_js(close, close, 90, 3, 20, null, null);
+    const indicator = result.values.slice(0, close.length);
+    const signal = result.values.slice(close.length);
+
+    const last5Ind = indicator.slice(-5);
+    const last5Sig = signal.slice(-5);
+    const expected = [0.0, 0.0, 0.0, 0.0, 0.0]; // matches Rust test refs
+
+    assertArrayClose(last5Ind, expected, 1e-8, 'RSMK indicator last 5 mismatch');
+    assertArrayClose(last5Sig, expected, 1e-8, 'RSMK signal last 5 mismatch');
+});
+
 test('RSMK with custom MA types', () => {
     const close = new Float64Array(testData.close);
     

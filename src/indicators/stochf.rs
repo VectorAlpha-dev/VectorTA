@@ -22,6 +22,16 @@
 //! - Batch: per-row kernel mirrors scalar optimizations; no cross-row sharing (window-dependent extrema).
 //! - Streaming: O(1) amortized via ring-indexed monotonic deques for %K and a running-sum ring for %D (SMA).
 //! - Memory: follows ALMA patterns (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes). %D supports SMA (matype=0).
+//!
+//! Binding test status (Oct 29, 2025):
+//! - WASM: all stochf binding tests pass (accuracy last-5 match Rust refs at abs tol 1e-4).
+//! - Python: one failure in streaming API test:
+//!   - tests/python/test_stochf.py::TestStochFStream::test_stochf_stream_basic
+//!     expects first value at the 5th update (fastk=5) to yield a finite %K.
+//!     Observed: %K is NaN. Likely cause: StochfStream deque state treats a full
+//!     window as empty when `head == tail` (no size tracking), making HH/LL fall
+//!     back to ±INF and producing NaN. This is an implementation issue, not a
+//!     bindings test setup problem. No changes made to kernels pending review.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;

@@ -61,16 +61,19 @@ class TestDm:
         assert len(minus) == len(low)
         
         # Check last 5 values match expected
+        # Match Rust tolerance: absolute diff <= 1e-6 (no looser than Rust)
         assert_close(
             plus[-5:], 
             expected_plus,
-            rtol=1e-6,
+            rtol=0.0,
+            atol=1e-6,
             msg="DM plus last 5 values mismatch"
         )
         assert_close(
             minus[-5:], 
             expected_minus,
-            rtol=1e-6,
+            rtol=0.0,
+            atol=1e-6,
             msg="DM minus last 5 values mismatch"
         )
     
@@ -232,16 +235,19 @@ class TestDm:
         ]
         
         # Check last 5 values match
+        # Match Rust tolerance: absolute diff <= 1e-6 (no looser than Rust)
         assert_close(
             default_plus[-5:],
             expected_plus,
-            rtol=1e-6,
+            rtol=0.0,
+            atol=1e-6,
             msg="DM batch default plus row mismatch"
         )
         assert_close(
             default_minus[-5:],
             expected_minus,
-            rtol=1e-6,
+            rtol=0.0,
+            atol=1e-6,
             msg="DM batch default minus row mismatch"
         )
     

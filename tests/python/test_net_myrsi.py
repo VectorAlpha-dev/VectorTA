@@ -215,10 +215,12 @@ class TestNetMyrsi:
         
         if first_valid < len(batch_results):
             # Compare from first valid index
+            # Match Rust tolerance: absolute diff <= 1e-10 (no relative slack)
             assert_close(
                 stream_results[first_valid:],
                 batch_results[first_valid:],
-                rtol=1e-10,
+                rtol=0,
+                atol=1e-10,
                 msg="Stream and batch results mismatch"
             )
     
