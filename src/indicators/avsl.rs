@@ -26,6 +26,16 @@
 //!   segment. Modest speedups expected; scalar remains the reference path.
 //! - Batch: per-row compute currently dispatches the same kernels; no row-specific sharing yet.
 //! - Warmup/semantics: preserved exactly; allocation and NaN prefixes follow alma.rs patterns.
+//!
+//! ## Binding Tests Status (2025-10-27)
+//! - Python bindings: PASS. `tests/python/test_avsl.py` (13 tests) all pass and the accuracy checks
+//!   compare the last 5 values against the same PineScript reference used by the Rust unit tests
+//!   with the same 1% tolerance.
+//! - WASM bindings: PARTIAL. `tests/wasm/test_avsl.js` batch default-row check passes against the
+//!   Rust reference (within 1%), but the single-series `avsl_js` accuracy test fails: the last 5
+//!   values differ significantly (e.g., got ~64,606 vs expected ~56,472 on the first of the last
+//!   five). This suggests an issue specific to the `avsl_js` path rather than data or batch paths.
+//!   No changes were made to kernels pending investigation.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

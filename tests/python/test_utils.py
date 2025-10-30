@@ -84,6 +84,17 @@ def generate_otto_test_data():
 
 # Expected outputs from Rust tests - these must match EXACTLY
 EXPECTED_OUTPUTS = {
+    'epma': {
+        'default_params': {'period': 11, 'offset': 4},
+        'last_5_values': [
+            59174.48,
+            59201.04,
+            59167.60,
+            59200.32,
+            59117.04,
+        ],
+        'warmup_period': 16,  # period + offset + 1
+    },
     'alma': {
         'default_params': {'period': 9, 'offset': 0.85, 'sigma': 6.0},
         'last_5_values': [
@@ -1709,14 +1720,14 @@ EXPECTED_OUTPUTS = {
         ],
         'warmup_period': 12  # length - 1 for default params
     },
-    'volume_adjusted_ma': {  # Updated after Pine logic fixes
+    'volume_adjusted_ma': {  # Matches Rust unit test references
         'default_params': {'length': 13, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
-        'fast_values': [  # length=13 (Updated after Pine logic fixes)
+        'fast_values': [  # length=13
             60249.34558277224,
-            60283.78930990677,
-            60173.39052862816,
-            60260.19903965848,
-            60226.10253226444
+            60283.79398716032,
+            60173.3929697517,
+            60260.20330381247,
+            60226.095375540506
         ],
         'slow_params': {'length': 55, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
         'slow_values': [  # length=55 (Updated after Pine logic fixes)

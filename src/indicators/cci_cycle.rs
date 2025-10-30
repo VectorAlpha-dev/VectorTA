@@ -16,6 +16,15 @@
 //! - **Streaming Performance**: O(1) per-tick (amortized): EMA/SMMA as constant-time recurrences; rolling min/max via monotonic deques; CCI MAD after exact init via Wilder RMA.
 //! - **Memory Optimization**: GOOD - properly uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - Decision: Stochastic min/max now uses O(n) monotonic deques; SIMD not beneficial there due to data-dependent control flow.
+//!
+//! ## Binding QA (2025-10-28)
+//! - WASM binding unit tests for `cci_cycle` pass, including accuracy check against the same last-5 reference values as Rust (tolerance 1e-6).
+//! - Python binding unit tests: all pass except the streaming comparison test
+//!   `tests/python/test_cci_cycle.py::TestCci_Cycle::test_cci_cycle_streaming`.
+//!   When comparing batch vs `CciCycleStream` on the standard close series (length=10, factor=0.5):
+//!   - First streaming value appears at index 39 (conservative warmup).
+//!   - Numeric mismatch vs batch is large at and after first emission (e.g., idx 39: batch≈2.191425, stream≈0.949371; max |diff| observed ≈93.94, mean |diff| ≈6.87 over comparable points).
+//!   - This indicates a streaming-vs-batch accuracy divergence rather than a test harness issue. Rust kernels/bindings have not been modified pending investigation.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings

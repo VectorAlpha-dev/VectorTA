@@ -121,6 +121,17 @@ function assertNoNaN(array, msg = "") {
 
 // Expected outputs from Rust tests - these must match EXACTLY
 const EXPECTED_OUTPUTS = {
+    epma: {
+        defaultParams: { period: 11, offset: 4 },
+        lastFive: [
+            59174.48,
+            59201.04,
+            59167.60,
+            59200.32,
+            59117.04
+        ],
+        warmupPeriod: 16 // period + offset + 1
+    },
     wto: {
         defaultParams: { channelLength: 10, averageLength: 21 },
         last5Values: {
@@ -1676,12 +1687,13 @@ const EXPECTED_OUTPUTS = {
     },
     volume_adjusted_ma: {  // Same as vama but with new name
         defaultParams: { length: 13, viFactor: 0.67, strict: true, samplePeriod: 0 },
-        fastValues: [  // length=13 (Updated after Pine logic fixes)
+        // Exact references from Rust unit tests (tolerance 1e-6)
+        fastValues: [  // length=13
             60249.34558277224,
-            60283.78930990677,
-            60173.39052862816,
-            60260.19903965848,
-            60226.10253226444
+            60283.79398716032,
+            60173.3929697517,
+            60260.20330381247,
+            60226.095375540506
         ],
         slowParams: { length: 55, viFactor: 0.67, strict: true, samplePeriod: 0 },
         slowValues: [  // length=55 (Updated after Pine logic fixes)

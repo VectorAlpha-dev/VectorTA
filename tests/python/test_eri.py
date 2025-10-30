@@ -75,17 +75,21 @@ class TestEri:
             -925.5235537281915,
         ]
         
+        # Match Rust unit test tolerance: absolute 1e-2
         assert_close(
             bull[-5:], 
             expected_bull_last_five,
-            rtol=1e-2,  # Matches Rust test tolerance
+            rtol=0.0,
+            atol=1e-2,
             msg="ERI bull last 5 values mismatch"
         )
         
+        # Match Rust unit test tolerance: absolute 1e-2
         assert_close(
             bear[-5:], 
             expected_bear_last_five,
-            rtol=1e-2,  # Matches Rust test tolerance
+            rtol=0.0,
+            atol=1e-2,
             msg="ERI bear last 5 values mismatch"
         )
         
@@ -292,17 +296,21 @@ class TestEri:
         ]
         
         # Check last 5 values match
+        # Match Rust unit test tolerance: absolute 1e-2
         assert_close(
             default_bull[-5:],
             expected_bull,
-            rtol=1e-2,
+            rtol=0.0,
+            atol=1e-2,
             msg="ERI batch bull default row mismatch"
         )
         
+        # Match Rust unit test tolerance: absolute 1e-2
         assert_close(
             default_bear[-5:],
             expected_bear,
-            rtol=1e-2,
+            rtol=0.0,
+            atol=1e-2,
             msg="ERI batch bear default row mismatch"
         )
     

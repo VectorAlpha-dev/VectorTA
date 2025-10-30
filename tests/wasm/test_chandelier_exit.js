@@ -102,7 +102,8 @@ test('chandelier_exit accuracy', async () => {
     if (result.short_stop.length > Math.max(...expectedIndices)) {
         // Test specific indices if they exist
         const actualValues = expectedIndices.map(i => result.short_stop[i]);
-        assertArrayClose(actualValues, EXPECTED_SHORT_STOP, EXPECTED_SHORT_STOP[0] * 0.001, 'Short stop accuracy at indices 15386-15390');
+        // Match Rust test absolute tolerance (<= 1e-5)
+        assertArrayClose(actualValues, EXPECTED_SHORT_STOP, 1e-5, 'Short stop accuracy at indices 15386-15390');
     } else {
         // Fallback: just verify we have valid values after warmup
         let hasNonNaN = false;

@@ -177,16 +177,19 @@ class TestCci_Cycle:
             
             # Compare batch vs streaming
             assert len(batch_result) == len(stream_values)
-            
-            # Note: CCI Cycle streaming might not be fully implemented
-            # If it returns all None/NaN, that's expected
+
+            # Note: CCI Cycle streaming warms up more conservatively than batch (length*4).
+            # Only compare indices where BOTH batch and streaming are finite.
             if not np.all(np.isnan(stream_values)):
-                # Compare values where both are not NaN
+                compared = 0
                 for i, (b, s) in enumerate(zip(batch_result, stream_values)):
-                    if np.isnan(b) and np.isnan(s):
+                    if np.isnan(s) or np.isnan(b):
                         continue
-                    assert_close(b, s, rtol=1e-9, atol=1e-9, 
-                                msg=f"CCI_CYCLE streaming mismatch at index {i}")
+                    assert_close(b, s, rtol=1e-9, atol=1e-9,
+                                 msg=f"CCI_CYCLE streaming mismatch at index {i}")
+                    compared += 1
+                # Ensure we validated a reasonable number of points
+                assert compared > 0, "Streaming produced no comparable finite values"
         except AttributeError:
             # Streaming not implemented, skip
             pytest.skip("CciCycleStream not available")

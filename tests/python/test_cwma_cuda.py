@@ -4,7 +4,8 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - optional dependency for CUDA path
+except Exception:  # pragma: no cover - optional dependency or env issues
+    # Catch broad exceptions (e.g., binary incompatibilities) and skip tests
     cp = None
 
 try:

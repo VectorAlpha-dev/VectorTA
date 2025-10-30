@@ -71,7 +71,7 @@ test('VolumeAdjustedMa accuracy', async () => {
     assertArrayClose(
         last5,
         expected.fastValues,
-        1e-2,  // Increased tolerance due to floating point differences
+        1e-6,
         "VolumeAdjustedMa last 5 values mismatch"
     );
     
@@ -101,7 +101,7 @@ test('VolumeAdjustedMa slow', () => {
     assertArrayClose(
         last5,
         expected.slowValues,
-        10,  // Increased tolerance - slow values have more accumulated floating point differences
+        1e-6,
         "VolumeAdjustedMa slow last 5 values mismatch"
     );
 });

@@ -41,15 +41,18 @@ class TestSuperSmoother3Pole(unittest.TestCase):
         self.assertEqual(len(result), len(self.close_prices))
         
         # Check last 5 values match expected
+        # Match Rust test tolerance: absolute <= 1e-8
         assert_close(
             result[-5:],
             expected['last_5_values'],
-            rtol=1e-8,
+            rtol=0,
+            atol=1e-8,
             msg="SuperSmoother3Pole last 5 values mismatch"
         )
         
         # Compare full output with Rust
-        compare_with_rust('supersmoother_3_pole', result, 'close', expected['default_params'])
+        # Use absolute tolerance matching Rust tests
+        compare_with_rust('supersmoother_3_pole', result, 'close', expected['default_params'], rtol=0, atol=1e-8)
     
     def test_supersmoother_3_pole_default_candles(self):
         """Test SuperSmoother3Pole with default parameters - mirrors check_supersmoother_3_pole_default_candles"""
@@ -243,8 +246,8 @@ class TestSuperSmoother3Pole(unittest.TestCase):
                 'supersmoother_3_pole', 
                 py_result, 
                 params={'period': period},
-                rtol=1e-9,
-                atol=1e-12
+                rtol=0,
+                atol=1e-8
             )
         )
     
