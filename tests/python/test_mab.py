@@ -77,22 +77,26 @@ class TestMab:
         ]
         
         # Check last 5 values match expected
+        # Match Rust tolerance: abs diff <= 1e-4 (do not exceed)
         assert_close(
-            upper[-5:], 
+            upper[-5:],
             expected_upper_last_five,
-            rtol=1e-6,
+            rtol=0,
+            atol=1e-4,
             msg="MAB upper band last 5 values mismatch"
         )
         assert_close(
-            middle[-5:], 
+            middle[-5:],
             expected_middle_last_five,
-            rtol=1e-6,
+            rtol=0,
+            atol=1e-4,
             msg="MAB middle band last 5 values mismatch"
         )
         assert_close(
-            lower[-5:], 
+            lower[-5:],
             expected_lower_last_five,
-            rtol=1e-6,
+            rtol=0,
+            atol=1e-4,
             msg="MAB lower band last 5 values mismatch"
         )
         
@@ -305,22 +309,26 @@ class TestMab:
             59070.11628271853,
         ]
         
+        # Match Rust tolerance: abs diff <= 1e-4 (do not exceed)
         assert_close(
             upper_values[0, -5:],
             expected_upper,
-            rtol=1e-6,
+            rtol=0,
+            atol=1e-4,
             msg="MAB batch upper band mismatch"
         )
         assert_close(
             middle_values[0, -5:],
             expected_middle,
-            rtol=1e-6,
+            rtol=0,
+            atol=1e-4,
             msg="MAB batch middle band mismatch"
         )
         assert_close(
             lower_values[0, -5:],
             expected_lower,
-            rtol=1e-6,
+            rtol=0,
+            atol=1e-4,
             msg="MAB batch lower band mismatch"
         )
     

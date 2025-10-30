@@ -254,7 +254,8 @@ class TestTema:
         np.testing.assert_allclose(
             result[-5:],
             expected['last_5_values'],
-            rtol=1e-8,
+            # Match or beat Rust unit test tolerance (<= 1e-9)
+            rtol=1e-9,
             err_msg="TEMA last 5 values mismatch"
         )
         

@@ -49,18 +49,22 @@ class TestAlphaTrend:
         assert len(k2) == len(close)
         
         # Check last 5 K1 values
+        # Match Rust unit test tolerance (abs diff < 1e-6)
         assert_close(
             k1[-5:],
             expected['k1_last_5_values'],
-            rtol=1e-8,
+            rtol=0.0,
+            atol=1e-6,
             msg="AlphaTrend K1 last 5 values mismatch"
         )
         
         # Check last 5 K2 values
+        # Match Rust unit test tolerance (abs diff < 1e-6)
         assert_close(
             k2[-5:],
             expected['k2_last_5_values'],
-            rtol=1e-8,
+            rtol=0.0,
+            atol=1e-6,
             msg="AlphaTrend K2 last 5 values mismatch"
         )
     

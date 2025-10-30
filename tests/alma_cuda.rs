@@ -12,6 +12,11 @@ use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::moving_averages::CudaAlma;
 
+#[cfg(feature = "cuda")]
+fn should_force_skip_cuda() -> bool {
+    std::env::var("SKIP_CUDA_TESTS").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+}
+
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
         return true;
@@ -34,7 +39,7 @@ fn cuda_feature_off_noop() {
 #[cfg(feature = "cuda")]
 #[test]
 fn alma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
-    if !cuda_available() {
+    if should_force_skip_cuda() || !cuda_available() {
         eprintln!("[alma_cuda_one_series_many_params_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
@@ -97,7 +102,7 @@ fn alma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
 #[cfg(feature = "cuda")]
 #[test]
 fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
-    if !cuda_available() {
+    if should_force_skip_cuda() || !cuda_available() {
         eprintln!("[alma_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }

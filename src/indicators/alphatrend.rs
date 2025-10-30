@@ -20,6 +20,15 @@
 //! - Streaming update: O(1) kernel implemented (ATR via SMA ring, RSI-RMA/MFI sums).
 //!   Emits Some((k1,k2)) after warmup+2 bars; matches scalar semantics.
 //! - Memory: uses zero-copy/uninit helpers (alloc_with_nan_prefix, make_uninit_matrix).
+//!
+//! Binding test status (Oct 27, 2025):
+//! - WASM binding unit tests for AlphaTrend pass and match Rust reference values at 1e-6 abs tol.
+//! - Python binding unit tests mostly pass; however, `TestAlphaTrend.test_alphatrend_stream`
+//!   fails because the streaming path currently returns `k2` with a 1-bar lag vs. the batch
+//!   semantics (observed at early indices: stream `k2[i] == k1[i-1]` while batch `k2[i] == k1[i-2]`).
+//!   Root cause: in `AlphaTrendStream::update`, `prev2` is updated before being returned. Proposed fix:
+//!   return the previous `prev2` for `k2` (i.e., capture `k2 = prev2` before advancing `prev1/prev2`).
+//!   No changes applied pending confirmation.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};

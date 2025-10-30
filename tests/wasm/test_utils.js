@@ -3,7 +3,6 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { parse } from 'csv-parse/sync';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,13 +11,7 @@ const __dirname = path.dirname(__filename);
 function loadTestData() {
     const csvPath = path.join(__dirname, '../../src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv');
     const content = fs.readFileSync(csvPath, 'utf8');
-    const records = parse(content, { 
-        columns: false,
-        skip_empty_lines: true,
-        cast: true,
-        from_line: 2  // Skip header row
-    });
-    
+
     const candles = {
         timestamp: [],
         open: [],
@@ -27,21 +20,37 @@ function loadTestData() {
         close: [],
         volume: []
     };
-    
-    for (const row of records) {
-        if (row.length < 6) continue;
+
+    const lines = content.split(/\r?\n/);
+    // Skip header (first line)
+    for (let li = 1; li < lines.length; li++) {
+        const line = lines[li].trim();
+        if (!line) continue;
+        const cols = line.split(',');
+        if (cols.length < 6) continue;
+
         // CSV format matches Rust: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
-        candles.timestamp.push(parseFloat(row[0]));  // JS numbers are f64
-        candles.open.push(parseFloat(row[1]));
-        candles.close.push(parseFloat(row[2]));
-        candles.high.push(parseFloat(row[3]));
-        candles.low.push(parseFloat(row[4]));
-        candles.volume.push(parseFloat(row[5]));
+        const t = Number(cols[0]);
+        const o = Number(cols[1]);
+        const c = Number(cols[2]);
+        const h = Number(cols[3]);
+        const l = Number(cols[4]);
+        const v = Number(cols[5]);
+
+        // Ignore rows with unparsable values
+        if ([t, o, c, h, l, v].some(x => Number.isNaN(x))) continue;
+
+        candles.timestamp.push(t);
+        candles.open.push(o);
+        candles.close.push(c);
+        candles.high.push(h);
+        candles.low.push(l);
+        candles.volume.push(v);
     }
-    
+
     // Add calculated fields
     candles.hl2 = candles.high.map((h, i) => (h + candles.low[i]) / 2.0);
-    
+
     return candles;
 }
 
@@ -54,6 +63,18 @@ function assertClose(actual, expected, tolerance = 1e-8, msg = "") {
 }
 
 function assertArrayClose(actual, expected, tolerance = 1e-8, msg = "") {
+    // Supports either absolute tolerance as a number, or an object { atol, rtol }
+    let atol, rtol;
+    if (typeof tolerance === 'number') {
+        atol = tolerance;
+        rtol = 0;
+    } else if (tolerance && typeof tolerance === 'object') {
+        atol = typeof tolerance.atol === 'number' ? tolerance.atol : 1e-8;
+        rtol = typeof tolerance.rtol === 'number' ? tolerance.rtol : 0;
+    } else {
+        atol = 1e-8;
+        rtol = 0;
+    }
     // Both should have valid length property
     const actualLen = actual ? actual.length : 0;
     const expectedLen = expected ? expected.length : 0;
@@ -66,10 +87,14 @@ function assertArrayClose(actual, expected, tolerance = 1e-8, msg = "") {
         if (isNaN(actual[i]) && isNaN(expected[i])) {
             continue;
         }
-        const diff = Math.abs(actual[i] - expected[i]);
-        if (diff > tolerance) {
+        const a = actual[i];
+        const e = expected[i];
+        const diff = Math.abs(a - e);
+        const rel = Math.max(Math.abs(a), Math.abs(e));
+        const threshold = Math.max(atol, rtol * rel);
+        if (diff > threshold) {
             const errorMsg = msg ? `${msg}: ` : "";
-            throw new Error(`${errorMsg}Mismatch at index ${i}: expected ${expected[i]}, got ${actual[i]} (diff: ${diff})`);
+            throw new Error(`${errorMsg}Mismatch at index ${i}: expected ${e}, got ${a} (diff: ${diff}, tol: ${threshold})`);
         }
     }
 }

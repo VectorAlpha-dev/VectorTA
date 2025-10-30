@@ -148,7 +148,14 @@ class TestEmv:
                     result = ta_indicators.emv(high, low, close, volume)
                 results.append(result)
             except Exception as e:
-                if "not supported" in str(e) or "not available" in str(e):
+                # Allow runs without nightly AVX features by skipping when
+                # specific kernels aren't compiled or supported in this build.
+                emsg = str(e).lower()
+                if (
+                    "not supported" in emsg
+                    or "not available" in emsg
+                    or "not compiled" in emsg
+                ):
                     continue
                 raise
         

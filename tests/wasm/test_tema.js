@@ -133,7 +133,8 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         const period = 9;
         
         const result = wasm.tema_js(close, period);
-        await compareWithRust('tema', result, 'close', { period });
+        // Match Rust unit test tolerance (<= 1e-9)
+        await compareWithRust('tema', result, 'close', { period }, 1e-9);
     });
     
     test('batch calculation', () => {
@@ -264,7 +265,7 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         assertArrayClose(
             last5,
             expected.last5Values,
-            1e-8,
+            1e-9,
             "TEMA last 5 values mismatch"
         );
         

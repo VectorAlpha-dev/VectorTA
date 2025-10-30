@@ -38,7 +38,8 @@ class TestMean_Ad:
         result = ta_indicators.mean_ad(hl2, period=5)
         
         expected = EXPECTED_OUTPUTS['mean_ad']['last_5_values']
-        assert_close(result[-5:], expected, rtol=1e-1, atol=1e-1,
+        # Match Rust tolerance: absolute 1e-1; do not use relative tolerance
+        assert_close(result[-5:], expected, rtol=0, atol=1e-1,
                     msg="mean_ad last 5 values mismatch")
     
     def test_mean_ad_default_params(self, test_data):
@@ -151,10 +152,11 @@ class TestMean_Ad:
         expected = EXPECTED_OUTPUTS['mean_ad']['last_5_values']
         
         # Check last 5 values match
+        # Match Rust tolerance: absolute 1e-1; do not use relative tolerance
         assert_close(
             default_row[-5:],
             expected,
-            rtol=1e-1,
+            rtol=0,
             atol=1e-1,
             msg="MEAN_AD batch default row mismatch"
         )

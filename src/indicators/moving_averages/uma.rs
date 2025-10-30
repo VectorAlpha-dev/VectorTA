@@ -20,6 +20,20 @@
 //! - **Optimization status**: Scalar core optimized (inlined RSI/MFI, ln LUT, FMA). SIMD accumulation present under `nightly-avx`, but Auto selection prefers scalar due to limited wins from scalar `exp` cost.
 //! - **Streaming**: optimized. Maintains O(1) updates for mean/σ, momentum, and WMA;
 //!   UMA core remains O(L) per tick due to non-decomposable power weights.
+//!
+//! Binding test status (2025-10-27):
+//! - WASM bindings: failures currently observed in tests/wasm/test_uma.js
+//!   - "UMA - streaming interface": no valid values produced after warmup.
+//!   - "UMA - streaming with volume": no valid values produced after warmup.
+//! - Python bindings: failure in tests/python/test_uma.py
+//!   - TestUma::test_uma_streaming_with_volume: stream outputs remain all-NaN.
+//!
+//! Notes: Batch UMA matches Rust references (1% tolerance) in both bindings. The
+//! streaming failures appear due to an overly strict warmup gate in UmaStream
+//! that never transitions to producing values once the internal ring reaches
+//! capacity. Investigate the warmup condition so that streaming begins emitting
+//! values after enough samples (>= max_length) and lets the WMA stage handle its
+//! own warmup. No reference values changed.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;

@@ -44,17 +44,21 @@ class TestNadarayaWatsonEnvelope:
         assert len(lower) == len(close)
         
         # Check last 5 values match expected
+        # Match Rust test tolerance: abs error <= 1e-6
         assert_close(
-            upper[-5:], 
+            upper[-5:],
             expected_upper,
-            rtol=1e-8,
+            rtol=0.0,
+            atol=1e-6,
             msg="NWE upper envelope last 5 values mismatch"
         )
         
+        # Match Rust test tolerance: abs error <= 1e-6
         assert_close(
             lower[-5:],
             expected_lower,
-            rtol=1e-8,
+            rtol=0.0,
+            atol=1e-6,
             msg="NWE lower envelope last 5 values mismatch"
         )
     
