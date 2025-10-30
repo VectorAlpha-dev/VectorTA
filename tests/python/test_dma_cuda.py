@@ -8,7 +8,10 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - optional dependency
+except Exception:  # pragma: no cover - optional/fragile dependency in CI images
+    # In many environments SciPy/CuPy/Numpy ABI mismatches raise non-ImportError
+    # exceptions during import. Treat any failure as "CUDA not available" so the
+    # test class can be cleanly skipped via the marker below.
     cp = None
 
 try:

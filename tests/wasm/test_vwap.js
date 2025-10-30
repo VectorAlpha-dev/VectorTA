@@ -135,20 +135,20 @@ test('VWAP batch processing', () => {
         (h + testData.low[i] + testData.close[i]) / 3.0
     );
     
-    // Use the new batch API with config object
+    // Use the unified batch API with explicit start/end/step (config object form was removed)
     const result_old = wasm.vwap_batch(
         timestamps,
         volumes,
         prices,
-        { anchor_range: ["1d", "3d", 1] }
+        "1d", "3d", 1
     );
     
     // Result should be an object with values, anchors, rows, cols
     assert(result_old.values, 'Result should have values array');
-    assert(result_old.anchors, 'Result should have anchors array');
+    assert(result_old.combos, 'Result should have combos array');
     assert.strictEqual(result_old.rows, 3, 'Should have 3 rows (1d, 2d, 3d)');
     assert.strictEqual(result_old.cols, prices.length, 'Cols should match input length');
-    assert.deepStrictEqual(result_old.anchors, ["1d", "2d", "3d"], 'Anchors should match expected');
+    assert.deepStrictEqual(result_old.combos.map(c => c.anchor), ["1d", "2d", "3d"], 'Anchors should match expected');
     
     // Check that values array has correct length
     assert.strictEqual(result_old.values.length, result_old.rows * result_old.cols, 
@@ -283,19 +283,15 @@ test('VWAP batch with serde config', () => {
     const volumes = testData.volume;
     const prices = testData.close;
     
-    // Use new batch API with config object
-    const config = {
-        anchor_range: ["1d", "3d", 1]
-    };
-    
-    const result = wasm.vwap_batch(timestamps, volumes, prices, config);
+    // Use unified batch API with explicit params (config object form was removed)
+    const result = wasm.vwap_batch(timestamps, volumes, prices, "1d", "3d", 1);
     
     // Result should be an object with values, anchors, rows, cols
     assert(result.values, 'Result should have values array');
-    assert(result.anchors, 'Result should have anchors array');
+    assert(result.combos, 'Result should have combos array');
     assert.strictEqual(result.rows, 3, 'Should have 3 rows (1d, 2d, 3d)');
     assert.strictEqual(result.cols, prices.length, 'Cols should match input length');
-    assert.deepStrictEqual(result.anchors, ["1d", "2d", "3d"], 'Anchors should match expected');
+    assert.deepStrictEqual(result.combos.map(c => c.anchor), ["1d", "2d", "3d"], 'Anchors should match expected');
     
     // Check that values array has correct length
     assert.strictEqual(result.values.length, result.rows * result.cols, 

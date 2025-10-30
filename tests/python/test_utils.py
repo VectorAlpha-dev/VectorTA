@@ -84,6 +84,18 @@ def generate_otto_test_data():
 
 # Expected outputs from Rust tests - these must match EXACTLY
 EXPECTED_OUTPUTS = {
+    'zscore': {
+        # Default parameters used in Rust tests
+        'default_params': {'period': 14, 'ma_type': 'sma', 'nbdev': 1.0, 'devtype': 0},
+        # Expected last 5 values from Rust unit test (population stddev)
+        'last_5_values': [
+            -0.3040683926967643,
+            -0.41042159719064014,
+            -0.5411993612192193,
+            -0.1673226261513698,
+            -1.431635486349618
+        ],
+    },
     'alma': {
         'default_params': {'period': 9, 'offset': 0.85, 'sigma': 6.0},
         'last_5_values': [

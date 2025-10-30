@@ -67,13 +67,21 @@ class TestLrsi:
                 valid_values = result[warmup_end:]
                 valid_values = valid_values[~np.isnan(valid_values)]
                 if len(valid_values) > 0:
-                    assert np.all((valid_values >= 0.0) & (valid_values <= 1.0)), \
+                    assert np.all((valid_values >= 0.0) & (valid_values <= 1.0)), (
                         "LRSI values should be between 0 and 1"
-                    
+                    )
                     # Verify we have reasonable oscillator values (not all the same)
                     if len(valid_values) > 5:
                         value_std = np.std(valid_values)
-                        assert value_std > 0.001, "LRSI should produce varying values, not constants"
+                        assert value_std > 0.001, (
+                            "LRSI should produce varying values, not constants"
+                        )
+
+        # Compare the last 5 values to Rust reference values with strict tolerance (<= 1e-9)
+        expected_last5 = EXPECTED_OUTPUTS['lrsi']['last_5_values']
+        last5 = result[-5:]
+        for i, (a, e) in enumerate(zip(last5, expected_last5)):
+            assert_close(a, e, rtol=1e-9, atol=1e-9, msg=f"LRSI last-5 mismatch at offset {i}")
     
     def test_lrsi_default_candles(self, test_data):
         """Test LRSI with default parameters - mirrors check_lrsi_default_candles"""

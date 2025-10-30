@@ -45,10 +45,12 @@ class TestSwma:
         assert len(result) == len(close)
         
         # Check last 5 values match expected
+        # Match Rust test tolerance: absolute diff <= 1e-8 (no looser)
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-8,
+            rtol=0.0,
+            atol=1e-8,
             msg="SWMA last 5 values mismatch"
         )
     
@@ -74,12 +76,26 @@ class TestSwma:
         # Results should be very close (within floating point precision)
         np.testing.assert_allclose(result_auto, result_scalar, rtol=1e-10)
         
-        # Test AVX kernels (even if they're stubs, they should work)
-        result_avx2 = swma(data, period, kernel='avx2')
-        result_avx512 = swma(data, period, kernel='avx512')
+        # Test AVX kernels when compiled and available; otherwise skip gracefully
+        try:
+            result_avx2 = swma(data, period, kernel='avx2')
+            np.testing.assert_allclose(result_scalar, result_avx2, rtol=1e-10)
+        except ValueError as e:
+            msg = str(e)
+            if 'not compiled' in msg or 'not available' in msg:
+                pytest.skip('AVX2 kernel not available in this build/CPU')
+            else:
+                raise
         
-        np.testing.assert_allclose(result_scalar, result_avx2, rtol=1e-10)
-        np.testing.assert_allclose(result_scalar, result_avx512, rtol=1e-10)
+        try:
+            result_avx512 = swma(data, period, kernel='avx512')
+            np.testing.assert_allclose(result_scalar, result_avx512, rtol=1e-10)
+        except ValueError as e:
+            msg = str(e)
+            if 'not compiled' in msg or 'not available' in msg:
+                pytest.skip('AVX512 kernel not available in this build/CPU')
+            else:
+                raise
         
     def test_invalid_kernel(self):
         """Test error handling for invalid kernel"""
@@ -212,13 +228,28 @@ class TestSwma:
         # Test different kernels
         result_auto = swma_batch(data, period_range, kernel='auto')
         result_scalar = swma_batch(data, period_range, kernel='scalar')
-        result_avx2 = swma_batch(data, period_range, kernel='avx2')
-        result_avx512 = swma_batch(data, period_range, kernel='avx512')
-        
-        # All should produce same results
+        # All should produce same results for compiled kernels
         np.testing.assert_allclose(result_auto['values'], result_scalar['values'], rtol=1e-10)
-        np.testing.assert_allclose(result_scalar['values'], result_avx2['values'], rtol=1e-10)
-        np.testing.assert_allclose(result_scalar['values'], result_avx512['values'], rtol=1e-10)
+        
+        try:
+            result_avx2 = swma_batch(data, period_range, kernel='avx2')
+            np.testing.assert_allclose(result_scalar['values'], result_avx2['values'], rtol=1e-10)
+        except ValueError as e:
+            msg = str(e)
+            if 'not compiled' in msg or 'not available' in msg:
+                pytest.skip('AVX2 batch kernel not available in this build/CPU')
+            else:
+                raise
+        
+        try:
+            result_avx512 = swma_batch(data, period_range, kernel='avx512')
+            np.testing.assert_allclose(result_scalar['values'], result_avx512['values'], rtol=1e-10)
+        except ValueError as e:
+            msg = str(e)
+            if 'not compiled' in msg or 'not available' in msg:
+                pytest.skip('AVX512 batch kernel not available in this build/CPU')
+            else:
+                raise
         
     def test_batch_invalid_kernel(self):
         """Test batch calculation with invalid kernel"""
