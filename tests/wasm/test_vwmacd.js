@@ -2,6 +2,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import * as wasm from '../../pkg/my_project.js';
+import { loadTestData, assertArrayClose } from './test_utils.js';
 
 describe('VWMACD WASM', () => {
     // Test data
@@ -20,6 +21,47 @@ describe('VWMACD WASM', () => {
     ];
 
     describe('Safe API', () => {
+        it('matches Rust reference last5 on CSV (tol=2e-4)', () => {
+            const candles = loadTestData();
+            const close = candles.close;
+            const volume = candles.volume;
+
+            const out = wasm.vwmacd_js(close, volume, 12, 26, 9, "sma", "sma", "ema");
+
+            const len = close.length;
+            const macd = out.slice(0, len);
+            const signal = out.slice(len, len * 2);
+            const hist = out.slice(len * 2);
+
+            const last5 = (arr) => arr.slice(arr.length - 5);
+
+            const expected_macd_last5 = [
+                -394.95161155,
+                -508.29106210,
+                -490.70190723,
+                -388.94996199,
+                -341.13720646,
+            ];
+            const expected_signal_last5 = [
+                -539.48861567,
+                -533.24910496,
+                -524.73966541,
+                -497.58172247,
+                -466.29282108,
+            ];
+            const expected_hist_last5 = [
+                144.53700412,
+                24.95804286,
+                34.03775818,
+                108.63176274,
+                125.15561462,
+            ];
+
+            const tol = 2e-4; // must not exceed Rust tolerance
+            assertArrayClose(last5(macd), expected_macd_last5, tol, 'macd last5');
+            assertArrayClose(last5(signal), expected_signal_last5, tol, 'signal last5');
+            assertArrayClose(last5(hist), expected_hist_last5, tol, 'hist last5');
+        });
         it('should calculate VWMACD with default parameters', () => {
             const result = wasm.vwmacd_js(close, volume, 12, 26, 9, "sma", "sma", "ema");
             
@@ -119,34 +161,34 @@ describe('VWMACD WASM', () => {
 
         it('should handle aliasing correctly', () => {
             const len = close.length;
-            
+
             // Allocate memory
-            const dataPtr = wasm.vwmacd_alloc(len);
+            const closePtr = wasm.vwmacd_alloc(len);
             const volumePtr = wasm.vwmacd_alloc(len);
-            
+            const outPtr = wasm.vwmacd_alloc(len); // alias outputs only
+
             try {
                 // Copy data to WASM memory
                 const memory = new Float64Array(wasm.__wasm.memory.buffer);
-                memory.set(close, dataPtr / 8);
+                memory.set(close, closePtr / 8);
                 memory.set(volume, volumePtr / 8);
-                
-                // Calculate with aliasing (all outputs to same buffer)
-                // Note: When all outputs point to the same buffer, only the last output (histogram) will be preserved
-                wasm.vwmacd_into(dataPtr, volumePtr, dataPtr, dataPtr, dataPtr, len, 12, 26, 9, "sma", "sma", "ema");
-                
+
+                // Calculate with aliasing across outputs (safe): macd/signal/hist -> same buffer
+                wasm.vwmacd_into(closePtr, volumePtr, outPtr, outPtr, outPtr, len, 12, 26, 9, "sma", "sma", "ema");
+
                 // Re-create memory view after potential growth
                 const memoryAfter = new Float64Array(wasm.__wasm.memory.buffer);
-                
+
                 // Read result (should be histogram values since it's written last)
-                const result = Array.from(memoryAfter.slice(dataPtr / 8, dataPtr / 8 + len));
-                
-                // Should not crash and should produce valid values
-                // Check histogram values (which should be available after total warmup)
+                const result = Array.from(memoryAfter.slice(outPtr / 8, outPtr / 8 + len));
+
+                // Should not crash and should produce valid histogram at last index after warmup
                 assert(!isNaN(result[34]));
             } finally {
                 // Clean up
-                wasm.vwmacd_free(dataPtr, len);
+                wasm.vwmacd_free(closePtr, len);
                 wasm.vwmacd_free(volumePtr, len);
+                wasm.vwmacd_free(outPtr, len);
             }
         });
     });

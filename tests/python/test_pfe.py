@@ -253,8 +253,13 @@ class TestPfe:
                     result = ta_indicators.pfe(close, 10, 5)
                 assert len(result) == len(close)
             except ValueError as e:
-                # Some kernels might not be available on all systems
-                if "Unsupported kernel" not in str(e) and "not available on this CPU" not in str(e):
+                # Some kernels might not be available or compiled (feature-gated) on this build
+                msg = str(e)
+                if (
+                    "Unsupported kernel" not in msg
+                    and "not available on this CPU" not in msg
+                    and "not compiled in this build" not in msg
+                ):
                     raise
 
 

@@ -65,10 +65,12 @@ class TestCci:
         assert len(result) == len(hlc3)
         
         # Check last 5 values match expected
+        # Match Rust test tolerance exactly: absolute 1e-6
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-6,
+            rtol=0.0,
+            atol=1e-6,
             msg="CCI last 5 values mismatch"
         )
         
@@ -207,10 +209,12 @@ class TestCci:
         expected = EXPECTED_OUTPUTS['cci']['last_5_values']
         
         # Check last 5 values match
+        # Match Rust test tolerance exactly: absolute 1e-6
         assert_close(
             default_row[-5:],
             expected,
-            rtol=1e-6,
+            rtol=0.0,
+            atol=1e-6,
             msg="CCI batch default row mismatch"
         )
     
