@@ -24,18 +24,49 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    // Load WASM wrappers and ensure the wasm instance is bound for both ESM and nodejs targets
     try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        const importPath = process.platform === 'win32' 
-            ? 'file:///' + wasmPath.replace(/\\/g, '/')
-            : wasmPath;
-        wasm = await import(importPath);
-    } catch (error) {
-        console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
-        throw error;
+        // First try pkg output. Handle both ESM and nodejs (CJS) targets.
+        const pkgPath = path.join(__dirname, '../../pkg/my_project.js');
+        const pkgImportPath = process.platform === 'win32'
+            ? 'file:///' + pkgPath.replace(/\\/g, '/')
+            : pkgPath;
+        const mod = await import(pkgImportPath);
+        const candidate = (mod && mod.default) ? mod.default : mod;
+        if (candidate && (typeof candidate.hma_js === 'function' || candidate.__wasm)) {
+            if (candidate.__wasm) {
+                // Nodejs target: bind wrappers to underlying wasm
+                const wrappersPath = path.join(__dirname, '../../pkg/my_project_bg.js');
+                const wrappersImportPath = process.platform === 'win32'
+                    ? 'file:///' + wrappersPath.replace(/\\/g, '/')
+                    : wrappersPath;
+                const wrappers = await import(wrappersImportPath);
+                if (typeof wrappers.__wbg_set_wasm === 'function') {
+                    wrappers.__wbg_set_wasm(candidate.__wasm);
+                }
+                wasm = wrappers;
+            } else {
+                wasm = candidate; // ESM target re-exports wrappers
+            }
+        } else {
+            throw new Error('pkg module missing expected exports');
+        }
+    } catch (e1) {
+        // Fallback to local test build (CJS with wrappers baked-in)
+        try {
+            const { pathToFileURL } = await import('url');
+            const localPath = path.join(__dirname, 'my_project.js');
+            // Use createRequire in the test runtime to load CJS under ESM
+            const { createRequire } = await import('module');
+            const require = createRequire(pathToFileURL(import.meta.url));
+            wasm = require(localPath);
+        } catch (e2) {
+            console.error('Failed to load WASM module. pkg error:', e1);
+            console.error('Local fallback error:', e2);
+            throw e2;
+        }
     }
-    
+
     testData = loadTestData();
 });
 

@@ -116,8 +116,13 @@ wasm = ["wasm-bindgen", "serde-wasm-bindgen", "js-sys"]
 python = ["pyo3", "numpy"]
 cuda = ["cust", "cust_derive"]
 
-[package.metadata.wasm-pack]
-"wasm-opt" = ["-O4", "--enable-simd"]
+[package.metadata.wasm-pack.profile.release]
+# Disable wasm-opt during wasm-pack build to avoid CI/agent issues.
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.dev]
+# Also disable in dev builds for consistency.
+wasm-opt = false
 
 [profile.release.build-override]
 # Applies only to build-scripts & proc-macros, *not* to your library/bin code.

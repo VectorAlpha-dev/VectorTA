@@ -49,8 +49,8 @@ class TestZlema:
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-1,  # Using 1e-1 as in Rust test
-            atol=1e-1,
+            rtol=0.0,      # Match Rust: absolute tolerance only
+            atol=1e-1,     # Rust test uses |diff| < 1e-1
             msg="ZLEMA last 5 values mismatch"
         )
         
@@ -151,8 +151,8 @@ class TestZlema:
         assert_close(
             batch_result[valid_mask], 
             stream_values[valid_mask], 
-            rtol=1e-3, 
-            atol=1e-3,
+            rtol=0.0,
+            atol=1e-9,  # Match Rust streaming test tolerance
             msg="ZLEMA streaming mismatch"
         )
     

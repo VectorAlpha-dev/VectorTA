@@ -486,8 +486,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "frama" => {
             let params = FramaParams::default();
+            // Use the true FRAMA defaults from FramaParams::default()
+            // Window defaults to 10, sc to 300, fc to 1.
             let window = params.window.unwrap_or(10);
-            let sc = params.sc.unwrap_or(200);
+            let sc = params.sc.unwrap_or(300);
             let fc = params.fc.unwrap_or(1);
             let input = FramaInput::from_candles(&candles, params);
             let result = frama(&input)?;

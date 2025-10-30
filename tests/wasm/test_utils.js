@@ -1,9 +1,8 @@
 /**
- * Common utilities for WASM binding tests
+ * Common utilities for WASM binding tests (no external deps)
  */
 import fs from 'fs';
 import path from 'path';
-import { parse } from 'csv-parse/sync';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,13 +11,12 @@ const __dirname = path.dirname(__filename);
 function loadTestData() {
     const csvPath = path.join(__dirname, '../../src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv');
     const content = fs.readFileSync(csvPath, 'utf8');
-    const records = parse(content, { 
-        columns: false,
-        skip_empty_lines: true,
-        cast: true,
-        from_line: 2  // Skip header row
-    });
-    
+
+    // Simple, dependency-free CSV parsing tailored to our numeric file:
+    // - first line is a header we skip
+    // - remaining lines are plain numeric values separated by commas
+    // - column order: timestamp, open, close, high, low, volume
+    const lines = content.split(/\r?\n/);
     const candles = {
         timestamp: [],
         open: [],
@@ -27,21 +25,23 @@ function loadTestData() {
         close: [],
         volume: []
     };
-    
-    for (const row of records) {
-        if (row.length < 6) continue;
-        // CSV format matches Rust: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
-        candles.timestamp.push(parseFloat(row[0]));  // JS numbers are f64
-        candles.open.push(parseFloat(row[1]));
-        candles.close.push(parseFloat(row[2]));
-        candles.high.push(parseFloat(row[3]));
-        candles.low.push(parseFloat(row[4]));
-        candles.volume.push(parseFloat(row[5]));
+
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const parts = line.split(',');
+        if (parts.length < 6) continue;
+        candles.timestamp.push(Number(parts[0]));
+        candles.open.push(Number(parts[1]));
+        candles.close.push(Number(parts[2]));
+        candles.high.push(Number(parts[3]));
+        candles.low.push(Number(parts[4]));
+        candles.volume.push(Number(parts[5]));
     }
-    
+
     // Add calculated fields
     candles.hl2 = candles.high.map((h, i) => (h + candles.low[i]) / 2.0);
-    
+
     return candles;
 }
 
@@ -98,27 +98,28 @@ function assertNoNaN(array, msg = "") {
 const EXPECTED_OUTPUTS = {
     wto: {
         defaultParams: { channelLength: 10, averageLength: 21 },
+        // Reference values mirror src/indicators/wto.rs::check_wto_accuracy
         last5Values: {
             wavetrend1: [
-                -31.700919052041584,
-                -31.429599055287365,
-                -33.42650456951316,
-                -32.48187262451018,
-                -39.88701736507456,
+                -34.81423091,
+                -33.92872278,
+                -35.29125217,
+                -34.93917015,
+                -41.42578524,
             ],
             wavetrend2: [
-                -35.68024735,
-                -33.31827192,
-                -32.62715068,
-                -32.25972409,
-                -34.30624855,
+                -37.72141493,
+                -35.54009606,
+                -34.81718669,
+                -34.74334400,
+                -36.39623258,
             ],
             histogram: [
-                3.9793283,
-                1.8886729,
-                -0.7993544,
-                -0.2221492,
-                -5.5807683,
+                2.90718403,
+                1.61137328,
+                -0.47406548,
+                -0.19582615,
+                -5.02955265,
             ]
         },
         warmupPeriod: 20,  // Based on average_length - 1
@@ -1201,6 +1202,17 @@ const EXPECTED_OUTPUTS = {
             0.9967247986764135,
             0.9950545846019277,
             0.984954072979463
+        ]
+    },
+    roc: {
+        // Matches Rust src/indicators/roc.rs check_roc_accuracy expected values
+        defaultParams: { period: 10 },
+        last5Values: [
+            -0.22551709049294377,
+            -0.5561903481650754,
+            -0.32752013235864963,
+            -0.49454153980722504,
+            -1.5045927020536976
         ]
     },
     damiani_volatmeter: {
