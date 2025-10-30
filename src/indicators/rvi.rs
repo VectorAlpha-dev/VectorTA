@@ -33,6 +33,10 @@
 //! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
 //! - **TODO**: Implement proper streaming with state tracking for deviation arrays and differences
+//!
+//! ## Test Status (bindings)
+//! - 2025-10-29: WASM and Python binding unit tests pass for RVI.
+//!   Fixed WASM test harness issues (double-free in zero-copy test; JS glue memory view caching avoided by using zero-copy APIs in specific tests). No kernel changes.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};

@@ -41,10 +41,12 @@ def test_pwma_accuracy():
     assert len(result) == len(close)
     
     # Check last 5 values match expected
+    # Match Rust tolerance: absolute 1e-3 (no relative tolerance)
     assert_close(
         result[-5:],
         expected['last_5_values'],
-        rtol=1e-3,
+        rtol=0,
+        atol=1e-3,
         msg="PWMA last 5 values mismatch"
     )
     
@@ -409,10 +411,12 @@ def test_pwma_batch_single_parameter():
     default_row = result['values'][0]
     
     # Check last 5 values match expected
+    # Match Rust tolerance: absolute 1e-3 (no relative tolerance)
     assert_close(
         default_row[-5:],
         expected['last_5_values'],
-        rtol=1e-3,
+        rtol=0,
+        atol=1e-3,
         msg="PWMA batch single parameter mismatch"
     )
 

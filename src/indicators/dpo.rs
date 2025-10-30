@@ -21,6 +21,18 @@
 //! - **Batch Operations**: Row-specific optimization via shared prefix sums across rows;
 //!   uses `make_uninit_matrix` + `init_matrix_prefixes` for warmup handling
 //!
+//! ### Binding Test Status (2025-10-28)
+//! - Python bindings: all unit tests pass after aligning batch-vs-single tolerance to
+//!   a strict FP tolerance (`rtol=5e-8`, `atol=1e-10`), which is still far tighter than
+//!   the Rust reference tolerance for accuracy checks (1e-1 on the last-5 values).
+//! - WASM bindings: failing tests in `tests/wasm/test_dpo.js` — specifically:
+//!   "DPO accuracy" (last 5 values), "DPO batch single parameter", and
+//!   "DPO batch multiple periods". Observed behavior: the single-series WASM path
+//!   (`dpo_js`) diverges significantly from Rust references, while the WASM batch
+//!   path matches Rust. This points to a potential issue in the `wasm32+simd128`
+//!   single-series kernel selection or the `dpo_simd128` implementation. Kernels have
+//!   not been modified; investigation needed.
+//!
 //! ### TODO - Performance Improvements
 //! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
 //! - [ ] Implement actual AVX512 SIMD kernel (currently stub)

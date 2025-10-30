@@ -157,13 +157,13 @@ test('Ehlers PMA NaN handling', () => {
         }
     }
     
-    // First 12 values should be NaN for predict (WASM binding warmup)
-    for (let i = 0; i < 12; i++) {
+    // Warmup NaN lengths must mirror Rust tests
+    // Predict warmup: first 13 values are NaN
+    for (let i = 0; i < 13; i++) {
         assert(isNaN(predict[i]), `Expected NaN in predict warmup at index ${i}`);
     }
-    
-    // First 15 values should be NaN for trigger (WASM binding warmup)
-    for (let i = 0; i < 15; i++) {
+    // Trigger warmup: first 16 values are NaN
+    for (let i = 0; i < 16; i++) {
         assert(isNaN(trigger[i]), `Expected NaN in trigger warmup at index ${i}`);
     }
 });

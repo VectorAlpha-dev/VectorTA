@@ -71,12 +71,19 @@ class TestCorrelationCycle:
         
         # Check last 5 values for all outputs including state
         for i in range(5):
-            assert_close(result['real'][-5 + i], expected_last_five_real[i], rtol=1e-8, atol=1e-10,
-                        msg=f"Real value mismatch at index {i}")
-            assert_close(result['imag'][-5 + i], expected_last_five_imag[i], rtol=1e-8, atol=1e-10,
-                        msg=f"Imag value mismatch at index {i}")
-            assert_close(result['angle'][-5 + i], expected_last_five_angle[i], rtol=1e-8, atol=1e-10,
-                        msg=f"Angle value mismatch at index {i}")
+            # Match Rust test tolerance: absolute <= 1e-8 (no looser relative tolerance)
+            assert_close(
+                result['real'][-5 + i], expected_last_five_real[i], rtol=0.0, atol=1e-8,
+                msg=f"Real value mismatch at index {i}"
+            )
+            assert_close(
+                result['imag'][-5 + i], expected_last_five_imag[i], rtol=0.0, atol=1e-8,
+                msg=f"Imag value mismatch at index {i}"
+            )
+            assert_close(
+                result['angle'][-5 + i], expected_last_five_angle[i], rtol=0.0, atol=1e-8,
+                msg=f"Angle value mismatch at index {i}"
+            )
         
         # Verify state values are -1, 0, or 1 after warmup
         warmup = 20  # period
@@ -303,22 +310,17 @@ class TestCorrelationCycle:
         default_angle = result['angle'][0]
         
         # Check last 5 values match expected
+        # Match Rust test tolerance: absolute <= 1e-8 across arrays
         assert_close(
-            default_real[-5:],
-            expected['last_5_values']['real'],
-            rtol=1e-8,
+            default_real[-5:], expected['last_5_values']['real'], rtol=0.0, atol=1e-8,
             msg="Batch real output mismatch"
         )
         assert_close(
-            default_imag[-5:],
-            expected['last_5_values']['imag'],
-            rtol=1e-8,
+            default_imag[-5:], expected['last_5_values']['imag'], rtol=0.0, atol=1e-8,
             msg="Batch imag output mismatch"
         )
         assert_close(
-            default_angle[-5:],
-            expected['last_5_values']['angle'],
-            rtol=1e-8,
+            default_angle[-5:], expected['last_5_values']['angle'], rtol=0.0, atol=1e-8,
             msg="Batch angle output mismatch"
         )
     

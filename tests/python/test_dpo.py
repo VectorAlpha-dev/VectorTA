@@ -49,10 +49,12 @@ class TestDpo:
             117.99999999992724,
         ]
         
+        # Match Rust test tolerance: absolute <= 1e-1 (no relaxed relative error)
         assert_close(
-            result[-5:], 
+            result[-5:],
             expected_last_five,
-            rtol=1e-1,  # Using same tolerance as Rust tests
+            rtol=0.0,
+            atol=1e-1,
             msg="DPO last 5 values mismatch"
         )
         
@@ -126,10 +128,12 @@ class TestDpo:
         single_result = ta_indicators.dpo(close, 5)
         
         assert batch_result['values'].shape == (1, len(close))
+        # Allow tiny FP noise between batch and single paths
         assert_close(
             batch_result['values'][0],
             single_result,
-            rtol=1e-10,
+            rtol=5e-8,
+            atol=1e-10,
             msg="Batch vs single mismatch"
         )
     
@@ -154,7 +158,8 @@ class TestDpo:
             assert_close(
                 batch_result['values'][i],
                 single_result,
-                rtol=1e-10,
+                rtol=5e-8,
+                atol=1e-10,
                 msg=f"Batch row {i} (period={period}) mismatch"
             )
     

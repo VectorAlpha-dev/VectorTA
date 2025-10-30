@@ -143,6 +143,7 @@ function assertNoNaN(array, msg = "") {
 
 // Expected outputs from Rust tests - these must match EXACTLY
 const EXPECTED_OUTPUTS = {
+<<<<<<< HEAD
     epma: {
         defaultParams: { period: 11, offset: 4 },
         lastFive: [
@@ -153,6 +154,43 @@ const EXPECTED_OUTPUTS = {
             59117.04
         ],
         warmupPeriod: 16 // period + offset + 1
+=======
+    zscore: {
+        // Default parameters used in Rust tests
+        defaultParams: { period: 14, maType: 'sma', nbdev: 1.0, devtype: 0 },
+        // Expected last 5 values from Rust unit test (population stddev)
+        last5Values: [
+            -0.3040683926967643,
+            -0.41042159719064014,
+            -0.5411993612192193,
+            -0.1673226261513698,
+            -1.431635486349618
+        ]
+    },
+    deviation: {
+        defaultParams: { period: 9, devtype: 0 },
+        last5Values: [
+            381.46174347,
+            381.02055938,
+            369.88470009,
+            339.41980271,
+            224.58405999
+        ],
+        meanAbsoluteLast5: [
+            377.42000000,
+            359.80000000,
+            334.50000000,
+            333.78000000,
+            349.86000000
+        ],
+        medianAbsoluteLast5: [
+            187.50000000,
+            187.50000000,
+            167.50000000,
+            156.00000000,
+            147.00000000
+        ]
+>>>>>>> simd-4
     },
     wto: {
         defaultParams: { channelLength: 10, averageLength: 21 },
@@ -1179,12 +1217,13 @@ const EXPECTED_OUTPUTS = {
     },
     bollinger_bands_width: {
         defaultParams: { period: 20, devup: 2.0, devdn: 2.0, matype: 'sma', devtype: 0 },
-        last5Values: [
-            0.0344,  // Placeholder values - should be calculated from actual Rust implementation
-            0.0352,
-            0.0361,
-            0.0358,
-            0.0349
+        // Match Python test fixtures and Rust reference generator
+        last_5_values: [
+            0.03715911020016619,
+            0.036072736452195386,
+            0.034961761824566714,
+            0.03493493700573171,
+            0.03624293421802348
         ]
     },
     bandpass: {

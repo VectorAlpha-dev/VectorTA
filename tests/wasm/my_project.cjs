@@ -1,5 +1,6 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 // CommonJS wrapper for wasm-bindgen output used by tests in ESM mode
 // Copied from tests/wasm/my_project.js to avoid ESM 'module is not defined' errors
 const exportsObj = module.exports;
@@ -15,6 +16,11 @@ imports['__wbindgen_placeholder__'] = module.exports;
 let imports = {};
 imports['__wbindgen_placeholder__'] = module.exports;
 >>>>>>> simd-3
+=======
+
+let imports = {};
+imports['__wbindgen_placeholder__'] = module.exports;
+>>>>>>> simd-4
 let wasm;
 const { TextEncoder, TextDecoder } = require(`util`);
 
@@ -114,12 +120,16 @@ function isLikeNone(x) {
 function debugString(val) {
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
     // primitive types
 >>>>>>> simd-1
 =======
     // primitive types
 >>>>>>> simd-3
+=======
+    // primitive types
+>>>>>>> simd-4
     const type = typeof val;
     if (type == 'number' || type == 'boolean' || val == null) {
         return  `${val}`;
@@ -141,21 +151,27 @@ function debugString(val) {
             return `Function(${name})`;
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
         }
         return 'Function';
     }
 =======
 =======
 >>>>>>> simd-3
+=======
+>>>>>>> simd-4
         } else {
             return 'Function';
         }
     }
     // objects
 <<<<<<< HEAD
+<<<<<<< HEAD
 >>>>>>> simd-1
 =======
 >>>>>>> simd-3
+=======
+>>>>>>> simd-4
     if (Array.isArray(val)) {
         const length = val.length;
         let debug = '[';
@@ -170,17 +186,22 @@ function debugString(val) {
     }
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
     // Test for built-in
 >>>>>>> simd-1
 =======
     // Test for built-in
 >>>>>>> simd-3
+=======
+    // Test for built-in
+>>>>>>> simd-4
     const builtInMatches = /\[object ([^\]]+)\]/.exec(toString.call(val));
     let className;
     if (builtInMatches && builtInMatches.length > 1) {
         className = builtInMatches[1];
     } else {
+<<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
         return toString.call(val);
@@ -189,6 +210,8 @@ function debugString(val) {
 =======
 =======
 >>>>>>> simd-3
+=======
+>>>>>>> simd-4
         // Failed to match the standard '[object ClassName]'
         return toString.call(val);
     }
@@ -197,15 +220,19 @@ function debugString(val) {
         // JSON.stringify avoids problems with cycles, and is generally much
         // easier than looping through ownProperties of `val`.
 <<<<<<< HEAD
+<<<<<<< HEAD
 >>>>>>> simd-1
 =======
 >>>>>>> simd-3
+=======
+>>>>>>> simd-4
         try {
             return 'Object(' + JSON.stringify(val) + ')';
         } catch (_) {
             return 'Object';
         }
     }
+<<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
     if (val instanceof Error) {
@@ -225,6 +252,8 @@ let cachedFloat64ArrayMemory0 = null;
 =======
 =======
 >>>>>>> simd-3
+=======
+>>>>>>> simd-4
     // errors
     if (val instanceof Error) {
         return `${val.name}: ${val.message}\n${val.stack}`;
@@ -245,9 +274,12 @@ function getStringFromWasm0(ptr, len) {
 let cachedFloat64ArrayMemory0 = null;
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 >>>>>>> simd-1
 =======
 >>>>>>> simd-3
+=======
+>>>>>>> simd-4
 function getFloat64ArrayMemory0() {
     if (cachedFloat64ArrayMemory0 === null || cachedFloat64ArrayMemory0.byteLength === 0) {
         cachedFloat64ArrayMemory0 = new Float64Array(wasm.memory.buffer);
@@ -260,6 +292,7 @@ function getArrayF64FromWasm0(ptr, len) {
     return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
 }
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
 const path = require('path');
@@ -306,6 +339,8 @@ exportsObj.vosc_batch = function(data, config) {
 =======
 =======
 >>>>>>> simd-3
+=======
+>>>>>>> simd-4
 function passArrayF64ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 8, 8) >>> 0;
     getFloat64ArrayMemory0().set(arg, ptr / 8);
@@ -13727,13 +13762,17 @@ module.exports.vosc_free = function(ptr, len) {
  */
 module.exports.vosc_batch = function(data, config) {
 <<<<<<< HEAD
+<<<<<<< HEAD
 >>>>>>> simd-1
 =======
 >>>>>>> simd-3
+=======
+>>>>>>> simd-4
     const ptr0 = passArrayF64ToWasm0(data, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.vosc_batch(ptr0, len0, config);
     if (ret[2]) {
+<<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
         throw new Error('vosc_batch threw');
@@ -13745,6 +13784,8 @@ exportsObj.__wasm = { memory: wasm.memory };
 =======
 =======
 >>>>>>> simd-3
+=======
+>>>>>>> simd-4
         throw takeFromExternrefTable0(ret[1]);
     }
     return takeFromExternrefTable0(ret[0]);
@@ -16778,6 +16819,9 @@ module.exports.__wasm = wasm;
 wasm.__wbindgen_start();
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 >>>>>>> simd-1
 =======
 >>>>>>> simd-3
+=======
+>>>>>>> simd-4

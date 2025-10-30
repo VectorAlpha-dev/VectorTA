@@ -24,18 +24,32 @@ let testData;
 
 test.before(async () => {
     // Load WASM module
+    // Prefer the pkg ESM build; fall back to the local CommonJS wrapper if Node
+    // cannot load the ESM+WASM pair (e.g., ERR_MODULE_NOT_FOUND: 'env').
+    const pkgPath = path.join(__dirname, '../../pkg/my_project.js');
+    const esmImportPath = process.platform === 'win32'
+        ? 'file:///' + pkgPath.replace(/\\/g, '/')
+        : pkgPath;
+    const cjsFallbackPath = path.join(__dirname, 'my_project.cjs');
+
     try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        const importPath = process.platform === 'win32' 
-            ? 'file:///' + wasmPath.replace(/\\/g, '/')
-            : wasmPath;
-        wasm = await import(importPath);
-        // No need to call default() for ES modules
+        wasm = await import(esmImportPath);
     } catch (error) {
-        console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
-        throw error;
+        // Known Node behavior: importing the wasm module may throw when the
+        // underlying .wasm requests an 'env' module. In that case, switch to
+        // the CommonJS wrapper that wires imports explicitly.
+        const msg = String(error && error.message || error);
+        const needsFallback = msg.includes("Cannot find package 'env'") || msg.includes('my_project_bg.wasm');
+        if (!needsFallback) {
+            console.error('Failed to load WASM pkg module:', error);
+            throw error;
+        }
+        // Dynamic import of CJS returns a namespace with named exports mapped
+        // from module.exports, which matches how tests access symbols.
+        const mod = await import(cjsFallbackPath);
+        wasm = mod.default ?? mod; // support either default or named export mapping
     }
-    
+
     testData = loadTestData();
 });
 

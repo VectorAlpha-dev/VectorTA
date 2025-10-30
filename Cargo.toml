@@ -124,6 +124,12 @@ wasm-opt = false
 # Also disable in dev builds for consistency.
 wasm-opt = false
 
+# Ensure wasm-pack does not run wasm-opt (breaks on paths with spaces in CI/dev).
+# wasm-pack expects this under a profile table; keep the above tuning for
+# environments that honor it, but explicitly disable the optimizer here.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [profile.release.build-override]
 # Applies only to build-scripts & proc-macros, *not* to your library/bin code.
 # Note: Cannot specify lto in build-override profiles (Cargo restriction)

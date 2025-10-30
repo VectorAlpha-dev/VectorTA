@@ -32,6 +32,15 @@ class TestZscore:
         result = ta_indicators.zscore(close)
         assert len(result) == len(close)
     
+    def test_zscore_accuracy_against_rust(self, test_data):
+        """Ensure Python binding matches Rust reference last-5 values within 1e-8 (abs)."""
+        close = test_data['close']
+        out = ta_indicators.zscore(close, period=14, ma_type="sma", nbdev=1.0, devtype=0)
+        last5 = out[-5:]
+        expected = np.array(EXPECTED_OUTPUTS['zscore']['last_5_values'], dtype=np.float64)
+        # Match Rust test's absolute tolerance of 1e-8
+        np.testing.assert_allclose(last5, expected, rtol=0.0, atol=1e-8)
+    
     def test_zscore_with_params(self, test_data):
         """Test ZSCORE with custom parameters"""
         close = test_data['close']
