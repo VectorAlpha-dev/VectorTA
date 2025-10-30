@@ -7,6 +7,7 @@ import assert from 'node:assert';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { compareWithRust } from './rust-comparison.js';
+import { loadTestData, assertArrayClose as assertArrayCloseUtil } from './test_utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,7 +40,7 @@ function assertArrayClose(actual, expected, tolerance, msg) {
             assert(isNaN(actual[i]), `${msg}: Expected NaN at index ${i}`);
         } else {
             const diff = Math.abs(actual[i] - expected[i]);
-            assert(diff < tolerance, 
+            assert(diff <= tolerance, 
                 `${msg}: Value mismatch at index ${i}: ${actual[i]} vs ${expected[i]} (diff: ${diff})`);
         }
     }
@@ -51,37 +52,27 @@ function assertClose(actual, expected, tolerance, msg) {
         `${msg}: ${actual} vs ${expected} (diff: ${diff})`);
 }
 
-function generateOttoTestData() {
-    const data = new Float64Array(260);
-    for (let i = 0; i < 260; i++) {
-        data[i] = 0.612 - (i * 0.00001);
-    }
-    
-    // Override last 30 values with specific test values
-    const testValues = [
-        0.61233, 0.61235, 0.61210, 0.61195, 0.61180,
-        0.61165, 0.61150, 0.61135, 0.61120, 0.61105,
-        0.61090, 0.61075, 0.61060, 0.61045, 0.61030,
-        0.61015, 0.61000, 0.60985, 0.60970, 0.60955,
-        0.60940, 0.60925, 0.60910, 0.60895, 0.60880,
-        0.60865, 0.60850, 0.60835, 0.60820, 0.60805,
-    ];
-    for (let i = 0; i < 30; i++) {
-        data[230 + i] = testValues[i];
-    }
-    return data;
+// Helper to load the same CSV data as Rust tests
+function loadCloseFromCsv() {
+    const candles = loadTestData();
+    return Float64Array.from(candles.close);
 }
 
-// Note: These PineScript reference values are for synthetic test data with
-// correcting_constant that produces different normalization than our implementation.
-// Our implementation with correcting_constant=100000 produces values ~100000x smaller.
-// We'll validate consistency instead of exact values.
-const pineScriptHott = [0.61437486, 0.61421295, 0.61409778, 0.61404352, 0.61388393];
-const pineScriptLott = [0.61221457, 0.61219084, 0.61197922, 0.61179661, 0.61142377];
-
-// Actual expected values from our implementation (values / 100000 due to correcting_constant)
-const expectedHott = pineScriptHott.map(v => v / 100000);
-const expectedLott = pineScriptLott.map(v => v / 100000);
+// Exact expected values for last 5 bars from Rust tests (CSV-based)
+const expectedHott = [
+    0.6137310801679211,
+    0.6136758137211143,
+    0.6135129389965592,
+    0.6133345015018311,
+    0.6130191362868016,
+];
+const expectedLott = [
+    0.6118478692473065,
+    0.6118237221582352,
+    0.6116076875101266,
+    0.6114220222840161,
+    0.6110393343841534,
+];
 
 const defaultParams = {
     ott_period: 2,
@@ -94,7 +85,7 @@ const defaultParams = {
 
 test('OTTO partial params', () => {
     // Test with default parameters - mirrors check_otto_partial_params
-    const data = generateOttoTestData();
+    const data = loadCloseFromCsv();
     
     // Use default params for testing
     const result = wasm.otto_js(
@@ -111,8 +102,8 @@ test('OTTO partial params', () => {
 });
 
 test('OTTO accuracy', async () => {
-    // Test OTTO matches expected values from Rust tests - mirrors check_otto_accuracy
-    const data = generateOttoTestData();
+    // Test OTTO matches Rust CSV reference values - mirrors check_otto_accuracy
+    const data = loadCloseFromCsv();
     
     const result = wasm.otto_js(
         data,
@@ -132,15 +123,16 @@ test('OTTO accuracy', async () => {
     const hottLast5 = hott.slice(-5);
     const lottLast5 = lott.slice(-5);
     
-    assertArrayClose(hottLast5, expectedHott, 1e-6, "OTTO HOTT last 5 values mismatch");
-    assertArrayClose(lottLast5, expectedLott, 1e-6, "OTTO LOTT last 5 values mismatch");
+    // Match Rust tolerance (abs <= 1e-8)
+    assertArrayClose(hottLast5, expectedHott, 1e-8, "OTTO HOTT last 5 values mismatch");
+    assertArrayClose(lottLast5, expectedLott, 1e-8, "OTTO LOTT last 5 values mismatch");
     
     // Note: compareWithRust not available for OTTO as it's in other_indicators
 });
 
 test('OTTO default candles', () => {
     // Test OTTO with default parameters - mirrors check_otto_default_candles
-    const data = generateOttoTestData();
+    const data = loadCloseFromCsv();
     
     const result = wasm.otto_js(
         data,
@@ -204,7 +196,7 @@ test('OTTO empty input', () => {
 
 test('OTTO invalid MA type', () => {
     // Test OTTO fails with invalid MA type - mirrors check_otto_invalid_ma_type
-    const data = generateOttoTestData();
+    const data = loadCloseFromCsv();
     
     assert.throws(() => {
         wasm.otto_js(data, 2, 0.6, 10, 25, 100000, "INVALID_MA");
@@ -213,7 +205,7 @@ test('OTTO invalid MA type', () => {
 
 test('OTTO all MA types', () => {
     // Test OTTO with all supported MA types - mirrors check_otto_all_ma_types
-    const data = generateOttoTestData();
+    const data = loadCloseFromCsv();
     const maTypes = ["SMA", "EMA", "WMA", "DEMA", "TMA", "VAR", "ZLEMA", "TSF", "HULL"];
     
     for (const maType of maTypes) {
@@ -233,7 +225,7 @@ test('OTTO all MA types', () => {
 
 test('OTTO reinput', () => {
     // Test OTTO applied twice (re-input) - mirrors check_otto_reinput
-    const data = generateOttoTestData();
+    const data = loadCloseFromCsv();
     
     // First pass
     const firstResult = wasm.otto_js(
@@ -299,7 +291,7 @@ test('OTTO reinput', () => {
 
 test('OTTO NaN handling', () => {
     // Test OTTO handles NaN values correctly - mirrors check_otto_nan_handling
-    const data = generateOttoTestData();
+    const data = loadCloseFromCsv();
     
     // Insert some NaN values
     data[100] = NaN;
@@ -531,7 +523,7 @@ test.skip('OTTO batch edge cases', () => {
 });
 
 test('OTTO batch error handling', () => {
-    const data = generateOttoTestData().slice(0, 20);
+    const data = loadCloseFromCsv().slice(0, 20);
     
     // Invalid config structure
     assert.throws(() => {
@@ -561,7 +553,7 @@ test('OTTO batch error handling', () => {
 // Zero-copy API tests
 test('OTTO zero-copy API', () => {
     // Use smaller parameters that work with 50 data points
-    const data = generateOttoTestData().slice(0, 50);
+    const data = loadCloseFromCsv().slice(0, 50);
     const testParams = {
         ott_period: 2,
         ott_percent: 0.6,
@@ -911,7 +903,7 @@ test('OTTO consistency across kernels', () => {
 
 test('OTTO warmup period validation', () => {
     // Test that warmup period behavior matches expectations
-    const data = generateOttoTestData();
+    const data = loadCloseFromCsv();
     
     const result = wasm.otto_js(
         data,

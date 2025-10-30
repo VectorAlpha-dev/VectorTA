@@ -19,6 +19,12 @@ fn approx_eq(a: f32, b: f32, tol: f32) -> bool {
     (a - b).abs() <= tol
 }
 
+fn using_nvcc_stub() -> bool {
+    std::env::var("NVCC")
+        .map(|p| p.contains("nvcc_stub.sh"))
+        .unwrap_or(false)
+}
+
 fn synth(len: usize) -> (Vec<f64>, Vec<f64>) {
     let mut price = vec![f64::NAN; len];
     let mut volume = vec![f64::NAN; len];
@@ -36,6 +42,10 @@ fn to_f32(v: &[f64]) -> Vec<f32> {
 
 #[test]
 fn buff_averages_cuda_plain_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if using_nvcc_stub() {
+        eprintln!("[buff_averages_cuda_plain_matches_cpu] skipped - NVCC stub in use (placeholder PTX)");
+        return Ok(());
+    }
     if !cuda_available() {
         eprintln!("[buff_averages_cuda_plain_matches_cpu] skipped - no CUDA device");
         return Ok(());
@@ -92,6 +102,10 @@ fn buff_averages_cuda_plain_matches_cpu() -> Result<(), Box<dyn std::error::Erro
 
 #[test]
 fn buff_averages_cuda_tiled128_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if using_nvcc_stub() {
+        eprintln!("[buff_averages_cuda_tiled128_matches_cpu] skipped - NVCC stub in use (placeholder PTX)");
+        return Ok(());
+    }
     if !cuda_available() {
         eprintln!("[buff_averages_cuda_tiled128_matches_cpu] skipped - no CUDA device");
         return Ok(());
@@ -144,6 +158,10 @@ fn buff_averages_cuda_tiled128_matches_cpu() -> Result<(), Box<dyn std::error::E
 
 #[test]
 fn buff_averages_cuda_tiled256_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if using_nvcc_stub() {
+        eprintln!("[buff_averages_cuda_tiled256_matches_cpu] skipped - NVCC stub in use (placeholder PTX)");
+        return Ok(());
+    }
     if !cuda_available() {
         eprintln!("[buff_averages_cuda_tiled256_matches_cpu] skipped - no CUDA device");
         return Ok(());

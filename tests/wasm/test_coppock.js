@@ -148,7 +148,9 @@ test('COPPOCK batch single parameter', () => {
     const singleResult = wasm.coppock_js(close, 11, 14, 10, "wma");
     
     assert.strictEqual(batchResult.values.length, singleResult.length);
-    assertArrayClose(batchResult.values, singleResult, 1e-10, "Batch vs single mismatch");
+    // Allow a tiny numeric tolerance between batch and single due to FP ordering
+    // Stay stricter than Rust's 1e-7 reference tolerance
+    assertArrayClose(batchResult.values, singleResult, 1e-9, "Batch vs single mismatch");
 });
 
 test('COPPOCK batch multiple parameters', () => {

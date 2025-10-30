@@ -51,9 +51,9 @@ class TestNatr:
         result_last_5 = result[-5:]
         expected_last_5 = EXPECTED_OUTPUTS['natr']['last_5_values']
         
-        # Check accuracy
-        assert_close(result_last_5, expected_last_5, rtol=1e-8, 
-                    msg="NATR last 5 values don't match expected")
+        # Check accuracy (match Rust tolerance: abs diff < 1e-8)
+        assert_close(result_last_5, expected_last_5, rtol=0, atol=1e-8,
+                     msg="NATR last 5 values don't match expected")
     
     def test_natr_zero_period(self):
         """Test NATR with zero period"""
@@ -129,9 +129,9 @@ class TestNatr:
         # Convert to numpy array
         stream_results = np.array(stream_results)
         
-        # Compare - they should be very close
-        assert_close(batch_result, stream_results, rtol=1e-9, 
-                    msg="NATR streaming results don't match batch results")
+        # Compare - they should be very close (Rust uses abs diff < 1e-9)
+        assert_close(batch_result, stream_results, rtol=0, atol=1e-9,
+                     msg="NATR streaming results don't match batch results")
     
     def test_natr_batch(self, test_data):
         """Test NATR batch functionality with multiple periods"""
@@ -148,8 +148,9 @@ class TestNatr:
         # Verify each row matches individual calculations
         for i, period in enumerate([10, 15, 20]):
             single = ta_indicators.natr(test_data['high'], test_data['low'], test_data['close'], period)
-            assert_close(batch_result['values'][i], single, rtol=1e-9,
-                        msg=f"NATR batch row {i} (period {period}) doesn't match single calculation")
+            # Use strict absolute tolerance to avoid exceeding Rust thresholds
+            assert_close(batch_result['values'][i], single, rtol=0, atol=1e-9,
+                         msg=f"NATR batch row {i} (period {period}) doesn't match single calculation")
     
     def test_natr_batch_single_parameter(self, test_data):
         """Test NATR batch with single parameter set"""
@@ -168,8 +169,8 @@ class TestNatr:
         
         # Compare with single calculation
         single_result = ta_indicators.natr(test_data['high'], test_data['low'], test_data['close'], 14)
-        assert_close(batch_result['values'][0], single_result, rtol=1e-9,
-                    msg="NATR batch single doesn't match single calculation")
+        assert_close(batch_result['values'][0], single_result, rtol=0, atol=1e-9,
+                     msg="NATR batch single doesn't match single calculation")
     
     def test_natr_batch_edge_cases(self, test_data):
         """Test NATR batch edge cases"""

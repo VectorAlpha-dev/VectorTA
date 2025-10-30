@@ -46,10 +46,12 @@ class TestWilders:
         assert len(result) == len(close)
         
         # Check last 5 values match expected
+        # Match Rust tolerance (absolute 1e-8); do not exceed it
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-8,
+            rtol=0,
+            atol=1e-8,
             msg="Wilders last 5 values mismatch"
         )
         
@@ -140,7 +142,8 @@ class TestWilders:
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
-            assert_close(b, s, rtol=1e-9, atol=1e-9, 
+            # Keep bindings tolerance no looser than Rust’s; use abs 1e-8
+            assert_close(b, s, rtol=0, atol=1e-8, 
                         msg=f"Wilders streaming mismatch at index {i}")
     
     def test_wilders_batch(self, test_data):
@@ -164,10 +167,12 @@ class TestWilders:
         expected = EXPECTED_OUTPUTS['wilders']['last_5_values']
         
         # Check last 5 values match
+        # Match Rust absolute tolerance
         assert_close(
             default_row[-5:],
             expected,
-            rtol=1e-8,
+            rtol=0,
+            atol=1e-8,
             msg="Wilders batch default row mismatch"
         )
     
@@ -189,8 +194,15 @@ class TestWilders:
                 result = ta_indicators.wilders(close, period=period, kernel=kernel)
                 assert len(result) == len(close)
             except ValueError as e:
-                # AVX kernels might not be available on all systems
-                if "Unknown kernel" not in str(e):
+                # AVX kernels might not be available or compiled; accept these gracefully
+                msg = str(e).lower()
+                allowed = (
+                    'unknown kernel' in msg or
+                    'not compiled' in msg or
+                    'unsupported' in msg or
+                    'not available' in msg
+                )
+                if not allowed:
                     raise
     
     def test_wilders_batch_multiple_periods(self, test_data):

@@ -67,6 +67,45 @@ class TestDamianiVolatmeter:
         
         # TODO: Add damiani_volatmeter to generate_references.exe
         # compare_with_rust('damiani_volatmeter', (vol, anti), 'close', expected['default_params'])
+
+    def test_damiani_accuracy_candles_stream(self, test_data):
+        """Candles-based accuracy: stream across OHLC and compare last-5 to Rust references.
+
+        Uses the feed-stream API (accepts H/L/C) to mirror Rust tests that use candles.
+        """
+        high = test_data['high']
+        low = test_data['low']
+        close = test_data['close']
+        expected = EXPECTED_OUTPUTS['damiani_volatmeter']
+
+        stream = ta_indicators.DamianiVolatmeterFeedStream(
+            vis_atr=expected['default_params']['vis_atr'],
+            vis_std=expected['default_params']['vis_std'],
+            sed_atr=expected['default_params']['sed_atr'],
+            sed_std=expected['default_params']['sed_std'],
+            threshold=expected['default_params']['threshold']
+        )
+
+        vols = []
+        antis = []
+        for h, l, c in zip(high, low, close):
+            out = stream.update(h, l, c)
+            if out is None:
+                vols.append(np.nan)
+                antis.append(np.nan)
+            else:
+                v, a = out
+                vols.append(v)
+                antis.append(a)
+
+        vols = np.array(vols)
+        antis = np.array(antis)
+
+        # Compare last 5 values using Rust unit test tolerance (1e-2)
+        assert_close(vols[-5:], expected['rust_vol_last_5_values'], rtol=1e-2,
+                     msg="Damiani Volatmeter (candles) vol last 5 mismatch")
+        assert_close(antis[-5:], expected['rust_anti_last_5_values'], rtol=1e-2,
+                     msg="Damiani Volatmeter (candles) anti last 5 mismatch")
     
     def test_damiani_default_candles(self, test_data):
         """Test Damiani Volatmeter with default parameters - mirrors check_damiani_input_with_default_candles"""

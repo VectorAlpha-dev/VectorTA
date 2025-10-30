@@ -27,11 +27,14 @@ test.before(async () => {
     // Load WASM module
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        const importPath = process.platform === 'win32' 
+        const importPath = process.platform === 'win32'
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        // Support both ESM and CJS outputs from wasm-pack (nodejs target is CJS)
+        if (wasm && wasm.default) {
+            wasm = wasm.default;
+        }
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;

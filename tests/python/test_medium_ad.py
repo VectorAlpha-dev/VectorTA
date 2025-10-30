@@ -45,10 +45,12 @@ class TestMediumAd:
         # Check last 5 values match expected (from Rust test)
         expected_last_five = [220.0, 78.5, 126.5, 48.0, 28.5]
         
+        # Rust test uses absolute tolerance of 1e-1; match that exactly (no relative slack)
         assert_close(
             result[-5:],
             expected_last_five,
-            rtol=1e-1,  # Using 1e-1 tolerance as per Rust test
+            rtol=0,
+            atol=1e-1,
             msg="MEDIUM_AD last 5 values mismatch"
         )
     

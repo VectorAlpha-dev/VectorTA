@@ -226,3 +226,16 @@ test('WCLPRICE with test data', async () => {
     // Since WCLPRICE has no parameters, we pass null for params
     await compareWithRust('wclprice', result, 'hlc', null);
 });
+
+test('WCLPRICE reference last five', () => {
+    // Explicitly verify last 5 values match Rust unit test references
+    const high = new Float64Array(testData.high);
+    const low = new Float64Array(testData.low);
+    const close = new Float64Array(testData.close);
+
+    const result = wasm.wclprice_js(high, low, close);
+    const expectedLastFive = [59225.5, 59212.75, 59078.5, 59150.75, 58711.25];
+    const start = result.length - 5;
+    const actualLastFive = Array.from(result.slice(start));
+    assertArrayClose(actualLastFive, expectedLastFive, 1e-8, 'Reference last five mismatch');
+});

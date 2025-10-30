@@ -23,14 +23,40 @@ let testData;
 test.before(async () => {
     // Load WASM module
     try {
-        const wasmPath = join(__dirname, '../../pkg/my_project.js');
-        const importPath = process.platform === 'win32'
-            ? 'file:///' + wasmPath.replace(/\\/g, '/')
-            : wasmPath;
-        wasm = await import(importPath);
-    } catch (error) {
-        console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
-        throw error;
+        // Prefer the local CommonJS wrapper that works reliably in Node without ESM WASM support
+        // This avoids Node trying to import the .wasm module directly (which can fail on some versions)
+        // tests/wasm/my_project.cjs bundles the same exports as the pkg wrapper
+        // and loads my_project_bg.wasm from the tests/wasm directory.
+        // If that fails, fall back to the pkg JS wrapper.
+        const localCjsPath = join(__dirname, './my_project.cjs');
+        // eslint-disable-next-line n/no-unsupported-features/es-syntax
+        wasm = await import('node:module').then(m => m.createRequire(import.meta.url)(localCjsPath));
+    } catch (e1) {
+        try {
+            const wasmPath = join(__dirname, '../../pkg/my_project.js');
+            const importPath = process.platform === 'win32'
+                ? 'file:///' + wasmPath.replace(/\\/g, '/')
+                : wasmPath;
+            wasm = await import(importPath);
+            // Initialize the wasm module (align with other tests' fallback logic)
+            try {
+                if (typeof wasm.default === 'function') {
+                    await wasm.default();
+                }
+            } catch (initErr) {
+                const wasmBinPath = join(__dirname, '../../pkg/my_project_bg.wasm');
+                const fs = await import('fs');
+                const bytes = fs.readFileSync ? fs.readFileSync(wasmBinPath) : (await (await import('node:fs/promises')).readFile(wasmBinPath));
+                if (typeof wasm.initSync === 'function') {
+                    wasm.initSync(bytes);
+                } else {
+                    throw initErr;
+                }
+            }
+        } catch (e2) {
+            console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
+            throw e2;
+        }
     }
 
     testData = loadTestData();
@@ -60,7 +86,9 @@ test.describe('Tilson T3 Moving Average', () => {
         );
 
         // Compare full output with Rust
-        await compareWithRust('tilson', result, 'close', expected.defaultParams);
+        // Use absolute-equivalent tolerance <= Rust's 1e-8 by passing a very small relative tol
+        // so that tol * (1 + |x|) <= 1e-8 for our data range.
+        await compareWithRust('tilson', result, 'close', expected.defaultParams, 1e-13);
     });
 
     test('Tilson default params', () => {

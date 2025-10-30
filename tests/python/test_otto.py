@@ -55,10 +55,10 @@ class TestOtto:
         assert len(lott) == len(data)
     
     def test_otto_accuracy(self, otto_test_data):
-        """Test OTTO calculation works correctly with CSV data"""
+        """Test OTTO matches Rust CSV reference values (last 5)"""
         data = otto_test_data
         expected = EXPECTED_OUTPUTS['otto']
-        
+
         hott, lott = ta_indicators.otto(
             data,
             ott_period=expected['default_params']['ott_period'],
@@ -68,29 +68,18 @@ class TestOtto:
             correcting_constant=expected['default_params']['correcting_constant'],
             ma_type=expected['default_params']['ma_type']
         )
-        
+
         assert len(hott) == len(data)
         assert len(lott) == len(data)
-        
-        # Note: The reference values in EXPECTED_OUTPUTS are for synthetic test data
-        # (pattern: 0.612 - i*0.00001), not for the CSV market data we now use.
-        # We verify basic sanity checks instead:
-        
-        # Check outputs are reasonable (not all NaN, within data range)
-        valid_hott = hott[~np.isnan(hott)]
-        valid_lott = lott[~np.isnan(lott)]
-        
-        assert len(valid_hott) > 0, "HOTT should have valid values"
-        assert len(valid_lott) > 0, "LOTT should have valid values"
-        
-        # OTTO outputs normalized values (typically between 0 and 1)
-        # Check they are within reasonable normalized range
-        assert np.all((valid_hott >= 0.0) & (valid_hott <= 1.0)), \
-            "HOTT values should be within normalized range [0, 1]"
-        assert np.all((valid_lott >= 0.0) & (valid_lott <= 1.0)), \
-            "LOTT values should be within normalized range [0, 1]"
-        
-        # Note: compare_with_rust not available for OTTO as it's in other_indicators
+
+        # Compare last 5 values exactly as in Rust tests
+        hott_last5 = hott[-5:]
+        lott_last5 = lott[-5:]
+        # Match or exceed Rust tolerance (abs <= 1e-8)
+        assert_close(hott_last5, np.array(expected['last_5_hott']), rtol=0.0, atol=1e-8,
+                     msg="OTTO HOTT last 5 values mismatch")
+        assert_close(lott_last5, np.array(expected['last_5_lott']), rtol=0.0, atol=1e-8,
+                     msg="OTTO LOTT last 5 values mismatch")
     
     def test_otto_default_candles(self, test_data):
         """Test OTTO with default parameters - mirrors check_otto_default_candles"""
