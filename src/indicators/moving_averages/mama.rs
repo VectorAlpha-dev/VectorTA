@@ -2882,17 +2882,19 @@ mod python_bindings {
         // 3. Heavy work without the GIL
         let kern = validate_kernel(kernel, true)?;
 
+        // For MAMA specifically, the scalar implementation is the reference and fastest.
+        // Ensure Python batch Auto follows the same Auto → Scalar behavior as single-series.
         let combos = py
             .allow_threads(|| -> Result<Vec<MamaParams>, MamaError> {
-                let kernel = match kern {
-                    Kernel::Auto => detect_best_batch_kernel(),
-                    k => k,
-                };
-                let simd = match kernel {
+                let simd = match kern {
+                    Kernel::Auto | Kernel::ScalarBatch => Kernel::Scalar,
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     Kernel::Avx512Batch => Kernel::Avx512,
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     Kernel::Avx2Batch => Kernel::Avx2,
-                    Kernel::ScalarBatch => Kernel::Scalar,
-                    _ => unreachable!(),
+                    // If SIMD isn't compiled in, or any other batch variant is requested,
+                    // fall back to scalar which matches the single-series path.
+                    _ => Kernel::Scalar,
                 };
                 // Use the _into variant that writes directly to our pre-allocated buffers
                 mama_batch_inner_into(slice_in, &sweep, simd, true, mama_slice, fama_slice)

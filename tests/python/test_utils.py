@@ -84,6 +84,29 @@ def generate_otto_test_data():
 
 # Expected outputs from Rust tests - these must match EXACTLY
 EXPECTED_OUTPUTS = {
+    'epma': {
+        'default_params': {'period': 11, 'offset': 4},
+        'last_5_values': [
+            59174.48,
+            59201.04,
+            59167.60,
+            59200.32,
+            59117.04,
+        ],
+        'warmup_period': 16,  # period + offset + 1
+    },
+    'zscore': {
+        # Default parameters used in Rust tests
+        'default_params': {'period': 14, 'ma_type': 'sma', 'nbdev': 1.0, 'devtype': 0},
+        # Expected last 5 values from Rust unit test (population stddev)
+        'last_5_values': [
+            -0.3040683926967643,
+            -0.41042159719064014,
+            -0.5411993612192193,
+            -0.1673226261513698,
+            -1.431635486349618
+        ],
+    },
     'alma': {
         'default_params': {'period': 9, 'offset': 0.85, 'sigma': 6.0},
         'last_5_values': [
@@ -307,25 +330,25 @@ EXPECTED_OUTPUTS = {
         'default_params': {'channel_length': 10, 'average_length': 21},
         'last_5_values': {
             'wavetrend1': [
-                -31.700919052041584,
-                -31.429599055287365,
-                -33.42650456951316,
-                -32.48187262451018,
-                -39.88701736507456,
+                -34.81423091,
+                -33.92872278,
+                -35.29125217,
+                -34.93917015,
+                -41.42578524,
             ],
             'wavetrend2': [
-                -35.68024735,
-                -33.31827192,
-                -32.62715068,
-                -32.25972409,
-                -34.30624855,
+                -37.72141493,
+                -35.54009606,
+                -34.81718669,
+                -34.74334400,
+                -36.39623258,
             ],
             'histogram': [
-                3.9793283,
-                1.8886729,
-                -0.7993544,
-                -0.2221492,
-                -5.5807683,
+                2.90718403,
+                1.61137328,
+                -0.47406548,
+                -0.19582615,
+                -5.02955265,
             ]
         },
         'warmup_period': 20,  # Based on average_length - 1
@@ -1709,14 +1732,14 @@ EXPECTED_OUTPUTS = {
         ],
         'warmup_period': 12  # length - 1 for default params
     },
-    'volume_adjusted_ma': {  # Updated after Pine logic fixes
+    'volume_adjusted_ma': {  # Matches Rust unit test references
         'default_params': {'length': 13, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
-        'fast_values': [  # length=13 (Updated after Pine logic fixes)
+        'fast_values': [  # length=13
             60249.34558277224,
-            60283.78930990677,
-            60173.39052862816,
-            60260.19903965848,
-            60226.10253226444
+            60283.79398716032,
+            60173.3929697517,
+            60260.20330381247,
+            60226.095375540506
         ],
         'slow_params': {'length': 55, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
         'slow_values': [  # length=55 (Updated after Pine logic fixes)

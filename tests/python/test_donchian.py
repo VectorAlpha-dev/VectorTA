@@ -66,22 +66,26 @@ class TestDonchian:
         assert len(lower) == len(high)
         
         # Check last 5 values match expected
+        # Match Rust test tolerance (abs <= 1e-1)
         assert_close(
             upper[-5:],
             expected['last_5_upper'],
-            rtol=0.001,
+            rtol=0.0,
+            atol=1e-1,
             msg="Donchian upper band last 5 values mismatch"
         )
         assert_close(
             middle[-5:],
             expected['last_5_middle'],
-            rtol=0.001,
+            rtol=0.0,
+            atol=1e-1,
             msg="Donchian middle band last 5 values mismatch"
         )
         assert_close(
             lower[-5:],
             expected['last_5_lower'],
-            rtol=0.001,
+            rtol=0.0,
+            atol=1e-1,
             msg="Donchian lower band last 5 values mismatch"
         )
         
@@ -113,7 +117,9 @@ class TestDonchian:
                     upper, middle, lower = ta.donchian(high, low, period)
                 results.append((upper, middle, lower))
             except ValueError as e:
-                if 'not supported' in str(e):
+                # Allow builds without SIMD features
+                msg = str(e).lower()
+                if ('not supported' in msg) or ('not compiled' in msg) or ('unsupported' in msg):
                     continue
                 raise
         
@@ -181,22 +187,26 @@ class TestDonchian:
         
         # When input high == low, all bands should converge to same value
         # Check last 5 values match expected reinput values
+        # Keep strict absolute tolerance here as well for consistency
         assert_close(
             upper2[-5:],
             expected['reinput_last_5_upper'],
-            rtol=0.001,
+            rtol=0.0,
+            atol=1e-1,
             msg="Donchian reinput upper band mismatch"
         )
         assert_close(
             middle2[-5:],
             expected['reinput_last_5_middle'],
-            rtol=0.001,
+            rtol=0.0,
+            atol=1e-1,
             msg="Donchian reinput middle band mismatch"
         )
         assert_close(
             lower2[-5:],
             expected['reinput_last_5_lower'],
-            rtol=0.001,
+            rtol=0.0,
+            atol=1e-1,
             msg="Donchian reinput lower band mismatch"
         )
     
@@ -332,19 +342,22 @@ class TestDonchian:
         assert_close(
             default_upper[-5:],
             expected['last_5_upper'],
-            rtol=0.001,
+            rtol=0.0,
+            atol=1e-1,
             msg="Batch default upper band mismatch"
         )
         assert_close(
             default_middle[-5:],
             expected['last_5_middle'],
-            rtol=0.001,
+            rtol=0.0,
+            atol=1e-1,
             msg="Batch default middle band mismatch"
         )
         assert_close(
             default_lower[-5:],
             expected['last_5_lower'],
-            rtol=0.001,
+            rtol=0.0,
+            atol=1e-1,
             msg="Batch default lower band mismatch"
         )
     

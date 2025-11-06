@@ -223,6 +223,21 @@ test('TTM Trend - accuracy check', () => {
     }
 });
 
+test('TTM Trend - matches Rust expected last five values', () => {
+    // Mirrors Rust check_ttm_accuracy expected values
+    const period = 5;
+    const result = wasm.ttm_trend_js(hl2, close, period);
+
+    // Convert f64 (0.0/1.0) to boolean for comparison
+    const last5Bools = Array.from(result.slice(-5)).map(v => v === 1.0);
+    const expectedLastFive = [true, false, false, false, false];
+    assert.deepStrictEqual(
+        last5Bools,
+        expectedLastFive,
+        `Expected ${expectedLastFive}, got ${last5Bools}`
+    );
+});
+
 test('TTM Trend - memory allocation and deallocation', () => {
     const len = 1000;
     

@@ -17,6 +17,7 @@
 //! - Row-specific batch: not implemented. Potential via prefix sums (P/Q) for shared sums across rows; defer to a future PR.
 //! - Streaming Performance: O(1) per tick via rolling S_y/S_xy and precomputed OLS constants
 //! - Memory Optimization: GOOD - properly uses alloc_with_nan_prefix and make_uninit_matrix helpers for zero-copy allocation
+//! - Bindings: WASM and Python unit tests pass (2025-10-28). WASM batch vs single equality uses abs tol=1e-7 (<= Rust 1e-6) to avoid spurious FP roundoff mismatches.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]

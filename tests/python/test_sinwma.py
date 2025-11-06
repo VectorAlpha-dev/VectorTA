@@ -53,7 +53,8 @@ def test_sinwma_accuracy():
     assert_close(
         result[-5:], 
         expected['last_5_values'],
-        rtol=1e-6,
+        atol=1e-6,
+        rtol=0.0,
         msg="SINWMA last 5 values mismatch"
     )
 
@@ -90,7 +91,7 @@ def test_sinwma_period_one():
     result = sinwma(data, 1)
     
     # With period=1, weight is sin(π/2) = 1.0, so output should equal input
-    assert_close(result, data, rtol=1e-10, msg="Period=1 should act as passthrough")
+    assert_close(result, data, atol=1e-10, rtol=0.0, msg="Period=1 should act as passthrough")
 
 
 def test_sinwma_nan_handling():
@@ -160,7 +161,7 @@ def test_sinwma_batch():
     # Compare after warmup period
     first_valid = np.where(~np.isnan(close))[0][0]
     warmup = first_valid + 10 - 1
-    assert_close(batch_first[warmup:], individual_result[warmup:], atol=1e-9, msg="SINWMA first combination mismatch")
+    assert_close(batch_first[warmup:], individual_result[warmup:], atol=1e-9, rtol=0.0, msg="SINWMA first combination mismatch")
 
 
 def test_sinwma_batch_single_parameter():
@@ -190,7 +191,8 @@ def test_sinwma_batch_single_parameter():
     assert_close(
         default_row[-5:],
         expected['last_5_values'],
-        rtol=1e-6,
+        atol=1e-6,
+        rtol=0.0,
         msg="SINWMA batch default row mismatch"
     )
 
@@ -222,7 +224,7 @@ def test_sinwma_stream():
         if np.isnan(batch_result[i]) and np.isnan(stream_results[i]):
             continue
         if not np.isnan(batch_result[i]) and not np.isnan(stream_results[i]):
-            assert_close(batch_result[i], stream_results[i], rtol=1e-9, msg=f"SINWMA streaming mismatch at index {i}")
+            assert_close(batch_result[i], stream_results[i], atol=1e-9, rtol=0.0, msg=f"SINWMA streaming mismatch at index {i}")
 
 
 def test_sinwma_different_periods():

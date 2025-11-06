@@ -444,7 +444,7 @@ test('JMA zero-copy API', () => {
     assert(ptr !== 0, 'Failed to allocate memory');
     
     // Create view into WASM memory
-    const memory = wasm.__wbindgen_memory();
+    const memory = wasm.__wasm ? wasm.__wasm.memory : (wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory);
     const memView = new Float64Array(
         memory.buffer,
         ptr,
@@ -483,14 +483,14 @@ test('JMA zero-copy with NaN data', () => {
     assert(ptr !== 0, 'Failed to allocate memory');
     
     try {
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm ? wasm.__wasm.memory : (wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory);
         const memView = new Float64Array(memory.buffer, ptr, data.length);
         memView.set(data);
         
         wasm.jma_into(ptr, ptr, data.length, period, phase, power);
         
         // Recreate view in case memory grew
-        const memory2 = wasm.__wbindgen_memory();
+        const memory2 = wasm.__wasm ? wasm.__wasm.memory : (wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory);
         const memView2 = new Float64Array(memory2.buffer, ptr, data.length);
         
         // Check first 2 values are NaN (before first valid)
@@ -536,7 +536,7 @@ test('JMA zero-copy memory management', () => {
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
         // Write pattern to verify memory
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm ? wasm.__wasm.memory : (wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory);
         const memView = new Float64Array(memory.buffer, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             memView[i] = i * 1.5;

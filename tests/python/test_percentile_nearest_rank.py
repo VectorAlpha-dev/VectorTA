@@ -55,10 +55,12 @@ class TestPercentileNearestRank:
         assert not np.isnan(result[warmup]), f"Expected valid value at index {warmup}"
         
         # Check last 5 values match expected reference values
+        # Match Rust unit test tolerance: abs diff < 1e-6
         assert_close(
             result[-5:],
             expected['last_5_values'],
-            rtol=1e-8,
+            rtol=0,
+            atol=1e-6,
             msg="PNR last 5 values mismatch"
         )
         
@@ -199,8 +201,9 @@ class TestPercentileNearestRank:
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
-            assert_close(b, s, rtol=1e-9, atol=1e-9, 
-                        msg=f"PNR streaming mismatch at index {i}")
+            # Match Rust streaming tolerance: abs diff < 1e-9
+            assert_close(b, s, rtol=0, atol=1e-9,
+                         msg=f"PNR streaming mismatch at index {i}")
     
     def test_percentile_nearest_rank_batch(self, test_data):
         """Test PNR batch processing - mirrors check_batch_default_row"""
@@ -225,10 +228,12 @@ class TestPercentileNearestRank:
         batch_row = result['values'][0]
         single_result = ta_indicators.percentile_nearest_rank(close, length=15, percentage=50.0)
         
+        # Keep tolerance no looser than Rust; use strict absolute check
         assert_close(
             batch_row,
             single_result,
-            rtol=1e-8,
+            rtol=0,
+            atol=1e-9,
             msg="PNR batch default row mismatch"
         )
     

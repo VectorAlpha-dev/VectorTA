@@ -672,99 +672,101 @@ fn macd_compute_into_classic_ema(
     let oms = 1.0 - aslow;
     let omsi = 1.0 - asig;
 
-    // Seed fast EMA with SMA over [first .. first+fast)
-    let mut fsum = 0.0;
-    let mut i = 0usize;
-    // small unroll – cheap on short windows
-    while i + 4 <= fast {
-        fsum += data[first + i + 0];
-        fsum += data[first + i + 1];
-        fsum += data[first + i + 2];
-        fsum += data[first + i + 3];
-        i += 4;
-    }
-    while i < fast {
-        fsum += data[first + i];
-        i += 1;
-    }
-    let mut fast_ema = fsum / fast as f64;
+    // Indices at which seeds become available
+    let fast_seed_idx = first + fast - 1;
+    let slow_seed_idx = macd_warmup; // == first + slow - 1
 
-    // Seed slow EMA with SMA over [first .. first+slow)
-    let mut ssum = 0.0;
-    let mut j = 0usize;
-    while j + 4 <= slow {
-        ssum += data[first + j + 0];
-        ssum += data[first + j + 1];
-        ssum += data[first + j + 2];
-        ssum += data[first + j + 3];
-        j += 4;
-    }
-    while j < slow {
-        ssum += data[first + j];
-        j += 1;
-    }
-    let mut slow_ema = ssum / slow as f64;
+    // Rolling sums for SMA seeding (single pass)
+    let mut fsum = 0.0f64;
+    let mut ssum = 0.0f64;
 
-    // Advance FAST EMA from (first+fast) ..= macd_warmup to align with SLOW at macd_warmup
-    let mut t = first + fast;
-    while t <= macd_warmup {
-        let x = data[t];
-        fast_ema = x.mul_add(af, omf * fast_ema);
-        t += 1;
-    }
+    // EMA state
+    let mut fast_ema = 0.0f64;
+    let mut slow_ema = 0.0f64;
+    let mut fast_ready = false;
+    let mut slow_ready = false;
 
-    // First valid MACD at macd_warmup
-    if macd_warmup < len {
-        let m0 = fast_ema - slow_ema;
-        macd_out[macd_warmup] = m0;
-    }
-
-    // Signal seeding state
+    // Signal state
     let mut have_seed = false;
-    let mut se = 0.0_f64;
-    if signal == 1 {
-        // seed immediately with m0
-        if signal_warmup < len {
-            se = macd_out[signal_warmup];
-            have_seed = true;
-            signal_out[signal_warmup] = se;
-            hist_out[signal_warmup] = macd_out[signal_warmup] - se;
+    let mut se = 0.0f64;
+    let mut sig_accum = 0.0f64;
+
+    // Single streaming loop from `first` .. len
+    let mut i = first;
+    while i < len {
+        let x = data[i];
+
+        // Update rolling sums only until seeds are ready
+        if !fast_ready {
+            fsum += x;
+            if i >= first + fast {
+                fsum -= data[i - fast];
+            }
         }
-    }
-    let mut sig_accum = if signal > 1 && macd_warmup < len {
-        macd_out[macd_warmup]
-    } else {
-        0.0
-    };
+        if !slow_ready {
+            ssum += x;
+            if i >= first + slow {
+                ssum -= data[i - slow];
+            }
+        }
 
-    // Single forward pass from macd_warmup+1 .. len
-    let mut k = macd_warmup.saturating_add(1);
-    while k < len {
-        let x = data[k];
-        fast_ema = x.mul_add(af, omf * fast_ema);
-        slow_ema = x.mul_add(aslow, oms * slow_ema);
-        let m = fast_ema - slow_ema;
-        macd_out[k] = m;
-
-        if !have_seed {
-            if signal > 1 && k <= signal_warmup {
-                sig_accum += m;
-                if k == signal_warmup {
-                    se = sig_accum / (signal as f64);
-                    have_seed = true;
-                    signal_out[k] = se;
-                    hist_out[k] = m - se;
-                }
+        // Seed FAST EMA when its window completes; advance thereafter
+        if !fast_ready {
+            if i == fast_seed_idx {
+                fast_ema = fsum / fast as f64;
+                fast_ready = true;
             }
         } else {
-            se = m.mul_add(asig, omsi * se);
-            if k >= signal_warmup {
-                signal_out[k] = se;
-                hist_out[k] = m - se;
+            fast_ema = x.mul_add(af, omf * fast_ema);
+        }
+
+        // Seed SLOW EMA when its window completes
+        if !slow_ready {
+            if i == slow_seed_idx {
+                slow_ema = ssum / slow as f64;
+                slow_ready = true;
+            }
+        } else {
+            slow_ema = x.mul_add(aslow, oms * slow_ema);
+        }
+
+        // Produce MACD once both EMAs are ready (i >= slow_seed_idx)
+        if slow_ready {
+            let m = fast_ema - slow_ema;
+            macd_out[i] = m;
+
+            // Seed or update signal
+            if !have_seed {
+                if signal == 1 {
+                    // Immediate seed with m at signal_warmup (== slow_seed_idx)
+                    if i == signal_warmup {
+                        se = m;
+                        have_seed = true;
+                        signal_out[i] = se;
+                        hist_out[i] = m - se;
+                    }
+                } else {
+                    // accumulate SMA of MACD until signal_warmup
+                    if i <= signal_warmup {
+                        sig_accum += m;
+                        if i == signal_warmup {
+                            se = sig_accum / (signal as f64);
+                            have_seed = true;
+                            signal_out[i] = se;
+                            hist_out[i] = m - se;
+                        }
+                    }
+                }
+            } else {
+                se = m.mul_add(asig, omsi * se);
+                if i >= signal_warmup {
+                    signal_out[i] = se;
+                    hist_out[i] = m - se;
+                }
             }
         }
 
-        k += 1;
+        i += 1;
     }
 
     Ok(())
@@ -941,6 +943,64 @@ pub fn macd_with_kernel(input: &MacdInput, kernel: Kernel) -> Result<MacdOutput,
         signal: signal_vec,
         hist,
     })
+}
+
+/// Compute MACD into caller-provided buffers (no per-call allocations).
+/// Buffers must have length equal to input length. Warmup prefixes are filled with NaNs.
+#[cfg(not(feature = "wasm"))]
+pub fn macd_into(
+    input: &MacdInput,
+    macd_out: &mut [f64],
+    signal_out: &mut [f64],
+    hist_out: &mut [f64],
+) -> Result<(), MacdError> {
+    let (data, fast, slow, signal, ma_type, macd_warmup, signal_warmup, chosen) =
+        macd_prepare(input, Kernel::Auto)?;
+
+    if macd_out.len() != data.len() || signal_out.len() != data.len() || hist_out.len() != data.len() {
+        return Err(MacdError::InvalidPeriod {
+            fast,
+            slow,
+            signal,
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefixes with quiet NaN
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let mw = macd_warmup.min(macd_out.len());
+    for v in &mut macd_out[..mw] { *v = qnan; }
+    let sw = signal_warmup.min(signal_out.len());
+    for v in &mut signal_out[..sw] { *v = qnan; }
+    let hw = signal_warmup.min(hist_out.len());
+    for v in &mut hist_out[..hw] { *v = qnan; }
+
+    // Choose path
+    if ma_type.eq_ignore_ascii_case("ema") {
+        let first = macd_warmup + 1 - slow;
+        // Dispatch like macd_with_kernel (SIMD-enabled path falls back to scalar here)
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    return macd_compute_into_classic_ema(
+                        data, fast, slow, signal, first, macd_out, signal_out, hist_out,
+                    );
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                    return macd_compute_into_classic_ema(
+                        data, fast, slow, signal, first, macd_out, signal_out, hist_out,
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    } else {
+        let first = macd_warmup + 1 - slow;
+        return macd_compute_into(
+            data, fast, slow, signal, &ma_type, first, macd_out, signal_out, hist_out,
+        );
+    }
 }
 
 #[inline(always)]

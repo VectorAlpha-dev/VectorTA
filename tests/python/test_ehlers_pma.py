@@ -105,12 +105,11 @@ class TestEhlersPma:
             assert not np.any(np.isnan(predict[20:])), "Found unexpected NaN in predict after warmup"
             # Check trigger values after warmup (16 with 1-bar lag)
             assert not np.any(np.isnan(trigger[20:])), "Found unexpected NaN in trigger after warmup"
-        
-        # First 12 values should be NaN for predict (Python binding warmup)
-        assert np.all(np.isnan(predict[:12])), "Expected NaN in predict warmup period"
-        
-        # First 15 values should be NaN for trigger (Python binding warmup)
-        assert np.all(np.isnan(trigger[:15])), "Expected NaN in trigger warmup period"
+        # Warmup NaN lengths must mirror Rust tests
+        # Predict warmup: first 13 values are NaN
+        assert np.all(np.isnan(predict[:13])), "Expected NaN in predict warmup period (first 13)"
+        # Trigger warmup: first 16 values are NaN
+        assert np.all(np.isnan(trigger[:16])), "Expected NaN in trigger warmup period (first 16)"
     
     def test_ehlers_pma_streaming(self, test_data):
         """Test Ehlers PMA streaming matches batch calculation - mirrors check_ehlers_pma_streaming"""

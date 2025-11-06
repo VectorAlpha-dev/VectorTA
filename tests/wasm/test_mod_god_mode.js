@@ -81,6 +81,45 @@ test('MOD_GOD_MODE basic test', () => {
     assert(nonNanCount > 0, 'Should have some non-NaN values in wavetrend');
 });
 
+test('MOD_GOD_MODE accuracy (matches Rust refs, tol<=4.0)', () => {
+    // Use the same CSV-backed dataset as Rust tests
+    const high = new Float64Array(testData.high);
+    const low = new Float64Array(testData.low);
+    const close = new Float64Array(testData.close);
+    const volume = new Float64Array(testData.volume);
+
+    const result = wasm.mod_god_mode(
+        high, low, close, volume,
+        17, // n1
+        6,  // n2
+        4,  // n3
+        'tradition_mg',
+        true // use_volume
+    );
+
+    const wt = Array.from(result.wavetrend);
+    const nonNan = wt.filter(v => !isNaN(v));
+    assert(nonNan.length >= 5, 'Not enough non-NaN values for accuracy check');
+
+    // Reference last 5 wavetrend values from Rust test (PineScript)
+    const expectedLastFive = [
+        61.66219598,
+        55.92955776,
+        34.70836488,
+        39.48824969,
+        15.74958884,
+    ];
+
+    const actualLastFive = nonNan.slice(-5);
+    for (let i = 0; i < 5; i++) {
+        const diff = Math.abs(actualLastFive[i] - expectedLastFive[i]);
+        assert(
+            diff < 4.0,
+            `Value ${i} mismatch: expected ${expectedLastFive[i].toFixed(8)}, got ${actualLastFive[i].toFixed(8)}, diff ${diff.toFixed(8)}`
+        );
+    }
+});
+
 test('MOD_GOD_MODE modes test', () => {
     const length = 50;
     const high = new Float64Array(length).fill(10.0);

@@ -55,13 +55,15 @@ class TestAroon:
         assert_close(
             up[-5:], 
             expected['last_5_up'],
-            rtol=1e-2,  # Aroon uses 1e-2 tolerance in Rust tests
+            rtol=0.0,
+            atol=1e-2,  # Match Rust absolute tolerance (<= 0.01)
             msg="Aroon up last 5 values mismatch"
         )
         assert_close(
             down[-5:], 
             expected['last_5_down'],
-            rtol=1e-2,  # Aroon uses 1e-2 tolerance in Rust tests
+            rtol=0.0,
+            atol=1e-2,  # Match Rust absolute tolerance (<= 0.01)
             msg="Aroon down last 5 values mismatch"
         )
         
@@ -195,7 +197,8 @@ class TestAroon:
             assert_close(
                 batch_up[mask_up],
                 stream_up[mask_up],
-                rtol=1e-8,
+                rtol=0.0,
+                atol=1e-8,
                 msg="Aroon up streaming mismatch"
             )
         
@@ -203,7 +206,8 @@ class TestAroon:
             assert_close(
                 batch_down[mask_down],
                 stream_down[mask_down],
-                rtol=1e-8,
+                rtol=0.0,
+                atol=1e-8,
                 msg="Aroon down streaming mismatch"
             )
     
@@ -321,7 +325,8 @@ class TestAroon:
             assert_close(
                 scalar_up[mask_up],
                 auto_up[mask_up],
-                rtol=1e-10,
+                rtol=0.0,
+                atol=1e-10,
                 msg="Kernel up results should match"
             )
         
@@ -329,7 +334,8 @@ class TestAroon:
             assert_close(
                 scalar_down[mask_down],
                 auto_down[mask_down],
-                rtol=1e-10,
+                rtol=0.0,
+                atol=1e-10,
                 msg="Kernel down results should match"
             )
 

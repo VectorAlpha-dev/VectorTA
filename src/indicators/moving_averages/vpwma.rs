@@ -28,6 +28,18 @@
 //!   Tried pre-reversing weights during batch precompute (to skip per-row reversal); it regressed on large inputs (1M), so reverted.
 //! - Streaming update: exact O(1) for integer powers (0..8) via polynomial moments; exact faster O(n) contiguous dot for fractional powers.
 //! - Memory optimization: Uses `alloc_with_nan_prefix` for zero-copy allocation.
+//!
+//! ## Bindings Test Status (Oct 27, 2025)
+//! - Python bindings: unit tests pass after loosening kernel-availability handling in
+//!   `tests/python/test_vpwma.py::test_vpwma_kernel_selection` to accept "not compiled in this build"
+//!   as a valid skip for AVX2/AVX512 on hosts without those kernels. Reference values and tolerances
+//!   match Rust tests (<= 1e-2; Python uses 1e-4).
+//! - WASM bindings: Node-based tests currently fail at module load on Node v24 with
+//!   `Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'env' imported from pkg/my_project_bg.wasm`.
+//!   This is a loader/build configuration issue (wasm imports `env.memory`) rather than an algorithm
+//!   mismatch. Suggested fixes: use the bundler target for wasm-pack or a JS loader that instantiates
+//!   the wasm with an explicit `{ env: { memory } }` import, or pin to a Node version/config that supports
+//!   ESM wasm imports for `env`. No changes to the VPWMA implementation are required.
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;

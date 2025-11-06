@@ -46,7 +46,8 @@ class TestObv:
         # Check last 5 values
         for i, expected in enumerate(expected_last_five):
             actual = result[-(5-i)]
-            assert_close(actual, expected, rtol=1e-6, msg=f"OBV mismatch at tail index {i}")
+            # Use absolute tolerance aligned with Rust tests (<= 1e-6)
+            assert_close(actual, expected, rtol=0.0, atol=1e-6, msg=f"OBV mismatch at tail index {i}")
     
     def test_obv_empty_data(self):
         """Test OBV with empty data"""

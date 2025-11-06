@@ -301,50 +301,37 @@ test('RVI zero-copy API', () => {
     } finally {
         // Clean up
         wasm.rvi_free(inPtr, len);
-        wasm.rvi_free(inPtr, len);
         wasm.rvi_free(outPtr, len);
     }
 });
 
 test('RVI zero-copy in-place', () => {
-    // Test in-place operation (aliasing)
-    // Use smaller dataset to avoid memory issues
+    // Test in-place operation (aliasing) using only zero-copy APIs
     const data = new Float64Array(testData.close.slice(0, 100));
     const len = data.length;
-    
-    // Allocate a single buffer
-    const ptr = wasm.rvi_alloc(len);
-    
+
+    // Allocate buffers
+    const inPtr = wasm.rvi_alloc(len);
+    const outPtr = wasm.rvi_alloc(len);
+
     try {
         // Copy input data to WASM memory
-        const wasmData = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
-        wasmData.set(data);
-        
-        // Get expected result before overwriting
-        const expected = wasm.rvi_js(data, 10, 14, 1, 0);
-        
-        // Call with same pointer for input and output (in-place)
-        wasm.rvi_into(
-            ptr,
-            ptr,
-            len,
-            10, 14, 1, 0
-        );
-        
-        // Re-create view after computation (in case memory was resized)
-        const wasmDataAfter = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
-        
-        // Compare with JS version
-        assertArrayClose(
-            Array.from(wasmDataAfter),
-            expected,
-            1e-10,
-            "In-place RVI mismatch"
-        );
-        
+        new Float64Array(wasm.__wasm.memory.buffer, inPtr, len).set(data);
+
+        // Compute expected into a separate output buffer (no JS helper)
+        wasm.rvi_into(inPtr, outPtr, len, 10, 14, 1, 0);
+        const expected = Array.from(new Float64Array(wasm.__wasm.memory.buffer, outPtr, len));
+
+        // Now compute in-place using the same pointer for input and output
+        wasm.rvi_into(inPtr, inPtr, len, 10, 14, 1, 0);
+        const inPlace = Array.from(new Float64Array(wasm.__wasm.memory.buffer, inPtr, len));
+
+        // Compare results
+        assertArrayClose(inPlace, expected, 1e-10, "In-place RVI mismatch");
     } finally {
         // Clean up
-        wasm.rvi_free(ptr, len);
+        wasm.rvi_free(inPtr, len);
+        wasm.rvi_free(outPtr, len);
     }
 });
 
@@ -364,54 +351,71 @@ test('RVI streaming (not fully supported)', () => {
 });
 
 test('RVI different devtypes', () => {
-    // Test RVI with different deviation types
-    const close = new Float64Array(testData.close.slice(0, 100)); // Smaller dataset
-    
-    // Test all three devtypes
+    // Test RVI with different deviation types via zero-copy API to avoid JS glue caching issues
+    const data = new Float64Array(testData.close.slice(0, 100));
+    const len = data.length;
     const devtypes = [0, 1, 2]; // StdDev, MeanAbsDev, MedianAbsDev
-    const results = [];
-    
-    for (const devtype of devtypes) {
-        const result = wasm.rvi_js(close, 10, 14, 1, devtype);
-        results.push(result);
-    }
-    
-    // Results should be different for different devtypes
-    for (let i = 0; i < devtypes.length; i++) {
-        for (let j = i + 1; j < devtypes.length; j++) {
-            // Check that results are not identical
-            let maxDiff = 0;
-            for (let k = 0; k < results[i].length; k++) {
-                if (!isNaN(results[i][k]) && !isNaN(results[j][k])) {
-                    const diff = Math.abs(results[i][k] - results[j][k]);
-                    maxDiff = Math.max(maxDiff, diff);
+
+    const inPtr = wasm.rvi_alloc(len);
+    // One output buffer reused per run
+    const outPtr = wasm.rvi_alloc(len);
+
+    try {
+        new Float64Array(wasm.__wasm.memory.buffer, inPtr, len).set(data);
+
+        const results = devtypes.map((dev) => {
+            wasm.rvi_into(inPtr, outPtr, len, 10, 14, 1, dev);
+            return Array.from(new Float64Array(wasm.__wasm.memory.buffer, outPtr, len));
+        });
+
+        // Results should be different for different devtypes
+        for (let i = 0; i < devtypes.length; i++) {
+            for (let j = i + 1; j < devtypes.length; j++) {
+                let maxDiff = 0;
+                for (let k = 0; k < len; k++) {
+                    const a = results[i][k];
+                    const b = results[j][k];
+                    if (!isNaN(a) && !isNaN(b)) {
+                        maxDiff = Math.max(maxDiff, Math.abs(a - b));
+                    }
                 }
+                assert(maxDiff > 1e-10, `Devtype ${devtypes[i]} and ${devtypes[j]} gave identical results`);
             }
-            assert(maxDiff > 1e-10, `Devtype ${devtypes[i]} and ${devtypes[j]} gave identical results`);
         }
+    } finally {
+        wasm.rvi_free(inPtr, len);
+        wasm.rvi_free(outPtr, len);
     }
 });
 
 test('RVI different matypes', () => {
-    // Test RVI with different MA types
-    const close = new Float64Array(testData.close.slice(0, 100)); // Smaller dataset
-    
-    // Test both matypes
+    // Test RVI with different MA types via zero-copy API to avoid JS glue caching issues
+    const data = new Float64Array(testData.close.slice(0, 100));
+    const len = data.length;
     const matypes = [0, 1]; // SMA, EMA
-    const results = [];
-    
-    for (const matype of matypes) {
-        const result = wasm.rvi_js(close, 10, 14, matype, 0);
-        results.push(result);
-    }
-    
-    // Results should be different for different matypes
-    let maxDiff = 0;
-    for (let i = 0; i < results[0].length; i++) {
-        if (!isNaN(results[0][i]) && !isNaN(results[1][i])) {
-            const diff = Math.abs(results[0][i] - results[1][i]);
-            maxDiff = Math.max(maxDiff, diff);
+
+    const inPtr = wasm.rvi_alloc(len);
+    const outPtr = wasm.rvi_alloc(len);
+
+    try {
+        new Float64Array(wasm.__wasm.memory.buffer, inPtr, len).set(data);
+
+        const results = matypes.map((ma) => {
+            wasm.rvi_into(inPtr, outPtr, len, 10, 14, ma, 0);
+            return Array.from(new Float64Array(wasm.__wasm.memory.buffer, outPtr, len));
+        });
+
+        let maxDiff = 0;
+        for (let i = 0; i < len; i++) {
+            const a = results[0][i];
+            const b = results[1][i];
+            if (!isNaN(a) && !isNaN(b)) {
+                maxDiff = Math.max(maxDiff, Math.abs(a - b));
+            }
         }
+        assert(maxDiff > 1e-10, "SMA and EMA gave identical results");
+    } finally {
+        wasm.rvi_free(inPtr, len);
+        wasm.rvi_free(outPtr, len);
     }
-    assert(maxDiff > 1e-10, "SMA and EMA gave identical results");
 });

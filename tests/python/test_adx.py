@@ -52,10 +52,12 @@ class TestAdx:
         assert len(result) == len(close)
         
         # Check last 5 values match expected
+        # Match Rust tolerance: absolute 1e-1 (not a 10% relative window)
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-1,  # ADX has lower precision requirement
+            rtol=0.0,
+            atol=1e-1,
             msg="ADX last 5 values mismatch"
         )
         
@@ -190,10 +192,12 @@ class TestAdx:
         expected = EXPECTED_OUTPUTS['adx']['last_5_values']
         
         # Check last 5 values match
+        # Match Rust tolerance: absolute 1e-1
         assert_close(
             default_row[-5:],
             expected,
-            rtol=1e-1,
+            rtol=0.0,
+            atol=1e-1,
             msg="ADX batch default row mismatch"
         )
     

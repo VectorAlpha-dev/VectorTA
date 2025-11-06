@@ -44,10 +44,12 @@ class TestMom:
         assert len(result) == len(close)
         
         # Check last 5 values match expected
+        # Rust test uses absolute tolerance < 1e-1; keep bindings at most as lax
         assert_close(
             result[-5:],
             expected['last_5_values'],
-            rtol=1e-1,  # MOM uses 1e-1 tolerance in Rust tests
+            rtol=0,
+            atol=1e-1,
             msg="MOM last 5 values mismatch"
         )
     

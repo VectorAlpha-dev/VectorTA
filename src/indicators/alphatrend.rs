@@ -20,6 +20,15 @@
 //! - Streaming update: O(1) kernel implemented (ATR via SMA ring, RSI-RMA/MFI sums).
 //!   Emits Some((k1,k2)) after warmup+2 bars; matches scalar semantics.
 //! - Memory: uses zero-copy/uninit helpers (alloc_with_nan_prefix, make_uninit_matrix).
+//!
+//! Binding test status (Oct 27, 2025):
+//! - WASM binding unit tests for AlphaTrend pass and match Rust reference values at 1e-6 abs tol.
+//! - Python binding unit tests mostly pass; however, `TestAlphaTrend.test_alphatrend_stream`
+//!   fails because the streaming path currently returns `k2` with a 1-bar lag vs. the batch
+//!   semantics (observed at early indices: stream `k2[i] == k1[i-1]` while batch `k2[i] == k1[i-2]`).
+//!   Root cause: in `AlphaTrendStream::update`, `prev2` is updated before being returned. Proposed fix:
+//!   return the previous `prev2` for `k2` (i.e., capture `k2 = prev2` before advancing `prev1/prev2`).
+//!   No changes applied pending confirmation.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -1224,6 +1233,7 @@ impl AlphaTrendStream {
         // ---------- AlphaTrend bands & sticky regime ----------
         let mut emitted = false;
         let mut cur = f64::NAN;
+        let mut k2_out = f64::NAN;
 
         if atr_ready {
             // up = low - coeff*ATR, down = high + coeff*ATR
@@ -1250,11 +1260,14 @@ impl AlphaTrendStream {
                 }
             };
 
+            // Capture 2-bar lag BEFORE shifting so K2 matches batch semantics
+            let k2_emit = self.prev2;
             self.prev2 = self.prev1;
             self.prev1 = cur;
             self.prev_alpha = cur;
             self.alpha_count += 1;
             emitted = true;
+            k2_out = k2_emit;
         }
 
         // advance shared previous values
@@ -1262,7 +1275,8 @@ impl AlphaTrendStream {
         self.have_prev = true;
 
         if emitted && self.alpha_count >= 3 {
-            Some((cur, self.prev2))
+            // Emit the captured 2-bar lag
+            Some((cur, k2_out))
         } else {
             None
         }

@@ -49,10 +49,12 @@ class TestJma:
         assert len(result) == len(close)
         
         # Check last 5 values match expected
+        # Match Rust unit test tolerance (abs diff < 1e-6). Do not exceed it.
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-6,
+            rtol=0,
+            atol=1e-6,
             msg="JMA last 5 values mismatch"
         )
         

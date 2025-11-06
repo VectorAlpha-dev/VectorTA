@@ -417,9 +417,8 @@ test('DEC_OSC zero-copy API', () => {
     
     try {
         // Create view into WASM memory
-        const memory = wasm.__wbindgen_memory();
         const memView = new Float64Array(
-            memory.buffer,
+            wasm.__wasm.memory.buffer,
             ptr,
             len
         );
@@ -457,15 +456,13 @@ test('DEC_OSC zero-copy with large dataset', () => {
     assert(ptr !== 0, 'Failed to allocate large buffer');
     
     try {
-        const memory = wasm.__wbindgen_memory();
-        const memView = new Float64Array(memory.buffer, ptr, size);
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
         memView.set(data);
         
         wasm.dec_osc_into(ptr, ptr, size, 125, 1.0);
         
         // Recreate view in case memory grew
-        const memory2 = wasm.__wbindgen_memory();
-        const memView2 = new Float64Array(memory2.buffer, ptr, size);
+        const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
         
         // Check warmup period has NaN (always 2 for DEC_OSC)
         const warmupPeriod = 2;
@@ -514,8 +511,7 @@ test('DEC_OSC memory management', () => {
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
         // Write pattern to verify memory
-        const memory = wasm.__wbindgen_memory();
-        const memView = new Float64Array(memory.buffer, ptr, size);
+        const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             memView[i] = i * 1.5;
         }

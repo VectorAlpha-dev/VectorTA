@@ -39,30 +39,43 @@ class TestVwmacd:
         assert len(hist) == len(close)
     
     def test_vwmacd_accuracy(self, test_data):
-        """Test VWMACD matches expected values from Rust tests - mirrors check_vwmacd_accuracy"""
+        """Matches Rust unit test reference values (last 5, tol=2e-4)."""
         close = test_data['close']
         volume = test_data['volume']
-        
-        macd, signal, hist = ta.vwmacd(
-            close, volume,
-            12, 26, 9
-        )
-        
-        # Expected values from Rust tests
-        expected_macd_last5 = [-123.456, -124.567, -125.678, -126.789, -127.890]  # Placeholder values
-        expected_signal_last5 = [-123.456, -124.567, -125.678, -126.789, -127.890]  # Placeholder values
-        expected_hist_last5 = [-1.234, -1.345, -1.456, -1.567, -1.678]  # Placeholder values
-        
-        # Check last 5 values match expected with 1e-2 tolerance (as in Rust tests)
-        macd_last5 = macd[-5:]
-        signal_last5 = signal[-5:]
-        hist_last5 = hist[-5:]
-        
-        # Note: The actual expected values should be obtained from Rust implementation
-        # For now, just check the arrays have values and aren't all NaN
-        assert not np.all(np.isnan(macd_last5))
-        assert not np.all(np.isnan(signal_last5))
-        assert not np.all(np.isnan(hist_last5))
+
+        macd, signal, hist = ta.vwmacd(close, volume, 12, 26, 9)
+
+        # Exact references from src/indicators/vwmacd.rs::tests::check_vwmacd_accuracy
+        expected_macd_last5 = np.array([
+            -394.95161155,
+            -508.29106210,
+            -490.70190723,
+            -388.94996199,
+            -341.13720646,
+        ])
+        expected_signal_last5 = np.array([
+            -539.48861567,
+            -533.24910496,
+            -524.73966541,
+            -497.58172247,
+            -466.29282108,
+        ])
+        expected_hist_last5 = np.array([
+            144.53700412,
+            24.95804286,
+            34.03775818,
+            108.63176274,
+            125.15561462,
+        ])
+
+        macd_last5 = np.asarray(macd[-5:])
+        signal_last5 = np.asarray(signal[-5:])
+        hist_last5 = np.asarray(hist[-5:])
+
+        # Rust tolerance is 2e-4; do not exceed it
+        assert_close(macd_last5, expected_macd_last5, rtol=0.0, atol=2e-4, msg="macd last5")
+        assert_close(signal_last5, expected_signal_last5, rtol=0.0, atol=2e-4, msg="signal last5")
+        assert_close(hist_last5, expected_hist_last5, rtol=0.0, atol=2e-4, msg="hist last5")
     
     def test_vwmacd_default_candles(self, test_data):
         """Test VWMACD with default parameters - mirrors check_vwmacd_default_candles"""
@@ -178,13 +191,15 @@ class TestVwmacd:
             ta.vwmacd(all_nan, all_nan, 12, 26, 9)
     
     def test_vwmacd_all_zero_volume(self, test_data):
-        """Test VWMACD with all zero volume"""
-        close = test_data['close'][:100]
-        zero_volume = np.zeros(100)
-        
-        # Should raise an error when all volume is zero
-        with pytest.raises(ValueError, match="MA calculation error"):
-            ta.vwmacd(close, zero_volume, 12, 26, 9)
+        """When volume is all zero, outputs should remain NaN (no crash)."""
+        close = test_data['close'][:200]
+        zero_volume = np.zeros_like(close)
+
+        macd, signal, hist = ta.vwmacd(close, zero_volume, 12, 26, 9)
+        # Expect NaNs after warmup as denominators are zero
+        assert np.all(np.isnan(macd))
+        assert np.all(np.isnan(signal))
+        assert np.all(np.isnan(hist))
     
     def test_vwmacd_streaming_basic(self, test_data):
         """Test VWMACD streaming functionality"""

@@ -43,9 +43,9 @@ class TestUltOsc:
             42.163165136766295,
         ]
         
-        # Check last 5 values
+        # Check last 5 values (match Rust abs tolerance 1e-8)
         for i in range(5):
-            assert_close(result[-(5-i)], expected_last_five[i], rtol=1e-8)
+            assert_close(result[-(5-i)], expected_last_five[i], rtol=0, atol=1e-8)
     
     def test_ultosc_custom_params(self, test_data):
         """Test ULTOSC with custom parameters"""

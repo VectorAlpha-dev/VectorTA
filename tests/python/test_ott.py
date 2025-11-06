@@ -41,10 +41,12 @@ class TestOtt:
         assert len(result) == len(close)
         
         # Check last 5 values match expected
+        # Match Rust test tolerance (abs diff < 1e-6)
         assert_close(
-            result[-5:], 
+            result[-5:],
             expected['last_5_values'],
-            rtol=1e-8,
+            rtol=0.0,
+            atol=1e-6,
             msg="OTT last 5 values mismatch"
         )
     
@@ -280,10 +282,12 @@ class TestOtt:
         assert len(second_result) == len(first_result)
         
         # Check last 5 values match expected
+        # Match Rust test tolerance (abs diff < 1e-6)
         assert_close(
             second_result[-5:],
             expected['reinput_last_5'],
-            rtol=1e-8,
+            rtol=0.0,
+            atol=1e-6,
             msg="OTT re-input last 5 values mismatch"
         )
     

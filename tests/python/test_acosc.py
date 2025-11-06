@@ -47,18 +47,22 @@ class TestAcosc:
         assert len(change) == len(high)
         
         # Check last 5 osc values match expected
+        # Match Rust tolerance: absolute 1e-1, no extra relative slack
         assert_close(
             osc[-5:], 
             expected['last_5_osc'],
-            rtol=1e-1,  # ACOSC uses 1e-1 tolerance in Rust tests
+            rtol=0.0,
+            atol=1e-1,
             msg="ACOSC osc last 5 values mismatch"
         )
         
         # Check last 5 change values match expected
+        # Match Rust tolerance: absolute 1e-1, no extra relative slack
         assert_close(
             change[-5:],
             expected['last_5_change'],
-            rtol=1e-1,  # ACOSC uses 1e-1 tolerance in Rust tests
+            rtol=0.0,
+            atol=1e-1,
             msg="ACOSC change last 5 values mismatch"
         )
         
@@ -231,17 +235,21 @@ class TestAcosc:
         expected = EXPECTED_OUTPUTS['acosc']
         
         # Check last 5 values match
+        # Match Rust tolerance: absolute 1e-1, no extra relative slack
         assert_close(
             osc_row[-5:],
             expected['last_5_osc'],
-            rtol=1e-1,  # ACOSC uses 1e-1 tolerance
+            rtol=0.0,
+            atol=1e-1,
             msg="ACOSC batch osc mismatch"
         )
         
+        # Match Rust tolerance: absolute 1e-1, no extra relative slack
         assert_close(
             change_row[-5:],
             expected['last_5_change'],
-            rtol=1e-1,  # ACOSC uses 1e-1 tolerance
+            rtol=0.0,
+            atol=1e-1,
             msg="ACOSC batch change mismatch"
         )
     

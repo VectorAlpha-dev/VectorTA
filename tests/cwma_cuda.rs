@@ -34,6 +34,11 @@ fn cuda_feature_off_noop() {
 #[cfg(feature = "cuda")]
 #[test]
 fn cwma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    // Allow environments without a working CUDA stack to skip safely
+    if std::env::var("SKIP_CUDA_TESTS").is_ok() {
+        eprintln!("[cwma_cuda_one_series_many_params_matches_cpu] skipped - SKIP_CUDA_TESTS set");
+        return Ok(());
+    }
     if !cuda_available() {
         eprintln!("[cwma_cuda_one_series_many_params_matches_cpu] skipped - no CUDA device");
         return Ok(());
@@ -87,6 +92,10 @@ fn cwma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
 #[cfg(feature = "cuda")]
 #[test]
 fn cwma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("SKIP_CUDA_TESTS").is_ok() {
+        eprintln!("[cwma_cuda_many_series_one_param_matches_cpu] skipped - SKIP_CUDA_TESTS set");
+        return Ok(());
+    }
     if !cuda_available() {
         eprintln!("[cwma_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
@@ -157,6 +166,10 @@ fn cwma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 #[cfg(feature = "cuda")]
 #[test]
 fn cwma_cuda_batched_tiled_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("SKIP_CUDA_TESTS").is_ok() {
+        eprintln!("[cwma_cuda_batched_tiled_matches_cpu] skipped - SKIP_CUDA_TESTS set");
+        return Ok(());
+    }
     if !cuda_available() {
         eprintln!("[cwma_cuda_batched_tiled_matches_cpu] skipped - no CUDA device");
         return Ok(());
@@ -216,6 +229,10 @@ fn cwma_cuda_batched_tiled_matches_cpu() -> Result<(), Box<dyn std::error::Error
 #[cfg(feature = "cuda")]
 #[test]
 fn cwma_cuda_many_series_tiled2d_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("SKIP_CUDA_TESTS").is_ok() {
+        eprintln!("[cwma_cuda_many_series_tiled2d_matches_cpu] skipped - SKIP_CUDA_TESTS set");
+        return Ok(());
+    }
     if !cuda_available() {
         eprintln!("[cwma_cuda_many_series_tiled2d_matches_cpu] skipped - no CUDA device");
         return Ok(());

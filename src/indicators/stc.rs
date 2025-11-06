@@ -572,47 +572,17 @@ pub unsafe fn stc_scalar_classic_ema(
     let slow_a = 2.0 / (slow as f64 + 1.0);
     let d_a = 2.0 / (d as f64 + 1.0);
 
-    // ===== Initialize SMA seeds for EMAs (exactly as in previous implementation) =====
+    // ===== Initialize EMA seed accumulators (skip NaNs) =====
+    // We seed each EMA using the mean of the first `period` finite samples,
+    // matching the semantics in moving_averages/ema.rs (carry-forward on NaN).
     let mut fast_sum = 0.0;
     let mut slow_sum = 0.0;
+    let mut fast_init_cnt: usize = 0;
+    let mut slow_init_cnt: usize = 0;
 
-    let f_end = fast.min(n);
-    let s_end = slow.min(n);
-
-    // Accumulate simultaneously where possible
-    let mut i0 = 0usize;
-    let m_end = core::cmp::min(f_end, s_end);
-    while i0 < m_end {
-        let xi = *slice.get_unchecked(i0);
-        fast_sum += xi;
-        slow_sum += xi;
-        i0 += 1;
-    }
-    if f_end > m_end {
-        let mut i = i0;
-        while i < f_end {
-            fast_sum += *slice.get_unchecked(i);
-            i += 1;
-        }
-    } else if s_end > m_end {
-        let mut i = i0;
-        while i < s_end {
-            slow_sum += *slice.get_unchecked(i);
-            i += 1;
-        }
-    }
-
-    // Seed EMAs to SMA of first 'period' points (matching prior behavior)
-    let mut fast_ema = if fast <= n {
-        fast_sum / fast as f64
-    } else {
-        f64::NAN
-    };
-    let mut slow_ema = if slow <= n {
-        slow_sum / slow as f64
-    } else {
-        f64::NAN
-    };
+    // EMA state (becomes finite once init_cnt == period)
+    let mut fast_ema = f64::NAN;
+    let mut slow_ema = f64::NAN;
 
     // ===== Fixed-size rings for MACD and d-EMA with branch-light scans =====
     // We store the last k values in rings and, when full, scan them to get min/max.
@@ -636,37 +606,48 @@ pub unsafe fn stc_scalar_classic_ema(
     let mut final_sum = 0.0;
     let mut final_init_cnt = 0usize;
 
-    // Precompute thresholds
-    let fast_thr = fast.saturating_sub(1);
-    let slow_thr = slow.saturating_sub(1);
+    // No index thresholds; we seed based on number of finite samples seen
 
     // Main loop: fully fused pipeline
     let mut i = 0usize;
     while i < n {
         let x = *slice.get_unchecked(i);
 
-        // --- Update EMAs (seed exactly at boundary indices) ---
-        if i >= fast_thr {
-            if i == fast_thr {
-                fast_ema = fast_sum / fast as f64;
+        // --- Update EMAs with NaN-aware seeding and carry-forward semantics ---
+        // Fast EMA
+        if x.is_finite() {
+            if fast_init_cnt < fast {
+                fast_init_cnt += 1;
+                fast_sum += x;
+                if fast_init_cnt == fast {
+                    fast_ema = fast_sum / fast as f64;
+                }
             } else {
+                // EMA phase
                 fast_ema = fma(fast_ema, fast_a, x);
             }
+        } else {
+            // NaN input: do not update sums or EMA; carry previous state
+            // (fast_ema remains as-is; still NaN until seeded)
         }
-        if i >= slow_thr {
-            if i == slow_thr {
-                slow_ema = slow_sum / slow as f64;
+
+        // Slow EMA
+        if x.is_finite() {
+            if slow_init_cnt < slow {
+                slow_init_cnt += 1;
+                slow_sum += x;
+                if slow_init_cnt == slow {
+                    slow_ema = slow_sum / slow as f64;
+                }
             } else {
                 slow_ema = fma(slow_ema, slow_a, x);
             }
+        } else {
+            // NaN input: carry previous
         }
 
         // --- MACD value at i ---
-        let macd = if i >= slow_thr {
-            fast_ema - slow_ema
-        } else {
-            f64::NAN
-        };
+        let macd = if slow_init_cnt >= slow { fast_ema - slow_ema } else { f64::NAN };
 
         // --- Maintain MACD validity and ring ---
         if i >= k {
@@ -721,14 +702,24 @@ pub unsafe fn stc_scalar_classic_ema(
                     d_ema = d_sum / d as f64;
                     d_ema
                 } else {
-                    f64::NAN
+                    // Warmup: running mean so far
+                    d_sum / (d_init_cnt as f64)
                 }
             } else {
                 d_ema = fma(d_ema, d_a, stok);
                 d_ema
             }
         } else {
-            f64::NAN
+            // NaN stok: carry-forward EMA semantics
+            if d_init_cnt == 0 {
+                f64::NAN
+            } else if d_init_cnt < d {
+                // Still warming: return current running mean
+                d_sum / (d_init_cnt as f64)
+            } else {
+                // Seeded: carry previous EMA value
+                d_ema
+            }
         };
 
         // --- Maintain d-EMA validity and ring ---
@@ -784,14 +775,22 @@ pub unsafe fn stc_scalar_classic_ema(
                     final_ema = final_sum / d as f64;
                     *dst = final_ema;
                 } else {
-                    *dst = f64::NAN;
+                    // Warmup: running mean so far
+                    *dst = final_sum / (final_init_cnt as f64);
                 }
             } else {
                 final_ema = fma(final_ema, d_a, kd);
                 *dst = final_ema;
             }
         } else {
-            *dst = f64::NAN;
+            // NaN kd: carry-forward semantics
+            if final_init_cnt == 0 {
+                *dst = f64::NAN;
+            } else if final_init_cnt < d {
+                *dst = final_sum / (final_init_cnt as f64);
+            } else {
+                *dst = final_ema;
+            }
         }
 
         i += 1;
@@ -1483,7 +1482,10 @@ impl EmaSeed {
             seeded: false,
         }
     }
-    /// Step with value x. Returns the current EMA if available on this tick, otherwise NaN.
+    /// Step with value x.
+    /// Matches scalar EMA warmup semantics:
+    /// - Before seeded: return running mean (sum/cnt) for the samples seen so far.
+    /// - Once seeded: classic EMA update `ema = ema + a*(x - ema)`.
     #[inline(always)]
     fn step(&mut self, x: f64) -> f64 {
         if !self.seeded {
@@ -1494,7 +1496,8 @@ impl EmaSeed {
                 self.seeded = true;
                 self.ema
             } else {
-                f64::NAN
+                // running mean during warmup (partial average)
+                self.sum / self.cnt as f64
             }
         } else {
             // ema = ema + a*(x - ema)
@@ -1510,6 +1513,21 @@ impl EmaSeed {
     #[inline(always)]
     fn current(&self) -> f64 {
         self.ema
+    }
+
+    /// When input is missing for this tick, mirror scalar behavior without mutating state:
+    /// - If no samples yet, return NaN.
+    /// - If warming (cnt < period), return current running mean (sum/cnt).
+    /// - If seeded, carry forward the previous EMA value.
+    #[inline(always)]
+    fn value_or_carry(&self) -> f64 {
+        if self.cnt == 0 {
+            f64::NAN
+        } else if !self.seeded {
+            self.sum / self.cnt as f64
+        } else {
+            self.ema
+        }
     }
 }
 
@@ -1561,6 +1579,18 @@ impl SmaState {
     #[inline(always)]
     fn is_seeded(&self) -> bool {
         self.cnt >= self.period
+    }
+
+    /// Return current SMA value and whether full window has been seeded, without mutating state.
+    #[inline(always)]
+    fn current(&self) -> (f64, bool) {
+        if self.cnt == 0 {
+            (f64::NAN, false)
+        } else if self.cnt < self.period {
+            (self.sum / self.cnt as f64, false)
+        } else {
+            (self.sum / self.period as f64, true)
+        }
     }
 }
 
@@ -1708,49 +1738,48 @@ impl StcStream {
     /// can still be `NaN` until the full pipeline is naturally warmed.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Handle pre-start and poison semantics similar to offline path.
+        // Start only after the first non-NaN; later NaNs carry forward state (no global poisoning).
         if !self.started {
             if value.is_nan() {
                 return None;
-            } else {
-                self.started = true;
-                self.ticks = 0;
             }
-        } else if value.is_nan() {
-            // match offline behavior: any NaN after start propagates NaNs henceforth
-            self.poisoned = true;
-        }
-        if self.poisoned {
-            // Keep contract: None before min_data, else Some(NaN)
-            self.ticks += 1;
-            return if self.ticks < self.min_data {
-                None
-            } else {
-                Some(f64::NAN)
-            };
+            self.started = true;
+            self.ticks = 0;
         }
 
         // === 1) Fast/Slow MAs -> MACD ===
         let (macd, macd_valid) = if self.fast_ma_type == "ema" && self.slow_ma_type == "ema" {
-            let _f = self.fast_ema.step(value);
-            let _s = self.slow_ema.step(value);
-            let valid = self.slow_ema.is_seeded(); // MACD only valid once slow EMA is seeded
-            let macd = if valid {
-                self.fast_ema.current() - self.slow_ema.current()
+            if value.is_nan() {
+                let valid = self.slow_ema.is_seeded();
+                let macd = if valid {
+                    self.fast_ema.current() - self.slow_ema.current()
+                } else {
+                    f64::NAN
+                };
+                (macd, valid)
             } else {
-                f64::NAN
-            };
-            (macd, valid)
+                let _f = self.fast_ema.step(value);
+                let _s = self.slow_ema.step(value);
+                let valid = self.slow_ema.is_seeded();
+                let macd = if valid {
+                    self.fast_ema.current() - self.slow_ema.current()
+                } else {
+                    f64::NAN
+                };
+                (macd, valid)
+            }
         } else if self.fast_ma_type == "sma" && self.slow_ma_type == "sma" {
-            let (fast_val, _fast_seeded_or_partial) = self.fast_sma.step(value);
-            let (slow_val, slow_seeded) = self.slow_sma.step(value);
-            // MACD valid only after slow SMA seeded (to match scalar SMA path)
-            let macd = if slow_seeded {
-                fast_val - slow_val
+            if value.is_nan() {
+                let (fast_val, _fast_seeded) = self.fast_sma.current();
+                let (slow_val, slow_seeded) = self.slow_sma.current();
+                let macd = if slow_seeded { fast_val - slow_val } else { f64::NAN };
+                (macd, slow_seeded)
             } else {
-                f64::NAN
-            };
-            (macd, slow_seeded)
+                let (fast_val, _fast_seeded_or_partial) = self.fast_sma.step(value);
+                let (slow_val, slow_seeded) = self.slow_sma.step(value);
+                let macd = if slow_seeded { fast_val - slow_val } else { f64::NAN };
+                (macd, slow_seeded)
+            }
         } else {
             // Fallback to O(n) exact recompute path for exotic MA types (rare)
             self.buffer.push(value);
@@ -1812,7 +1841,8 @@ impl StcStream {
         let d_val = if !stok.is_nan() {
             self.d_ema.step(stok)
         } else {
-            f64::NAN
+            // carry-forward/running-mean during NaN stok (no state mutation)
+            self.d_ema.value_or_carry()
         };
 
         // Maintain d-ema valid ring and min/max deques
@@ -1855,7 +1885,8 @@ impl StcStream {
         let out = if !kd.is_nan() {
             self.final_ema.step(kd)
         } else {
-            f64::NAN
+            // carry-forward/running-mean during NaN kd (no state mutation)
+            self.final_ema.value_or_carry()
         };
 
         // increment tick; enforce stream warmup contract

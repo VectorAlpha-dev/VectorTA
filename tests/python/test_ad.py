@@ -49,10 +49,12 @@ class TestAd:
         assert len(result) == len(close)
         
         # Check last 5 values match expected
+        # Match Rust unit test tolerance (absolute 1e-1)
         assert_close(
             result[-5:],
             expected['last_5_values'],
-            rtol=1e-4,  # AD values are large, so use relative tolerance
+            rtol=0.0,
+            atol=1e-1,
             msg="AD last 5 values mismatch"
         )
         

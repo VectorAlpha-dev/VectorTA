@@ -80,8 +80,9 @@ test('MarketEFI NaN handling', () => {
     const result = wasm.marketefi_js(high, low, volume);
     
     assert(isNaN(result[0]), "First value should be NaN");
-    assertClose(result[1], 1.0, 1e-8, "Second value mismatch");
-    assertClose(result[2], 1.0, 1e-8, "Third value mismatch");
+    // Exact equality matches Rust test semantics here
+    assertClose(result[1], 1.0, 0, "Second value mismatch");
+    assertClose(result[2], 1.0, 0, "Third value mismatch");
 });
 
 test('MarketEFI empty data', () => {
@@ -114,9 +115,9 @@ test('MarketEFI zero volume', () => {
     
     const result = wasm.marketefi_js(high, low, volume);
     
-    assertClose(result[0], 1.0, 1e-8);
+    assertClose(result[0], 1.0, 0);
     assert(isNaN(result[1]), "Zero volume should produce NaN");
-    assertClose(result[2], 0.5, 1e-8);
+    assertClose(result[2], 0.5, 0);
 });
 
 test('MarketEFI all NaN input', () => {

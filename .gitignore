@@ -30,6 +30,8 @@ website
 
 # Python
 .venv/
+# Local Python virtualenvs (Linux/WSL)
+.venv-linux/
 venv/
 __pycache__/
 *.pyc
