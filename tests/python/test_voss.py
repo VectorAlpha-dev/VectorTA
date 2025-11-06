@@ -66,16 +66,18 @@ class TestVoss:
         
         # Check last 5 values match expected
         assert_close(
-            voss_result[-5:], 
+            voss_result[-5:],
             expected_voss_last_five,
-            rtol=1e-1,  # Using 1e-1 like in Rust tests
+            rtol=0.0,
+            atol=1e-6,  # Match Rust unit test tolerance (abs <= 1e-6)
             msg="VOSS last 5 values mismatch"
         )
         
         assert_close(
-            filt_result[-5:], 
+            filt_result[-5:],
             expected_filt_last_five,
-            rtol=1e-1,  # Using 1e-1 like in Rust tests
+            rtol=0.0,
+            atol=1e-6,  # Match Rust unit test tolerance (abs <= 1e-6)
             msg="Filt last 5 values mismatch"
         )
     

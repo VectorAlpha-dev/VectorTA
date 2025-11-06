@@ -41,11 +41,18 @@ def run_tests():
     cmd = [
         sys.executable, '-m', 'pytest',
         '--tb=short',           # Short traceback format
-        '-n', 'auto',           # Use all available CPUs
         '--quiet',              # Less verbose by default
         '--color=yes',          # Colored output
         '--durations=10',       # Show 10 slowest tests
     ]
+
+    # Add parallel flag only if xdist is available
+    try:
+        import pytest_xdist  # noqa: F401
+        cmd.extend(['-n', 'auto'])
+    except Exception:
+        # xdist not installed; run tests serially
+        pass
     
     # Add coverage if requested
     if '--coverage' in sys.argv:

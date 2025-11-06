@@ -158,7 +158,9 @@ class TestCoppock:
         assert 'values' in batch_result
         batch_values = batch_result['values'][0]  # First row
         
-        np.testing.assert_allclose(batch_values, single_result, rtol=1e-10)
+        # Allow tiny FP differences between batch and single.
+        # Use absolute tolerance tighter than Rust's 1e-7 reference threshold.
+        np.testing.assert_allclose(batch_values, single_result, rtol=0.0, atol=1e-9)
     
     def test_coppock_batch_multiple_params(self, test_data):
         """Test batch with multiple parameter combinations"""

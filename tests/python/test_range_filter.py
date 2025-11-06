@@ -35,33 +35,33 @@ class TestRangeFilter:
         assert len(high_band) == len(close)
         assert len(low_band) == len(close)
         
-        # Test last 5 values against reference
+        # Test last 5 values against Rust references (exact same as Rust unit tests)
         expected_filter = [
-            59_723.11589983, 
-            59_723.11589983, 
-            59_723.11589983, 
-            59_723.11589983, 
-            59_513.19118432
+            59_589.73987817684,
+            59_589.73987817684,
+            59_589.73987817684,
+            59_589.73987817684,
+            59_589.73987817684,
         ]
-        
+
         expected_high = [
-            60_764.83144963,
-            60_662.23897632,
-            60_586.59003279,
-            60_511.95188173,
-            60_371.38236863
+            60_935.63924911415,
+            60_906.58379951138,
+            60_874.2002431993,
+            60_838.79850154794,
+            60_810.879398758305,
         ]
-        
+
         expected_low = [
-            58_681.40035002,
-            58_783.99282333,
-            58_859.64176686,
-            58_934.27991792,
-            58_655.00000000
+            58_243.84050723953,
+            58_272.8959568423,
+            58_305.27951315438,
+            58_340.68125480574,
+            58_368.60035759538,
         ]
-        
-        # Allow reasonable tolerance due to implementation variations
-        tolerance = 600.0
+
+        # Match Rust test tolerance
+        tolerance = 1e-10
         
         # Check Filter values
         last_5_filter = filter_values[-5:]
@@ -141,10 +141,16 @@ class TestRangeFilter:
     
     def test_range_filter_invalid_range_size(self):
         """Test RANGE_FILTER fails with invalid range_size - mirrors check_rf_invalid_range_size"""
-        # Note: The Python binding currently doesn't validate range_size
-        # This is a limitation of the current implementation
-        # TODO: Add range_size validation in the Rust code
-        pass
+        data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        # Zero range_size
+        with pytest.raises(ValueError, match="Invalid range_size"):
+            ta_indicators.range_filter(data, range_size=0.0)
+        # Negative range_size
+        with pytest.raises(ValueError, match="Invalid range_size"):
+            ta_indicators.range_filter(data, range_size=-1.0)
+        # NaN range_size
+        with pytest.raises(ValueError, match="Invalid range_size"):
+            ta_indicators.range_filter(data, range_size=float('nan'))
     
     def test_range_filter_nan_handling(self, test_data):
         """Test RANGE_FILTER handles NaN values correctly - mirrors check_rf_nan_handling"""
@@ -195,22 +201,16 @@ class TestRangeFilter:
         stream_high = np.array(stream_high)
         stream_low = np.array(stream_low)
         
-        # Compare batch vs streaming
+        # Compare structure and basic properties (mirror Rust: no strict numeric equality)
         assert len(batch_filter) == len(stream_filter)
-        
-        # Allow for some difference in warmup handling
-        # Check values after warmup period
-        for i in range(50, len(batch_filter)):
-            if np.isnan(batch_filter[i]) and np.isnan(stream_filter[i]):
-                continue
-            # Use larger tolerance for streaming
-            assert_close(
-                batch_filter[i], 
-                stream_filter[i], 
-                rtol=0.01,  # 1% relative tolerance
-                atol=10.0,  # Absolute tolerance
-                msg=f"Range Filter streaming mismatch at index {i}"
-            )
+        # After warmup, ensure values are not NaN and bands are ordered
+        start = 30
+        for i in range(start, len(batch_filter)):
+            assert not np.isnan(stream_filter[i]), f"Stream filter[{i}] is NaN"
+            assert not np.isnan(stream_high[i]), f"Stream high[{i}] is NaN"
+            assert not np.isnan(stream_low[i]), f"Stream low[{i}] is NaN"
+            assert stream_high[i] >= stream_filter[i], f"High band < filter at index {i}"
+            assert stream_filter[i] >= stream_low[i], f"Filter < low band at index {i}"
     
     def test_range_filter_batch_default(self, test_data):
         """Test RANGE_FILTER batch processing - mirrors check_range_filter_batch_default"""

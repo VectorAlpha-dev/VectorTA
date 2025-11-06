@@ -389,8 +389,14 @@ class TestVpwma:
                 )
                 available_kernels.append(kernel)
             except ValueError as e:
-                # Some kernels might not be available on all systems
-                if "Unknown kernel" not in str(e) and "not available" not in str(e).lower():
+                # Some kernels might not be available or compiled on this system/build
+                msg = str(e)
+                allowed = (
+                    "Unknown kernel" in msg or
+                    "not available" in msg.lower() or
+                    "not compiled in this build" in msg
+                )
+                if not allowed:
                     raise
         
         # Should have at least scalar and auto

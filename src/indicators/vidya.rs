@@ -27,6 +27,13 @@
 //!   there is no clear shared precompute beyond single prefix sums; per-row sequential dependency
 //!   dominates.
 //! - **WebAssembly**: Has SIMD128 helper matching scalar logic for parity.
+//! - **Bindings Test Status (2025-10-30)**:
+//!   - Python: binding unit tests pass; accuracy checks use the same last-5 reference
+//!     values as Rust with ≤1e-1 absolute tolerance.
+//!   - WASM: single-series APIs (`vidya_js`, `vidya_into`) pass and match Rust references.
+//!     Batch bindings (`vidya_batch`/`vidya_batch_into`) currently panic in WASM due to an
+//!     allocation/rows mismatch in the binding; corresponding WASM batch tests are skipped
+//!     until the binding is fixed. This is a binding issue, not a kernel/numerics issue.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaVidya;

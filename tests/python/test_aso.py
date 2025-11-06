@@ -45,14 +45,16 @@ class TestAso:
         assert_close(
             bulls[-5:],
             expected['last_5_bulls'],
-            rtol=1e-6,
+            rtol=0.0,
+            atol=1e-6,
             msg="ASO Bulls last 5 values mismatch"
         )
         
         assert_close(
             bears[-5:],
             expected['last_5_bears'],
-            rtol=1e-6,
+            rtol=0.0,
+            atol=1e-6,
             msg="ASO Bears last 5 values mismatch"
         )
     

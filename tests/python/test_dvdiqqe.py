@@ -172,6 +172,48 @@ def test_dvdiqqe_accuracy():
     assert len(np.unique(center_values)) > 1, "Dynamic center line should vary over time"
 
 
+def test_dvdiqqe_matches_rust_reference_values_last5():
+    """Ensure Python binding matches the Rust unit test reference values (last 5)."""
+    test_data = load_test_data()
+
+    # Parameters exactly as used in Rust tests
+    params = dict(
+        period=13,
+        smoothing_period=6,
+        fast_multiplier=2.618,
+        slow_multiplier=4.236,
+        volume_type="default",
+        center_type="dynamic",
+    )
+
+    dvdi, fast_tl, slow_tl, center_line = dvdiqqe(
+        open=test_data['open'],
+        high=test_data['high'],
+        low=test_data['low'],
+        close=test_data['close'],
+        volume=test_data['volume'],
+        **params,
+    )
+
+    # Rust reference arrays (from src/indicators/dvdiqqe.rs tests)
+    exp_dvdi = np.array([-304.41010224, -279.48152664, -287.58723437, -252.40349484, -343.00922595])
+    exp_slow = np.array([-990.21769695, -955.69385266, -951.82562405, -903.39071943, -903.39071943])
+    exp_fast = np.array([-728.26380454, -697.40500858, -697.40500858, -654.73695895, -654.73695895])
+    exp_center = np.array([
+        21.98929919135097,
+        21.969910753134442,
+        21.950003541229705,
+        21.932361363982043,
+        21.908895469736102,
+    ])
+
+    # Compare last 5 with absolute tolerance <= 1e-6 (no relative tolerance)
+    assert_close(dvdi[-5:], exp_dvdi, rtol=0.0, atol=1e-6, msg="DVDI last-5")
+    assert_close(slow_tl[-5:], exp_slow, rtol=0.0, atol=1e-6, msg="Slow TL last-5")
+    assert_close(fast_tl[-5:], exp_fast, rtol=0.0, atol=1e-6, msg="Fast TL last-5")
+    assert_close(center_line[-5:], exp_center, rtol=0.0, atol=1e-6, msg="Center line last-5")
+
+
 def test_dvdiqqe_with_custom_params():
     """Test DVDIQQE with custom parameters."""
     # Use real test data

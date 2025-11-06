@@ -976,7 +976,15 @@ pub struct StochfStream {
     ql_head: usize,
     ql_tail: usize,
 
-    cap_k: usize, // == fastk_period
+    // Ring capacity for the deques. Use fastk_period + 1 to distinguish
+    // empty vs full states in a head/tail ring without tracking length.
+    // This avoids the head==tail ambiguity that previously caused the
+    // first valid %K to be treated as empty (yielding NaN).
+    cap_k: usize,
+
+    // Full-state flags to disambiguate head==tail (empty vs full)
+    qh_full: bool,
+    ql_full: bool,
 
     // tick counter
     t: usize,
@@ -1003,7 +1011,8 @@ impl StochfStream {
         }
 
         // Preallocate fixed-size deques and %D ring
-        let cap_k = fastk_period;
+        // Use fastk_period + 1 ring capacity to disambiguate empty/full.
+        let cap_k = fastk_period + 1;
 
         Ok(Self {
             fastk_period,
@@ -1014,11 +1023,13 @@ impl StochfStream {
             qh_val: vec![0.0; cap_k],
             qh_head: 0,
             qh_tail: 0,
+            qh_full: false,
 
             ql_idx: vec![0; cap_k],
             ql_val: vec![0.0; cap_k],
             ql_head: 0,
             ql_tail: 0,
+            ql_full: false,
 
             cap_k,
 
@@ -1050,25 +1061,34 @@ impl StochfStream {
 
     #[inline(always)]
     fn qh_expire(&mut self, win_start: usize) {
-        while self.qh_head != self.qh_tail && self.qh_idx[self.qh_head] < win_start {
+        while (self.qh_head != self.qh_tail || self.qh_full)
+            && self.qh_idx[self.qh_head] < win_start
+        {
             Self::inc(&mut self.qh_head, self.cap_k);
+            // Once we move head forward, the deque cannot be full
+            self.qh_full = false;
         }
     }
     #[inline(always)]
     fn ql_expire(&mut self, win_start: usize) {
-        while self.ql_head != self.ql_tail && self.ql_idx[self.ql_head] < win_start {
+        while (self.ql_head != self.ql_tail || self.ql_full)
+            && self.ql_idx[self.ql_head] < win_start
+        {
             Self::inc(&mut self.ql_head, self.cap_k);
+            self.ql_full = false;
         }
     }
 
     #[inline(always)]
     fn qh_push(&mut self, idx: usize, val: f64) {
         // Pop <= from back (maintain decreasing values)
-        while self.qh_head != self.qh_tail {
+        while self.qh_head != self.qh_tail || self.qh_full {
             let mut back = self.qh_tail;
             Self::dec(&mut back, self.cap_k);
             if self.qh_val[back] <= val {
                 self.qh_tail = back;
+                // Removing from back means it's no longer full
+                self.qh_full = false;
             } else {
                 break;
             }
@@ -1076,16 +1096,21 @@ impl StochfStream {
         self.qh_idx[self.qh_tail] = idx;
         self.qh_val[self.qh_tail] = val;
         Self::inc(&mut self.qh_tail, self.cap_k);
+        // If tail wrapped to head, mark full
+        if self.qh_tail == self.qh_head {
+            self.qh_full = true;
+        }
     }
 
     #[inline(always)]
     fn ql_push(&mut self, idx: usize, val: f64) {
         // Pop >= from back (maintain increasing values)
-        while self.ql_head != self.ql_tail {
+        while self.ql_head != self.ql_tail || self.ql_full {
             let mut back = self.ql_tail;
             Self::dec(&mut back, self.cap_k);
             if self.ql_val[back] >= val {
                 self.ql_tail = back;
+                self.ql_full = false;
             } else {
                 break;
             }
@@ -1093,6 +1118,9 @@ impl StochfStream {
         self.ql_idx[self.ql_tail] = idx;
         self.ql_val[self.ql_tail] = val;
         Self::inc(&mut self.ql_tail, self.cap_k);
+        if self.ql_tail == self.ql_head {
+            self.ql_full = true;
+        }
     }
 
     /// O(1) amortized per tick for both %K and %D (SMA).
@@ -1121,16 +1149,18 @@ impl StochfStream {
         }
 
         // Fetch HH/LL from deque fronts; if empty, behave like offline code (-INF/INF)
-        let hh = if self.qh_head != self.qh_tail {
+        let hh = if self.qh_head != self.qh_tail || self.qh_full {
             self.qh_val[self.qh_head]
         } else {
             f64::NEG_INFINITY
         };
-        let ll = if self.ql_head != self.ql_tail {
+        let ll = if self.ql_head != self.ql_tail || self.ql_full {
             self.ql_val[self.ql_head]
         } else {
             f64::INFINITY
         };
+
+        // (No debug printing; keep stream hot path clean.)
 
         // %K
         let denom = hh - ll;

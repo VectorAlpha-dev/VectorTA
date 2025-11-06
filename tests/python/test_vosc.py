@@ -48,8 +48,9 @@ class TestVosc:
         assert len(result) == len(volume), "VOSC length mismatch"
         
         # Check last 5 values
+        # Match Rust tolerance: absolute atol=1e-1, rtol=0
         for i, expected in enumerate(expected_last_five):
-            assert_close(result[-(5-i)], expected, 1e-1)
+            assert_close(result[-(5-i)], expected, rtol=0, atol=1e-1)
         
         # Check warmup period (should be NaN)
         warmup_period = long_period - 1

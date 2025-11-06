@@ -50,7 +50,8 @@ class TestNvi:
             154275.63921207888,
             154275.63921207888,
         ]
-        assert_close(result[-5:], expected, rtol=1e-7, atol=1e-5,
+        # Match Rust unit test tolerance: absolute 1e-5 with no relative slack
+        assert_close(result[-5:], expected, rtol=0.0, atol=1e-5,
                      msg="NVI accuracy test failed")
     
     def test_nvi_empty_data(self):

@@ -244,8 +244,14 @@ class TestRoc:
                     result = ta_indicators.roc(close, 10)
                 assert len(result) == len(close)
             except ValueError as e:
-                # Some kernels might not be available on all systems
-                if "Unsupported kernel" not in str(e) and "not available on this CPU" not in str(e):
+                # Some kernels might not be compiled or available on this system/build
+                msg = str(e)
+                allowed = (
+                    "Unsupported kernel" in msg
+                    or "not available on this CPU" in msg
+                    or "not compiled in this build" in msg
+                )
+                if not allowed:
                     raise
 
 

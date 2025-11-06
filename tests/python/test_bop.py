@@ -57,7 +57,8 @@ class TestBop:
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-10,
+            rtol=0.0,
+            atol=1e-10,
             msg="BOP last 5 values mismatch"
         )
         
@@ -101,7 +102,7 @@ class TestBop:
         result = ta_indicators.bop(open_data, high, low, close)
         assert len(result) == 1
         # (11.0 - 10.0) / (12.0 - 9.5) = 1.0 / 2.5 = 0.4
-        assert_close(result[0], 0.4, rtol=1e-10, msg="BOP single value calculation")
+        assert_close(result[0], 0.4, rtol=0.0, atol=1e-10, msg="BOP single value calculation")
     
     def test_bop_with_slice_data_reinput(self, test_data):
         """Test BOP with slice data re-input - mirrors check_bop_with_slice_data_reinput"""
@@ -198,7 +199,8 @@ class TestBop:
         assert_close(
             default_row[-5:],
             expected,
-            rtol=1e-10,
+            rtol=0.0,
+            atol=1e-10,
             msg="BOP batch default row mismatch"
         )
         
@@ -312,7 +314,7 @@ class TestBop:
         # BOP = (105 - 100) / (110 - 90) = 5/20 = 0.25
         expected_value = 0.25
         for i in range(nan_period, size):
-            assert_close(result[i], expected_value, rtol=1e-10, 
+            assert_close(result[i], expected_value, rtol=0.0, atol=1e-10, 
                         msg=f"BOP value mismatch at index {i}")
     
     def test_bop_invalid_kernel(self, test_data):

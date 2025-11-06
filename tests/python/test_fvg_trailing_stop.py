@@ -50,11 +50,13 @@ class TestFvgTrailingStop:
             
             # Check lower values (may be NaN if upper is active)
             if not np.isnan(lower[idx]):
-                assert_close(lower[idx], expected_lower[i], rtol=1e-2)
+                # Match Rust test tolerance: absolute <= 0.01, no extra rtol
+                assert_close(lower[idx], expected_lower[i], rtol=0.0, atol=1e-2)
             
             # Check lower trailing stop values (may be NaN if upper is active)
             if not np.isnan(lower_ts[idx]):
-                assert_close(lower_ts[idx], expected_lower_ts[i], rtol=1e-2)
+                # Match Rust test tolerance: absolute <= 0.01, no extra rtol
+                assert_close(lower_ts[idx], expected_lower_ts[i], rtol=0.0, atol=1e-2)
     
     def test_fvg_trailing_stop_empty_data(self):
         """Test FVG Trailing Stop handles empty data correctly."""

@@ -1207,8 +1207,9 @@ unsafe fn voss_row_scalar_unchecked(
     let w0 = 2.0 * PI / period as f64;
     let f1 = w0.cos();
     let g1 = (bandwidth * w0).cos();
-    let inv_g1 = 1.0 / g1;
-    let s1 = inv_g1 - (inv_g1 * inv_g1 - 1.0).sqrt();
+    // Match scalar path operation order for bitwise-consistent results across kernels
+    // Scalar uses: 1/g1 - sqrt(1/g1^2 - 1)
+    let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
     let c1 = 0.5 * (1.0 - s1);
     let c2 = f1 * (1.0 + s1);
     let c3 = -s1;

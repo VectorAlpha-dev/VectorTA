@@ -46,6 +46,21 @@ test('ZSCORE basic candles', () => {
     assert.strictEqual(result.length, close.length);
 });
 
+test('ZSCORE accuracy vs Rust reference (last 5 values)', () => {
+    // Ensure the WASM binding matches Rust unit test reference values
+    const close = new Float64Array(testData.close);
+    const out = wasm.zscore_js(close, 14, 'sma', 1.0, 0);
+
+    const start = Math.max(0, out.length - 5);
+    const last5 = out.slice(start);
+    const expected = EXPECTED_OUTPUTS.zscore.last5Values;
+
+    // Use absolute tolerance 1e-8 to match Rust tests
+    for (let i = 0; i < 5; i++) {
+        assertClose(last5[i], expected[i], 1e-8, `Zscore mismatch at tail idx ${i}`);
+    }
+});
+
 test('ZSCORE with custom parameters', () => {
     const close = new Float64Array(testData.close);
     

@@ -1781,6 +1781,7 @@ pub fn volume_adjusted_ma_batch_py<'py>(
     strict: Option<bool>,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
+    eprintln!("[VolumeAdjustedMa_batch_py] using Vec->ndarray path (no PyArray1 prealloc)");
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
     // Accept non-contiguous inputs by copying to owned arrays when needed
@@ -1849,15 +1850,10 @@ pub fn volume_adjusted_ma_batch_py<'py>(
     // Package metadata like ALMA
     let dict = PyDict::new(py);
     use numpy::PyArray2;
-    // Build a Vec<Vec<f64>> view of rows to construct a 2D array safely
-    let mut rows_vec: Vec<Vec<f64>> = Vec::with_capacity(rows);
-    for r in 0..rows {
-        let start = r * cols;
-        let end = start + cols;
-        rows_vec.push(buf[start..end].to_vec());
-    }
-    let out_arr2 = PyArray2::from_vec2(py, &rows_vec)
+    // Move the computed buffer into an ndarray without copying, then into NumPy
+    let arr2 = ndarray::Array2::from_shape_vec((rows, cols), buf)
         .map_err(|_| PyValueError::new_err("failed to build output array"))?;
+    let out_arr2 = arr2.into_pyarray(py);
     dict.set_item("values", out_arr2)?;
     dict.set_item(
         "lengths",

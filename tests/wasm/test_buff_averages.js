@@ -6,6 +6,8 @@ import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
+import { createRequire } from 'module';
 import { 
     loadTestData, 
     assertArrayClose, 
@@ -25,10 +27,31 @@ test.before(async () => {
     // Load WASM module
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        const importPath = process.platform === 'win32' 
+        const importPath = process.platform === 'win32'
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
+        // Prefer pkg/ ESM; initialize:
+        // - If `initSync` exists, use bytes to avoid fetch(file://)
+        // - Else, try default(); on fetch failure, fall back to local CJS glue.
+        try {
+            const wasmBinPath = path.join(path.dirname(importPath.replace(/^file:\/\//, '')), 'my_project_bg.wasm');
+            if (typeof wasm.initSync === 'function' && fs.existsSync(wasmBinPath)) {
+                const bytes = fs.readFileSync(wasmBinPath);
+                wasm.initSync(bytes);
+            } else if (typeof wasm.default === 'function') {
+                await wasm.default();
+            }
+        } catch (e) {
+            const msg = String(e?.message || e).toLowerCase();
+            const likelyFileUrlFetch = msg.includes('fetch failed') || msg.includes('not implemented');
+            if (!likelyFileUrlFetch) throw e;
+            const localPath = path.join(__dirname, 'my_project.cjs');
+            // tests/wasm/my_project.js is CommonJS; load via createRequire in this ESM context
+            const require = createRequire(import.meta.url);
+            // eslint-disable-next-line import/no-commonjs
+            wasm = require(localPath);
+        }
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;

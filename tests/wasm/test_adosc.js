@@ -261,12 +261,11 @@ test('ADOSC fast API - basic computation', () => {
     const outPtr = wasm.adosc_alloc(len);
     
     try {
-        // Create views into WASM memory - use proper memory accessor
-        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
-        const highView = new Float64Array(memory.buffer, highPtr, len);
-        const lowView = new Float64Array(memory.buffer, lowPtr, len);
-        const closeView = new Float64Array(memory.buffer, closePtr, len);
-        const volumeView = new Float64Array(memory.buffer, volumePtr, len);
+        // Create views into WASM memory (consistent with other tests)
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
         
         // Copy data into WASM memory
         highView.set(high);
@@ -287,8 +286,7 @@ test('ADOSC fast API - basic computation', () => {
         );
         
         // Read results from output buffer - recreate view after computation
-        const memory2 = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
-        const result = new Float64Array(memory2.buffer, outPtr, len);
+        const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
         // Verify results match safe API
         const safeResult = wasm.adosc_js(high, low, close, volume, 3, 10);
@@ -317,12 +315,11 @@ test('ADOSC fast API - in-place computation (aliasing)', () => {
     const volumePtr = wasm.adosc_alloc(len);
     
     try {
-        // Create views into WASM memory - use proper memory accessor
-        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
-        const highView = new Float64Array(memory.buffer, highPtr, len);
-        const lowView = new Float64Array(memory.buffer, lowPtr, len);
-        const closeView = new Float64Array(memory.buffer, closePtr, len);
-        const volumeView = new Float64Array(memory.buffer, volumePtr, len);
+        // Create views into WASM memory (consistent with other tests)
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
         
         // Copy data into WASM memory
         highView.set(high);
@@ -346,8 +343,7 @@ test('ADOSC fast API - in-place computation (aliasing)', () => {
         const expected = wasm.adosc_js(high, low, close, volume, 3, 10);
         
         // closeView might be invalid after memory growth, so recreate
-        const memory3 = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
-        const resultView = new Float64Array(memory3.buffer, closePtr, len);
+        const resultView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
         
         for (let i = 0; i < len; i++) {
             assertClose(resultView[i], expected[i], 1e-10, `In-place computation mismatch at index ${i}`);
@@ -541,11 +537,10 @@ test('ADOSC batch into - fast API for batch computation', () => {
     
     try {
         // Copy data into WASM memory
-        const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
-        const highView = new Float64Array(memory.buffer, highPtr, len);
-        const lowView = new Float64Array(memory.buffer, lowPtr, len);
-        const closeView = new Float64Array(memory.buffer, closePtr, len);
-        const volumeView = new Float64Array(memory.buffer, volumePtr, len);
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
+        const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
         
         highView.set(high);
         lowView.set(low);
@@ -563,8 +558,7 @@ test('ADOSC batch into - fast API for batch computation', () => {
         assert.strictEqual(numRows, rows);
         
         // Read results
-        const memory2 = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
-        const results = new Float64Array(memory2.buffer, outPtr, totalSize);
+        const results = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
         
         // Verify first row matches single calculation
         const expected = wasm.adosc_js(high, low, close, volume, 2, 5);

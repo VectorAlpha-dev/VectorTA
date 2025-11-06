@@ -119,6 +119,17 @@ pub mod tulip {
 
         Ok(start as usize)
     }
+
+    /// Query Tulip for input/output arity for a given indicator name.
+    pub unsafe fn get_io_counts(name: &str) -> Result<(usize, usize), String> {
+        let c_name = std::ffi::CString::new(name).unwrap();
+        let indicator = ti_find_indicator(c_name.as_ptr());
+        if indicator.is_null() {
+            return Err(format!("Indicator '{}' not found", name));
+        }
+        let info = &*indicator;
+        Ok((info.inputs as usize, info.outputs as usize))
+    }
 }
 
 // Module for TA-Lib wrappers (if available)

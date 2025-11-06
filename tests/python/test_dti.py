@@ -39,6 +39,30 @@ class TestDTI:
         valid_values = result[~np.isnan(result)]
         assert np.all(valid_values >= -100.0)
         assert np.all(valid_values <= 100.0)
+
+    def test_dti_matches_rust_references(self):
+        """Ensure Python binding matches Rust unit test references (last 5 values).
+
+        The Rust unit test in src/indicators/dti.rs checks the last five values
+        against these exact numbers with tolerance 1e-6. This test mirrors that
+        check to guarantee bindings stay aligned with the Rust source of truth.
+        """
+        test_data = load_test_data()
+        high = test_data['high']
+        low = test_data['low']
+
+        result = ta.dti(high, low, r=14, s=10, u=5)
+        expected_last_five = np.array([
+            -39.0091620347991,
+            -39.75219264093014,
+            -40.53941417932286,
+            -41.2787749205189,
+            -42.93758699380749,
+        ], dtype=np.float64)
+
+        last5 = result[-5:]
+        # Match Rust tolerance: <= 1e-6 (no looser tolerance allowed)
+        np.testing.assert_allclose(last5, expected_last_five, rtol=0.0, atol=1e-6)
         
     def test_dti_warmup_period(self):
         """Test DTI warmup period behavior"""

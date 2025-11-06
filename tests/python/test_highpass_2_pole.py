@@ -53,9 +53,10 @@ class TestHighPass2Pole:
         
         # Check last 5 values match expected
         assert_close(
-            result[-5:], 
+            result[-5:],
             expected_last_five,
-            rtol=1e-6,  # Using 1e-6 as in Rust test
+            rtol=0.0,
+            atol=1e-6,  # Match Rust test absolute tolerance
             msg="HighPass2 last 5 values mismatch"
         )
         

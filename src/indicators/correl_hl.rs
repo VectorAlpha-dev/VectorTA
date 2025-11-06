@@ -1412,53 +1412,20 @@ pub fn correl_hl_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<
         period: config.period_range,
     };
 
+    // Expand parameter grid and allocate output once
     let combos = expand_grid(&sweep);
     if combos.is_empty() {
         return Err(JsValue::from_str("No valid parameter combinations"));
     }
-
-    // Check for first valid data point
-    let first_valid_idx = match high
-        .iter()
-        .zip(low.iter())
-        .position(|(&h, &l)| !h.is_nan() && !l.is_nan())
-    {
-        Some(idx) => idx,
-        None => return Err(JsValue::from_str("All values are NaN")),
-    };
-
     let rows = combos.len();
     let cols = high.len();
-    let mut values = vec![0.0; rows * cols];
+    let mut values = vec![0.0f64; rows * cols];
 
-    // Initialize with NaN for warmup periods
-    for (row, combo) in combos.iter().enumerate() {
-        let period = combo.period.unwrap();
-        let warmup_period = first_valid_idx + period - 1;
-        let row_start = row * cols;
-        for i in 0..warmup_period.min(cols) {
-            values[row_start + i] = f64::NAN;
-        }
-    }
-
-    // Compute correlation for each parameter combination
-    for (row, combo) in combos.iter().enumerate() {
-        let period = combo.period.unwrap();
-        let params = CorrelHlParams {
-            period: Some(period),
-        };
-        let input = CorrelHlInput::from_slices(high, low, params);
-
-        // Get row slice
-        let row_start = row * cols;
-        let row_end = row_start + cols;
-        let row_slice = &mut values[row_start..row_end];
-
-        // Compute into the row directly
-        if let Err(e) = correl_hl_into_slice(row_slice, &input, Kernel::Auto) {
-            return Err(JsValue::from_str(&e.to_string()));
-        }
-    }
+    // Use the shared-prefix batch path to ensure numerical parity with the
+    // zero-copy fast API (`correl_hl_batch_into`). This writes warmup NaNs
+    // and computes each row in-place into `values` (row-major) without copies.
+    correl_hl_batch_inner_into(high, low, &sweep, Kernel::Auto, false, &mut values)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
 
