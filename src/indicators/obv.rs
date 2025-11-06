@@ -239,21 +239,25 @@ pub unsafe fn obv_avx2(close: &[f64], volume: &[f64], first_valid: usize, out: &
         let sign = _mm_add_pd(pos, neg);
 
         let vol = _mm_loadu_pd(volume.as_ptr().add(i));
-        let dv = _mm_mul_pd(vol, sign); // [d0, d1] = sign*volume
+        let dv = _mm_mul_pd(vol, sign); // [dv0, dv1] = sign*volume (exact for sign in {-1,0,+1})
 
-        // Inclusive 2-lane scan: [d0, d0+d1]
-        // m_shift = [0, d0]
-        let m_shift = _mm_unpacklo_pd(zero, dv);
-        let scan = _mm_add_pd(dv, m_shift);
+        // Match scalar update order exactly:
+        //   res0 = prev_obv + dv0
+        //   res1 = res0     + dv1
+        // Doing the additions in this order (rather than (dv0+dv1)+prev)
+        // avoids tiny rounding-order diffs vs scalar/FMA.
+        let dv0 = _mm_cvtsd_f64(dv);
+        let dv1 = _mm_cvtsd_f64(_mm_unpackhi_pd(dv, dv));
 
-        // Add scalar base carry (prev_obv) to both lanes, store
-        let base = _mm_set1_pd(prev_obv);
-        let res = _mm_add_pd(scan, base);
+        let res0 = dv0 + prev_obv;
+        let res1 = dv1 + res0;
+
+        // Store [res0, res1]
+        let res = _mm_set_pd(res1, res0);
         _mm_storeu_pd(out.as_mut_ptr().add(i), res);
 
         // Update carry and prev_close using lane-1
-        let res_hi = _mm_unpackhi_pd(res, res);
-        prev_obv = _mm_cvtsd_f64(res_hi);
+        prev_obv = res1;
 
         let c_hi = _mm_unpackhi_pd(c, c);
         prev_close = _mm_cvtsd_f64(c_hi);

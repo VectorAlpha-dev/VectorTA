@@ -84,7 +84,6 @@ def generate_otto_test_data():
 
 # Expected outputs from Rust tests - these must match EXACTLY
 EXPECTED_OUTPUTS = {
-<<<<<<< HEAD
     'epma': {
         'default_params': {'period': 11, 'offset': 4},
         'last_5_values': [
@@ -95,7 +94,7 @@ EXPECTED_OUTPUTS = {
             59117.04,
         ],
         'warmup_period': 16,  # period + offset + 1
-=======
+    },
     'zscore': {
         # Default parameters used in Rust tests
         'default_params': {'period': 14, 'ma_type': 'sma', 'nbdev': 1.0, 'devtype': 0},
@@ -107,7 +106,6 @@ EXPECTED_OUTPUTS = {
             -0.1673226261513698,
             -1.431635486349618
         ],
->>>>>>> simd-4
     },
     'alma': {
         'default_params': {'period': 9, 'offset': 0.85, 'sigma': 6.0},

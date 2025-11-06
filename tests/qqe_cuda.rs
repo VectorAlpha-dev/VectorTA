@@ -2,7 +2,6 @@
 
 use my_project::indicators::qqe::{
     qqe_batch_with_kernel, qqe_with_kernel, QqeBatchRange, QqeData, QqeInput, QqeParams,
-    qqe_batch_with_kernel, qqe_with_kernel, QqeBatchRange, QqeData, QqeInput, QqeParams,
 };
 use my_project::utilities::enums::Kernel;
 
@@ -52,9 +51,6 @@ fn qqe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaQqe::new(0).expect("CudaQqe::new");
-    let (dev, combos) = cuda
-        .qqe_batch_dev(&price_f32, &sweep)
-        .expect("qqe_batch_dev");
     let (dev, combos) = cuda
         .qqe_batch_dev(&price_f32, &sweep)
         .expect("qqe_batch_dev");
@@ -122,24 +118,14 @@ fn qqe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         smoothing_factor: Some(5),
         fast_factor: Some(4.236),
     };
-    let params = QqeParams {
-        rsi_period: Some(14),
-        smoothing_factor: Some(5),
-        fast_factor: Some(4.236),
-    };
+
 
     // CPU baseline per series
     let mut cpu_fast_tm = vec![f64::NAN; cols * rows];
     let mut cpu_slow_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        for t in 0..rows {
-            series[t] = tm[t * cols + s];
-        }
-        let input = QqeInput {
-            data: QqeData::Slice(&series),
-            params: params.clone(),
-        };
+        
         for t in 0..rows {
             series[t] = tm[t * cols + s];
         }

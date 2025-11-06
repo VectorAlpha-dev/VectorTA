@@ -460,9 +460,10 @@ impl UmaStream {
         // advance ring head
         self.head = (self.head + 1) % self.cap;
 
-        // --- warmup: need at least max_length for μ/σ and then smooth_length values for WMA ---
-        let min_needed = self.max_length + self.smooth_length; // conservative
-        if self.count + ((self.diff_step > 0) as usize) < min_needed {
+        // --- warmup: wait until the fixed window (max_length) is full.
+        // The WMA stage below performs its own warmup for `smooth_length` values,
+        // so we only gate here on the rolling μ/σ window being valid.
+        if self.count < self.cap {
             return None;
         }
 
@@ -1669,6 +1670,7 @@ impl UmaStreamPy {
     pub fn reset(&mut self) {
         self.stream.reset();
     }
+
 }
 
 #[cfg(feature = "python")]

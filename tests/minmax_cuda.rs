@@ -3,10 +3,7 @@
 use my_project::indicators::minmax::{
     minmax_batch_with_kernel, MinmaxBatchRange, MinmaxParams, MinmaxInput, minmax_with_kernel,
 };
-// Minimal import fixes: tests use these items below
-use my_project::indicators::minmax::{
-    minmax_with_kernel, MinmaxInput, MinmaxParams,
-};
+// Minimal import fixes: primary import above already brings needed items
 use my_project::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]

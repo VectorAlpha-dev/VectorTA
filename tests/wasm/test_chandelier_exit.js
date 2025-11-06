@@ -408,11 +408,10 @@ test('chandelier_exit zero-copy API', () => {
     assert(outPtr !== 0, 'Failed to allocate output buffer');
     
     try {
-        // Create views into WASM memory
-        const memory = wasm.__wbindgen_memory();
-        const highView = new Float64Array(memory.buffer, highPtr, high.length);
-        const lowView = new Float64Array(memory.buffer, lowPtr, low.length);
-        const closeView = new Float64Array(memory.buffer, closePtr, close.length);
+        // Create views into WASM memory (no legacy __wbindgen_memory)
+        const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, high.length);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, low.length);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, close.length);
         
         // Copy data into WASM memory
         highView.set(high);
@@ -422,9 +421,8 @@ test('chandelier_exit zero-copy API', () => {
         // Compute CE in-place
         wasm.ce_into(highPtr, lowPtr, closePtr, outPtr, high.length, period, mult, use_close);
         
-        // Read results (may need to recreate view if memory grew)
-        const memory2 = wasm.__wbindgen_memory();
-        const outView = new Float64Array(memory2.buffer, outPtr, high.length * 2);
+        // Read results (recreate the view in case memory grew)
+        const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, high.length * 2);
         
         // Verify results match regular API
         const regularResult = wasm.chandelier_exit_wasm(high, low, close, period, mult, use_close);

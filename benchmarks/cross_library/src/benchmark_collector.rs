@@ -24,15 +24,16 @@ impl BenchmarkCollector {
         &self,
         indicator: &str,
         library: LibraryType,
-        duration: Duration,
+        duration_total: Duration,
         data_size: usize,
+        iterations: usize,
     ) {
         let measurement = UnifiedMeasurement::new(
             indicator.to_string(),
             library,
-            duration,
+            duration_total,
             data_size,
-            1, // Single iteration for Criterion benchmarks
+            iterations.max(1),
         );
 
         if let Ok(mut measurements) = self.measurements.lock() {

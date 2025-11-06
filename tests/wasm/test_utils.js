@@ -11,15 +11,6 @@ const __dirname = path.dirname(__filename);
 function loadTestData() {
     const csvPath = path.join(__dirname, '../../src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv');
     const content = fs.readFileSync(csvPath, 'utf8');
-
-<<<<<<< HEAD
-=======
-    // Simple, dependency-free CSV parsing tailored to our numeric file:
-    // - first line is a header we skip
-    // - remaining lines are plain numeric values separated by commas
-    // - column order: timestamp, open, close, high, low, volume
-    const lines = content.split(/\r?\n/);
->>>>>>> simd-3
     const candles = {
         timestamp: [],
         open: [],
@@ -29,7 +20,6 @@ function loadTestData() {
         volume: []
     };
 
-<<<<<<< HEAD
     const lines = content.split(/\r?\n/);
     // Skip header (first line)
     for (let li = 1; li < lines.length; li++) {
@@ -55,19 +45,6 @@ function loadTestData() {
         candles.high.push(h);
         candles.low.push(l);
         candles.volume.push(v);
-=======
-    for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-        const parts = line.split(',');
-        if (parts.length < 6) continue;
-        candles.timestamp.push(Number(parts[0]));
-        candles.open.push(Number(parts[1]));
-        candles.close.push(Number(parts[2]));
-        candles.high.push(Number(parts[3]));
-        candles.low.push(Number(parts[4]));
-        candles.volume.push(Number(parts[5]));
->>>>>>> simd-3
     }
 
     // Add calculated fields
@@ -143,7 +120,6 @@ function assertNoNaN(array, msg = "") {
 
 // Expected outputs from Rust tests - these must match EXACTLY
 const EXPECTED_OUTPUTS = {
-<<<<<<< HEAD
     epma: {
         defaultParams: { period: 11, offset: 4 },
         lastFive: [
@@ -154,7 +130,7 @@ const EXPECTED_OUTPUTS = {
             59117.04
         ],
         warmupPeriod: 16 // period + offset + 1
-=======
+    },
     zscore: {
         // Default parameters used in Rust tests
         defaultParams: { period: 14, maType: 'sma', nbdev: 1.0, devtype: 0 },
@@ -190,7 +166,6 @@ const EXPECTED_OUTPUTS = {
             156.00000000,
             147.00000000
         ]
->>>>>>> simd-4
     },
     wto: {
         defaultParams: { channelLength: 10, averageLength: 21 },
