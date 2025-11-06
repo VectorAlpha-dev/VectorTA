@@ -24,19 +24,38 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
-    try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        const importPath = process.platform === 'win32' 
-            ? 'file:///' + wasmPath.replace(/\\/g, '/')
-            : wasmPath;
-        wasm = await import(importPath);
-        // No need to call default() for ES modules
-    } catch (error) {
-        console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
-        throw error;
+    // Load WASM module (prefer pkg ESM; fallback to bundled CJS wrapper when ESM import fails)
+    const pkgPath = path.join(__dirname, '../../pkg/my_project.js');
+    const pkgImport = process.platform === 'win32'
+        ? 'file:///' + pkgPath.replace(/\\/g, '/')
+        : pkgPath;
+
+    async function tryImport(p) {
+        const mod = await import(p);
+        // If CommonJS, Node returns { default: exports }. Normalize to a plain object
+        return mod && mod.default && (mod.bop_js === undefined && mod.default.bop_js !== undefined)
+            ? mod.default
+            : mod;
     }
-    
+
+    try {
+        wasm = await tryImport(pkgImport);
+    } catch (esmErr) {
+        // Fallback to pre-bundled CommonJS wrapper in tests/wasm
+        try {
+            const cjsPath = path.join(__dirname, 'my_project.js');
+            const cjsImport = process.platform === 'win32'
+                ? 'file:///' + cjsPath.replace(/\\/g, '/')
+                : cjsPath;
+            wasm = await tryImport(cjsImport);
+            console.warn('Loaded fallback CJS wrapper for WASM tests (pkg ESM import failed).');
+        } catch (cjsErr) {
+            console.error('Failed to load WASM module from pkg and fallback CJS.');
+            console.error('Tip: run "wasm-pack build --features wasm --target nodejs" to regenerate pkg/.');
+            throw esmErr;
+        }
+    }
+
     testData = loadTestData();
 });
 

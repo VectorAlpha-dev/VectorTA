@@ -39,6 +39,40 @@ test.before(async () => {
     testData = loadTestData();
 });
 
+// Matches Rust check_prb_accuracy: compare last 5 non-NaN values from CSV
+test('PRB CSV accuracy matches Rust', () => {
+    const expected = EXPECTED_OUTPUTS.prb;
+    const close = new Float64Array(testData.close);
+
+    const result = wasm.prb(
+        close,
+        false, // smooth_data (Rust uses Some(false))
+        10,    // smooth_period (ignored when smooth_data=false)
+        100,   // regression_period
+        2,     // polynomial_order
+        0,     // regression_offset
+        2.0    // ndev
+    );
+
+    // Flattened values: [main, upper, lower]
+    const mainValues = result.values.slice(0, close.length);
+    const nonNan = Array.from(mainValues).filter(v => !isNaN(v));
+    assert(nonNan.length >= 5, 'Should have at least 5 non-NaN values');
+
+    const last5 = nonNan.slice(-5);
+    const expectedLast5 = expected.last5MainValues;
+    for (let i = 0; i < 5; i++) {
+        const actual = last5[i];
+        const exp = expectedLast5[i];
+        const diff = Math.abs(actual - exp);
+        const tolerance = Math.abs(exp) * 0.01; // match Rust 1% tolerance
+        assert(
+            diff < tolerance,
+            `CSV parity mismatch at ${i}: expected ${exp}, got ${actual} (diff ${diff} > tol ${tolerance})`
+        );
+    }
+});
+
 test('PRB accuracy', () => {
     // Test PRB matches expected values from Pine Script reference
     const data = new Float64Array([

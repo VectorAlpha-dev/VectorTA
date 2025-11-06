@@ -49,10 +49,12 @@ class TestMass:
         assert len(result) == len(high)
         
         # Check last 5 values match expected
+        # Rust test uses absolute tolerance of 1e-7; match or tighten (no looser than Rust)
         assert_close(
-            result[-5:], 
+            result[-5:],
             expected['last_5_values'],
-            rtol=1e-7,
+            rtol=0.0,
+            atol=1e-7,
             msg="Mass Index last 5 values mismatch"
         )
         

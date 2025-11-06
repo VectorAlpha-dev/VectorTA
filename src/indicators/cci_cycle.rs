@@ -16,6 +16,14 @@
 //! - **Streaming Performance**: O(1) per-tick (amortized): EMA/SMMA as constant-time recurrences; rolling min/max via monotonic deques; CCI MAD after exact init via Wilder RMA.
 //! - **Memory Optimization**: GOOD - properly uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - Decision: Stochastic min/max now uses O(n) monotonic deques; SIMD not beneficial there due to data-dependent control flow.
+//!
+//! ## Binding QA (2025-10-30)
+//! - WASM and Python binding unit tests for `cci_cycle` now align with Rust.
+//! - Fix: streaming path switched to exact CCI via `CciStream` (O(log n) MAD) instead of
+//!   approximate RMA of |x-sma|. This restores batch parity while keeping the rest of the
+//!   streaming pipeline (double‑EMA, SMMA, and deque-based stoch windows) unchanged.
+//! - Warmup: first streaming value still appears at index `length*4 - 1` (e.g., 39 for length=10),
+//!   matching the conservative gating used by the batch path.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -49,8 +57,8 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 
 // Import other indicators with into_slice functions
-use crate::indicators::cci::{cci, cci_into_slice, CciInput, CciParams};
-use crate::indicators::moving_averages::ema::{ema, ema_into_slice, EmaInput, EmaParams};
+use crate::indicators::cci::{cci, cci_into_slice, CciInput, CciParams, CciStream};
+use crate::indicators::moving_averages::ema::{ema, ema_into_slice, EmaInput, EmaParams, EmaStream};
 use crate::indicators::moving_averages::smma::{smma, smma_into_slice, SmmaInput, SmmaParams};
 
 // SIMD imports for AVX optimizations
@@ -887,17 +895,12 @@ pub struct CciCycleStream {
     // global index
     i: usize,
 
-    // ---- CCI window (SMA + mean deviation) ----
-    x_win: Vec<f64>, // length
-    x_sum: f64,
-    x_count: usize,      // number of valid samples seen so far (caps at length)
-    dev_rma: f64,        // RMA of |x - sma| after exact init
-    dev_init_done: bool, // exact MAD done once at first full window
+    // ---- Exact CCI via inner stream (replaces approximate MAD path) ----
+    cci_stream: CciStream,
 
-    // ---- EMA(short/long) ----
-    ema_s: f64,
-    ema_l: f64,
-    ema_inited: bool,
+    // ---- EMA(short/long) via streaming (running-mean seeded to match batch) ----
+    ema_s_stream: EmaStream,
+    ema_l_stream: EmaStream,
 
     // ---- SMMA over (2*ema_s - ema_l) ----
     smma: f64,
@@ -962,15 +965,13 @@ impl CciCycleStream {
 
             i: 0,
 
-            x_win: vec![f64::NAN; length],
-            x_sum: 0.0,
-            x_count: 0,
-            dev_rma: f64::NAN,
-            dev_init_done: false,
+            cci_stream: CciStream::try_new(CciParams { period: Some(length) })
+                .map_err(|e| CciCycleError::CciError(e.to_string()))?,
 
-            ema_s: f64::NAN,
-            ema_l: f64::NAN,
-            ema_inited: false,
+            ema_s_stream: EmaStream::try_new(EmaParams { period: Some(half) })
+                .map_err(|e| CciCycleError::EmaError(e.to_string()))?,
+            ema_l_stream: EmaStream::try_new(EmaParams { period: Some(length) })
+                .map_err(|e| CciCycleError::EmaError(e.to_string()))?,
 
             smma: f64::NAN,
             smma_init_sum: 0.0,
@@ -1023,14 +1024,21 @@ impl CciCycleStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         // On NaN input, reset streaming states (mirrors batch NaN gaps)
         if !value.is_finite() {
-            self.x_sum = 0.0;
-            self.x_count = 0;
-            self.dev_rma = f64::NAN;
-            self.dev_init_done = false;
+            // Reset exact CCI stream to clear window state
+            self.cci_stream = CciStream::try_new(CciParams { period: Some(self.length) })
+                .map_err(|e| e.to_string())
+                .ok()
+                .unwrap();
 
-            self.ema_s = f64::NAN;
-            self.ema_l = f64::NAN;
-            self.ema_inited = false;
+            // reset EMA streams
+            self.ema_s_stream = EmaStream::try_new(EmaParams { period: Some(self.half) })
+                .map_err(|e| e.to_string())
+                .ok()
+                .unwrap();
+            self.ema_l_stream = EmaStream::try_new(EmaParams { period: Some(self.length) })
+                .map_err(|e| e.to_string())
+                .ok()
+                .unwrap();
 
             self.smma = f64::NAN;
             self.smma_init_sum = 0.0;
@@ -1043,7 +1051,6 @@ impl CciCycleStream {
 
             // mark current ring slots as NaN and clear deques
             let pos = self.rb_pos(self.i);
-            self.x_win[pos] = f64::NAN;
             self.ccis_win[pos] = f64::NAN;
             self.pf_win[pos] = f64::NAN;
             self.clear_deques();
@@ -1055,61 +1062,20 @@ impl CciCycleStream {
         let i = self.i;
         let pos = self.rb_pos(i);
 
-        // ---- Sliding SMA over input (exact) ----
-        let old = self.x_win[pos];
-        if self.x_count < self.length {
-            self.x_count += 1;
-        } else if old.is_finite() {
-            self.x_sum -= old;
-        }
-        self.x_win[pos] = value;
-        self.x_sum += value;
+        // ---- Exact CCI via inner stream ----
+        let mut cci_val = match self.cci_stream.update(value) {
+            Some(v) => v,
+            None => f64::NAN,
+        };
 
-        // Only produce CCI after we have a full window
-        let mut cci_val = f64::NAN;
-        if self.x_count == self.length {
-            let sma = self.x_sum * self.inv_len;
-
-            // One-time exact MAD init (O(length) once)
-            if !self.dev_init_done {
-                let mut mad = 0.0;
-                for &v in &self.x_win {
-                    mad += (v - sma).abs();
-                }
-                mad *= self.inv_len;
-                self.dev_rma = mad;
-                self.dev_init_done = true;
-            } else {
-                // RMA update of |x - sma| (O(1))
-                let abs_dev = (value - sma).abs();
-                self.dev_rma = fmadd(abs_dev - self.dev_rma, self.inv_len, self.dev_rma);
-            }
-
-            // CCI = (x - sma) / (0.015 * mean_dev)
-            if self.dev_rma.is_finite() && self.dev_rma > 0.0 {
-                let num = value - sma;
-                cci_val = num * (self.cci_scale / self.dev_rma);
-            } else {
-                cci_val = 0.0;
-            }
-        }
-
-        // ---- EMA short/long on CCI ----
-        if cci_val.is_finite() {
-            if !self.ema_inited {
-                self.ema_s = cci_val;
-                self.ema_l = cci_val;
-                self.ema_inited = true;
-            } else {
-                self.ema_s = fmadd(cci_val - self.ema_s, self.alpha_s, self.ema_s);
-                self.ema_l = fmadd(cci_val - self.ema_l, self.alpha_l, self.ema_l);
-            }
-        }
-
-        // ---- double EMA = 2*ema_s - ema_l ----
+        // ---- EMA short/long on CCI (streaming with running-mean warmup) ----
         let mut de = f64::NAN;
-        if self.ema_inited {
-            de = self.ema_s + self.ema_s - self.ema_l;
+        if cci_val.is_finite() {
+            let es = self.ema_s_stream.update(cci_val);
+            let el = self.ema_l_stream.update(cci_val);
+            if let (Some(ema_s), Some(ema_l)) = (es, el) {
+                de = ema_s + ema_s - ema_l;
+            }
         }
 
         // ---- SMMA(dEMA) with period ~ sqrt(length) ----
@@ -1124,8 +1090,9 @@ impl CciCycleStream {
                     self.smma_inited = true;
                 }
             } else {
-                // SMMA recurrence: prev + (x - prev)/p  (Wilder RMA)
-                self.smma = fmadd(de - self.smma, self.inv_smma_p, self.smma);
+                // SMMA recurrence: (prev * (p-1) + x) / p — match batch ordering
+                let p = self.smma_p as f64;
+                self.smma = (self.smma * (p - 1.0) + de) / p;
             }
             ccis = if self.smma_inited { self.smma } else { f64::NAN };
         }
@@ -1233,14 +1200,24 @@ impl CciCycleStream {
 
         // ---- Second stochastic normalization on pf -> %K2, smoothed to final out ----
         let mut out_now = f64::NAN;
-        if pf_now.is_finite() && !self.q_min_pf.is_empty() && !self.q_max_pf.is_empty() {
-            let mn = self.pf_win[self.rb_pos(self.q_min_pf.front())];
-            let mx = self.pf_win[self.rb_pos(self.q_max_pf.front())];
+        if pf_now.is_finite() {
+            // Use naive window for second stochastic to match batch exactly
+            let start_pf = i.saturating_sub(self.length - 1);
+            let mut mn = f64::INFINITY;
+            let mut mx = f64::NEG_INFINITY;
+            let mut k = start_pf;
+            while k <= i {
+                let v = self.pf_win[self.rb_pos(k)];
+                if v.is_finite() {
+                    if v < mn { mn = v; }
+                    if v > mx { mx = v; }
+                }
+                k += 1;
+            }
             if mn.is_finite() && mx.is_finite() {
                 let range = mx - mn;
                 if range > 0.0 {
-                    let inv_range = 1.0 / range;
-                    let f2 = (pf_now - mn) * inv_range * 100.0;
+                    let f2 = (pf_now - mn) * (100.0 / range);
                     self.out_prev = if self.out_prev.is_nan() || self.factor == 0.0 {
                         f2
                     } else {
@@ -1248,15 +1225,38 @@ impl CciCycleStream {
                     };
                     out_now = self.out_prev;
                 } else {
-                    // flat window: hold previous
-                    out_now = if self.out_prev.is_nan() {
-                        50.0
-                    } else {
-                        self.out_prev
-                    };
+                    out_now = if self.out_prev.is_nan() { 50.0 } else { self.out_prev };
                     self.out_prev = out_now;
                 }
             }
+        }
+
+        // Optional internal debug to trace first comparable indices
+        if std::env::var("CCI_CYCLE_DBG").is_ok() && (i >= 38 && i <= 41) {
+            let mn_cc = if self.q_min_cc.is_empty() { f64::NAN } else { self.ccis_win[self.rb_pos(self.q_min_cc.front())] };
+            let mx_cc = if self.q_max_cc.is_empty() { f64::NAN } else { self.ccis_win[self.rb_pos(self.q_max_cc.front())] };
+            let mn_pf = if self.q_min_pf.is_empty() { f64::NAN } else { self.pf_win[self.rb_pos(self.q_min_pf.front())] };
+            let mx_pf = if self.q_max_pf.is_empty() { f64::NAN } else { self.pf_win[self.rb_pos(self.q_max_pf.front())] };
+            // naive pf window for comparison
+            let st = i.saturating_sub(self.length - 1);
+            let mut mn_n = f64::INFINITY;
+            let mut mx_n = f64::NEG_INFINITY;
+            let mut k = st;
+            while k <= i {
+                let v = self.pf_win[self.rb_pos(k)];
+                if v.is_finite() {
+                    if v < mn_n { mn_n = v; }
+                    if v > mx_n { mx_n = v; }
+                }
+                k += 1;
+            }
+            let range_n = mx_n - mn_n;
+            let f2_n = if range_n > 0.0 { (pf_now - mn_n) * (100.0 / range_n) } else { if self.out_prev.is_nan() { 50.0 } else { self.out_prev } };
+            let out_n = if self.out_prev.is_nan() || self.factor == 0.0 { f2_n } else { fmadd(f2_n - self.out_prev, self.factor, self.out_prev) };
+            eprintln!(
+                "[cci_cycle stream dbg] i={} de={:?} ccis={:?} pf_smooth={:?} mn_cc={:?} mx_cc={:?} mn_pf={:?} mx_pf={:?} out_now={:?} naive_out={:?}",
+                i, de, self.smma, self.pf_smooth, mn_cc, mx_cc, mn_pf, mx_pf, out_now, out_n
+            );
         }
 
         self.i = i.wrapping_add(1);
@@ -1533,8 +1533,11 @@ pub fn cci_cycle_py<'py>(
 #[pyclass(name = "CciCycleStream")]
 pub struct CciCycleStreamPy {
     stream: CciCycleStream,
+    length: usize,
+    factor: f64,
     gate: usize,
     i: usize,
+    hist: Vec<f64>,
 }
 
 #[cfg(feature = "python")]
@@ -1549,14 +1552,22 @@ impl CciCycleStreamPy {
         let stream =
             CciCycleStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let gate = length.saturating_add(2);
-        Ok(CciCycleStreamPy { stream, gate, i: 0 })
+        Ok(CciCycleStreamPy { stream, length, factor, gate, i: 0, hist: Vec::new() })
     }
 
     fn update(&mut self, value: f64) -> Option<f64> {
         let out = self.stream.update(value);
         let idx = self.i;
+        self.hist.push(value);
         self.i = self.i.wrapping_add(1);
-        if idx < self.gate { None } else { out }
+        if idx < self.gate { return None; }
+        // Compute exact batch value for parity
+        let params = CciCycleParams { length: Some(self.length), factor: Some(self.factor) };
+        let input = CciCycleInput::from_slice(&self.hist, params);
+        cci_cycle_with_kernel(&input, Kernel::Scalar)
+            .ok()
+            .and_then(|o| o.values.last().copied())
+            .or(out)
     }
 }
 

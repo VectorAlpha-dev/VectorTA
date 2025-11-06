@@ -1084,15 +1084,29 @@ pub fn er_batch_py<'py>(
 
     let combos = py
         .allow_threads(|| {
-            let batch = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
-                k => k,
-            };
-            let simd = match batch {
-                Kernel::Avx512Batch => Kernel::Avx512,
-                Kernel::Avx2Batch => Kernel::Avx2,
-                Kernel::ScalarBatch => Kernel::Scalar,
-                _ => unreachable!(),
+            // Align Python batch Auto selection with the single-path mapping to avoid
+            // parity mismatches: single maps AVX512 -> Scalar for ER until parity is
+            // fully validated across datasets. Keep AVX2 as-is.
+            let simd = match kern {
+                Kernel::Auto => {
+                    let base = detect_best_kernel();
+                    match base {
+                        // Single-path er_with_kernel routes AVX512 to scalar.
+                        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                        Kernel::Avx512 => Kernel::Scalar,
+                        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                        Kernel::Avx2 => Kernel::Avx2,
+                        _ => Kernel::Scalar,
+                    }
+                }
+                other => match other {
+                    Kernel::ScalarBatch => Kernel::Scalar,
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx2Batch => Kernel::Avx2,
+                    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                    Kernel::Avx512Batch => Kernel::Avx512,
+                    _ => unreachable!(),
+                },
             };
             er_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })

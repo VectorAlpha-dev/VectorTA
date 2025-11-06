@@ -92,8 +92,10 @@ test('LRSI accuracy', () => {
         }
     }
     
-    // Compare full output with Rust if available
-    // compareWithRust('lrsi', result, 'hl', { alpha: alpha });
+    // Verify last 5 values match Rust references exactly (<=1e-9 tol)
+    const expectedLast5 = [0.0, 0.0, 0.0, 0.0, 0.0];
+    const last5 = Array.from(result.slice(result.length - 5));
+    assertArrayClose(last5, expectedLast5, 1e-9, 'LRSI last 5 values mismatch vs Rust');
 });
 
 test('LRSI default candles', () => {

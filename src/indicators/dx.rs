@@ -1897,14 +1897,15 @@ pub fn dx_batch_py<'py>(
     let sweep = DxBatchRange::from_tuple(period_range);
     let combos = expand_grid(&sweep);
     let rows = combos.len();
-    let cols = h.len();
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let out_slice = unsafe { out_arr.as_slice_mut()? };
+    // Use the minimum input length to mirror core logic
+    let cols = h.len().min(l.len()).min(c.len());
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
-        dx_batch_inner_into(h, l, c, &sweep, kern, true, out_slice)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let DxBatchOutput { values, .. } = py
+        .allow_threads(|| dx_batch_with_kernel(h, l, c, &sweep, kern))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Move values into a NumPy array with shape (rows, cols)
+    let out_arr = PyArray1::from_vec(py, values);
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;

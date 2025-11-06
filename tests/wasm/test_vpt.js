@@ -82,10 +82,11 @@ test('VPT accuracy from CSV', async () => {
     assert(result.length >= 5);
     const last5 = result.slice(-5);
     
+    // Match Rust tolerance (abs diff < 1e-9)
     assertArrayClose(
         last5,
         expected_last_five,
-        1e-3,
+        1e-9,
         "VPT last 5 values mismatch"
     );
     

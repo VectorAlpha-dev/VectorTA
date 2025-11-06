@@ -335,7 +335,7 @@ test('QQE NaN handling', () => {
     const slow = result.values.slice(result.cols, result.cols * 2);
     
     // After warmup period, no NaN values should exist
-    const warmup = expected.warmupPeriod; // Should be 17 now
+    const warmup = expected.warmupPeriod; // 17 for default params
     
     if (fast.length > warmup) {
         for (let i = warmup; i < Math.min(warmup + 100, fast.length); i++) {
@@ -344,8 +344,11 @@ test('QQE NaN handling', () => {
         }
     }
     
-    // First warmup values should be NaN
-    assertAllNaN(fast.slice(0, warmup), "Expected NaN in fast warmup period");
+    // Warmup semantics: fast is defined from rsi_start; slow from warmup
+    const firstValid = testData.close.findIndex(v => !Number.isNaN(v));
+    const rsiStart = firstValid + expected.defaultParams.rsiPeriod; // 0 + 14 = 14 on this data
+    
+    assertAllNaN(fast.slice(0, rsiStart), "Expected NaN in fast until rsi_start");
     assertAllNaN(slow.slice(0, warmup), "Expected NaN in slow warmup period");
 });
 

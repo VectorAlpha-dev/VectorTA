@@ -26,6 +26,16 @@
 //!   segment. Modest speedups expected; scalar remains the reference path.
 //! - Batch: per-row compute currently dispatches the same kernels; no row-specific sharing yet.
 //! - Warmup/semantics: preserved exactly; allocation and NaN prefixes follow alma.rs patterns.
+//!
+//! ## Binding Tests Status (2025-10-27)
+//! - Python bindings: PASS. `tests/python/test_avsl.py` (13 tests) all pass and the accuracy checks
+//!   compare the last 5 values against the same PineScript reference used by the Rust unit tests
+//!   with the same 1% tolerance.
+//! - WASM bindings: PARTIAL. `tests/wasm/test_avsl.js` batch default-row check passes against the
+//!   Rust reference (within 1%), but the single-series `avsl_js` accuracy test fails: the last 5
+//!   values differ significantly (e.g., got ~64,606 vs expected ~56,472 on the first of the last
+//!   five). This suggests an issue specific to the `avsl_js` path rather than data or batch paths.
+//!   No changes were made to kernels pending investigation.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -2354,18 +2364,40 @@ pub fn avsl_js(
     slow_period: usize,
     multiplier: f64,
 ) -> Result<Vec<f64>, JsValue> {
-    let params = AvslParams {
-        fast_period: Some(fast_period),
-        slow_period: Some(slow_period),
-        multiplier: Some(multiplier),
+    // Validate inputs following the same rules as the scalar path
+    let len = close.len();
+    if len == 0 {
+        return Err(JsValue::from_str("empty input"));
+    }
+    if close.len() != low.len() || close.len() != volume.len() {
+        return Err(JsValue::from_str("data length mismatch"));
+    }
+    let first = first_valid_max3(close, low, volume)
+        .ok_or_else(|| JsValue::from_str("All values are NaN"))?;
+    if fast_period == 0 || fast_period > len {
+        return Err(JsValue::from_str("Invalid period"));
+    }
+    if slow_period == 0 || slow_period > len {
+        return Err(JsValue::from_str("Invalid period"));
+    }
+    if !(multiplier.is_finite()) || multiplier <= 0.0 {
+        return Err(JsValue::from_str("Invalid multiplier"));
+    }
+    if len - first < slow_period {
+        return Err(JsValue::from_str("Not enough valid data"));
+    }
+
+    // Route single-series JS API through the same batch kernel path used by
+    // avsl_batch() to ensure identical numerics. This avoids divergence that
+    // was observed between single-series and batch implementations.
+    let sweep = AvslBatchRange {
+        fast_period: (fast_period, fast_period, 0),
+        slow_period: (slow_period, slow_period, 0),
+        multiplier: (multiplier, multiplier, 0.0),
     };
-    let input = AvslInput::from_slices(close, low, volume, params);
-
-    let mut output = vec![0.0; close.len()];
-    avsl_into_slice(&mut output, &input, detect_best_kernel())
+    let out = avsl_batch_with_kernel(close, low, volume, &sweep, detect_best_batch_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-    Ok(output)
+    Ok(out.values)
 }
 
 #[cfg(feature = "wasm")]
@@ -2398,7 +2430,7 @@ pub fn avsl_into(
     multiplier: f64,
 ) -> Result<(), JsValue> {
     if close_ptr.is_null() || low_ptr.is_null() || vol_ptr.is_null() || out_ptr.is_null() {
-        return Err(JsValue::from_str("null pointer passed to avsl_into"));
+        return Err(JsValue::from_str("Null pointer"));
     }
     unsafe {
         let close = core::slice::from_raw_parts(close_ptr, len);
@@ -2406,24 +2438,47 @@ pub fn avsl_into(
         let vol = core::slice::from_raw_parts(vol_ptr, len);
         let out = core::slice::from_raw_parts_mut(out_ptr, len);
 
+        // Validate like avsl_js to avoid internal panics in batch helpers
+        let n = close.len();
+        if n == 0 {
+            return Err(JsValue::from_str("empty input"));
+        }
+        if close.len() != low.len() || close.len() != vol.len() {
+            return Err(JsValue::from_str("data length mismatch"));
+        }
+        let first = match first_valid_max3(close, low, vol) {
+            Some(i) => i,
+            None => return Err(JsValue::from_str("All values are NaN")),
+        };
+        if fast_period == 0 || fast_period > n || slow_period == 0 || slow_period > n {
+            return Err(JsValue::from_str("Invalid period"));
+        }
+        if !(multiplier.is_finite()) || multiplier <= 0.0 {
+            return Err(JsValue::from_str("Invalid multiplier"));
+        }
+        if n - first < slow_period {
+            return Err(JsValue::from_str("Not enough valid data"));
+        }
+
         let params = AvslParams {
             fast_period: Some(fast_period),
             slow_period: Some(slow_period),
             multiplier: Some(multiplier),
         };
-        let input = AvslInput::from_slices(close, low, vol, params);
 
-        // Handle in-place gracefully
+        // Handle in-place gracefully by computing into a temporary slice
         if out_ptr as *const f64 == close_ptr as *const f64
             || out_ptr as *const f64 == low_ptr as *const f64
             || out_ptr as *const f64 == vol_ptr as *const f64
         {
             let mut temp = vec![0.0; len];
-            avsl_into_slice(&mut temp, &input, detect_best_kernel())
+            let combos = vec![params];
+            avsl_batch_inner_into(close, low, vol, &combos, detect_best_batch_kernel(), &mut temp)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             out.copy_from_slice(&temp);
         } else {
-            avsl_into_slice(out, &input, detect_best_kernel())
+            let combos = vec![params];
+            avsl_batch_inner_into(close, low, vol, &combos, detect_best_batch_kernel(), out)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
         Ok(())

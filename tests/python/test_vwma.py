@@ -53,11 +53,13 @@ class TestVwma:
         assert len(result) == len(close)
         
         # Check last 5 values match expected
+        # Use absolute tolerance 1e-3 to match Rust tests exactly
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-3,  # VWMA uses 1e-3 tolerance in Rust tests
-            msg="VWMA last 5 values mismatch"
+            rtol=0.0,
+            atol=1e-3,
+            msg="VWMA last 5 values mismatch (abs tol 1e-3)"
         )
         
         # Compare full output with Rust
@@ -208,11 +210,13 @@ class TestVwma:
         expected = EXPECTED_OUTPUTS['vwma']['last_5_values']
         
         # Check last 5 values match
+        # Use absolute tolerance 1e-3 to align with Rust tests
         assert_close(
             default_row[-5:],
             expected,
-            rtol=1e-3,  # VWMA uses 1e-3 tolerance
-            msg="VWMA batch default row mismatch"
+            rtol=0.0,
+            atol=1e-3,
+            msg="VWMA batch default row mismatch (abs tol 1e-3)"
         )
     
     def test_vwma_kernel_parameter(self, test_data):

@@ -60,7 +60,8 @@ class TestNama:
         
         # Check last 5 values
         last_5_actual = result[-5:]
-        assert_close(last_5_actual, expected_last_five, rtol=1e-8, atol=1e-8,
+        # Match Rust tolerance (abs diff < 1e-6); do not exceed it
+        assert_close(last_5_actual, expected_last_five, rtol=0.0, atol=1e-6,
                     msg="NAMA last 5 values mismatch")
         
         # Note: User's reference values (59309.14, 59304.89, etc.) are from OHLC calculation

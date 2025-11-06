@@ -899,11 +899,14 @@ fn dema_batch_with_kernel(
             })
         }
     };
+    // Keep parity and performance policy consistent with single-path:
+    // - AVX512: use AVX512 (wins consistently)
+    // - AVX2: prefer Scalar (AVX2 underperforms on typical targets and single Auto uses Scalar)
     let simd = match kernel {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512Batch => Kernel::Avx512,
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::Avx2Batch => Kernel::Scalar,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
     };
@@ -1061,12 +1064,12 @@ unsafe fn dema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dema_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    dema_scalar(data, period, first, out)
+    dema_avx2(data, period, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn dema_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    dema_scalar(data, period, first, out)
+    dema_avx512(data, period, first, out)
 }
 
 #[cfg(test)]
@@ -1958,7 +1961,7 @@ pub fn dema_batch_py<'py>(
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512Batch => Kernel::Avx512,
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2Batch => Kernel::Avx2,
+        Kernel::Avx2Batch => Kernel::Scalar,
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
     };

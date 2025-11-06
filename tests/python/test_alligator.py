@@ -56,24 +56,28 @@ class TestAlligator:
         assert len(result['lips']) == len(hl2)
         
         # Check last 5 values match expected for each line
+        # Match Rust test tolerance: absolute 1e-1 (no relative tolerance)
         assert_close(
             result['jaw'][-5:], 
             expected_last_five_jaw,
-            rtol=1e-1,  # Using 1e-1 tolerance as in Rust tests
+            rtol=0,
+            atol=1e-1,
             msg="Alligator jaw last 5 values mismatch"
         )
         
         assert_close(
             result['teeth'][-5:], 
             expected_last_five_teeth,
-            rtol=1e-1,
+            rtol=0,
+            atol=1e-1,
             msg="Alligator teeth last 5 values mismatch"
         )
         
         assert_close(
             result['lips'][-5:], 
             expected_last_five_lips,
-            rtol=1e-1,
+            rtol=0,
+            atol=1e-1,
             msg="Alligator lips last 5 values mismatch"
         )
     
@@ -253,21 +257,24 @@ class TestAlligator:
         assert_close(
             jaw_row[-5:],
             expected_jaw,
-            rtol=1e-1,
+            rtol=0,
+            atol=1e-1,
             msg="Alligator batch jaw mismatch"
         )
         
         assert_close(
             teeth_row[-5:],
             expected_teeth,
-            rtol=1e-1,
+            rtol=0,
+            atol=1e-1,
             msg="Alligator batch teeth mismatch"
         )
         
         assert_close(
             lips_row[-5:],
             expected_lips,
-            rtol=1e-1,
+            rtol=0,
+            atol=1e-1,
             msg="Alligator batch lips mismatch"
         )
     

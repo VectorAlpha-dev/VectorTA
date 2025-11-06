@@ -63,8 +63,9 @@ class TestChandelierExit:
         
         if len(short_stop) > max(expected_indices):
             # Test specific indices if they exist
+            # Match Rust absolute tolerance (<= 1e-5) for reference values
             for idx, exp_val in zip(expected_indices, expected['short_stop_last_5']):
-                assert_close(short_stop[idx], exp_val, rtol=1e-3, msg=f"short_stop[{idx}]")
+                assert_close(short_stop[idx], exp_val, rtol=1e-12, atol=1e-5, msg=f"short_stop[{idx}]")
         else:
             # Fallback: just verify we have valid values after warmup
             non_nan_indices = [i for i in range(len(short_stop)) if not np.isnan(short_stop[i])]

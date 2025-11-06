@@ -1712,6 +1712,15 @@ pub fn srsi_py<'py>(
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
 
+    // Pre-validate periods for clearer Python errors (aligns with tests)
+    if matches!(rsi_period, Some(0))
+        || matches!(stoch_period, Some(0))
+        || matches!(k, Some(0))
+        || matches!(d, Some(0))
+    {
+        return Err(PyValueError::new_err("Invalid period: values must be > 0"));
+    }
+
     let params = SrsiParams {
         rsi_period,
         stoch_period,
@@ -1723,7 +1732,19 @@ pub fn srsi_py<'py>(
 
     let (k_vec, d_vec) = py
         .allow_threads(|| srsi_with_kernel(&input, kern).map(|o| (o.k, o.d)))
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("Not enough valid data")
+                && (matches!(rsi_period, Some(0))
+                    || matches!(stoch_period, Some(0))
+                    || matches!(k, Some(0))
+                    || matches!(d, Some(0)))
+            {
+                PyValueError::new_err("Invalid period: values must be > 0")
+            } else {
+                PyValueError::new_err(msg)
+            }
+        })?;
 
     Ok((k_vec.into_pyarray(py), d_vec.into_pyarray(py)))
 }

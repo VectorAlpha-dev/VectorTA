@@ -79,7 +79,7 @@ test('RANGE_FILTER accuracy', () => {
         58368.60035759538
     ];
     
-    const tolerance = 0.0001; // Tight tolerance as we're comparing against our own implementation
+    const tolerance = 1e-10; // Match Rust unit test tolerance
     
     // Check Filter values
     const last5Filter = result.filter.slice(-5);

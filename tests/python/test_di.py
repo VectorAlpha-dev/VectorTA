@@ -40,16 +40,19 @@ class TestDi:
         assert len(minus_di) == len(test_data['close'])
         
         # Check last 5 values match expected
+        # Match Rust tolerance exactly: abs diff < 1e-6 (no looser rtol)
         assert_close(
             plus_di[-5:],
             expected['plus_last_5_values'],
-            rtol=1e-6,
+            rtol=0.0,
+            atol=1e-6,
             msg="DI+ last 5 values mismatch"
         )
         assert_close(
             minus_di[-5:],
             expected['minus_last_5_values'],
-            rtol=1e-6,
+            rtol=0.0,
+            atol=1e-6,
             msg="DI- last 5 values mismatch"
         )
     

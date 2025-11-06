@@ -14,6 +14,11 @@ use my_project::cuda::moving_averages::alma_wrapper::{
     BatchKernelPolicy, BatchThreadsPerOutput, CudaAlma, CudaAlmaPolicy, ManySeriesKernelPolicy,
 };
 
+#[cfg(feature = "cuda")]
+fn should_force_skip_cuda() -> bool {
+    std::env::var("SKIP_CUDA_TESTS").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+}
+
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
         return true;
@@ -57,7 +62,7 @@ fn compare_batch(
     start_period: usize,
     end_period: usize,
 ) {
-    if !cuda_available() {
+    if should_force_skip_cuda() || !cuda_available() {
         eprintln!("[compare_batch] skipped - no CUDA device");
         return;
     }
@@ -85,7 +90,7 @@ fn compare_batch(
 
 #[cfg(feature = "cuda")]
 fn compare_many_series(policy: CudaAlmaPolicy, cols: usize, rows: usize, period: usize) {
-    if !cuda_available() {
+    if should_force_skip_cuda() || !cuda_available() {
         eprintln!("[compare_many_series] skipped - no CUDA device");
         return;
     }

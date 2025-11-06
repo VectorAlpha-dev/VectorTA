@@ -131,7 +131,8 @@ test('PNR empty input', () => {
     const empty = new Float64Array([]);
     
     assert.throws(() => {
-        wasm.percentile_nearest_rank_js(empty);
+        // WASM API requires explicit params even for empty input
+        wasm.percentile_nearest_rank_js(empty, 15, 50.0);
     }, /Input data is empty/);
 });
 
@@ -211,7 +212,8 @@ test('PNR all NaN input', () => {
     allNaN.fill(NaN);
     
     assert.throws(() => {
-        wasm.percentile_nearest_rank_js(allNaN);
+        // WASM API requires explicit params even when data contains only NaN
+        wasm.percentile_nearest_rank_js(allNaN, 15, 50.0);
     }, /All values are NaN/);
 });
 

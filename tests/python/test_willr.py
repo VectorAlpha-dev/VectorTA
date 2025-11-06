@@ -105,12 +105,13 @@ class TestWillr:
             ta.willr(high, low, close, 5)
     
     def test_willr_not_enough_valid_data(self):
-        """Test WILLR fails with not enough valid data."""
-        high = np.array([np.nan, 2.0])
-        low = np.array([np.nan, 1.0])
-        close = np.array([np.nan, 1.5])
-        
-        with pytest.raises(ValueError, match="Invalid period"):
+        """Test WILLR fails with not enough valid data (period <= len but insufficient valid span)."""
+        # len = 3, period = 3, first_valid = 2 -> valid span = 1 < 3
+        high = np.array([np.nan, np.nan, 2.0])
+        low = np.array([np.nan, np.nan, 1.0])
+        close = np.array([np.nan, np.nan, 1.5])
+
+        with pytest.raises(ValueError, match="Not enough valid data"):
             ta.willr(high, low, close, 3)
     
     def test_willr_mismatched_lengths(self):

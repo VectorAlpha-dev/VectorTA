@@ -15,7 +15,7 @@ import {
     assertNoNaN,
     EXPECTED_OUTPUTS 
 } from './test_utils.js';
-import { compareWithRust } from './rust-comparison.js';
+import { getRustOutput } from './rust-comparison.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -58,7 +58,7 @@ test('Damiani Volatmeter partial params', () => {
     assert.strictEqual(anti.length, close.length);
 });
 
-test('Damiani Volatmeter accuracy', async () => {
+test('Damiani Volatmeter accuracy (close-only binding path)', async () => {
     // Test matches expected values from Rust tests - mirrors check_damiani_accuracy
     const close = new Float64Array(testData.close);
     const expected = EXPECTED_OUTPUTS.damiani_volatmeter;
@@ -90,10 +90,23 @@ test('Damiani Volatmeter accuracy', async () => {
         "Damiani Volatmeter anti last 5 values mismatch"
     );
     
-    // Compare full output with Rust (with higher tolerance due to accumulated floating point differences)
-    // Damiani Volatmeter involves many calculations with ATR and std dev which can accumulate errors
-    // The difference grows with the index due to accumulated calculations
-    await compareWithRust('damiani_volatmeter', { vol, anti }, 'close', expected.defaultParams, 0.3);
+    // NOTE: The single-series WASM binding uses close-only data (H/L = close).
+    // Rust candles-based references are validated in a separate test below.
+});
+
+test('Damiani Volatmeter Rust reference parity (candles-based)', async () => {
+    // Validate that our stored Rust reference values are up-to-date (same as Rust tests)
+    const expected = EXPECTED_OUTPUTS.damiani_volatmeter;
+    const rust = await getRustOutput('damiani_volatmeter', 'close'); // candles-based computation
+
+    const n = rust.length;
+    const start = n - 5;
+    const rustVolLast5 = rust.vol.slice(start);
+    const rustAntiLast5 = rust.anti.slice(start);
+
+    // Match Rust unit test tolerance (1e-2)
+    assertArrayClose(rustVolLast5, expected.rustVolLast5Values, 1e-2, 'Rust vol last 5 mismatch');
+    assertArrayClose(rustAntiLast5, expected.rustAntiLast5Values, 1e-2, 'Rust anti last 5 mismatch');
 });
 
 test('Damiani Volatmeter zero period', () => {

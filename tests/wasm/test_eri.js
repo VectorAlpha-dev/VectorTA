@@ -71,17 +71,19 @@ test('ERI accuracy', () => {
     ];
     
     // Check last 5 values
+    // Match Rust unit test tolerance: absolute 1e-2
     assertArrayClose(
         bull.slice(-5),
         expectedBullLastFive,
-        0.02,
+        0.01,
         'ERI bull last 5 values mismatch'
     );
     
+    // Match Rust unit test tolerance: absolute 1e-2
     assertArrayClose(
         bear.slice(-5),
         expectedBearLastFive,
-        0.02,
+        0.01,
         'ERI bear last 5 values mismatch'
     );
 });

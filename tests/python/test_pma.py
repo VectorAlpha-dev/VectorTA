@@ -66,16 +66,19 @@ class TestPma:
         last5_trigger = trigger[-5:]
         
         for i in range(5):
+            # Match Rust test tolerance exactly: absolute 1e-1
             assert_close(
                 last5_predict[i],
                 expected_predict[i],
-                rtol=1e-1,
+                rtol=0,
+                atol=1e-1,
                 msg=f"PMA predict last 5 values mismatch at index {i}"
             )
             assert_close(
                 last5_trigger[i],
                 expected_trigger[i],
-                rtol=1e-1,
+                rtol=0,
+                atol=1e-1,
                 msg=f"PMA trigger last 5 values mismatch at index {i}"
             )
     
@@ -138,24 +141,21 @@ class TestPma:
     def test_pma_mixed_nan_input(self):
         """Test PMA with mixed NaN values"""
         mixed_data = np.array([np.nan, np.nan, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0], dtype=np.float64)
-        
+
         predict, trigger = ta_indicators.pma(mixed_data)
         assert len(predict) == len(mixed_data)
         assert len(trigger) == len(mixed_data)
-        
-        # First values should be NaN due to input NaN and warmup
-        assert np.isnan(predict[0])
-        assert np.isnan(predict[1])
-        assert np.isnan(trigger[0])
-        assert np.isnan(trigger[1])
-        
-        # After warmup from first valid value (index 2), predict starts at index 2 + 6 = 8
-        # Trigger needs 3 more predict values, so starts at index 8 + 3 = 11
-        # But we only have 9 values, so neither predict nor trigger will be valid
-        # The test data is too short to produce any valid output
+
+        # Warmup from first valid value (index 2):
+        # predict becomes valid at j0 = 2 + 6 = 8
+        # trigger requires 3 additional predicts -> first valid at 11 (not present here)
         for i in range(len(mixed_data)):
-            assert np.isnan(predict[i]), f"Expected NaN in predict at index {i} due to insufficient data"
-            assert np.isnan(trigger[i]), f"Expected NaN in trigger at index {i} due to insufficient data"
+            if i < 8:
+                assert np.isnan(predict[i]), f"Expected NaN in predict at index {i} during warmup"
+            elif i == 8:
+                assert not np.isnan(predict[i]), "Expected valid predict at index 8"
+            # trigger remains NaN for all indices in this short series
+            assert np.isnan(trigger[i]), f"Expected NaN in trigger at index {i} due to insufficient predicts"
     
     def test_pma_simple_predictable_pattern(self):
         """Test PMA with a simple pattern"""

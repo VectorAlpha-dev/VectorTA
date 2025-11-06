@@ -57,14 +57,29 @@ class TestEmd:
             -63.18241536833306,
         ]
         
-        # Check last 5 values
+        # Check last 5 values using absolute tolerance only (<= Rust tolerance)
         for i in range(5):
-            assert_close(upperband[-5+i], expected_last_five_upper[i], 
-                        rtol=1e-6, atol=1e-6, msg=f"EMD upperband mismatch at index {-5+i}")
-            assert_close(middleband[-5+i], expected_last_five_middle[i], 
-                        rtol=1e-6, atol=1e-6, msg=f"EMD middleband mismatch at index {-5+i}")
-            assert_close(lowerband[-5+i], expected_last_five_lower[i], 
-                        rtol=1e-6, atol=1e-6, msg=f"EMD lowerband mismatch at index {-5+i}")
+            assert_close(
+                upperband[-5 + i],
+                expected_last_five_upper[i],
+                rtol=0.0,
+                atol=1e-6,
+                msg=f"EMD upperband mismatch at index {-5 + i}"
+            )
+            assert_close(
+                middleband[-5 + i],
+                expected_last_five_middle[i],
+                rtol=0.0,
+                atol=1e-6,
+                msg=f"EMD middleband mismatch at index {-5 + i}"
+            )
+            assert_close(
+                lowerband[-5 + i],
+                expected_last_five_lower[i],
+                rtol=0.0,
+                atol=1e-6,
+                msg=f"EMD lowerband mismatch at index {-5 + i}"
+            )
     
     def test_emd_errors(self):
         """Test error handling"""

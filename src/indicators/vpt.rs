@@ -486,13 +486,16 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         let invalid = m_nan_p0 | m_nan_p1 | m_nan_v | m_eq0_p0;
 
         // cur = v * ((p1 - p0) / p0)
+        // Use rcp14 with two Newton refinements to reach near-IEEE precision
+        // while remaining faster than full-width division on most CPUs.
         let diff = _mm512_sub_pd(p1, p0);
-        // Fast reciprocal + one Newton step (~28 bits), then multiply: div = diff / p0
-        // Keeps behavior under invalid mask unchanged; accuracy matches scalar within tolerance.
         let r0 = _mm512_rcp14_pd(p0);
         let two = _mm512_set1_pd(2.0);
-        let r1 = _mm512_mul_pd(r0, _mm512_fnmadd_pd(p0, r0, two));
-        let div = _mm512_mul_pd(diff, r1);
+        let e1 = _mm512_fnmadd_pd(p0, r0, two);      // e1 = 2 - p0*r0
+        let r1 = _mm512_mul_pd(r0, e1);              // first refinement
+        let e2 = _mm512_fnmadd_pd(p0, r1, two);      // e2 = 2 - p0*r1
+        let r2 = _mm512_mul_pd(r1, e2);              // second refinement
+        let div = _mm512_mul_pd(diff, r2);
         let mul = _mm512_mul_pd(vv, div);
         let cur = _mm512_mask_mov_pd(mul, invalid, _mm512_set1_pd(f64::NAN));
 
