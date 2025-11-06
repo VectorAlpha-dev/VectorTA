@@ -48,6 +48,22 @@ class TestWclprice:
         for i in range(len(result)):
             if not np.isnan(result[i]):
                 assert low[i] <= result[i] <= high[i], f"WCLPRICE value {result[i]} at index {i} is outside range [{low[i]}, {high[i]}]"
+
+    def test_wclprice_reference_last_five(self, test_data):
+        """Ensure last 5 values match Rust reference values exactly (same CSV)."""
+        high = test_data['high']
+        low = test_data['low']
+        close = test_data['close']
+
+        result = ta_indicators.wclprice(high, low, close)
+        expected_last_five = np.array([59225.5, 59212.75, 59078.5, 59150.75, 58711.25])
+        actual_last_five = result[-5:]
+        assert_close(
+            actual_last_five,
+            expected_last_five,
+            rtol=1e-8,
+            msg="WCLPRICE last 5 values mismatch vs Rust references",
+        )
     
     def test_wclprice_empty_data(self):
         """Test WCLPRICE fails with empty data - mirrors check_wclprice_empty_data"""

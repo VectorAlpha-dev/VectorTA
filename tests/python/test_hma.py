@@ -47,7 +47,8 @@ class TestHma:
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-3,  # Using 1e-3 as in Rust test
+            rtol=1e-12,
+            atol=1e-3,  # Match Rust absolute tolerance (< 1e-3)
             msg="HMA last 5 values mismatch"
         )
         
@@ -205,7 +206,8 @@ class TestHma:
         assert_close(
             batch_result['values'][0, -5:],
             expected['last_5_values'],
-            rtol=1e-3,
+            rtol=1e-12,
+            atol=1e-3,  # Match Rust absolute tolerance (< 1e-3)
             msg="HMA batch last 5 values mismatch"
         )
     

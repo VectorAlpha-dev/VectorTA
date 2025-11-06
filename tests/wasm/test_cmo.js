@@ -6,6 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { 
     loadTestData, 
     assertArrayClose, 
@@ -25,18 +26,26 @@ let testData;
 
 test.before(async () => {
     // Load WASM module
+    // Prefer ESM pkg output; on Node ESM WASM import failures ("env" import),
+    // fall back to the local CommonJS wrapper in tests/wasm/.
+    const pkgPath = path.join(__dirname, '../../pkg/my_project.js');
+    const esmImportPath = process.platform === 'win32'
+        ? 'file:///' + pkgPath.replace(/\\/g, '/')
+        : pkgPath;
     try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
-        const importPath = process.platform === 'win32' 
-            ? 'file:///' + wasmPath.replace(/\\/g, '/')
-            : wasmPath;
-        wasm = await import(importPath);
-        // No need to call default() for ES modules
-    } catch (error) {
-        console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
-        throw error;
+        wasm = await import(esmImportPath);
+        // Some Node versions expose CJS default; normalize
+        if (wasm && wasm.default) wasm = wasm.default;
+        // Access to raw memory is needed by fast-API tests. The pkg ESM build
+        // doesn’t expose the wasm instance; if missing, use CJS fallback.
+        if (!wasm || !wasm.__wasm) throw new Error('no __wasm in ESM module');
+    } catch (err) {
+        const require = createRequire(import.meta.url);
+        const localCjsPath = path.join(__dirname, 'my_project.js');
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        wasm = require(localCjsPath);
     }
-    
+
     testData = loadTestData();
 });
 

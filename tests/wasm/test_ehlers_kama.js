@@ -247,7 +247,8 @@ test('Ehlers KAMA batch single parameter', () => {
     const singleResult = wasm.ehlers_kama_js(close, 20);
     
     assert.strictEqual(batchResult.values.length, singleResult.length);
-    assertArrayClose(batchResult.values, singleResult, 1e-10, "Batch vs single mismatch");
+    // Match Rust property tests which allow ~1e-9 (or a few ULPs)
+    assertArrayClose(batchResult.values, singleResult, 1e-9, "Batch vs single mismatch");
 });
 
 test('Ehlers KAMA batch multiple periods', () => {

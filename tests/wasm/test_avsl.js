@@ -332,11 +332,10 @@ test('AVSL zero-copy API', () => {
     
     try {
         // Create views into WASM memory
-        const memory = wasm.__wbindgen_memory();
-        const closeView = new Float64Array(memory.buffer, closePtr, data.length);
-        const lowView = new Float64Array(memory.buffer, lowPtr, data.length);
-        const volView = new Float64Array(memory.buffer, volPtr, data.length);
-        const outView = new Float64Array(memory.buffer, outPtr, data.length);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, data.length);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, data.length);
+        const volView = new Float64Array(wasm.__wasm.memory.buffer, volPtr, data.length);
+        const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, data.length);
         
         // Copy data into WASM memory
         closeView.set(data);
@@ -350,8 +349,7 @@ test('AVSL zero-copy API', () => {
         const regularResult = wasm.avsl_js(data, data, volume, fastPeriod, slowPeriod, multiplier);
         
         // Recreate view in case memory grew
-        const memory2 = wasm.__wbindgen_memory();
-        const outView2 = new Float64Array(memory2.buffer, outPtr, data.length);
+        const outView2 = new Float64Array(wasm.__wasm.memory.buffer, outPtr, data.length);
         
         for (let i = 0; i < data.length; i++) {
             if (isNaN(regularResult[i]) && isNaN(outView2[i])) {
@@ -389,10 +387,9 @@ test('AVSL zero-copy in-place operation', () => {
     const volPtr = wasm.avsl_alloc(size);
     
     try {
-        const memory = wasm.__wbindgen_memory();
-        const closeView = new Float64Array(memory.buffer, closePtr, size);
-        const lowView = new Float64Array(memory.buffer, lowPtr, size);
-        const volView = new Float64Array(memory.buffer, volPtr, size);
+        const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, size);
+        const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, size);
+        const volView = new Float64Array(wasm.__wasm.memory.buffer, volPtr, size);
         
         closeView.set(close);
         lowView.set(low);
@@ -402,8 +399,7 @@ test('AVSL zero-copy in-place operation', () => {
         wasm.avsl_into(closePtr, lowPtr, volPtr, closePtr, size, 12, 26, 2.0);
         
         // Recreate view
-        const memory2 = wasm.__wbindgen_memory();
-        const resultView = new Float64Array(memory2.buffer, closePtr, size);
+        const resultView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, size);
         
         // Check warmup period has NaN
         // With first_val=0 and slow_period=26:

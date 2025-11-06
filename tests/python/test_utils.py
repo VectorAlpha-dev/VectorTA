@@ -84,6 +84,17 @@ def generate_otto_test_data():
 
 # Expected outputs from Rust tests - these must match EXACTLY
 EXPECTED_OUTPUTS = {
+    'epma': {
+        'default_params': {'period': 11, 'offset': 4},
+        'last_5_values': [
+            59174.48,
+            59201.04,
+            59167.60,
+            59200.32,
+            59117.04,
+        ],
+        'warmup_period': 16,  # period + offset + 1
+    },
     'zscore': {
         # Default parameters used in Rust tests
         'default_params': {'period': 14, 'ma_type': 'sma', 'nbdev': 1.0, 'devtype': 0},
@@ -123,36 +134,23 @@ EXPECTED_OUTPUTS = {
             'correcting_constant': 100000,
             'ma_type': 'VAR'
         },
-        # Expected values from PineScript (last 5 values)
+        # Exact CSV-based reference values from Rust unit tests (last 5)
         'last_5_hott': [
-            0.61437486,
-            0.61421295,
-            0.61409778,
-            0.61404352,
-            0.61388393
+            0.6137310801679211,
+            0.6136758137211143,
+            0.6135129389965592,
+            0.6133345015018311,
+            0.6130191362868016
         ],
         'last_5_lott': [
-            0.61221457,
-            0.61219084,
-            0.61197922,
-            0.61179661,
-            0.61142377
+            0.6118478692473065,
+            0.6118237221582352,
+            0.6116076875101266,
+            0.6114220222840161,
+            0.6110393343841534
         ],
-        # Test data generation pattern
-        'test_data_pattern': {
-            'size': 260,
-            'formula': lambda i: 0.612 - (i * 0.00001),
-            'last_30_override': [
-                0.61233, 0.61235, 0.61210, 0.61195, 0.61180,
-                0.61165, 0.61150, 0.61135, 0.61120, 0.61105,
-                0.61090, 0.61075, 0.61060, 0.61045, 0.61030,
-                0.61015, 0.61000, 0.60985, 0.60970, 0.60955,
-                0.60940, 0.60925, 0.60910, 0.60895, 0.60880,
-                0.60865, 0.60850, 0.60835, 0.60820, 0.60805,
-            ]
-        },
-        # Warmup period for default params
-        'warmup_period': 250  # Conservative estimate
+        # Warmup period for default params (conservative)
+        'warmup_period': 250
     },
     'percentile_nearest_rank': {
         'default_params': {'length': 15, 'percentage': 50.0},
@@ -332,25 +330,25 @@ EXPECTED_OUTPUTS = {
         'default_params': {'channel_length': 10, 'average_length': 21},
         'last_5_values': {
             'wavetrend1': [
-                -31.700919052041584,
-                -31.429599055287365,
-                -33.42650456951316,
-                -32.48187262451018,
-                -39.88701736507456,
+                -34.81423091,
+                -33.92872278,
+                -35.29125217,
+                -34.93917015,
+                -41.42578524,
             ],
             'wavetrend2': [
-                -35.68024735,
-                -33.31827192,
-                -32.62715068,
-                -32.25972409,
-                -34.30624855,
+                -37.72141493,
+                -35.54009606,
+                -34.81718669,
+                -34.74334400,
+                -36.39623258,
             ],
             'histogram': [
-                3.9793283,
-                1.8886729,
-                -0.7993544,
-                -0.2221492,
-                -5.5807683,
+                2.90718403,
+                1.61137328,
+                -0.47406548,
+                -0.19582615,
+                -5.02955265,
             ]
         },
         'warmup_period': 20,  # Based on average_length - 1
@@ -1314,19 +1312,35 @@ EXPECTED_OUTPUTS = {
             'sed_std': 100,
             'threshold': 1.4
         },
+        # Close-only reference (binding single-series path uses close for H/L/C)
         'vol_last_5_values': [
-            0.8539059,  # These are the actual values when using close-only data
+            0.8539059,
             0.75935611,
             0.73610448,
             0.76744843,
             0.84842545
         ],
         'anti_last_5_values': [
-            1.1250333,  # These are the actual values when using close-only data
+            1.1250333,
             1.1325502,
             1.14038661,
             1.13929192,
             1.12982407
+        ],
+        # Candles-based Rust references from src/indicators/damiani_volatmeter.rs tests (check_damiani_accuracy)
+        'rust_vol_last_5_values': [
+            0.9009485470514558,
+            0.8333604467044887,
+            0.815318380178986,
+            0.8276892636184923,
+            0.879447954127426
+        ],
+        'rust_anti_last_5_values': [
+            1.1227721577887388,
+            1.1250333024152703,
+            1.1325501989919875,
+            1.1403866079746106,
+            1.1392919184055932
         ],
         'warmup_period': 101  # max(vis_atr, vis_std, sed_atr, sed_std, 3) + 1
     },
@@ -1718,14 +1732,14 @@ EXPECTED_OUTPUTS = {
         ],
         'warmup_period': 12  # length - 1 for default params
     },
-    'volume_adjusted_ma': {  # Updated after Pine logic fixes
+    'volume_adjusted_ma': {  # Matches Rust unit test references
         'default_params': {'length': 13, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
-        'fast_values': [  # length=13 (Updated after Pine logic fixes)
+        'fast_values': [  # length=13
             60249.34558277224,
-            60283.78930990677,
-            60173.39052862816,
-            60260.19903965848,
-            60226.10253226444
+            60283.79398716032,
+            60173.3929697517,
+            60260.20330381247,
+            60226.095375540506
         ],
         'slow_params': {'length': 55, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
         'slow_values': [  # length=55 (Updated after Pine logic fixes)

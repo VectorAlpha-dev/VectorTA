@@ -46,10 +46,11 @@ class TestEma:
         assert len(result) == len(close)
         
         # Check last 5 values match expected
+        # Match Rust test tolerance (abs diff < 1e-1); do not allow larger rtol
         assert_close(
             result[-5:],
             expected['last_five'],
-            rtol=1e-1,
+            rtol=0.0,
             atol=1e-1,
             msg="EMA last 5 values mismatch"
         )

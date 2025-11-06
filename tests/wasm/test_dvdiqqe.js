@@ -189,6 +189,56 @@ test('DVDIQQE accuracy check', () => {
     assert.ok(centerSet.size > 1, 'Dynamic center line should vary over time');
 });
 
+test('DVDIQQE matches Rust reference values (last 5)', () => {
+    // These are the same reference values and parameters used in the Rust unit tests
+    const expectedDvdi = [-304.41010224, -279.48152664, -287.58723437, -252.40349484, -343.00922595];
+    const expectedSlow = [-990.21769695, -955.69385266, -951.82562405, -903.39071943, -903.39071943];
+    const expectedFast = [-728.26380454, -697.40500858, -697.40500858, -654.73695895, -654.73695895];
+    // Center line depends on full CSV history; these match the Rust test dataset
+    const expectedCenter = [
+        21.98929919135097,
+        21.969910753134442,
+        21.950003541229705,
+        21.932361363982043,
+        21.908895469736102,
+    ];
+
+    const testData = loadTestData();
+    const open = new Float64Array(testData.open);
+    const high = new Float64Array(testData.high);
+    const low = new Float64Array(testData.low);
+    const close = new Float64Array(testData.close);
+    const volume = new Float64Array(testData.volume);
+
+    // Use the exact parameters from Rust tests
+    const result = wasm.dvdiqqe(
+        open,
+        high,
+        low,
+        close,
+        Array.from(volume),
+        13,     // period
+        6,      // smoothing_period
+        2.618,  // fast_multiplier
+        4.236,  // slow_multiplier
+        'default',
+        'dynamic'
+    );
+
+    const cols = result.cols;
+    const dvdi = result.values.slice(0, cols);
+    const fast_tl = result.values.slice(cols, 2 * cols);
+    const slow_tl = result.values.slice(2 * cols, 3 * cols);
+    const center_line = result.values.slice(3 * cols, 4 * cols);
+
+    // Compare last 5 values to Rust references with <= 1e-6 absolute tolerance
+    const last5 = (arr) => arr.slice(arr.length - 5);
+    assertArrayClose(last5(dvdi), expectedDvdi, 1e-6, 'DVDI last-5 mismatch vs Rust');
+    assertArrayClose(last5(slow_tl), expectedSlow, 1e-6, 'Slow TL last-5 mismatch vs Rust');
+    assertArrayClose(last5(fast_tl), expectedFast, 1e-6, 'Fast TL last-5 mismatch vs Rust');
+    assertArrayClose(last5(center_line), expectedCenter, 1e-6, 'Center line last-5 mismatch vs Rust');
+});
+
 test('DVDIQQE error handling - empty input', () => {
     const empty = new Float64Array(0);
     

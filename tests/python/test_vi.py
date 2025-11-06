@@ -68,13 +68,15 @@ class TestVI:
         assert_close(
             result['plus'][-5:], 
             expected_last_five_plus,
-            rtol=1e-8,
+            rtol=0.0,
+            atol=1e-8,
             msg="VI plus last 5 values mismatch"
         )
         assert_close(
             result['minus'][-5:], 
             expected_last_five_minus,
-            rtol=1e-8,
+            rtol=0.0,
+            atol=1e-8,
             msg="VI minus last 5 values mismatch"
         )
     

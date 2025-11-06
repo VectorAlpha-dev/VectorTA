@@ -74,7 +74,8 @@ test('HighPass2 accuracy', async () => {
     );
     
     // Compare full output with Rust
-    await compareWithRust('highpass_2_pole', result, 'close', { period: 48, k: 0.707 });
+    // Use a very tight tolerance so it never exceeds Rust's 1e-6 absolute
+    await compareWithRust('highpass_2_pole', result, 'close', { period: 48, k: 0.707 }, 1e-12);
 });
 
 test('HighPass2 default candles', async () => {
@@ -85,7 +86,8 @@ test('HighPass2 default candles', async () => {
     assert.strictEqual(result.length, close.length);
     
     // Compare with Rust
-    await compareWithRust('highpass_2_pole', result, 'close', { period: 48, k: 0.707 });
+    // Use a very tight tolerance so it never exceeds Rust's 1e-6 absolute
+    await compareWithRust('highpass_2_pole', result, 'close', { period: 48, k: 0.707 }, 1e-12);
 });
 
 test('HighPass2 zero period', () => {

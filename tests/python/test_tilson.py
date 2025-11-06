@@ -29,15 +29,18 @@ class TestTilson:
         assert len(result) == len(close)
         
         # Check last 5 values match expected
+        # Match Rust test's absolute tolerance of 1e-8 (no relative scaling)
         assert_close(
             result[-5:],
             expected['last_5_values'],
-            rtol=1e-8,
+            rtol=0.0,
+            atol=1e-8,
             msg="Tilson last 5 values mismatch"
         )
         
         # Compare full output with Rust
-        compare_with_rust('tilson', result, 'close', expected['default_params'])
+        # Keep absolute tolerance <= Rust's 1e-8 for full-series comparison
+        compare_with_rust('tilson', result, 'close', expected['default_params'], rtol=0.0, atol=1e-8)
     
     def test_tilson_default_params(self, test_data):
         """Test Tilson with default parameters - mirrors check_tilson_default_candles"""
@@ -251,7 +254,8 @@ class TestTilson:
         assert_close(
             default_row[-5:],
             expected,
-            rtol=1e-8,
+            rtol=0.0,
+            atol=1e-8,
             msg="Tilson batch default row mismatch"
         )
     

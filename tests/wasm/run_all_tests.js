@@ -28,11 +28,11 @@ function checkWasmBuilt() {
 }
 
 function installDependencies() {
-    // Check if node_modules exists
+    // Offline-friendly: test_utils.js no longer needs external deps.
+    // Skip npm install to avoid network requirements in CI/agent runs.
     const nodeModulesPath = path.join(__dirname, 'node_modules');
     if (!fs.existsSync(nodeModulesPath)) {
-        console.log('Installing test dependencies...');
-        execSync('npm install', { cwd: __dirname, stdio: 'inherit' });
+        console.log('[wasm-tests] Skipping npm install (no external deps required)');
     }
 }
 

@@ -358,7 +358,7 @@ test('ASO zero-copy API', () => {
     
     try {
         // Create views into WASM memory
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const bullsView = new Float64Array(memory.buffer, bullsPtr, data.length);
         const bearsView = new Float64Array(memory.buffer, bearsPtr, data.length);
         
@@ -387,7 +387,7 @@ test('ASO zero-copy API', () => {
         );
         
         // Recreate views in case memory grew
-        const memory2 = wasm.__wbindgen_memory();
+        const memory2 = wasm.__wasm.memory;
         const bullsView2 = new Float64Array(memory2.buffer, bullsPtr, data.length);
         const bearsView2 = new Float64Array(memory2.buffer, bearsPtr, data.length);
         
@@ -452,7 +452,7 @@ test('ASO zero-copy with large dataset', () => {
         const lowPtr = wasm.aso_alloc(size);
         const closePtr = wasm.aso_alloc(size);
         
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         new Float64Array(memory.buffer, openPtr, size).set(open);
         new Float64Array(memory.buffer, highPtr, size).set(high);
         new Float64Array(memory.buffer, lowPtr, size).set(low);
@@ -465,7 +465,7 @@ test('ASO zero-copy with large dataset', () => {
         );
         
         // Recreate views in case memory grew
-        const memory2 = wasm.__wbindgen_memory();
+        const memory2 = wasm.__wasm.memory;
         const bullsView = new Float64Array(memory2.buffer, bullsPtr, size);
         const bearsView = new Float64Array(memory2.buffer, bearsPtr, size);
         
@@ -608,7 +608,7 @@ test('ASO memory management', () => {
         assert(bearsPtr !== 0, `Failed to allocate ${size} elements for bears`);
         
         // Write pattern to verify memory
-        const memory = wasm.__wbindgen_memory();
+        const memory = wasm.__wasm.memory;
         const bullsView = new Float64Array(memory.buffer, bullsPtr, size);
         const bearsView = new Float64Array(memory.buffer, bearsPtr, size);
         

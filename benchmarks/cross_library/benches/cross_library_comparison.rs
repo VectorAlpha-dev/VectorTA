@@ -107,7 +107,8 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             rust_name: "adx",
             tulip_name: "adx",
             talib_name: Some("ADX"),
-            inputs: vec!["high", "low", "close"],
+            // Tulip ADX only requires high, low (no close)
+            inputs: vec!["high", "low"],
             options: vec![14.0],
         },
         IndicatorMapping {
@@ -300,7 +301,8 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             rust_name: "adxr",
             tulip_name: "adxr",
             talib_name: Some("ADXR"),
-            inputs: vec!["high", "low", "close"],
+            // Tulip ADXR only requires high, low
+            inputs: vec!["high", "low"],
             options: vec![14.0],
         },
         // DI variants (explicit plus/minus for TA-LIB parity)
@@ -552,7 +554,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
         // WCLPRICE (Weighted Close Price)
         IndicatorMapping {
             rust_name: "wclprice",
-            tulip_name: "wcprice",
+            tulip_name: "wclprice",
             talib_name: Some("WCLPRICE"),
             inputs: vec!["high", "low", "close"],
             options: vec![],
@@ -796,16 +798,10 @@ fn benchmark_rust_indicator(
             });
         }
         "linreg" => {
-            group.bench_function("rust_ffi", |b| {
+            let input = linreg::LinRegInput::from_slice(&data.close, linreg::LinRegParams { period: Some(14) });
+            group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    unsafe {
-                        rust_ffi::rust_linreg(
-                            data.len() as i32,
-                            data.close.as_ptr(),
-                            14,
-                            rust_output.as_mut_ptr(),
-                        );
-                    }
+                    let _ = black_box(linreg::linreg(input));
                 });
             });
         }
@@ -825,9 +821,14 @@ fn benchmark_rust_indicator(
                 signal_period: Some(9),
                 ma_type: None
             });
+            // Pre-allocate outputs once to avoid per-iter allocations
+            let mut macd_buf = vec![0.0; data.len()];
+            let mut sig_buf = vec![0.0; data.len()];
+            let mut hist_buf = vec![0.0; data.len()];
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
                 b.iter(|| {
-                    let _ = black_box(macd::macd(input));
+                    macd::macd_into(input, &mut macd_buf, &mut sig_buf, &mut hist_buf).unwrap();
+                    black_box(*macd_buf.last().unwrap_or(&0.0));
                 });
             });
         }
@@ -1949,13 +1950,28 @@ fn benchmark_rust_indicator(
     #[cfg(feature = "talib")]
     let _has_talib = std::env::var("TALIB_PATH").is_ok();
 
-    let mut output_buffers: Vec<Vec<f64>> = match indicator.tulip_name {
-        "bbands" => vec![vec![0.0; data.len()]; 3], // 3 outputs
-        "macd" => vec![vec![0.0; data.len()]; 3],   // 3 outputs
-        "stoch" | "stochf" | "stochrsi" => vec![vec![0.0; data.len()]; 2],  // 2 outputs
-        "aroon" | "di" | "dm" => vec![vec![0.0; data.len()]; 2],  // 2 outputs
-        _ => vec![vec![0.0; data.len()]; 1],        // 1 output
-    };
+    // Validate that this Tulip indicator exists before registering the bench.
+    // Without this guard, unmapped/missing names (e.g., stochf) would return
+    // immediately inside the bench closure and produce misleading nano-second timings.
+    let mut _tulip_available = true;
+    unsafe {
+        if let Err(e) = tulip::get_start_index(indicator.tulip_name, &indicator.options) {
+            eprintln!("[skip] Tulip indicator '{}' not found: {}", indicator.tulip_name, e);
+            _tulip_available = false;
+        }
+    }
+
+    // Determine correct Tulip arity directly from Tulip metadata to avoid mismatches.
+    let (t_inputs, t_outputs) = unsafe { tulip::get_io_counts(indicator.tulip_name) } 
+        .unwrap_or((indicator.inputs.len(), 1));
+    if t_inputs != indicator.inputs.len() {
+        eprintln!(
+            "[skip] Tulip '{}' expects {} inputs but mapping provides {} (rust_name='{}').",
+            indicator.tulip_name, t_inputs, indicator.inputs.len(), indicator.rust_name
+        );
+        return;
+    }
+    let mut output_buffers: Vec<Vec<f64>> = (0..t_outputs).map(|_| vec![0.0; data.len()]).collect();
 
     let inputs: Vec<&[f64]> = indicator.inputs.iter().map(|&input_name| {
         match input_name {
@@ -1968,24 +1984,26 @@ fn benchmark_rust_indicator(
         }
     }).collect();
 
-    group.bench_function("tulip", |b| {
-        b.iter(|| {
-            let mut output_refs: Vec<&mut [f64]> = output_buffers
-                .iter_mut()
-                .map(|v| &mut v[..])
-                .collect();
+    if _tulip_available {
+        group.bench_function("tulip", |b| {
+            b.iter(|| {
+                let mut output_refs: Vec<&mut [f64]> = output_buffers
+                    .iter_mut()
+                    .map(|v| &mut v[..])
+                    .collect();
 
-            unsafe {
-                let _ = black_box(tulip::call_indicator(
-                    indicator.tulip_name,
-                    data.len(),
-                    &inputs,
-                    &indicator.options,
-                    &mut output_refs,
-                ));
-            }
+                unsafe {
+                    let _ = black_box(tulip::call_indicator(
+                        indicator.tulip_name,
+                        data.len(),
+                        &inputs,
+                        &indicator.options,
+                        &mut output_refs,
+                    ));
+                }
+            });
         });
-    });
+    }
     }
 
     // Benchmark TA-LIB implementation if available
@@ -2524,7 +2542,29 @@ fn setup_benchmarks(c: &mut Criterion) {
     // Create exporter that will save JSON when dropped
     let _json_exporter = JsonExporter;
 
-    let mappings = get_indicator_mappings();
+    // Load mappings, allow alphabetical order and indicator filtering
+    let mut mappings = get_indicator_mappings();
+    let sort_alpha = std::env::var("SORT_ALPHA")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    if sort_alpha {
+        mappings.sort_by(|a, b| a.tulip_name.cmp(b.tulip_name).then(a.rust_name.cmp(b.rust_name)));
+    }
+    if let Ok(filter) = std::env::var("IND_FILTER") {
+        let terms: Vec<String> = filter
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !terms.is_empty() {
+            mappings.retain(|m| {
+                let rn = m.rust_name.to_lowercase();
+                let tn = m.tulip_name.to_lowercase();
+                let tl = m.talib_name.map(|s| s.to_lowercase());
+                terms.iter().any(|t| rn.contains(t) || tn.contains(t) || tl.as_ref().map_or(false, |x| x.contains(t)))
+            });
+        }
+    }
 
     for (size_name, csv_path) in DATA_SIZES {
         let path = Path::new(csv_path);
@@ -3011,8 +3051,8 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             return;
         }
     }
-    let rust_duration = rust_start.elapsed() / iterations as u32;
-    COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, rust_duration, data.len());
+    let rust_duration_total = rust_start.elapsed();
+    COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, rust_duration_total, data.len(), iterations);
 
     // Measure Rust via FFI (subset of indicators with wrappers)
     let rust_ffi_start = Instant::now();
@@ -3127,24 +3167,33 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
         "vidya" => { let mut out = vec![0.0; data.len()]; for _ in 0..iterations { unsafe { rust_ffi::rust_vidya(data.len() as i32, data.close.as_ptr(), 2, 5, 0.2, out.as_mut_ptr()); } } }
         _ => {}
     }
-    let rust_ffi_duration = rust_ffi_start.elapsed() / iterations as u32;
-    COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustFFI, rust_ffi_duration, data.len());
+    let rust_ffi_duration_total = rust_ffi_start.elapsed();
+    COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustFFI, rust_ffi_duration_total, data.len(), iterations);
 
     // Measure Tulip
     unsafe {
-        // Determine number of outputs based on indicator
-        let output_count = match indicator.tulip_name {
-            "bbands" | "macd" => 3,
-            "stoch" | "stochf" | "stochrsi" => 2,
-            "aroon" | "di" | "dm" => 2,
-            _ => 1,
+        // Validate Tulip presence and IO arity before timing
+        if let Err(e) = tulip::get_start_index(indicator.tulip_name, &indicator.options) {
+            eprintln!("[skip] Tulip indicator '{}' not found: {}", indicator.tulip_name, e);
+            return;
+        }
+
+        let (t_inputs, t_outputs) = match tulip::get_io_counts(indicator.tulip_name) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[skip] Tulip indicator '{}' IO query failed: {}", indicator.tulip_name, e);
+                return;
+            }
         };
+        if t_inputs != indicator.inputs.len() {
+            eprintln!(
+                "[skip] Tulip '{}' expects {} inputs but mapping provides {} (rust_name='{}').",
+                indicator.tulip_name, t_inputs, indicator.inputs.len(), indicator.rust_name
+            );
+            return;
+        }
 
-        let mut output_buffers: Vec<Vec<f64>> = (0..output_count)
-            .map(|_| vec![0.0; data.len()])
-            .collect();
-
-        // Prepare inputs based on indicator requirements
+        // Prepare inputs and outputs from true Tulip arity
         let inputs: Vec<&[f64]> = indicator.inputs.iter().map(|&input_name| {
             match input_name {
                 "open" => &data.open[..],
@@ -3156,10 +3205,8 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
             }
         }).collect();
 
-        let mut output_refs: Vec<&mut [f64]> = output_buffers
-            .iter_mut()
-            .map(|v| &mut v[..])
-            .collect();
+        let mut output_buffers: Vec<Vec<f64>> = (0..t_outputs).map(|_| vec![0.0; data.len()]).collect();
+        let mut output_refs: Vec<&mut [f64]> = output_buffers.iter_mut().map(|v| &mut v[..]).collect();
 
         let tulip_start = Instant::now();
         for _ in 0..iterations {
@@ -3171,8 +3218,8 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
                 &mut output_refs,
             );
         }
-        let tulip_duration = tulip_start.elapsed() / iterations as u32;
-        COLLECTOR.add_measurement(indicator.rust_name, LibraryType::TulipFFI, tulip_duration, data.len());
+        let tulip_duration_total = tulip_start.elapsed();
+        COLLECTOR.add_measurement(indicator.rust_name, LibraryType::TulipFFI, tulip_duration_total, data.len(), iterations);
     }
 
     // Measure TA-LIB (if available and mapped)
@@ -3236,8 +3283,8 @@ fn measure_and_collect(indicator: &IndicatorMapping, data: &CandleData, _size_na
                     }
                 }
             }
-            let talib_duration = talib_start.elapsed() / iterations as u32;
-            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::TalibFFI, talib_duration, data.len());
+            let talib_duration_total = talib_start.elapsed();
+            COLLECTOR.add_measurement(indicator.rust_name, LibraryType::TalibFFI, talib_duration_total, data.len(), iterations);
         }
     }
 }

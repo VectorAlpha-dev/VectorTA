@@ -7,7 +7,9 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover
+    # Be resilient to environments where CuPy is installed but broken or mismatched
+    # (e.g., NumPy/SciPy binary ABI issues). Treat as unavailable and skip.
     cp = None
 
 try:

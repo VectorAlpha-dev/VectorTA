@@ -58,17 +58,20 @@ test('SuperSmoother3Pole accuracy', async (t) => {
     for (let i = 0; i < 5; i++) {
         const diff = Math.abs(last5[i] - expectedLast5[i]);
         assert.ok(
-            diff < 1e-6,
+            diff < 1e-8,
             `Value mismatch at position ${i}: expected ${expectedLast5[i]}, got ${last5[i]}, diff ${diff}`
         );
     }
     
     // Compare with Rust
+    // Use a strict relative tolerance so absolute error stays <= 1e-8
+    // For prices ~59k, tol=1e-13 -> abs_tol ~ 6e-9
     const rustResult = await compareWithRust(
         'supersmoother_3_pole', 
         result, 
         'close', 
-        expected.defaultParams
+        expected.defaultParams,
+        1e-13
     );
     assert.ok(rustResult, 'Comparison with Rust succeeded');
 });

@@ -116,13 +116,12 @@ wasm = ["wasm-bindgen", "serde-wasm-bindgen", "js-sys"]
 python = ["pyo3", "numpy"]
 cuda = ["cust", "cust_derive"]
 
-[package.metadata.wasm-pack]
-"wasm-opt" = ["-O4", "--enable-simd"]
-
-# Ensure wasm-pack does not run wasm-opt (breaks on paths with spaces in CI/dev).
-# wasm-pack expects this under a profile table; keep the above tuning for
-# environments that honor it, but explicitly disable the optimizer here.
 [package.metadata.wasm-pack.profile.release]
+# Disable wasm-opt during wasm-pack build to avoid CI/agent issues.
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.dev]
+# Also disable in dev builds for consistency.
 wasm-opt = false
 
 [profile.release.build-override]

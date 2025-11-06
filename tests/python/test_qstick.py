@@ -38,8 +38,9 @@ class TestQstick:
         # Check last 5 values
         for i, expected in enumerate(expected_last_five):
             actual = result[-(5-i)]
-            assert_close(actual, expected, rtol=1e-1, 
-                        msg=f"QSTICK mismatch at index {i}: expected {expected}, got {actual}")
+            # Match Rust tolerance: absolute 1e-1 (no relaxed relative tol)
+            assert_close(actual, expected, rtol=0.0, atol=1e-1,
+                         msg=f"QSTICK mismatch at index {i}: expected {expected}, got {actual}")
     
     def test_qstick_errors(self):
         """Test error handling"""

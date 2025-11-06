@@ -201,7 +201,8 @@ test('PFE batch single parameter set', () => {
     const singleResult = wasm.pfe_js(close, 10, 5);
     
     assert.strictEqual(batchResult.values.length, singleResult.length);
-    assertArrayClose(batchResult.values, singleResult, 1e-10, "Batch vs single mismatch");
+    // Match Rust streaming vs batch tolerance (1e-9)
+    assertArrayClose(batchResult.values, singleResult, 1e-9, "Batch vs single mismatch");
 });
 
 test('PFE batch multiple periods', () => {

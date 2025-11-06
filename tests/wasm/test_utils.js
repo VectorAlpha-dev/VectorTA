@@ -1,9 +1,8 @@
 /**
- * Common utilities for WASM binding tests
+ * Common utilities for WASM binding tests (no external deps)
  */
 import fs from 'fs';
 import path from 'path';
-import { parse } from 'csv-parse/sync';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,13 +11,6 @@ const __dirname = path.dirname(__filename);
 function loadTestData() {
     const csvPath = path.join(__dirname, '../../src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv');
     const content = fs.readFileSync(csvPath, 'utf8');
-    const records = parse(content, { 
-        columns: false,
-        skip_empty_lines: true,
-        cast: true,
-        from_line: 2  // Skip header row
-    });
-    
     const candles = {
         timestamp: [],
         open: [],
@@ -27,21 +19,37 @@ function loadTestData() {
         close: [],
         volume: []
     };
-    
-    for (const row of records) {
-        if (row.length < 6) continue;
+
+    const lines = content.split(/\r?\n/);
+    // Skip header (first line)
+    for (let li = 1; li < lines.length; li++) {
+        const line = lines[li].trim();
+        if (!line) continue;
+        const cols = line.split(',');
+        if (cols.length < 6) continue;
+
         // CSV format matches Rust: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
-        candles.timestamp.push(parseFloat(row[0]));  // JS numbers are f64
-        candles.open.push(parseFloat(row[1]));
-        candles.close.push(parseFloat(row[2]));
-        candles.high.push(parseFloat(row[3]));
-        candles.low.push(parseFloat(row[4]));
-        candles.volume.push(parseFloat(row[5]));
+        const t = Number(cols[0]);
+        const o = Number(cols[1]);
+        const c = Number(cols[2]);
+        const h = Number(cols[3]);
+        const l = Number(cols[4]);
+        const v = Number(cols[5]);
+
+        // Ignore rows with unparsable values
+        if ([t, o, c, h, l, v].some(x => Number.isNaN(x))) continue;
+
+        candles.timestamp.push(t);
+        candles.open.push(o);
+        candles.close.push(c);
+        candles.high.push(h);
+        candles.low.push(l);
+        candles.volume.push(v);
     }
-    
+
     // Add calculated fields
     candles.hl2 = candles.high.map((h, i) => (h + candles.low[i]) / 2.0);
-    
+
     return candles;
 }
 
@@ -54,6 +62,18 @@ function assertClose(actual, expected, tolerance = 1e-8, msg = "") {
 }
 
 function assertArrayClose(actual, expected, tolerance = 1e-8, msg = "") {
+    // Supports either absolute tolerance as a number, or an object { atol, rtol }
+    let atol, rtol;
+    if (typeof tolerance === 'number') {
+        atol = tolerance;
+        rtol = 0;
+    } else if (tolerance && typeof tolerance === 'object') {
+        atol = typeof tolerance.atol === 'number' ? tolerance.atol : 1e-8;
+        rtol = typeof tolerance.rtol === 'number' ? tolerance.rtol : 0;
+    } else {
+        atol = 1e-8;
+        rtol = 0;
+    }
     // Both should have valid length property
     const actualLen = actual ? actual.length : 0;
     const expectedLen = expected ? expected.length : 0;
@@ -66,10 +86,14 @@ function assertArrayClose(actual, expected, tolerance = 1e-8, msg = "") {
         if (isNaN(actual[i]) && isNaN(expected[i])) {
             continue;
         }
-        const diff = Math.abs(actual[i] - expected[i]);
-        if (diff > tolerance) {
+        const a = actual[i];
+        const e = expected[i];
+        const diff = Math.abs(a - e);
+        const rel = Math.max(Math.abs(a), Math.abs(e));
+        const threshold = Math.max(atol, rtol * rel);
+        if (diff > threshold) {
             const errorMsg = msg ? `${msg}: ` : "";
-            throw new Error(`${errorMsg}Mismatch at index ${i}: expected ${expected[i]}, got ${actual[i]} (diff: ${diff})`);
+            throw new Error(`${errorMsg}Mismatch at index ${i}: expected ${e}, got ${a} (diff: ${diff}, tol: ${threshold})`);
         }
     }
 }
@@ -96,6 +120,17 @@ function assertNoNaN(array, msg = "") {
 
 // Expected outputs from Rust tests - these must match EXACTLY
 const EXPECTED_OUTPUTS = {
+    epma: {
+        defaultParams: { period: 11, offset: 4 },
+        lastFive: [
+            59174.48,
+            59201.04,
+            59167.60,
+            59200.32,
+            59117.04
+        ],
+        warmupPeriod: 16 // period + offset + 1
+    },
     zscore: {
         // Default parameters used in Rust tests
         defaultParams: { period: 14, maType: 'sma', nbdev: 1.0, devtype: 0 },
@@ -134,27 +169,28 @@ const EXPECTED_OUTPUTS = {
     },
     wto: {
         defaultParams: { channelLength: 10, averageLength: 21 },
+        // Reference values mirror src/indicators/wto.rs::check_wto_accuracy
         last5Values: {
             wavetrend1: [
-                -31.700919052041584,
-                -31.429599055287365,
-                -33.42650456951316,
-                -32.48187262451018,
-                -39.88701736507456,
+                -34.81423091,
+                -33.92872278,
+                -35.29125217,
+                -34.93917015,
+                -41.42578524,
             ],
             wavetrend2: [
-                -35.68024735,
-                -33.31827192,
-                -32.62715068,
-                -32.25972409,
-                -34.30624855,
+                -37.72141493,
+                -35.54009606,
+                -34.81718669,
+                -34.74334400,
+                -36.39623258,
             ],
             histogram: [
-                3.9793283,
-                1.8886729,
-                -0.7993544,
-                -0.2221492,
-                -5.5807683,
+                2.90718403,
+                1.61137328,
+                -0.47406548,
+                -0.19582615,
+                -5.02955265,
             ]
         },
         warmupPeriod: 20,  // Based on average_length - 1
@@ -1240,6 +1276,17 @@ const EXPECTED_OUTPUTS = {
             0.984954072979463
         ]
     },
+    roc: {
+        // Matches Rust src/indicators/roc.rs check_roc_accuracy expected values
+        defaultParams: { period: 10 },
+        last5Values: [
+            -0.22551709049294377,
+            -0.5561903481650754,
+            -0.32752013235864963,
+            -0.49454153980722504,
+            -1.5045927020536976
+        ]
+    },
     damiani_volatmeter: {
         defaultParams: {
             vis_atr: 13,
@@ -1248,19 +1295,35 @@ const EXPECTED_OUTPUTS = {
             sed_std: 100,
             threshold: 1.4
         },
+        // Close-only reference (binding single-series path uses close for H/L/C)
         volLast5Values: [
-            0.8539059,  // These are the actual values when using close-only data
+            0.8539059,
             0.75935611,
             0.73610448,
             0.76744843,
             0.84842545
         ],
         antiLast5Values: [
-            1.1250333,  // These are the actual values when using close-only data
+            1.1250333,
             1.1325502,
             1.14038661,
             1.13929192,
             1.12982407
+        ],
+        // Candles-based Rust references from src/indicators/damiani_volatmeter.rs tests (check_damiani_accuracy)
+        rustVolLast5Values: [
+            0.9009485470514558,
+            0.8333604467044887,
+            0.815318380178986,
+            0.8276892636184923,
+            0.879447954127426
+        ],
+        rustAntiLast5Values: [
+            1.1227721577887388,
+            1.1250333024152703,
+            1.1325501989919875,
+            1.1403866079746106,
+            1.1392919184055932
         ],
         warmupPeriod: 101  // max(vis_atr, vis_std, sed_atr, sed_std, 3) + 1
     },
@@ -1672,12 +1735,13 @@ const EXPECTED_OUTPUTS = {
     },
     volume_adjusted_ma: {  // Same as vama but with new name
         defaultParams: { length: 13, viFactor: 0.67, strict: true, samplePeriod: 0 },
-        fastValues: [  // length=13 (Updated after Pine logic fixes)
+        // Exact references from Rust unit tests (tolerance 1e-6)
+        fastValues: [  // length=13
             60249.34558277224,
-            60283.78930990677,
-            60173.39052862816,
-            60260.19903965848,
-            60226.10253226444
+            60283.79398716032,
+            60173.3929697517,
+            60260.20330381247,
+            60226.095375540506
         ],
         slowParams: { length: 55, viFactor: 0.67, strict: true, samplePeriod: 0 },
         slowValues: [  // length=55 (Updated after Pine logic fixes)

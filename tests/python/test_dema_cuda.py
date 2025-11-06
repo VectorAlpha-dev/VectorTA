@@ -55,6 +55,29 @@ class TestDemaCuda:
         # Tighter tolerances thanks to FMA delta updates in CUDA kernel
         assert_close(gpu_first, cpu, rtol=5e-6, atol=5e-7, msg="DEMA CUDA batch vs CPU mismatch")
 
+    def test_dema_cuda_matches_rust_last5(self, test_data):
+        """Check CUDA path against Rust reference last-5 values (period=30)."""
+        close = test_data["close"]
+        period = 30
+
+        # Known-good last 5 from Rust unit tests (dema.rs)
+        expected_last5 = np.array([
+            59189.73193987478,
+            59129.24920772847,
+            59058.80282420511,
+            59011.5555611042,
+            58908.370159946775,
+        ], dtype=np.float64)
+
+        handle = ti.dema_cuda_batch_dev(
+            close.astype(np.float32),
+            period_range=(period, period, 0),
+        )
+        gpu = cp.asnumpy(cp.asarray(handle))[0]
+
+        # Compare last 5 values with slightly looser tolerance (fp32 kernel)
+        assert_close(gpu[-5:], expected_last5, rtol=1e-6, atol=2e-6, msg="DEMA CUDA last-5 mismatch vs Rust ref")
+
     def test_dema_cuda_batch_multiple_periods(self, test_data):
         close = test_data["close"][:2048]
         sweep = (10, 20, 2)

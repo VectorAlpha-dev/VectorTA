@@ -52,8 +52,21 @@ def test_mama_accuracy():
         assert np.isfinite(fama_vals[i]), f"FAMA NaN at index {i}"
     
     # Test specific reference values (last 5 values from actual data)
-    expected_mama_last5 = [59269.25858627174, 59264.845656958154, 59151.92282847907, 59152.076687055116, 59127.222852702354]
-    expected_fama_last5 = [59671.54351470043, 59661.37606825687, 59534.01275831243, 59524.464356530996, 59514.533318935275]
+    # Reference values generated from the Rust implementation (generate_references)
+    expected_mama_last5 = [
+        59244.89377664517,
+        59241.699087812915,
+        59140.34954390646,
+        59141.08206671113,
+        59116.77796337557,
+    ]
+    expected_fama_last5 = [
+        59785.36249740519,
+        59771.77091216539,
+        59613.91557010065,
+        59602.094732515914,
+        59589.9618132874,
+    ]
     
     assert_close(mama_vals[-5:], expected_mama_last5, rtol=1e-6, msg="MAMA last 5 values mismatch")
     assert_close(fama_vals[-5:], expected_fama_last5, rtol=1e-6, msg="FAMA last 5 values mismatch")

@@ -63,10 +63,12 @@ class TestVPT:
         
         assert len(result) >= 5
         # Check last 5 values match expected
+        # Match Rust tolerance (abs diff < 1e-9)
         assert_close(
-            result[-5:], 
+            result[-5:],
             expected_last_five,
-            rtol=1e-3,
+            rtol=0.0,
+            atol=1e-9,
             msg="VPT last 5 values mismatch"
         )
     
