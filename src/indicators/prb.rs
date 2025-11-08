@@ -1635,6 +1635,22 @@ pub fn prb_into_slice(
     )
 }
 
+/// Write PRB outputs into caller-provided slices without allocating.
+///
+/// - Preserves the exact NaN warmup prefix semantics of `prb()`.
+/// - All output slice lengths must equal the input data length.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn prb_into(
+    input: &PrbInput,
+    out_main: &mut [f64],
+    out_upper: &mut [f64],
+    out_lower: &mut [f64],
+) -> Result<(), PrbError> {
+    prb_into_slice(out_main, out_upper, out_lower, input, Kernel::Auto)
+}
+
 // ==================== BATCH PROCESSING ====================
 #[derive(Clone, Debug)]
 pub struct PrbBatchRange {
@@ -2584,6 +2600,65 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use std::error::Error;
+
+    #[test]
+    fn test_prb_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use existing CSV candles for parity (preferred input source)
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = PrbInput::from_candles(&candles, "close", PrbParams::default());
+
+        // Baseline via Vec-returning API
+        let base = prb(&input)?;
+        let len = candles.close.len();
+
+        // Preallocate outputs and call into API
+        let mut main = vec![0.0f64; len];
+        let mut up = vec![0.0f64; len];
+        let mut lo = vec![0.0f64; len];
+
+        #[cfg(not(feature = "wasm"))]
+        {
+            prb_into(&input, &mut main, &mut up, &mut lo)?;
+        }
+
+        // Helper for parity: NaN == NaN, finite exact equality preferred
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        assert_eq!(base.values.len(), len);
+        assert_eq!(base.upper_band.len(), len);
+        assert_eq!(base.lower_band.len(), len);
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(base.values[i], main[i]),
+                "values mismatch at {}: got {}, expected {}",
+                i,
+                main[i],
+                base.values[i]
+            );
+            assert!(
+                eq_or_both_nan(base.upper_band[i], up[i]),
+                "upper mismatch at {}: got {}, expected {}",
+                i,
+                up[i],
+                base.upper_band[i]
+            );
+            assert!(
+                eq_or_both_nan(base.lower_band[i], lo[i]),
+                "lower mismatch at {}: got {}, expected {}",
+                i,
+                lo[i],
+                base.lower_band[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_prb_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

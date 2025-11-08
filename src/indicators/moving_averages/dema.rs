@@ -279,6 +279,18 @@ pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput,
     Ok(DemaOutput { values: out })
 }
 
+/// Writes DEMA values into a caller-provided output buffer without allocating.
+///
+/// - Preserves the same NaN warmup prefix as `dema()` (up to `first + period - 1`).
+/// - The output slice length must equal the input length; returns the module's
+///   existing error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn dema_into(input: &DemaInput, out: &mut [f64]) -> Result<(), DemaError> {
+    // Delegate to the internal zero-copy helper with Kernel::Auto
+    dema_into_slice(out, input, Kernel::Auto)
+}
+
 /// Write DEMA values directly to output slice - no allocations.
 /// This is the core helper for WASM optimizations.
 /// The output slice must be the same length as the input data.
@@ -1647,6 +1659,39 @@ mod tests {
         check_dema_no_poison,
         check_dema_warmup_nan_preservation
     );
+
+    #[test]
+    fn test_dema_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = DemaInput::with_default_candles(&candles);
+        let baseline = dema(&input)?.values;
+
+        let mut out = vec![0.0; candles.close.len()];
+
+        // Use native into when available; fallback to internal helper under wasm
+        #[cfg(not(feature = "wasm"))]
+        {
+            dema_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            dema_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(out.len(), baseline.len());
+        for i in 0..out.len() {
+            let a = out[i];
+            let b = baseline[i];
+            if a.is_nan() || b.is_nan() {
+                assert!(a.is_nan() && b.is_nan(), "NaN mismatch at index {}", i);
+            } else {
+                assert!(a == b, "Value mismatch at index {}: {} != {}", i, a, b);
+            }
+        }
+        Ok(())
+    }
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);

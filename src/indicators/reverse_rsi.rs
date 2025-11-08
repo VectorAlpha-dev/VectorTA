@@ -902,6 +902,35 @@ pub fn reverse_rsi_with_kernel(
     Ok(ReverseRsiOutput { values: out })
 }
 
+/// Writes Reverse RSI values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - The `out` slice length must equal the input length.
+/// - Uses kernel auto-detection (equivalent to `reverse_rsi()`).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn reverse_rsi_into(
+    input: &ReverseRsiInput,
+    out: &mut [f64],
+) -> Result<(), ReverseRsiError> {
+    let (data, first, rsi_len, rsi_lvl, ema_len) = reverse_rsi_prepare(input, Kernel::Auto)?;
+    if out.len() != data.len() {
+        return Err(ReverseRsiError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warm = (first + ema_len - 1).min(out.len());
+    for v in &mut out[..warm] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Compute into caller buffer using auto kernel selection
+    reverse_rsi_compute_into(data, first, rsi_len, rsi_lvl, Kernel::Auto, out)
+}
+
 // ============= OPTIONAL SIMD STUBS (public, cfg-gated) =============
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -2507,5 +2536,42 @@ mod tests {
     #[test]
     fn test_batch_into_signature_parity() {
         let _ = check_batch_into_signature_parity("batch_into_signature", Kernel::Auto);
+    }
+
+    #[test]
+    fn test_reverse_rsi_into_matches_api() {
+        // Use the same dataset as other tests to ensure realistic coverage
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("read candles");
+
+        let params = ReverseRsiParams::default();
+        let input = ReverseRsiInput::from_candles(&candles, "close", params);
+
+        // Baseline via Vec-returning API
+        let baseline = reverse_rsi(&input).expect("baseline").values;
+
+        // Into-API writes into preallocated buffer (no allocations)
+        let mut out = vec![0.0; candles.close.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            reverse_rsi_into(&input, &mut out).expect("reverse_rsi_into");
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // Fallback for wasm builds: same semantics via explicit kernel
+            reverse_rsi_into_slice(&mut out, &input, Kernel::Auto).expect("reverse_rsi_into_slice");
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(
+                equal,
+                "parity mismatch at index {}: baseline={:?}, into={:?}",
+                i,
+                a,
+                b
+            );
+        }
     }
 }

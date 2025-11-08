@@ -453,6 +453,339 @@ pub fn stoch_into_slices(
     Ok(())
 }
 
+// === No-alloc writer API ===
+
+/// Compute Stochastic Oscillator into caller-provided buffers, preserving NaN warmups.
+/// Length of `out_k` and `out_d` must equal the input length.
+#[cfg(not(feature = "wasm"))]
+pub fn stoch_into(input: &StochInput, out_k: &mut [f64], out_d: &mut [f64]) -> Result<(), StochError> {
+    stoch_compute_into(input, Kernel::Auto, out_k, out_d)
+}
+
+/// Core compute function that mirrors `stoch_with_kernel` but writes into provided slices.
+fn stoch_compute_into(
+    input: &StochInput,
+    kernel: Kernel,
+    out_k: &mut [f64],
+    out_d: &mut [f64],
+) -> Result<(), StochError> {
+    // Extract inputs
+    let (high, low, close) = match &input.data {
+        StochData::Candles { candles } => {
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| StochError::Other(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| StochError::Other(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| StochError::Other(e.to_string()))?;
+            (high, low, close)
+        }
+        StochData::Slices { high, low, close } => (*high, *low, *close),
+    };
+
+    let len = high.len();
+    if len == 0 || low.is_empty() || close.is_empty() {
+        return Err(StochError::EmptyData);
+    }
+    if len != low.len() || len != close.len() {
+        return Err(StochError::MismatchedLength);
+    }
+    if out_k.len() != len || out_d.len() != len {
+        return Err(StochError::MismatchedLength);
+    }
+
+    let fastk_period = input.get_fastk_period();
+    let slowk_period = input.get_slowk_period();
+    let slowd_period = input.get_slowd_period();
+
+    if fastk_period == 0 || fastk_period > len {
+        return Err(StochError::InvalidPeriod {
+            period: fastk_period,
+            data_len: len,
+        });
+    }
+    if slowk_period == 0 || slowk_period > len {
+        return Err(StochError::InvalidPeriod {
+            period: slowk_period,
+            data_len: len,
+        });
+    }
+    if slowd_period == 0 || slowd_period > len {
+        return Err(StochError::InvalidPeriod {
+            period: slowd_period,
+            data_len: len,
+        });
+    }
+
+    // First valid index across all inputs
+    let first_valid_idx = high
+        .iter()
+        .zip(low.iter())
+        .zip(close.iter())
+        .position(|((h, l), c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
+        .ok_or(StochError::AllValuesNaN)?;
+
+    if (len - first_valid_idx) < fastk_period {
+        return Err(StochError::NotEnoughValidData {
+            needed: fastk_period,
+            valid: len - first_valid_idx,
+        });
+    }
+
+    // Prefill NaN warmups in outputs
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in out_k.iter_mut() {
+        *v = qnan;
+    }
+    for v in out_d.iter_mut() {
+        *v = qnan;
+    }
+
+    // Rolling HH/LL and raw %K
+    let mut hh = alloc_with_nan_prefix(len, first_valid_idx + fastk_period - 1);
+    let mut ll = alloc_with_nan_prefix(len, first_valid_idx + fastk_period - 1);
+
+    let max_vals = max_rolling(&high[first_valid_idx..], fastk_period)
+        .map_err(|e| StochError::Other(e.to_string()))?;
+    let min_vals = min_rolling(&low[first_valid_idx..], fastk_period)
+        .map_err(|e| StochError::Other(e.to_string()))?;
+
+    for (i, &val) in max_vals.iter().enumerate() {
+        hh[i + first_valid_idx] = val;
+    }
+    for (i, &val) in min_vals.iter().enumerate() {
+        ll[i + first_valid_idx] = val;
+    }
+
+    let mut k_raw = alloc_with_nan_prefix(len, first_valid_idx + fastk_period - 1);
+    let chosen = match kernel {
+        Kernel::Auto => Kernel::Scalar,
+        other => other,
+    };
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => stoch_scalar(
+                high, low, close, &hh, &ll, fastk_period, first_valid_idx, &mut k_raw,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => stoch_avx2(
+                high, low, close, &hh, &ll, fastk_period, first_valid_idx, &mut k_raw,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => stoch_avx512(
+                high, low, close, &hh, &ll, fastk_period, first_valid_idx, &mut k_raw,
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    let slowk_ma_type = input.get_slowk_ma_type();
+    let slowd_ma_type = input.get_slowd_ma_type();
+
+    if (slowk_ma_type == "sma" || slowk_ma_type == "SMA")
+        && (slowd_ma_type == "sma" || slowd_ma_type == "SMA")
+    {
+        let k_first_valid = first_valid_idx + fastk_period - 1;
+        stoch_classic_sma_into(&k_raw, slowk_period, slowd_period, k_first_valid, out_k, out_d);
+        return Ok(());
+    } else if (slowk_ma_type == "ema" || slowk_ma_type == "EMA")
+        && (slowd_ma_type == "ema" || slowd_ma_type == "EMA")
+    {
+        let k_first_valid = first_valid_idx + fastk_period - 1;
+        stoch_classic_ema_into(&k_raw, slowk_period, slowd_period, k_first_valid, out_k, out_d);
+        return Ok(());
+    }
+
+    // Generic MA types: compute via dispatcher, then copy into outputs
+    let k_vec = ma(&slowk_ma_type, MaData::Slice(&k_raw), slowk_period)
+        .map_err(|e| StochError::Other(e.to_string()))?;
+    let d_vec = ma(&slowd_ma_type, MaData::Slice(&k_vec), slowd_period)
+        .map_err(|e| StochError::Other(e.to_string()))?;
+    debug_assert_eq!(k_vec.len(), len);
+    debug_assert_eq!(d_vec.len(), len);
+    out_k.copy_from_slice(&k_vec);
+    out_d.copy_from_slice(&d_vec);
+    Ok(())
+}
+
+#[inline]
+fn stoch_classic_sma_into(
+    k_raw: &[f64],
+    slowk_period: usize,
+    slowd_period: usize,
+    first_valid_idx: usize,
+    out_k: &mut [f64],
+    out_d: &mut [f64],
+) {
+    let len = k_raw.len();
+
+    // %K (SMA over raw K)
+    let k_start = first_valid_idx;
+    let mut sum_k = 0.0;
+    for i in k_start..(k_start + slowk_period).min(len) {
+        if !k_raw[i].is_nan() {
+            sum_k += k_raw[i];
+        }
+    }
+    if k_start + slowk_period - 1 < len {
+        out_k[k_start + slowk_period - 1] = sum_k / slowk_period as f64;
+    }
+    for i in (k_start + slowk_period)..len {
+        let old_val = k_raw[i - slowk_period];
+        let new_val = k_raw[i];
+        if !old_val.is_nan() {
+            sum_k -= old_val;
+        }
+        if !new_val.is_nan() {
+            sum_k += new_val;
+        }
+        out_k[i] = sum_k / slowk_period as f64;
+    }
+
+    // %D (SMA over %K)
+    let d_start = first_valid_idx + slowk_period - 1;
+    let mut sum_d = 0.0;
+    for i in d_start..(d_start + slowd_period).min(len) {
+        if !out_k[i].is_nan() {
+            sum_d += out_k[i];
+        }
+    }
+    if d_start + slowd_period - 1 < len {
+        out_d[d_start + slowd_period - 1] = sum_d / slowd_period as f64;
+    }
+    for i in (d_start + slowd_period)..len {
+        let old_val = out_k[i - slowd_period];
+        let new_val = out_k[i];
+        if !old_val.is_nan() {
+            sum_d -= old_val;
+        }
+        if !new_val.is_nan() {
+            sum_d += new_val;
+        }
+        out_d[i] = sum_d / slowd_period as f64;
+    }
+}
+
+#[inline]
+fn stoch_classic_ema_into(
+    k_raw: &[f64],
+    slowk_period: usize,
+    slowd_period: usize,
+    first_valid_idx: usize,
+    out_k: &mut [f64],
+    out_d: &mut [f64],
+) {
+    let len = k_raw.len();
+
+    // %K (EMA over raw K), initialized with SMA
+    let alpha_k = 2.0 / (slowk_period as f64 + 1.0);
+    let one_minus_alpha_k = 1.0 - alpha_k;
+    let k_warmup = first_valid_idx + slowk_period - 1;
+
+    let mut sum_k = 0.0;
+    let mut count_k = 0;
+    for i in first_valid_idx..(first_valid_idx + slowk_period).min(len) {
+        if !k_raw[i].is_nan() {
+            sum_k += k_raw[i];
+            count_k += 1;
+        }
+    }
+    if count_k > 0 && k_warmup < len {
+        let mut ema_k = sum_k / count_k as f64;
+        out_k[k_warmup] = ema_k;
+        for i in (k_warmup + 1)..len {
+            if !k_raw[i].is_nan() {
+                ema_k = alpha_k * k_raw[i] + one_minus_alpha_k * ema_k;
+            }
+            out_k[i] = ema_k;
+        }
+    } else {
+        for i in k_warmup..len {
+            out_k[i] = f64::NAN;
+        }
+    }
+
+    // %D (EMA over %K), initialized with SMA
+    let alpha_d = 2.0 / (slowd_period as f64 + 1.0);
+    let one_minus_alpha_d = 1.0 - alpha_d;
+    let d_warmup = first_valid_idx + slowk_period + slowd_period - 2;
+    let d_start = first_valid_idx + slowk_period - 1;
+
+    let mut sum_d = 0.0;
+    let mut count_d = 0;
+    for i in d_start..(d_start + slowd_period).min(len) {
+        if !out_k[i].is_nan() {
+            sum_d += out_k[i];
+            count_d += 1;
+        }
+    }
+    if count_d > 0 && d_warmup < len {
+        let mut ema_d = sum_d / count_d as f64;
+        out_d[d_warmup] = ema_d;
+        for i in (d_warmup + 1)..len {
+            if !out_k[i].is_nan() {
+                ema_d = alpha_d * out_k[i] + one_minus_alpha_d * ema_d;
+            }
+            out_d[i] = ema_d;
+        }
+    } else {
+        for i in d_warmup..len {
+            out_d[i] = f64::NAN;
+        }
+    }
+}
+
+// === Parity Test ===
+#[cfg(test)]
+mod into_parity_tests {
+    use super::*;
+    use crate::utilities::data_loader::read_candles_from_csv;
+
+    fn eq_or_both_nan_eps(a: f64, b: f64, eps: f64) -> bool {
+        (a.is_nan() && b.is_nan()) || (a - b).abs() <= eps
+    }
+
+    #[test]
+    fn test_stoch_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use the existing repository CSV to build candles
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = StochInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let base = stoch(&input).expect("baseline stoch failed");
+
+        // Into API
+        let mut k_into = vec![0.0; base.k.len()];
+        let mut d_into = vec![0.0; base.d.len()];
+        stoch_into(&input, &mut k_into, &mut d_into).expect("stoch_into failed");
+
+        assert_eq!(k_into.len(), base.k.len());
+        assert_eq!(d_into.len(), base.d.len());
+
+        for i in 0..k_into.len() {
+            assert!(
+                eq_or_both_nan_eps(k_into[i], base.k[i], 1e-12),
+                "K mismatch at {}: into={} api={}",
+                i,
+                k_into[i],
+                base.k[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(d_into[i], base.d[i], 1e-12),
+                "D mismatch at {}: into={} api={}",
+                i,
+                d_into[i],
+                base.d[i]
+            );
+        }
+        Ok(())
+    }
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn stoch_avx512(

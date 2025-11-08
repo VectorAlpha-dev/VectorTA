@@ -297,6 +297,17 @@ pub fn dec_osc_with_kernel(
     Ok(DecOscOutput { values: out })
 }
 
+/// Write DEC_OSC results into a caller-provided output slice without allocating.
+///
+/// - Preserves the same NaN warmup prefix as the Vec-returning API (first-valid + 2).
+/// - The output slice length must match the input length.
+/// - Uses `Kernel::Auto` to dispatch to the existing compute path.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn dec_osc_into(out: &mut [f64], input: &DecOscInput) -> Result<(), DecOscError> {
+    dec_osc_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn dec_osc_into_slice(
     dst: &mut [f64],
@@ -1746,6 +1757,48 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+
+        Ok(())
+    }
+
+    // Parity test: native no-alloc API matches Vec-returning API
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_dec_osc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a small but non-trivial input: linear drift + sinusoid
+        let n = 256usize;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64;
+            let v = 100.0 + 0.05 * t + 2.0 * (0.1 * t).sin();
+            data.push(v);
+        }
+
+        let input = DecOscInput::from_slice(&data, DecOscParams::default());
+
+        // Baseline via existing API
+        let baseline = dec_osc(&input)?.values;
+
+        // Preallocate output and call the new into API
+        let mut out = vec![0.0; n];
+        super::dec_osc_into(&mut out, &input)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: NaN equals NaN, otherwise exact equality preferred
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at index {}: baseline={} vs into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
 
         Ok(())
     }

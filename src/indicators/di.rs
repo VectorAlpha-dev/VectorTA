@@ -351,10 +351,41 @@ pub fn di_into_slice(
     // Fill warmup period with NaN
     let warmup_end = first_idx + period - 1;
     for v in &mut dst_plus[..warmup_end] {
-        *v = f64::NAN;
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
     for v in &mut dst_minus[..warmup_end] {
-        *v = f64::NAN;
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    Ok(())
+}
+
+/// Write DI results into caller-provided buffers without allocations.
+///
+/// Preserves the exact NaN warmup prefix semantics (quiet-NaN pattern) and requires
+/// `out_plus.len() == out_minus.len() == input length`.
+#[cfg(not(feature = "wasm"))]
+pub fn di_into(input: &DiInput, out_plus: &mut [f64], out_minus: &mut [f64]) -> Result<(), DiError> {
+    let (high, low, close, period, first_idx, chosen) = di_prepare(input, Kernel::Auto)?;
+
+    let n = high.len();
+    if out_plus.len() != n || out_minus.len() != n {
+        return Err(DiError::InvalidPeriod {
+            period: n,
+            data_len: out_plus.len().min(out_minus.len()),
+        });
+    }
+
+    di_compute_into(high, low, close, period, first_idx, chosen, out_plus, out_minus);
+
+    // Warmup NaN prefix using the same quiet-NaN pattern used by Vec APIs
+    let warmup_end = first_idx + period - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out_plus[..warmup_end] {
+        *v = qnan;
+    }
+    for v in &mut out_minus[..warmup_end] {
+        *v = qnan;
     }
 
     Ok(())
@@ -1948,6 +1979,50 @@ mod tests {
             })
             .unwrap();
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_di_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the same data source as other DI tests for consistency
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let params = DiParams::default();
+        let input = DiInput::from_candles(&candles, params);
+
+        // Baseline via Vec-returning API
+        let baseline = di(&input)?;
+
+        // Preallocate outputs and call into API
+        let n = candles.close.len();
+        let mut plus = vec![0.0_f64; n];
+        let mut minus = vec![0.0_f64; n];
+        di_into(&input, &mut plus, &mut minus)?;
+
+        assert_eq!(baseline.plus.len(), plus.len());
+        assert_eq!(baseline.minus.len(), minus.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline.plus[i], plus[i]),
+                "+DI mismatch at index {}: baseline={} vs into={}",
+                i,
+                baseline.plus[i],
+                plus[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.minus[i], minus[i]),
+                "-DI mismatch at index {}: baseline={} vs into={}",
+                i,
+                baseline.minus[i],
+                minus[i]
+            );
+        }
         Ok(())
     }
 

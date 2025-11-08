@@ -571,6 +571,18 @@ pub fn ehlers_kama_with_kernel(
     Ok(EhlersKamaOutput { values: out })
 }
 
+/// Compute Ehlers KAMA into a caller-provided buffer without allocating.
+/// Preserves NaN warmups exactly as the Vec-returning API; the output slice
+/// length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn ehlers_kama_into(
+    input: &EhlersKamaInput,
+    out: &mut [f64],
+) -> Result<(), EhlersKamaError> {
+    ehlers_kama_into_slice(out, input, Kernel::Auto)
+}
+
 /// Compute Ehlers KAMA directly into the provided output slice.
 /// The output slice must be the same length as the input data.
 #[inline]
@@ -1401,6 +1413,43 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_ehlers_kama_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input (with a NaN prefix to exercise warmup)
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
+        for i in 3..256 {
+            let x = i as f64;
+            data.push((x.sin() * 0.5 + x.cos() * 0.25) + x * 1e-2);
+        }
+
+        let input = EhlersKamaInput::from_slice(&data, EhlersKamaParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = ehlers_kama(&input)?;
+
+        // Preallocate output and use no-alloc API
+        let mut out = vec![0.0; data.len()];
+        ehlers_kama_into(&input, &mut out)?;
+
+        assert_eq!(baseline.values.len(), out.len());
+        for (i, (&a, &b)) in baseline.values.iter().zip(out.iter()).enumerate() {
+            if a.is_nan() {
+                assert!(b.is_nan(), "NaN warmup mismatch at index {}: got {}", i, b);
+            } else {
+                assert!(
+                    (a - b).abs() <= 1e-12,
+                    "Value mismatch at index {}: expected {}, got {}",
+                    i,
+                    a,
+                    b
+                );
+            }
+        }
+        Ok(())
+    }
 
     fn check_ehlers_kama_partial_params(
         test_name: &str,

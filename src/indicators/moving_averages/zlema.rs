@@ -1521,8 +1521,12 @@ pub fn zlema_compute_into(
         });
     }
 
-    // Initialize the warmup period with NaN
-    out[..warm].fill(f64::NAN);
+    // Initialize the warmup period with the same quiet-NaN pattern used by Vec API
+    // to preserve exact warmup semantics/parity.
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..warm] {
+        *v = qnan;
+    }
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -1564,9 +1568,10 @@ pub fn zlema_into_slice(
             data_len: data.len(),
         });
     }
-    // Initialize only the prefix, zero-copy style
+    // Initialize only the prefix, zero-copy style, with quiet-NaN to match Vec API
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warm] {
-        *v = f64::NAN;
+        *v = qnan;
     }
 
     let chosen = match kern {
@@ -1583,6 +1588,58 @@ pub fn zlema_into_slice(
             _ => unreachable!(),
         }
     }
+    Ok(())
+}
+
+/// Compute ZLEMA directly into the provided output buffer without any allocations.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (quiet-NaN prefix).
+/// - Requires `out.len() == input.len()`; returns `ZlemaError::InvalidPeriod` on mismatch.
+/// - Uses the same kernel-selection semantics as `zlema()` (Auto → Scalar for parity).
+#[cfg(not(feature = "wasm"))]
+pub fn zlema_into(input: &ZlemaInput, out: &mut [f64]) -> Result<(), ZlemaError> {
+    // Match `zlema_with_kernel` Auto semantics by forcing Scalar here for parity.
+    zlema_compute_into(input, Kernel::Scalar, out)
+}
+
+#[cfg(test)]
+#[cfg(not(feature = "wasm"))]
+fn eq_or_both_nan(a: f64, b: f64) -> bool {
+    (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+}
+
+#[cfg(test)]
+#[cfg(not(feature = "wasm"))]
+#[test]
+fn test_zlema_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+    // Construct a small but non-trivial input (no leading NaNs; default period = 14)
+    let n = 256usize;
+    let mut data = Vec::with_capacity(n);
+    for i in 0..n {
+        let x = i as f64;
+        data.push(x.sin() + 0.5 * x.cos());
+    }
+
+    let input = ZlemaInput::from_slice(&data, ZlemaParams::default());
+
+    // Baseline via existing Vec-returning API
+    let baseline = zlema(&input)?.values;
+
+    // Preallocate and compute via new into API
+    let mut out = vec![0.0f64; n];
+    zlema_into(&input, &mut out)?;
+
+    assert_eq!(baseline.len(), out.len());
+    for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+        assert!(
+            eq_or_both_nan(a, b),
+            "mismatch at {}: baseline={}, into={}",
+            i,
+            a,
+            b
+        );
+    }
+
     Ok(())
 }
 

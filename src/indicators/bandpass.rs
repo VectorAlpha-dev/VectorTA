@@ -396,6 +396,32 @@ pub fn bandpass_with_kernel(
     })
 }
 
+/// Compute Band-Pass into caller-provided output buffers (no allocations).
+///
+/// Preserves NaN warmups exactly like `bandpass()`/`bandpass_with_kernel()` and writes results
+/// directly into the provided slices. Each output slice length must equal the input length.
+///
+/// Returns `Ok(())` on success; propagates existing `BandPassError` variants (including
+/// `DestLenMismatch` when lengths differ).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn bandpass_into(
+    input: &BandPassInput,
+    bp_out: &mut [f64],
+    bp_normalized_out: &mut [f64],
+    signal_out: &mut [f64],
+    trigger_out: &mut [f64],
+) -> Result<(), BandPassError> {
+    bandpass_into_slice(
+        bp_out,
+        bp_normalized_out,
+        signal_out,
+        trigger_out,
+        input,
+        Kernel::Auto,
+    )
+}
+
 /// Write directly to output slices - no allocations
 #[inline]
 pub fn bandpass_into_slice(
@@ -1535,6 +1561,53 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_bandpass_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Small but non-trivial synthetic input
+        let len = 512usize;
+        let mut data = Vec::with_capacity(len);
+        for i in 0..len {
+            let t = i as f64 * 0.07;
+            // mix of trend + cycles to exercise normalization/trigger
+            data.push((t).sin() * 0.8 + (0.33 * t).sin() * 0.2 + 0.001 * i as f64);
+        }
+
+        let input = BandPassInput::from_slice(&data, BandPassParams::default());
+
+        // Baseline via Vec-returning API
+        let base = bandpass(&input)?;
+
+        // Preallocate outputs
+        let mut bp = vec![0.0; len];
+        let mut bpn = vec![0.0; len];
+        let mut sig = vec![0.0; len];
+        let mut trg = vec![0.0; len];
+
+        // New no-allocation API
+        #[allow(unused_mut)]
+        let mut _ok = bandpass_into(&input, &mut bp, &mut bpn, &mut sig, &mut trg)?;
+
+        // Length parity
+        assert_eq!(bp.len(), base.bp.len());
+        assert_eq!(bpn.len(), base.bp_normalized.len());
+        assert_eq!(sig.len(), base.signal.len());
+        assert_eq!(trg.len(), base.trigger.len());
+
+        // Helper: NaN == NaN, otherwise exact (paths are identical)
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..len {
+            assert!(eq_or_both_nan(bp[i], base.bp[i]), "bp mismatch at {}: {} vs {}", i, bp[i], base.bp[i]);
+            assert!(eq_or_both_nan(bpn[i], base.bp_normalized[i]), "bpn mismatch at {}: {} vs {}", i, bpn[i], base.bp_normalized[i]);
+            assert!(eq_or_both_nan(sig[i], base.signal[i]), "sig mismatch at {}: {} vs {}", i, sig[i], base.signal[i]);
+            assert!(eq_or_both_nan(trg[i], base.trigger[i]), "trg mismatch at {}: {} vs {}", i, trg[i], base.trigger[i]);
+        }
+
+        Ok(())
+    }
 
     fn check_bandpass_partial_params(
         test_name: &str,

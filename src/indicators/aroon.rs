@@ -274,6 +274,21 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
     })
 }
 
+/// Write Aroon outputs directly into caller-provided buffers without allocations.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (`aroon`/`aroon_with_kernel`).
+/// - Both `out_up` and `out_down` must have length equal to the input length.
+/// - Uses `Kernel::Auto` for runtime selection, mirroring the default API.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn aroon_into(
+    input: &AroonInput,
+    out_up: &mut [f64],
+    out_down: &mut [f64],
+) -> Result<(), AroonError> {
+    aroon_into_slice(out_up, out_down, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down: &mut [f64]) {
     let len = high.len();
@@ -2482,6 +2497,61 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    // Parity test: native into() matches Vec-returning API exactly (NaN == NaN)
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_aroon_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Construct a small-but-nontrivial input with leading NaNs to exercise warmup handling
+        let len = 256usize;
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        // 8 leading NaNs
+        for _ in 0..8 { high.push(f64::NAN); low.push(f64::NAN); }
+        // Deterministic synthetic data
+        for i in 8..len {
+            let base = 100.0 + (i as f64) * 0.017;
+            high.push(base + 0.75 + (i as f64).sin() * 0.01);
+            low.push(base - 0.80 + (i as f64).cos() * 0.01);
+        }
+
+        let input = AroonInput::from_slices_hl(&high, &low, AroonParams::default());
+
+        // Baseline via existing API
+        let baseline = aroon(&input)?;
+
+        // Preallocated outputs for into-API
+        let mut up = vec![0.0; len];
+        let mut down = vec![0.0; len];
+        aroon_into(&input, &mut up, &mut down)?;
+
+        assert_eq!(baseline.aroon_up.len(), up.len());
+        assert_eq!(baseline.aroon_down.len(), down.len());
+
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline.aroon_up[i], up[i]),
+                "Mismatch at index {} (up): baseline={}, into={}",
+                i,
+                baseline.aroon_up[i],
+                up[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.aroon_down[i], down[i]),
+                "Mismatch at index {} (down): baseline={}, into={}",
+                i,
+                baseline.aroon_down[i],
+                down[i]
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// Write directly to output slices - no allocations

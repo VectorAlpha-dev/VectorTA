@@ -269,6 +269,19 @@ pub fn linreg_with_kernel(
     Ok(LinRegOutput { values: out })
 }
 
+/// LinReg zero-allocation API: writes results into the caller-provided buffer.
+///
+/// - Preserves NaN warmups exactly like `linreg()` (Auto short-circuits to Scalar).
+/// - The output slice length must equal the input length.
+/// - Returns `Ok(())` on success, or the same errors as the Vec-returning API on failure.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn linreg_into(input: &LinRegInput, out: &mut [f64]) -> Result<(), LinRegError> {
+    // Match `linreg()` semantics where Kernel::Auto maps to Scalar for this indicator.
+    // Use the existing compute_into path for warmup handling and kernel dispatch.
+    linreg_compute_into(input, Kernel::Scalar, out)
+}
+
 /// Compute LinReg directly into pre-allocated output slice (zero-copy)
 pub fn linreg_compute_into(
     input: &LinRegInput,
@@ -1036,6 +1049,41 @@ mod tests {
         }
         let output = linreg_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_linreg_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input: NaN warmup prefix + trending/oscillating data
+        let mut data = Vec::with_capacity(5 + 256);
+        for _ in 0..5 {
+            data.push(f64::NAN);
+        }
+        for i in 0..256u32 {
+            let x = i as f64;
+            let v = (x * 0.137).sin() * 3.0 + x * 0.25; // mild sinusoid on a trend
+            data.push(v);
+        }
+
+        let params = LinRegParams { period: Some(14) };
+        let input = LinRegInput::from_slice(&data, params);
+
+        // Baseline via existing Vec-returning API (Auto -> Scalar for this indicator)
+        let baseline = linreg(&input)?.values;
+
+        // Preallocate and compute in-place
+        let mut out = vec![0.0; data.len()];
+        linreg_into(&input, &mut out)?;
+
+        assert_eq!(out.len(), baseline.len());
+        for (i, (&a, &b)) in out.iter().zip(baseline.iter()).enumerate() {
+            if a.is_nan() || b.is_nan() {
+                assert!(a.is_nan() && b.is_nan(), "NaN parity mismatch at index {}", i);
+            } else {
+                let diff = (a - b).abs();
+                assert!(diff <= 1e-12, "Value mismatch at index {}: {} vs {} (diff={})", i, a, b, diff);
+            }
+        }
         Ok(())
     }
 

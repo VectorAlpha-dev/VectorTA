@@ -402,6 +402,22 @@ pub fn frama_with_kernel(input: &FramaInput, kernel: Kernel) -> Result<FramaOutp
     Ok(FramaOutput { values: out })
 }
 
+/// Write FRAMA values into a caller-provided output buffer without allocating.
+///
+/// - Preserves the same NaN warmup prefix as `frama()` (indices before the first
+///   valid output remain NaN; the seed at the first valid index is finite).
+/// - The output slice length must equal the input length; returns the module's
+///   existing window/length error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn frama_into(input: &FramaInput, out: &mut [f64]) -> Result<(), FramaError> {
+    // Delegate to the internal helper with Kernel::Auto
+    frama_into_slice(out, input, Kernel::Auto)
+}
+
+// Note: `frama_into_slice` is already provided later in this module (WASM section)
+// and is used here to avoid duplication.
+
 #[derive(Copy, Clone)]
 struct MonoDeque<const CAP: usize> {
     buf: [usize; CAP],
@@ -2499,6 +2515,39 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_frama_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = FramaInput::with_default_candles(&candles);
+        let baseline = frama(&input)?.values;
+
+        let mut out = vec![0.0; candles.close.len()];
+
+        // Use native into when available; fallback to internal helper under wasm
+        #[cfg(not(feature = "wasm"))]
+        {
+            frama_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            frama_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(out.len(), baseline.len());
+        for i in 0..out.len() {
+            let a = out[i];
+            let b = baseline[i];
+            if a.is_nan() || b.is_nan() {
+                assert!(a.is_nan() && b.is_nan(), "NaN mismatch at index {}", i);
+            } else {
+                assert!(a == b, "Value mismatch at index {}: {} != {}", i, a, b);
+            }
+        }
+        Ok(())
+    }
 }
 
 // Python bindings

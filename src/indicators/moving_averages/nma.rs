@@ -2228,13 +2228,24 @@ pub fn nma_into_slice(dst: &mut [f64], input: &NmaInput, kern: Kernel) -> Result
         dst,
     );
 
-    // Fill warmup period with NaN
+    // Fill warmup period with the same quiet-NaN pattern used by alloc_with_nan_prefix
     let warmup_end = first + period;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_end] {
-        *v = f64::NAN;
+        *v = qnan;
     }
 
     Ok(())
+}
+
+/// Writes NMA into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup prefix exactly as the Vec-returning API does.
+/// - Output slice length must equal input length; returns `InvalidPeriod` on mismatch.
+#[cfg(not(feature = "wasm"))]
+pub fn nma_into(input: &NmaInput, out: &mut [f64]) -> Result<(), NmaError> {
+    // Delegate to the slice variant with automatic kernel selection
+    nma_into_slice(out, input, Kernel::Auto)
 }
 
 // WASM bindings
@@ -2476,6 +2487,54 @@ mod tests {
         let input = NmaInput::from_candles(&candles, "close", default_params);
         let output = nma_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_nma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare a small, non-trivial positive input slice (ensure > 0 for ln())
+        let n = 256usize;
+        let mut data = vec![0.0f64; n];
+        for i in 0..n {
+            let t = i as f64;
+            data[i] = 100.0 + 0.1 * t + (t * 0.07).sin();
+        }
+
+        let params = NmaParams::default();
+        let input = NmaInput::from_slice(&data, params);
+
+        // Baseline via Vec-returning API
+        let baseline = nma(&input)?.values;
+
+        // Preallocate output buffer and compute via into-API
+        let mut out = vec![0.0f64; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            nma_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // For completeness if tests ever run with wasm feature, fall back to slice variant
+            nma_into_slice(&mut out, &input, detect_best_kernel())?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: treat NaN == NaN; otherwise require tight epsilon equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "Mismatch at index {}: baseline={} out={}",
+                i,
+                a,
+                b
+            );
+        }
 
         Ok(())
     }

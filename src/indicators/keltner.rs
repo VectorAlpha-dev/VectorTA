@@ -358,6 +358,22 @@ pub fn keltner_with_kernel(
     })
 }
 
+/// Writes Keltner Channels into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmup prefix identical to `keltner()`/`keltner_with_kernel()`.
+/// - All output slices must have the same length as the input series.
+/// - Uses runtime kernel selection (`Kernel::Auto`).
+#[cfg(not(feature = "wasm"))]
+#[inline(always)]
+pub fn keltner_into(
+    input: &KeltnerInput,
+    upper_dst: &mut [f64],
+    middle_dst: &mut [f64],
+    lower_dst: &mut [f64],
+) -> Result<(), KeltnerError> {
+    keltner_into_slice(upper_dst, middle_dst, lower_dst, input, Kernel::Auto)
+}
+
 /// Write keltner output directly to pre-allocated slices - zero allocations
 #[inline(always)]
 pub fn keltner_into_slice(
@@ -2554,6 +2570,86 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_keltner_into_matches_api() {
+        use crate::utilities::data_loader::Candles;
+
+        // Build a small but non-trivial synthetic OHLC series
+        let n = 256usize;
+        let mut ts = Vec::with_capacity(n);
+        let mut open = Vec::with_capacity(n);
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        let mut volume = Vec::with_capacity(n);
+
+        let mut price = 1000.0f64;
+        for i in 0..n {
+            let i_f = i as f64;
+            let drift = (i_f * 0.001).sin() * 0.5;
+            let noise = (i_f * 0.07).cos() * 0.8;
+            price = (price + drift + noise).max(1.0);
+            let spread = 2.0 + (i % 5) as f64;
+            let h = price + spread;
+            let l = price - spread * 0.8;
+            let o = price - 0.25 * spread;
+            let c = price + 0.25 * spread;
+
+            ts.push(i as i64);
+            open.push(o);
+            high.push(h);
+            low.push(l);
+            close.push(c);
+            volume.push(1000.0 + i as f64);
+        }
+
+        let candles = Candles::new(ts, open, high, low, close, volume);
+        let input = KeltnerInput::from_candles(&candles, "close", KeltnerParams::default());
+
+        // Baseline via Vec-returning API
+        let base = keltner(&input).expect("keltner baseline failed");
+
+        let len = candles.close.len();
+        let mut up = vec![0.0; len];
+        let mut mid = vec![0.0; len];
+        let mut lo = vec![0.0; len];
+
+        // Into API (no allocation)
+        keltner_into(&input, &mut up, &mut mid, &mut lo).expect("keltner_into failed");
+
+        assert_eq!(base.upper_band.len(), up.len());
+        assert_eq!(base.middle_band.len(), mid.len());
+        assert_eq!(base.lower_band.len(), lo.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(base.upper_band[i], up[i]),
+                "upper mismatch at {}: base={} into={}",
+                i,
+                base.upper_band[i],
+                up[i]
+            );
+            assert!(
+                eq_or_both_nan(base.middle_band[i], mid[i]),
+                "middle mismatch at {}: base={} into={}",
+                i,
+                base.middle_band[i],
+                mid[i]
+            );
+            assert!(
+                eq_or_both_nan(base.lower_band[i], lo[i]),
+                "lower mismatch at {}: base={} into={}",
+                i,
+                base.lower_band[i],
+                lo[i]
+            );
+        }
+    }
 }
 
 // Python bindings

@@ -239,6 +239,87 @@ pub fn medium_ad_with_kernel(
     Ok(MediumAdOutput { values: out })
 }
 
+/// Writes MEDIUM_AD values into a caller-provided output slice without allocating.
+///
+/// - Preserves the module's NaN warmup semantics (prefix up to `first + period - 1`).
+/// - `out.len()` must equal the input length; returns the module's length/period error on mismatch.
+/// - Uses the same kernel auto-selection policy as `medium_ad()` (short-circuits AVX2 to scalar).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn medium_ad_into(input: &MediumAdInput, out: &mut [f64]) -> Result<(), MediumAdError> {
+    // Resolve input data
+    let data: &[f64] = match &input.data {
+        MediumAdData::Candles { candles, source } => source_type(candles, source),
+        MediumAdData::Slice(sl) => sl,
+    };
+
+    let len = data.len();
+    if len == 0 {
+        return Err(MediumAdError::EmptyData);
+    }
+
+    // Find first non-NaN and validate
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(MediumAdError::AllValuesNaN)?;
+
+    let period = input.get_period();
+    if period == 0 || period > len {
+        return Err(MediumAdError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < period {
+        return Err(MediumAdError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+
+    if out.len() != len {
+        // Reuse module's existing length-style error (matches into_slice behavior)
+        return Err(MediumAdError::InvalidPeriod {
+            period: out.len(),
+            data_len: len,
+        });
+    }
+
+    // Pre-fill warmup prefix with quiet NaNs to match Vec-returning API
+    let warm = first + period - 1;
+    let warm_cap = warm.min(len);
+    for v in &mut out[..warm_cap] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Choose kernel with the same policy used by medium_ad_with_kernel
+    let chosen = match Kernel::Auto {
+        Kernel::Auto => {
+            match detect_best_kernel() {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => Kernel::Avx512,
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => Kernel::Scalar,
+                other => other,
+            }
+        }
+        other => other,
+    };
+
+    // Compute directly into caller-provided buffer
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => medium_ad_scalar(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => medium_ad_avx2(data, period, first, out),
+            // Route AVX512 to scalar for parity/correctness with current policy
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => medium_ad_scalar(data, period, first, out),
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
 #[inline]
 pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     // alloc_with_nan_prefix already wrote NaNs up to warm = first_valid + period - 1
@@ -2428,5 +2509,50 @@ pub fn medium_ad_batch_into(
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         Ok(rows)
+    }
+}
+
+// Minimal parity test for the native into API
+#[cfg(all(test, not(feature = "wasm")))]
+mod tests_into_parity {
+    use super::*;
+
+    #[test]
+    fn test_medium_ad_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a small but non-trivial input with a NaN prefix
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..253usize {
+            let x = (i as f64 * 0.019).sin() * 3.0 + 42.0 + ((i % 11) as f64) * 0.07;
+            data.push(x);
+        }
+
+        let input = MediumAdInput::from_slice(&data, MediumAdParams::default());
+
+        // Baseline via existing Vec-returning API
+        let baseline = medium_ad(&input)?.values;
+
+        // Preallocate output; function should write warmups to NaN and values thereafter
+        let mut out = vec![0.0; data.len()];
+        medium_ad_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        #[inline]
+        fn eq_or_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for (i, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_nan(*a, *b),
+                "medium_ad_into mismatch at idx {}: baseline={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
     }
 }

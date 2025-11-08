@@ -327,6 +327,17 @@ pub fn trendflex_into_slice(
     Ok(())
 }
 
+/// Writes TrendFlex outputs into a caller-provided buffer without allocating.
+///
+/// - Preserves the same NaN warmup prefix as the Vec-returning API.
+/// - `out.len()` must equal the input length; returns the module's length/period
+///   error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn trendflex_into(input: &TrendFlexInput, out: &mut [f64]) -> Result<(), TrendFlexError> {
+    trendflex_into_slice(out, input, Kernel::Auto)
+}
+
 // In-place scalar kernel that writes directly into output slice
 // Streaming, loop-jammed implementation: computes super smoother, rolling window, and
 // normalization in one pass using a ring buffer (no temporary ssf vector).
@@ -1948,6 +1959,37 @@ mod tests {
 
         let result = trendflex_into_slice(&mut out, &input, Kernel::Scalar);
         assert!(result.is_ok());
+    }
+
+    // Parity test: native into() matches Vec API including warmup NaNs
+    #[test]
+    #[cfg(not(feature = "wasm"))]
+    fn test_trendflex_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let n = 512usize;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64;
+            data.push(0.01 * t + (t * 0.05).sin());
+        }
+
+        let input = TrendFlexInput::from_slice(&data, TrendFlexParams::default());
+        let baseline = trendflex(&input)?.values;
+
+        let mut out = vec![0.0f64; n];
+        trendflex_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+        for i in 0..n {
+            let a = baseline[i];
+            let b = out[i];
+            let equal = if a.is_nan() && b.is_nan() {
+                true
+            } else {
+                (a - b).abs() <= 1e-12
+            };
+            assert!(equal, "divergence at {}: {} vs {}", i, a, b);
+        }
+        Ok(())
     }
 
     // Test for batch kernel coercion

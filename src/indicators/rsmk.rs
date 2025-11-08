@@ -870,6 +870,283 @@ pub fn rsmk_into_slice(
     Ok(())
 }
 
+/// Write RSMK results into caller-provided buffers without allocating outputs.
+///
+/// Preserves NaN warmups exactly as the Vec-returning API. Both `indicator_out`
+/// and `signal_out` must have length equal to the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn rsmk_into(
+    input: &RsmkInput,
+    indicator_out: &mut [f64],
+    signal_out: &mut [f64],
+) -> Result<(), RsmkError> {
+    // Extract and validate inputs exactly like rsmk_with_kernel
+    let (main, compare) = match &input.data {
+        RsmkData::Candles {
+            candles,
+            candles_compare,
+            source,
+        } => (
+            source_type(candles, source),
+            source_type(candles_compare, source),
+        ),
+        RsmkData::Slices { main, compare } => (*main, *compare),
+    };
+    let len = main.len();
+    if len == 0 || compare.len() == 0 {
+        return Err(RsmkError::EmptyData);
+    }
+    if main.len() != compare.len()
+        || indicator_out.len() != len
+        || signal_out.len() != len
+    {
+        return Err(RsmkError::InvalidPeriod {
+            period: 0,
+            data_len: len,
+        });
+    }
+
+    let lookback = input.get_lookback();
+    let period = input.get_period();
+    let signal_period = input.get_signal_period();
+    if lookback == 0
+        || period == 0
+        || signal_period == 0
+        || period > len
+        || signal_period > len
+        || lookback >= len
+    {
+        return Err(RsmkError::InvalidPeriod {
+            period: lookback.max(period).max(signal_period),
+            data_len: len,
+        });
+    }
+
+    // 1) log-ratio
+    let mut lr = Vec::with_capacity(len);
+    unsafe { lr.set_len(len); }
+    for i in 0..len {
+        let m = main[i];
+        let c = compare[i];
+        unsafe {
+            *lr.get_unchecked_mut(i) = if m.is_nan() || c.is_nan() || c == 0.0 {
+                f64::NAN
+            } else {
+                (m / c).ln()
+            };
+        }
+    }
+    let first_valid = lr
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(RsmkError::AllValuesNaN)?;
+
+    // 2) momentum into temp vec with NaN prefix sized by (first_valid + lookback)
+    let mut mom = alloc_with_nan_prefix(len, first_valid + lookback);
+    let mom_fv = first_valid + lookback;
+    unsafe {
+        for i in mom_fv..len {
+            let a = *lr.get_unchecked(i);
+            let b = *lr.get_unchecked(i - lookback);
+            *mom.get_unchecked_mut(i) = if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                a - b
+            };
+        }
+    }
+
+    // 3) MA selection and fused paths (mirror rsmk_scalar semantics)
+    #[inline(always)]
+    fn is_ema(s: &str) -> bool { s.eq_ignore_ascii_case("ema") }
+    #[inline(always)]
+    fn is_sma(s: &str) -> bool { s.eq_ignore_ascii_case("sma") }
+
+    let matype = input.get_ma_type();
+    let sigtype = input.get_signal_ma_type();
+
+    let ind_warmup = mom_fv.saturating_add(period.saturating_sub(1));
+    let sig_warmup = ind_warmup.saturating_add(signal_period.saturating_sub(1));
+
+    // Prefill NaN warmups in destination buffers
+    for i in 0..ind_warmup.min(len) { indicator_out[i] = f64::NAN; }
+    for i in 0..sig_warmup.min(len) { signal_out[i] = f64::NAN; }
+
+    // --- EMA over momentum, then EMA over indicator (fused) ---
+    if is_ema(matype) && is_ema(sigtype) {
+        if ind_warmup < len {
+            // Seed EMA(indicator) from SMA of first `period` momentum points (NaN-aware)
+            let mut sum = 0.0;
+            let mut cnt = 0usize;
+            let init_end = (mom_fv + period).min(len);
+            unsafe {
+                for i in mom_fv..init_end {
+                    let v = *mom.get_unchecked(i);
+                    if !v.is_nan() { sum += v; cnt += 1; }
+                }
+            }
+            if cnt > 0 {
+                let alpha_ind = 2.0 / (period as f64 + 1.0);
+                let alpha_sig = 2.0 / (signal_period as f64 + 1.0);
+
+                let mut ema_ind = (sum / cnt as f64) * 100.0;
+                indicator_out[ind_warmup] = ema_ind;
+
+                let mut ema_sig = 0.0f64; // set when seeded
+                let mut acc_sig = ema_ind;
+                let mut cnt_sig = 1usize;
+                if sig_warmup == ind_warmup { // signal_period == 1
+                    ema_sig = acc_sig / (cnt_sig as f64);
+                    signal_out[sig_warmup] = ema_sig;
+                }
+
+                unsafe {
+                    for i in (ind_warmup + 1)..len {
+                        let mv = *mom.get_unchecked(i);
+                        if mv.is_finite() {
+                            let src100 = mv * 100.0;
+                            ema_ind = (src100 - ema_ind).mul_add(alpha_ind, ema_ind);
+                        }
+                        *indicator_out.get_unchecked_mut(i) = ema_ind;
+
+                        if i < sig_warmup {
+                            acc_sig += ema_ind; cnt_sig += 1;
+                        } else if i == sig_warmup {
+                            ema_sig = acc_sig / (cnt_sig as f64);
+                            *signal_out.get_unchecked_mut(i) = ema_sig;
+                        } else {
+                            ema_sig = (ema_ind - ema_sig).mul_add(alpha_sig, ema_sig);
+                            *signal_out.get_unchecked_mut(i) = ema_sig;
+                        }
+                    }
+                }
+            } else {
+                // No finite values to seed
+                for i in ind_warmup..len { indicator_out[i] = f64::NAN; }
+                for i in sig_warmup..len { signal_out[i] = f64::NAN; }
+            }
+        }
+        return Ok(());
+    }
+
+    // --- SMA over momentum, then SMA over indicator (fused) ---
+    if is_sma(matype) && is_sma(sigtype) {
+        let mut sum_ind = 0.0; let mut cnt_ind = 0usize;
+        let mut sum_sig = 0.0; let mut cnt_sig = 0usize;
+        unsafe {
+            for i in mom_fv..len {
+                let v_new = *mom.get_unchecked(i);
+                if !v_new.is_nan() { sum_ind += v_new; cnt_ind += 1; }
+                if i >= mom_fv + period {
+                    let v_old = *mom.get_unchecked(i - period);
+                    if !v_old.is_nan() { sum_ind -= v_old; cnt_ind -= 1; }
+                }
+                if i >= ind_warmup {
+                    let ind_val = if cnt_ind > 0 { (sum_ind / cnt_ind as f64) * 100.0 } else { f64::NAN };
+                    *indicator_out.get_unchecked_mut(i) = ind_val;
+                    if !ind_val.is_nan() { sum_sig += ind_val; cnt_sig += 1; }
+                    if i >= sig_warmup {
+                        let old_idx = i - signal_period;
+                        let old_ind = *indicator_out.get_unchecked(old_idx);
+                        if !old_ind.is_nan() { sum_sig -= old_ind; cnt_sig -= 1; }
+                        *signal_out.get_unchecked_mut(i) = if cnt_sig > 0 { sum_sig / cnt_sig as f64 } else { f64::NAN };
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // --- EMA over momentum, then SMA over indicator (fused) ---
+    if is_ema(matype) && is_sma(sigtype) {
+        if ind_warmup < len {
+            // Seed indicator EMA
+            let mut sum = 0.0; let mut cnt = 0usize;
+            let init_end = (mom_fv + period).min(len);
+            unsafe {
+                for i in mom_fv..init_end { let v = *mom.get_unchecked(i); if !v.is_nan() { sum += v; cnt += 1; } }
+            }
+            if cnt > 0 {
+                let alpha_ind = 2.0 / (period as f64 + 1.0);
+                let mut ema_ind = (sum / cnt as f64) * 100.0;
+                let mut sum_sig = 0.0; let mut cnt_sig = 0usize;
+                unsafe {
+                    *indicator_out.get_unchecked_mut(ind_warmup) = ema_ind;
+                    sum_sig += ema_ind; cnt_sig += 1;
+                    if sig_warmup == ind_warmup {
+                        *signal_out.get_unchecked_mut(sig_warmup) = sum_sig / cnt_sig as f64;
+                    }
+                    for i in (ind_warmup + 1)..len {
+                        let mv = *mom.get_unchecked(i);
+                        if !mv.is_nan() { let src100 = mv * 100.0; ema_ind = (src100 - ema_ind).mul_add(alpha_ind, ema_ind); }
+                        *indicator_out.get_unchecked_mut(i) = ema_ind;
+                        if i < sig_warmup {
+                            sum_sig += ema_ind; cnt_sig += 1;
+                        } else if i == sig_warmup {
+                            *signal_out.get_unchecked_mut(i) = sum_sig / cnt_sig as f64;
+                        } else {
+                            // rolling SMA over indicator
+                            let old_idx = i - signal_period;
+                            let old_ind = *indicator_out.get_unchecked(old_idx);
+                            if !old_ind.is_nan() { sum_sig -= old_ind; cnt_sig -= 1; }
+                            sum_sig += ema_ind; cnt_sig += 1;
+                            *signal_out.get_unchecked_mut(i) = if cnt_sig > 0 { sum_sig / cnt_sig as f64 } else { f64::NAN };
+                        }
+                    }
+                }
+            } else {
+                for i in ind_warmup..len { indicator_out[i] = f64::NAN; }
+                for i in sig_warmup..len { signal_out[i] = f64::NAN; }
+            }
+        }
+        return Ok(());
+    }
+
+    // --- SMA over momentum, then EMA over indicator (fused) ---
+    if is_sma(matype) && is_ema(sigtype) {
+        let mut sum_ind = 0.0; let mut cnt_ind = 0usize;
+        let alpha_sig = 2.0 / (signal_period as f64 + 1.0);
+        let mut ema_sig = 0.0f64; let mut seeded_sig = false; let mut acc_sig = 0.0f64; let mut cnt_sig = 0usize;
+        unsafe {
+            for i in mom_fv..len {
+                let v_new = *mom.get_unchecked(i);
+                if !v_new.is_nan() { sum_ind += v_new; cnt_ind += 1; }
+                if i >= mom_fv + period {
+                    let v_old = *mom.get_unchecked(i - period);
+                    if !v_old.is_nan() { sum_ind -= v_old; cnt_ind -= 1; }
+                }
+                if i >= ind_warmup {
+                    let ind_val = if cnt_ind > 0 { (sum_ind / cnt_ind as f64) * 100.0 } else { f64::NAN };
+                    *indicator_out.get_unchecked_mut(i) = ind_val;
+                    if !seeded_sig {
+                        acc_sig += ind_val; cnt_sig += 1;
+                        if i == sig_warmup {
+                            ema_sig = acc_sig / (cnt_sig as f64); seeded_sig = true; *signal_out.get_unchecked_mut(i) = ema_sig;
+                        }
+                    } else {
+                        if ind_val.is_finite() {
+                            ema_sig = (ind_val - ema_sig).mul_add(alpha_sig, ema_sig);
+                        }
+                        *signal_out.get_unchecked_mut(i) = ema_sig;
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // 4) Fallback to generic MA pipeline for uncommon MA types — match scalar behavior
+    let mut indicator = ma(matype, MaData::Slice(&mom), period)
+        .map_err(|e| RsmkError::MaError(e.to_string()))?;
+    for v in &mut indicator { *v *= 100.0; }
+    let signal = ma(sigtype, MaData::Slice(&indicator), signal_period)
+        .map_err(|e| RsmkError::MaError(e.to_string()))?;
+    indicator_out.copy_from_slice(&indicator);
+    signal_out.copy_from_slice(&signal);
+    Ok(())
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx2")]
@@ -2250,6 +2527,51 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[test]
+    fn test_rsmk_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use the existing CSV dataset to mirror other tests
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file)?;
+
+        let input = RsmkInput::with_default_candles(&candles, &candles);
+
+        // Baseline via existing Vec-returning API
+        let baseline = rsmk(&input)?;
+
+        // Preallocate outputs and run the new into API
+        let n = candles.close.len();
+        let mut out_ind = vec![0.0f64; n];
+        let mut out_sig = vec![0.0f64; n];
+        rsmk_into(&input, &mut out_ind, &mut out_sig)?;
+
+        assert_eq!(baseline.indicator.len(), n);
+        assert_eq!(baseline.signal.len(), n);
+        assert_eq!(out_ind.len(), n);
+        assert_eq!(out_sig.len(), n);
+
+        // Helper: NaN == NaN, else exact or tight epsilon
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline.indicator[i], out_ind[i]),
+                "indicator mismatch at {i}: {} vs {}",
+                baseline.indicator[i],
+                out_ind[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.signal[i], out_sig[i]),
+                "signal mismatch at {i}: {} vs {}",
+                baseline.signal[i],
+                out_sig[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_rsmk_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

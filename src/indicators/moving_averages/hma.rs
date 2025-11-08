@@ -201,6 +201,16 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
     hma_with_kernel(input, Kernel::Auto)
 }
 
+/// Writes HMA results into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup semantics identical to the Vec-returning API.
+/// - The output slice length must equal the input length.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+pub fn hma_into(input: &HmaInput, out: &mut [f64]) -> Result<(), HmaError> {
+    hma_into_internal(input, out)
+}
+
 #[inline]
 fn hma_into_internal(input: &HmaInput, out: &mut [f64]) -> Result<(), HmaError> {
     hma_with_kernel_into(input, Kernel::Auto, out)
@@ -1691,6 +1701,34 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use proptest::prelude::*;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_hma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare non-trivial input data (deterministic, finite values)
+        let data: Vec<f64> = (0..512)
+            .map(|i| ((i as f64).sin() * 123.456789) + (i as f64) * 0.25)
+            .collect();
+
+        // Default params match existing tests (period defaults to 5)
+        let input = HmaInput::from_slice(&data, HmaParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = hma(&input)?.values;
+
+        // Preallocate output and call the new into API
+        let mut out = vec![0.0; data.len()];
+        hma_into(&input, &mut out)?;
+
+        // Parity check: exact equality for finite values; NaN == NaN
+        assert_eq!(baseline.len(), out.len());
+        for (a, b) in baseline.iter().zip(out.iter()) {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(equal, "Mismatch: a={:?}, b={:?}", a, b);
+        }
+
+        Ok(())
+    }
 
     fn check_hma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

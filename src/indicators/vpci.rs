@@ -705,6 +705,22 @@ pub fn vpci_into_slice(
     Ok(())
 }
 
+/// VPCI into (no allocations): writes results into caller-provided buffers.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (`vpci`) does.
+/// - Each output slice length must equal the input length; otherwise returns
+///   `VpciError::MismatchedOutputLengths`.
+/// - Uses `Kernel::Auto` for runtime kernel selection (same as `vpci`).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn vpci_into(
+    input: &VpciInput,
+    out_vpci: &mut [f64],
+    out_vpcis: &mut [f64],
+) -> Result<(), VpciError> {
+    vpci_into_slice(out_vpci, out_vpcis, input, Kernel::Auto)
+}
+
 // Simple stub functions that use the unified compute path
 #[inline]
 pub unsafe fn vpci_scalar(
@@ -2353,6 +2369,59 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+}
+
+// Parity test for the native `vpci_into` API using the repository CSV data
+#[cfg(test)]
+#[cfg(not(feature = "wasm"))]
+mod tests_into {
+    use super::*;
+    use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_vpci_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use the same CSV used by other VPCI tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let params = VpciParams::default();
+        let input = VpciInput::from_candles(&candles, "close", "volume", params);
+
+        // Baseline via Vec-returning API
+        let base = vpci(&input)?;
+
+        // Into-API outputs
+        let n = candles.close.len();
+        let mut y = vec![0.0f64; n];
+        let mut ys = vec![0.0f64; n];
+        vpci_into(&input, &mut y, &mut ys)?;
+
+        assert_eq!(base.vpci.len(), y.len());
+        assert_eq!(base.vpcis.len(), ys.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12 || a.to_bits() == b.to_bits()
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(base.vpci[i], y[i]),
+                "VPCI mismatch at {}: base={}, into={}",
+                i,
+                base.vpci[i],
+                y[i]
+            );
+            assert!(
+                eq_or_both_nan(base.vpcis[i], ys[i]),
+                "VPCIS mismatch at {}: base={}, into={}",
+                i,
+                base.vpcis[i],
+                ys[i]
+            );
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "python")]
