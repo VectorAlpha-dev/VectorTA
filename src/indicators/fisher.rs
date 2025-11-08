@@ -288,6 +288,21 @@ pub fn fisher_with_kernel(
     })
 }
 
+/// Writes Fisher Transform results into the provided output slices without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (prefix up to `first + period - 1`).
+/// - The lengths of `fisher_out` and `signal_out` must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn fisher_into(
+    input: &FisherInput,
+    fisher_out: &mut [f64],
+    signal_out: &mut [f64],
+) -> Result<(), FisherError> {
+    // Delegate to the slice-based helper with Kernel::Auto to match default dispatch.
+    fisher_into_slice(fisher_out, signal_out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn fisher_scalar_into(
     high: &[f64],
@@ -1952,6 +1967,75 @@ mod tests {
                     avx512_result.fisher[i]
                 );
             }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fisher_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial OHLCV series (length 256)
+        let n = 256usize;
+        let mut ts = Vec::with_capacity(n);
+        let mut open = Vec::with_capacity(n);
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        let mut volume = Vec::with_capacity(n);
+
+        for i in 0..n {
+            ts.push(i as i64);
+            let base = 1000.0 + (i as f64) * 0.1;
+            let wiggle = ((i as f64) * 0.15).sin() * 2.0;
+            let h = base + 5.0 + wiggle;
+            let l = base - 5.0 - 0.5 * wiggle;
+            let o = base - 1.0;
+            let c = base + 1.0;
+            open.push(o);
+            high.push(h);
+            low.push(l);
+            close.push(c);
+            volume.push(100.0 + (i % 10) as f64);
+        }
+
+        let candles = crate::utilities::data_loader::Candles::new(ts, open, high.clone(), low.clone(), close, volume);
+        let input = FisherInput::from_candles(&candles, FisherParams::default());
+
+        // Baseline via existing Vec-returning API
+        let base = fisher(&input)?;
+
+        // Preallocate output buffers
+        let mut out_fish = vec![0.0; n];
+        let mut out_sig = vec![0.0; n];
+
+        // New native into API (guarded to avoid wasm symbol clash)
+        #[cfg(not(feature = "wasm"))]
+        {
+            fisher_into(&input, &mut out_fish, &mut out_sig)?;
+        }
+
+        // Helper: treat NaN == NaN; prefer exact equality for finite
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        assert_eq!(out_fish.len(), base.fisher.len());
+        assert_eq!(out_sig.len(), base.signal.len());
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(out_fish[i], base.fisher[i]),
+                "fisher mismatch at {}: {} vs {}",
+                i,
+                out_fish[i],
+                base.fisher[i]
+            );
+            assert!(
+                eq_or_both_nan(out_sig[i], base.signal[i]),
+                "signal mismatch at {}: {} vs {}",
+                i,
+                out_sig[i],
+                base.signal[i]
+            );
         }
 
         Ok(())

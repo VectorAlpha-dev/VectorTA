@@ -409,6 +409,36 @@ pub fn alma_into_slice(dst: &mut [f64], input: &AlmaInput, kern: Kernel) -> Resu
     Ok(())
 }
 
+/// Writes ALMA results into the provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn alma_into(input: &AlmaInput, out: &mut [f64]) -> Result<(), AlmaError> {
+    let (data, weights, period, first, inv_n, chosen) = alma_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(AlmaError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warmup_end = first + period - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let warm = warmup_end.min(out.len());
+    for v in &mut out[..warm] {
+        *v = qnan;
+    }
+
+    // Compute into the destination buffer for the valid range
+    alma_compute_into(data, &weights, period, first, inv_n, chosen, out);
+
+    Ok(())
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx512f")]
@@ -2276,6 +2306,41 @@ mod tests {
 
     #[cfg(feature = "proptest")]
     generate_all_alma_tests!(check_alma_property);
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_alma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with an initial NaN prefix
+        let mut data = vec![f64::NAN; 3];
+        data.extend((0..256).map(|i| (i as f64).sin() * 100.0 + (i as f64) * 0.1));
+
+        let input = AlmaInput::from_slice(&data, AlmaParams::default());
+
+        // Baseline via Vec API
+        let baseline = alma_with_kernel(&input, Kernel::Auto)?.values;
+
+        // Preallocate output and compute via into API
+        let mut out = vec![0.0; data.len()];
+        alma_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);

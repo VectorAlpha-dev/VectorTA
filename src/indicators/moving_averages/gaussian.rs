@@ -53,6 +53,55 @@ impl<'a> AsRef<[f64]> for GaussianInput<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Parity test for the native `gaussian_into` API
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests_into {
+    use super::*;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_gaussian_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a small but non-trivial input with a NaN prefix
+        let mut data = Vec::with_capacity(256);
+        // Leading NaNs (warmup-style prefix)
+        for _ in 0..8 {
+            data.push(f64::NAN);
+        }
+        // Deterministic pattern: ramp + sine
+        for i in 0..(256 - 8) {
+            let x = i as f64;
+            data.push(x * 0.1 + (x * 0.07).sin());
+        }
+
+        let input = GaussianInput::from_slice(&data, GaussianParams::default());
+
+        // Baseline via existing Vec-returning API
+        let base = gaussian(&input)?.values;
+
+        // Preallocate output and call the new into API
+        let mut out = vec![0.0f64; data.len()];
+        gaussian_into(&input, &mut out)?;
+
+        assert_eq!(base.len(), out.len());
+        // Equality helper: NaN == NaN, finite within tight epsilon
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+        for i in 0..base.len() {
+            assert!(
+                eq_or_both_nan(base[i], out[i]),
+                "mismatch at idx {}: base={}, out={}",
+                i,
+                base[i],
+                out[i]
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum GaussianData<'a> {
     Candles {
@@ -873,6 +922,25 @@ pub fn gaussian_into_slice(
     }
 
     gaussian_with_kernel_into(input, kern, dst)
+}
+
+/// Compute the Gaussian indicator directly into a caller-provided buffer.
+///
+/// - Preserves NaN warmups consistent with the Vec-returning API.
+/// - The `out` slice length must equal the input length.
+/// - Does not allocate; writes results in-place.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn gaussian_into(input: &GaussianInput, out: &mut [f64]) -> Result<(), GaussianError> {
+    let data = input.as_ref();
+    if out.len() != data.len() {
+        return Err(GaussianError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+    // Use the module's dispatcher with Kernel::Auto to preserve selection semantics.
+    gaussian_with_kernel_into(input, Kernel::Auto, out)
 }
 
 #[inline(always)]

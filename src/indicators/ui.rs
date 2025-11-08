@@ -267,6 +267,70 @@ pub fn ui_with_kernel(input: &UiInput, kernel: Kernel) -> Result<UiOutput, UiErr
     Ok(UiOutput { values: out })
 }
 
+/// Write Ulcer Index values into a caller-provided buffer without allocating.
+///
+/// - Preserves the exact NaN warmup prefix semantics of `ui()`/`ui_with_kernel()`.
+/// - The output slice length must equal the input length.
+/// - Uses `Kernel::Auto` dispatch for kernel selection.
+#[cfg(not(feature = "wasm"))]
+pub fn ui_into(input: &UiInput, out: &mut [f64]) -> Result<(), UiError> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(UiError::EmptyInput);
+    }
+
+    if out.len() != len {
+        return Err(UiError::InvalidLength {
+            expected: len,
+            actual: out.len(),
+        });
+    }
+
+    let first = data
+        .iter()
+        .position(|x| x.is_finite())
+        .ok_or(UiError::AllValuesNaN)?;
+    let period = input.get_period();
+    let scalar = input.get_scalar();
+
+    if period == 0 || period > len {
+        return Err(UiError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if (len - first) < period {
+        return Err(UiError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+    if !scalar.is_finite() {
+        return Err(UiError::InvalidScalar { scalar });
+    }
+
+    let chosen = detect_best_kernel();
+
+    // Prefill warmup prefix with the crate's quiet-NaN pattern to match alloc_with_nan_prefix
+    let warmup = first + (period * 2 - 2);
+    let nan_q = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..warmup.min(len)] {
+        *v = nan_q;
+    }
+
+    match chosen {
+        Kernel::Scalar | Kernel::ScalarBatch => ui_scalar(data, period, scalar, first, out),
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 | Kernel::Avx2Batch => ui_avx2(data, period, scalar, first, out),
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 | Kernel::Avx512Batch => ui_avx512(data, period, scalar, first, out),
+        _ => ui_scalar(data, period, scalar, first, out),
+    }
+
+    Ok(())
+}
+
 pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &mut [f64]) {
     // Drop-in scalar kernel, aggressively optimized & loop-jammed.
     // - Monotonic rolling-max via a hand-rolled circular deque (no std::collections).
@@ -2372,4 +2436,43 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_ui_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use the existing CSV candles to match other UI tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = UiInput::with_default_candles(&candles);
+
+        // Baseline via existing Vec-returning API
+        let baseline = ui(&input)?.values;
+
+        // Preallocate output buffer and compute via new into API
+        let mut out = vec![0.0; baseline.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            ui_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, use the slice helper to emulate native into
+            ui_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+        for i in 0..baseline.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at index {i}: baseline={:?}, into={:?}",
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 }

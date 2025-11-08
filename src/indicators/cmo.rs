@@ -278,6 +278,36 @@ pub fn cmo_into_slice(dst: &mut [f64], input: &CmoInput, kern: Kernel) -> Result
     Ok(())
 }
 
+/// Writes CMO results into the provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn cmo_into(input: &CmoInput, out: &mut [f64]) -> Result<(), CmoError> {
+    let (data, period, first, chosen) = cmo_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(CmoError::InvalidOutputLen {
+            expected: data.len(),
+            got: out.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warmup_end = first + period;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let warm = warmup_end.min(out.len());
+    for v in &mut out[..warm] {
+        *v = qnan;
+    }
+
+    // Compute into the destination buffer for the valid range
+    cmo_compute_into(data, period, first, chosen, out);
+
+    Ok(())
+}
+
 #[inline]
 pub fn cmo_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     let mut avg_gain = 0.0;
@@ -1300,6 +1330,44 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_cmo_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with an initial NaN prefix
+        let mut data = vec![f64::NAN; 3];
+        data.extend((0..256).map(|i| {
+            let x = i as f64;
+            (x * 0.07).sin() * 5.0 + x * 0.1
+        }));
+
+        let input = CmoInput::from_slice(&data, CmoParams::default());
+
+        // Baseline via Vec API
+        let baseline = cmo_with_kernel(&input, Kernel::Auto)?.values;
+
+        // Preallocate output and compute via into API
+        let mut out = vec![0.0; data.len()];
+        cmo_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_cmo_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

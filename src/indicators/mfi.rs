@@ -1389,11 +1389,23 @@ pub fn mfi_into_slice(dst: &mut [f64], input: &MfiInput, kern: Kernel) -> Result
 
     // Fill warmup with NaN
     let warmup_period = first_valid_idx + period - 1;
+    // Use the same quiet-NaN bit pattern as alloc_with_nan_prefix for exact parity.
+    let nan_q = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_period] {
-        *v = f64::NAN;
+        *v = nan_q;
     }
 
     Ok(())
+}
+
+/// Write MFI values into a caller-provided buffer without allocating.
+///
+/// - Preserves the exact NaN warmup prefix semantics of `mfi()`/`mfi_with_kernel()`.
+/// - The output slice length must equal the input length.
+/// - Uses `Kernel::Auto` dispatch for kernel selection.
+#[cfg(not(feature = "wasm"))]
+pub fn mfi_into(input: &MfiInput, out: &mut [f64]) -> Result<(), MfiError> {
+    mfi_into_slice(out, input, Kernel::Auto)
 }
 
 #[cfg(feature = "wasm")]
@@ -1551,6 +1563,58 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use paste::paste;
+    use std::error::Error;
+
+    #[test]
+    fn test_mfi_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare deterministic synthetic data (length 256)
+        let n = 256usize;
+        let mut tp = Vec::with_capacity(n);
+        let mut vol = Vec::with_capacity(n);
+        for i in 0..n {
+            let i_f = i as f64;
+            // Mildly varying typical price with small oscillation
+            let price = 100.0 + 0.123 * i_f + ((i % 7) as f64 - 3.0) * 0.05;
+            tp.push(price);
+            // Positive, varying volume
+            vol.push(1_000.0 + ((i * 37) % 113) as f64);
+        }
+
+        // Default params (period = 14)
+        let input = MfiInput::from_slices(&tp, &vol, MfiParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = mfi(&input)?.values;
+
+        // Preallocate output buffer and call into API
+        let mut out = vec![0.0f64; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            mfi_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm feature builds, use the slice variant to preserve parity
+            mfi_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        // Equality helper: NaN == NaN, finite requires exact equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+        for (i, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(*a, *b),
+                "mismatch at {}: baseline={} vs into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_mfi_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

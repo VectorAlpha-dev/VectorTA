@@ -347,8 +347,10 @@ pub fn jma_with_kernel_into(
         other => other,
     };
 
-    // Only set the true NaN prefix
-    out[..first].fill(f64::NAN);
+    // Only set the true NaN prefix using the same quiet-NaN pattern
+    // used by alloc_with_nan_prefix for parity with Vec-returning API.
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    out[..first].fill(qnan);
 
     unsafe {
         match chosen {
@@ -365,6 +367,18 @@ pub fn jma_with_kernel_into(
         }
     }
     Ok(())
+}
+
+/// Write JMA values into a caller-provided buffer without allocations.
+///
+/// - Preserves the NaN warmup prefix exactly as the Vec-returning API does.
+/// - `out.len()` must equal the input data length.
+///
+/// Returns `Ok(())` on success or a `JmaError` on invalid parameters or length mismatch.
+#[cfg(not(feature = "wasm"))]
+pub fn jma_into(input: &JmaInput, out: &mut [f64]) -> Result<(), JmaError> {
+    // Delegate to the existing zero-allocation kernel dispatcher (Kernel::Auto).
+    jma_with_kernel_into(input, Kernel::Auto, out)
 }
 
 #[inline]
@@ -2118,6 +2132,43 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_jma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with a NaN warmup prefix
+        let len = 256usize;
+        let mut data = Vec::with_capacity(len);
+        for _ in 0..5 { data.push(f64::from_bits(0x7ff8_0000_0000_0000)); }
+        for i in 0..(len - 5) {
+            let x = i as f64;
+            // Mixed signal: sine + mild trend to avoid trivial equality
+            data.push((x * 0.1).sin() * 10.0 + x * 0.01);
+        }
+
+        let input = JmaInput::from_slice(&data, JmaParams::default());
+
+        // Baseline via existing Vec-returning API
+        let baseline = jma(&input)?.values;
+
+        // Preallocate output and compute via into-API
+        let mut out = vec![0.0; data.len()];
+        // jma_into is native-only; if building for wasm this test is not compiled.
+        #[cfg(not(feature = "wasm"))]
+        {
+            jma_into(&input, &mut out)?;
+
+            assert_eq!(out.len(), baseline.len());
+            for (a, b) in out.iter().zip(baseline.iter()) {
+                if a.is_nan() || b.is_nan() {
+                    assert!(a.is_nan() && b.is_nan());
+                } else {
+                    assert_eq!(a, b);
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // Python bindings

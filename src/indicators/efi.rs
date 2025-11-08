@@ -279,6 +279,16 @@ pub fn efi_with_kernel(input: &EfiInput, kernel: Kernel) -> Result<EfiOutput, Ef
     Ok(EfiOutput { values: out })
 }
 
+/// Writes EFI values into the provided output slice without allocating.
+///
+/// - Preserves NaN warmup prefixes exactly as the Vec-returning API.
+/// - The `out` slice length must equal the input length.
+/// - Uses `Kernel::Auto` for runtime dispatch.
+#[cfg(not(feature = "wasm"))]
+pub fn efi_into(input: &EfiInput, out: &mut [f64]) -> Result<(), EfiError> {
+    efi_into_slice(out, input, Kernel::Auto)
+}
+
 /// Write EFI directly to output slice - no allocations
 pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result<(), EfiError> {
     let (price, volume): (&[f64], &[f64]) = match &input.data {
@@ -1810,4 +1820,47 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    // Parity test: native into API matches Vec-returning API
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_efi_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct synthetic price/volume with an initial NaN to force warmup prefix
+        let len = 256usize;
+        let mut price = vec![0.0; len];
+        let mut volume = vec![0.0; len];
+
+        price[0] = f64::NAN; // ensure first diff warmup shifts at least one position
+        volume[0] = 1_000.0;
+        for i in 1..len {
+            price[i] = 100.0 + (i as f64) * 0.5;
+            volume[i] = 10_000.0 + (i as f64) * 100.0;
+        }
+
+        let input = EfiInput::from_slices(&price, &volume, EfiParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = efi(&input)?.values;
+
+        // Into API writes into caller-provided buffer
+        let mut out = vec![0.0; len];
+        efi_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "Mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+        Ok(())
+    }
 }

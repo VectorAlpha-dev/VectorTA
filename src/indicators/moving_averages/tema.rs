@@ -230,6 +230,36 @@ pub fn tema_with_kernel(input: &TemaInput, kernel: Kernel) -> Result<TemaOutput,
     Ok(TemaOutput { values: out })
 }
 
+/// Writes TEMA results into the provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn tema_into(input: &TemaInput, out: &mut [f64]) -> Result<(), TemaError> {
+    let (data, period, first, len, chosen) = tema_prepare(input, Kernel::Auto)?;
+
+    if out.len() != len {
+        return Err(TemaError::InvalidPeriod {
+            period: out.len(),
+            data_len: len,
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warm = first + (period - 1) * 3;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let pref = warm.min(out.len());
+    for v in &mut out[..pref] {
+        *v = qnan;
+    }
+
+    // Compute into the destination buffer for the valid range
+    tema_compute_into(data, period, first, chosen, out);
+
+    Ok(())
+}
+
 // ========== Scalar Implementation ==========
 
 #[inline]
@@ -734,6 +764,54 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_tema_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a small yet non-trivial input with leading NaNs
+        let len = 256usize;
+        let mut data = vec![f64::NAN; len];
+        for i in 2..len {
+            let x = i as f64;
+            data[i] = (x * 0.31337).sin() * 10.0 + x * 0.01;
+        }
+
+        let input = TemaInput::from_slice(&data, TemaParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = tema(&input)?.values;
+
+        // No-allocation path into caller-provided buffer
+        let mut out = vec![0.0; len];
+        #[cfg(not(feature = "wasm"))]
+        {
+            tema_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // For wasm builds, re-use the slice helper to validate parity
+            tema_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: NaN == NaN, otherwise tight epsilon
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "parity mismatch at idx {}: api={} into={} diff={}",
+                i,
+                a,
+                b,
+                (a - b).abs()
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_tema_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

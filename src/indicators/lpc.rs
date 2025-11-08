@@ -1199,6 +1199,21 @@ pub fn lpc_with_kernel(input: &LpcInput, kernel: Kernel) -> Result<LpcOutput, Lp
     })
 }
 
+/// Compute LPC into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - All output slice lengths must equal the input length.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+pub fn lpc_into(
+    input: &LpcInput,
+    filter_out: &mut [f64],
+    high_out: &mut [f64],
+    low_out: &mut [f64],
+) -> Result<(), LpcError> {
+    lpc_into_slices(filter_out, high_out, low_out, input, Kernel::Auto)
+}
+
 /// Prepare function to extract and validate inputs
 fn lpc_prepare<'a>(
     input: &'a LpcInput<'a>,
@@ -2328,6 +2343,20 @@ pub fn lpc_into_slices(
             data_len: n,
         });
     }
+    // Prefill warmup prefix with the crate's quiet-NaN pattern to match Vec APIs
+    if first > 0 {
+        let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+        let w = first.min(n);
+        for v in &mut filter_dst[..w] {
+            *v = qnan;
+        }
+        for v in &mut high_band_dst[..w] {
+            *v = qnan;
+        }
+        for v in &mut low_band_dst[..w] {
+            *v = qnan;
+        }
+    }
     lpc_compute_into(
         h,
         l,
@@ -2570,6 +2599,75 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[test]
+    fn test_lpc_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Small but non-trivial synthetic OHLC with NaN warmup prefix
+        let n = 256usize;
+        let warm = 8usize;
+        let mut ts = Vec::with_capacity(n);
+        let mut open = Vec::with_capacity(n);
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        let mut vol = Vec::with_capacity(n);
+
+        for i in 0..n {
+            ts.push(i as i64);
+            let base = 100.0 + 0.1 * (i as f64) + (i as f64 * 0.05).sin();
+            if i < warm {
+                open.push(f64::NAN);
+                high.push(f64::NAN);
+                low.push(f64::NAN);
+                close.push(f64::NAN);
+            } else {
+                open.push(base - 0.2);
+                high.push(base + 1.0);
+                low.push(base - 1.0);
+                close.push(base);
+            }
+            vol.push(1.0);
+        }
+
+        let candles = crate::utilities::data_loader::Candles::new(
+            ts, open, high.clone(), low.clone(), close.clone(), vol,
+        );
+        let input = LpcInput::from_candles(&candles, "close", LpcParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = lpc(&input)?;
+
+        // Pre-allocated output buffers
+        let mut f = vec![0.0; n];
+        let mut hb = vec![0.0; n];
+        let mut lb = vec![0.0; n];
+
+        // Native no-allocation API
+        #[cfg(not(feature = "wasm"))]
+        {
+            lpc_into(&input, &mut f, &mut hb, &mut lb)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, exercise the slice variant directly
+            lpc_into_slices(&mut f, &mut hb, &mut lb, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(f.len(), baseline.filter.len());
+        assert_eq!(hb.len(), baseline.high_band.len());
+        assert_eq!(lb.len(), baseline.low_band.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..n {
+            assert!(eq_or_both_nan(f[i], baseline.filter[i]), "filter mismatch at {}: {} vs {}", i, f[i], baseline.filter[i]);
+            assert!(eq_or_both_nan(hb[i], baseline.high_band[i]), "high band mismatch at {}: {} vs {}", i, hb[i], baseline.high_band[i]);
+            assert!(eq_or_both_nan(lb[i], baseline.low_band[i]), "low band mismatch at {}: {} vs {}", i, lb[i], baseline.low_band[i]);
+        }
+        Ok(())
+    }
 
     fn check_lpc_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

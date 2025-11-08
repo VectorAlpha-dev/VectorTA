@@ -392,10 +392,11 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
         });
     }
 
-    // correct warmup
+    // correct warmup: use the crate's quiet-NaN pattern to match alloc_with_nan_prefix
     let warmup_end = first + needed - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_end.min(len)] {
-        *v = f64::NAN;
+        *v = qnan;
     }
 
     let chosen = match kern {
@@ -444,6 +445,19 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
         }
     }
     Ok(())
+}
+
+// Native no-allocation API: writes into caller-provided buffer while preserving NaN warmups.
+// Guard against symbol clash with the wasm-bindgen export of the same name.
+#[cfg(not(feature = "wasm"))]
+/// Computes Schaff Trend Cycle into an existing output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix semantics).
+/// - `out.len()` must equal the input length; returns an error on mismatch.
+/// - Uses `Kernel::Auto` to dispatch to the best available implementation.
+#[inline]
+pub fn stc_into(input: &StcInput, out: &mut [f64]) -> Result<(), StcError> {
+    stc_into_slice(out, input, Kernel::Auto)
 }
 
 #[inline]
@@ -2448,6 +2462,43 @@ mod tests {
         let input = StcInput::with_default_candles(&candles);
         let output = stc_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_stc_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the repository CSV so this matches other tests and reference expectations.
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = StcInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = stc(&input)?;
+
+        // Preallocate destination and call into-API
+        let mut out = vec![0.0f64; baseline.values.len()];
+        #[cfg(not(feature = "wasm"))]
+        stc_into(&input, &mut out)?;
+        #[cfg(feature = "wasm")]
+        stc_into_slice(&mut out, &input, Kernel::Auto)?; // fallback in wasm test builds
+
+        assert_eq!(out.len(), baseline.values.len());
+
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for (i, (&a, &b)) in baseline.values.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "Mismatch at idx {}: baseline={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+
         Ok(())
     }
 

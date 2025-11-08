@@ -1237,6 +1237,17 @@ pub fn uma_into_slice(dst: &mut [f64], input: &UmaInput, kern: Kernel) -> Result
     Ok(())
 }
 
+/// Writes UMA results into the provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn uma_into(input: &UmaInput, out: &mut [f64]) -> Result<(), UmaError> {
+    // Reuse the module's compute-into path with automatic kernel selection.
+    uma_into_slice(out, input, Kernel::Auto)
+}
+
 // ==================== BATCH PROCESSING ====================
 
 #[derive(Clone, Debug)]
@@ -2675,6 +2686,60 @@ mod tests {
         assert_eq!(via_api.len(), via_into.len());
         for (a, b) in via_api.iter().zip(via_into.iter()) {
             assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    #[test]
+    fn test_uma_into_matches_api() {
+        // Build small synthetic candles (no file IO), include a NaN prefix
+        let len = 256usize;
+        let mut ts = Vec::with_capacity(len);
+        let mut open = Vec::with_capacity(len);
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        let mut close = Vec::with_capacity(len);
+        let mut volume = Vec::with_capacity(len);
+
+        for i in 0..len {
+            ts.push(i as i64);
+            let base = 100.0 + (i as f64) * 0.1 + (i as f64 / 10.0).sin() * 2.0;
+            let c = if i < 3 { f64::NAN } else { base };
+            let h = if i < 3 { f64::NAN } else { c + 1.0 };
+            let l = if i < 3 { f64::NAN } else { c - 1.0 };
+            let o = if i < 3 { f64::NAN } else { c };
+            let v = 1000.0 + (i % 10) as f64; // always > 0
+
+            open.push(o);
+            high.push(h);
+            low.push(l);
+            close.push(c);
+            volume.push(v);
+        }
+
+        let candles = crate::utilities::data_loader::Candles::new(
+            ts, open, high, low, close, volume,
+        );
+        let params = UmaParams::default();
+        let input = UmaInput::from_candles(&candles, "close", params);
+
+        let baseline = uma(&input).unwrap().values;
+        let mut via_into = vec![0.0; baseline.len()];
+        // Native `_into` wrapper should match the Vec API exactly (including NaN warmups)
+        #[cfg(not(feature = "wasm"))]
+        uma_into(&input, &mut via_into).unwrap();
+        #[cfg(feature = "wasm")]
+        uma_into_slice(&mut via_into, &input, detect_best_kernel()).unwrap();
+
+        assert_eq!(baseline.len(), via_into.len());
+        for (a, b) in baseline.iter().zip(via_into.iter()) {
+            let both_nan = a.is_nan() && b.is_nan();
+            let close_enough = if both_nan { true } else { (*a - *b).abs() <= 1e-12 };
+            assert!(
+                close_enough,
+                "Mismatch: a={} b={}",
+                a,
+                b
+            );
         }
     }
 

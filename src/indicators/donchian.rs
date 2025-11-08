@@ -704,6 +704,22 @@ pub fn donchian_into_slice(
     Ok(())
 }
 
+/// Writes Donchian upper/middle/lower bands into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix semantics).
+/// - Each output slice length must match the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn donchian_into(
+    input: &DonchianInput,
+    upper: &mut [f64],
+    middle: &mut [f64],
+    lower: &mut [f64],
+) -> Result<(), DonchianError> {
+    donchian_into_slice(upper, middle, lower, input, Kernel::Auto)
+}
+
+
 #[inline(always)]
 pub fn donchian_batch_with_kernel(
     high: &[f64],
@@ -1618,6 +1634,49 @@ mod tests {
                     }
                 )*
             }
+        }
+    }
+
+    #[test]
+    fn test_donchian_into_matches_api() {
+        let n = 256usize;
+        let mut high = vec![f64::NAN; n];
+        let mut low = vec![f64::NAN; n];
+
+        // Valid data begins at index 5; add some interior NaNs for gating
+        for i in 5..n {
+            let base = (i as f64).sin() * 10.0 + 100.0;
+            high[i] = base + 2.0 + ((i % 7) as f64) * 0.1;
+            low[i] = base - 2.0 - ((i % 5) as f64) * 0.1;
+        }
+        for idx in [37usize, 88, 133, 210] {
+            high[idx] = f64::NAN;
+        }
+        for idx in [59usize, 120, 178, 220] {
+            low[idx] = f64::NAN;
+        }
+
+        let input = DonchianInput::from_slices(&high, &low, DonchianParams::default());
+        let expected = donchian(&input).expect("baseline donchian() failed");
+
+        let mut up = vec![0.0; n];
+        let mut mid = vec![0.0; n];
+        let mut lo = vec![0.0; n];
+
+        #[cfg(not(feature = "wasm"))]
+        {
+            donchian_into(&input, &mut up, &mut mid, &mut lo).expect("donchian_into failed");
+        }
+
+        assert_eq!(expected.upperband.len(), up.len());
+        assert_eq!(expected.middleband.len(), mid.len());
+        assert_eq!(expected.lowerband.len(), lo.len());
+
+        let eq = |a: f64, b: f64| (a.is_nan() && b.is_nan()) || (a == b);
+        for i in 0..n {
+            assert!(eq(expected.upperband[i], up[i]), "upper mismatch at {}", i);
+            assert!(eq(expected.middleband[i], mid[i]), "middle mismatch at {}", i);
+            assert!(eq(expected.lowerband[i], lo[i]), "lower mismatch at {}", i);
         }
     }
 
@@ -2731,6 +2790,9 @@ pub fn donchian_cuda_batch_dev_py<'py>(
     d.set_item("cols", h.len())?;
     Ok(d)
 }
+
+// (tests live earlier in this file; parity test added to that module)
+
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "donchian_cuda_many_series_one_param_dev")]

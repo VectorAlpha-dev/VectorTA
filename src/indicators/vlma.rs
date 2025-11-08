@@ -307,6 +307,16 @@ pub fn vlma_with_kernel(input: &VlmaInput, kernel: Kernel) -> Result<VlmaOutput,
     Ok(VlmaOutput { values: out })
 }
 
+/// Writes VLMA results into the provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API: the value at
+///   `first_valid` is kept, all other warmup positions are set to NaN.
+/// - The length of `out` must equal the input length, otherwise an error is returned.
+#[cfg(not(feature = "wasm"))]
+pub fn vlma_into(input: &VlmaInput, out: &mut [f64]) -> Result<(), VlmaError> {
+    vlma_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn vlma_into_slice(dst: &mut [f64], input: &VlmaInput, kern: Kernel) -> Result<(), VlmaError> {
     let (data, min_p, max_p, matype, devtype, first, chosen) = vlma_prepare(input, kern)?;
@@ -2082,6 +2092,38 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+    
+    #[test]
+    fn test_vlma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use existing CSV dataset for parity check
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = VlmaInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let base = vlma(&input)?.values;
+
+        // No-allocation API into a caller-provided buffer
+        let mut out = vec![0.0f64; base.len()];
+        super::vlma_into(&input, &mut out)?;
+
+        assert_eq!(base.len(), out.len());
+
+        // Helper: treat NaN == NaN, else require exact (or tight epsilon) equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(base[i], out[i]),
+                "Mismatch at index {i}: base={:?}, into={:?}",
+                base[i],
+                out[i]
+            );
+        }
+        Ok(())
+    }
     fn check_vlma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

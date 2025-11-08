@@ -417,6 +417,40 @@ pub fn mama_compute_into(
     Ok(())
 }
 
+/// Computes MAMA into caller-provided buffers without allocating.
+///
+/// - Preserves the indicator's NaN warmup (first 10 elements) in both outputs.
+/// - Both `out_mama` and `out_fama` must have the same length as `input`.
+/// - Uses `Kernel::Auto` for kernel selection (short-circuited to Scalar for this indicator).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn mama_into(
+    input: &MamaInput,
+    out_mama: &mut [f64],
+    out_fama: &mut [f64],
+) -> Result<(), MamaError> {
+    let data = input.as_ref();
+    if out_mama.len() != data.len() || out_fama.len() != data.len() {
+        return Err(MamaError::NotEnoughData {
+            needed: data.len(),
+            found: out_mama.len().min(out_fama.len()),
+        });
+    }
+
+    // Compute full series in-place, then overwrite warmup with NaN to match Vec API.
+    mama_compute_into(input, Kernel::Auto, out_mama, out_fama)?;
+
+    const WARM: usize = 10;
+    let warm = WARM.min(data.len());
+    for v in &mut out_mama[..warm] {
+        *v = f64::NAN;
+    }
+    for v in &mut out_fama[..warm] {
+        *v = f64::NAN;
+    }
+    Ok(())
+}
+
 /// Computes MAMA directly into provided output slices, avoiding allocation.
 /// The output slices must be the same length as the input data.
 /// This is the preferred method for WASM bindings to minimize allocations.
@@ -2795,6 +2829,65 @@ mod tests {
     // Release mode stub - does nothing
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
+    // Ensure the no-allocation API matches the Vec-returning API exactly (including NaN warmups).
+    #[test]
+    fn test_mama_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a small but non-trivial input series
+        let n = 256usize;
+        let data: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64;
+                (t * 0.013).sin() * 10.0 + (t * 0.01)
+            })
+            .collect();
+
+        let input = MamaInput::from_slice(&data, MamaParams::default());
+
+        // Baseline via existing Vec-returning API
+        let baseline = mama(&input)?;
+
+        // Preallocate and call the new into API
+        let mut out_mama = vec![0.0; n];
+        let mut out_fama = vec![0.0; n];
+        #[allow(unused_variables)]
+        {
+            // Native-only symbol; keep build green when feature "wasm" is enabled in other targets
+            #[cfg(not(feature = "wasm"))]
+            {
+                super::mama_into(&input, &mut out_mama, &mut out_fama)?;
+            }
+            #[cfg(feature = "wasm")]
+            {
+                // In wasm builds, compare against the slice-based helper to keep parity coverage.
+                super::mama_into_slice(&mut out_mama, &mut out_fama, &input, Kernel::Auto)?;
+            }
+        }
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        assert_eq!(baseline.mama_values.len(), out_mama.len());
+        assert_eq!(baseline.fama_values.len(), out_fama.len());
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline.mama_values[i], out_mama[i]),
+                "mama mismatch at {}: left={} right={}",
+                i,
+                baseline.mama_values[i],
+                out_mama[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.fama_values[i], out_fama[i]),
+                "fama mismatch at {}: left={} right={}",
+                i,
+                baseline.fama_values[i],
+                out_fama[i]
+            );
+        }
         Ok(())
     }
 

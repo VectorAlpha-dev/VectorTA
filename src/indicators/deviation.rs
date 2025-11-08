@@ -270,6 +270,17 @@ pub fn deviation(input: &DeviationInput) -> Result<DeviationOutput, DeviationErr
     deviation_with_kernel(input, Kernel::Auto)
 }
 
+/// Writes Deviation outputs into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - `out.len()` must equal the input length.
+/// - Uses runtime kernel auto-detection (same as `deviation()`).
+#[cfg(not(feature = "wasm"))]
+#[inline(always)]
+pub fn deviation_into(input: &DeviationInput, out: &mut [f64]) -> Result<(), DeviationError> {
+    deviation_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline(always)]
 fn deviation_prepare<'a>(
     input: &'a DeviationInput,
@@ -2840,6 +2851,49 @@ mod tests {
         check_deviation_invalid_devtype,
         check_deviation_no_poison
     );
+
+    #[test]
+    fn test_deviation_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Small but non-trivial series with NaN prefix to exercise warmup handling
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..251usize {
+            let x = (i as f64 * 0.113).sin() * 3.7 + (i as f64 * 0.017).cos() * 1.3 + 42.0;
+            data.push(x);
+        }
+
+        let input = DeviationInput::with_defaults(&data);
+
+        // Baseline via Vec-returning API
+        let baseline = deviation(&input)?.values;
+
+        // Preallocate output buffer and compute via into API
+        let mut out = vec![0.0f64; data.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            deviation_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, the native deviation_into is not available; use the slice variant directly
+            deviation_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "deviation_into parity mismatch at index {}: vec={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
+    }
 
     #[cfg(feature = "proptest")]
     generate_all_deviation_tests!(check_deviation_property);

@@ -182,6 +182,20 @@ pub fn obv_with_kernel(input: &ObvInput, kernel: Kernel) -> Result<ObvOutput, Ob
     Ok(ObvOutput { values: out })
 }
 
+/// Write OBV results into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup prefix exactly as the Vec-returning API.
+/// - The output slice length must equal the input length (close/volume length).
+/// - Uses `Kernel::Auto` for dispatch just like `obv()`.
+///
+/// Errors mirror `obv()`/`obv_with_kernel()` (e.g., length mismatch, empty data, all-NaN).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn obv_into(input: &ObvInput, out: &mut [f64]) -> Result<(), ObvError> {
+    let (close, volume) = input.as_refs();
+    obv_into_slice(out, close, volume, Kernel::Auto)
+}
+
 #[inline]
 pub fn obv_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
     // OBV starts at 0 at the first valid bar
@@ -649,6 +663,49 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+    
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_obv_into_matches_api() {
+        let n = 256usize;
+        let mut close = vec![f64::NAN; n];
+        let mut volume = vec![f64::NAN; n];
+
+        for i in 0..n {
+            if i >= 5 {
+                // Produce both up/down/flat segments deterministically
+                let base = 100.0 + ((i as i32 % 11) - 5) as f64;
+                let wiggle = ((i as f64) * 0.03).sin();
+                close[i] = base + wiggle;
+            }
+            if i >= 7 {
+                let v = ((i * 37) % 1000) as f64;
+                volume[i] = if i % 10 == 0 { 0.0 } else { v + 0.5 };
+            }
+        }
+
+        let input = ObvInput::from_slices(&close, &volume, ObvParams::default());
+        let baseline = obv(&input).expect("baseline obv").values;
+
+        let mut out = vec![0.0; n];
+        obv_into(&input, &mut out).expect("obv_into");
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "Mismatch at {}: baseline={} into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+    }
     fn check_obv_empty_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let close: [f64; 0] = [];

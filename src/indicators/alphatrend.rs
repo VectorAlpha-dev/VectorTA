@@ -318,6 +318,23 @@ pub fn alphatrend_with_kernel(
     Ok(AlphaTrendOutput { k1, k2 })
 }
 
+/// Writes AlphaTrend outputs into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix semantics).
+/// - The `out_k1` and `out_k2` slice lengths must equal the input length.
+/// - Uses `Kernel::Auto` dispatch to select the best available kernel.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn alphatrend_into(
+    input: &AlphaTrendInput,
+    out_k1: &mut [f64],
+    out_k2: &mut [f64],
+) -> Result<(), AlphaTrendError> {
+    // Reuse the existing into helper which validates lengths, computes warmups,
+    // prefills NaN prefixes, and calls the selected compute kernel.
+    alphatrend_into_slices(out_k1, out_k2, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn alphatrend_into_slices(
     dst_k1: &mut [f64],
@@ -3241,6 +3258,56 @@ mod tests {
 
     #[cfg(feature = "proptest")]
     generate_all_alphatrend_tests!(check_alphatrend_property);
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_alphatrend_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = AlphaTrendInput::from_candles(&candles, AlphaTrendParams::default());
+
+        // Baseline via allocating API
+        let baseline = alphatrend(&input)?;
+
+        // Preallocate outputs and compute via *_into
+        let mut out_k1 = vec![0.0; candles.close.len()];
+        let mut out_k2 = vec![0.0; candles.close.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            alphatrend_into(&input, &mut out_k1, &mut out_k2)?;
+        }
+
+        // Equality helper: treat NaN == NaN; for finite values prefer exact equality,
+        // but allow a very small epsilon as a fallback if needed.
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            if a.is_nan() && b.is_nan() {
+                true
+            } else {
+                a == b || (a - b).abs() <= 1e-12
+            }
+        }
+
+        assert_eq!(baseline.k1.len(), out_k1.len());
+        assert_eq!(baseline.k2.len(), out_k2.len());
+
+        for i in 0..out_k1.len() {
+            assert!(
+                eq_or_both_nan(baseline.k1[i], out_k1[i]),
+                "k1 mismatch at idx {i}: api={} into={}",
+                baseline.k1[i],
+                out_k1[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.k2[i], out_k2[i]),
+                "k2 mismatch at idx {i}: api={} into={}",
+                baseline.k2[i],
+                out_k2[i]
+            );
+        }
+
+        Ok(())
+    }
 
     // Batch testing functions
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

@@ -294,6 +294,37 @@ pub fn marketefi_with_kernel(
     Ok(MarketefiOutput { values: out })
 }
 
+/// Writes Market Facilitation Index (marketefi) values into a caller-provided buffer without allocations.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (`marketefi` / `marketefi_with_kernel`).
+/// - Output slice length must equal the input length; returns `MismatchedDataLength` on mismatch.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn marketefi_into(input: &MarketefiInput, out: &mut [f64]) -> Result<(), MarketefiError> {
+    let (h, l, v, first, chosen) = marketefi_prepare(input, Kernel::Auto)?;
+    if out.len() != h.len() {
+        return Err(MarketefiError::MismatchedDataLength);
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by `alloc_with_nan_prefix`.
+    for x in &mut out[..first] {
+        *x = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    marketefi_compute_into(h, l, v, first, chosen, out);
+
+    // Keep validation semantics identical to the Vec API.
+    let valid = out[first..].iter().any(|x| !x.is_nan());
+    if !valid {
+        return Err(MarketefiError::NotEnoughValidData);
+    }
+    if out[first..].iter().all(|&x| x.is_nan()) {
+        return Err(MarketefiError::ZeroOrNaNVolume);
+    }
+    Ok(())
+}
+
 #[inline]
 pub fn marketefi_scalar(
     high: &[f64],
@@ -942,6 +973,48 @@ mod tests {
     use paste::paste;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[test]
+    fn test_marketefi_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Small but non-trivial synthetic data with NaNs and a zero-volume entry
+        let len = 256;
+        let mut high = vec![f64::NAN; len];
+        let mut low = vec![f64::NAN; len];
+        let mut volume = vec![f64::NAN; len];
+
+        // Warmup region with NaNs, then valid data; include a zero volume later
+        for i in 10..len {
+            let base = 100.0 + (i as f64) * 0.1;
+            let spread = 0.5 + (i % 7) as f64 * 0.05;
+            high[i] = base + spread;
+            low[i] = base - spread * 0.3;
+            volume[i] = if i % 53 == 0 { 0.0 } else { 1000.0 + (i as f64) };
+        }
+
+        let input = MarketefiInput::from_slices(&high, &low, &volume, MarketefiParams::default());
+
+        // Baseline via Vec-returning API (Auto kernel)
+        let baseline = marketefi_with_kernel(&input, Kernel::Auto)?;
+
+        // Into API into caller-allocated buffer
+        let mut out = vec![0.0; len];
+        #[cfg(not(feature = "wasm"))]
+        {
+            marketefi_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds native `marketefi_into` is not available; emulate via into_slice
+            marketefi_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(out.len(), baseline.values.len());
+        for (a, b) in out.iter().zip(baseline.values.iter()) {
+            let eq = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(eq, "mismatch: got {a:?}, expected {b:?}");
+        }
+        Ok(())
+    }
 
     fn check_marketefi_accuracy(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);

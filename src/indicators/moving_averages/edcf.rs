@@ -295,6 +295,46 @@ pub fn edcf_with_kernel(input: &EdcfInput, kernel: Kernel) -> Result<EdcfOutput,
     Ok(EdcfOutput { values: out })
 }
 
+/// Computes EDCF into a caller-provided buffer (no allocations).
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API.
+/// - The output slice length must equal the input length.
+/// - Uses `Kernel::Auto` for kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn edcf_into(input: &EdcfInput, out: &mut [f64]) -> Result<(), EdcfError> {
+    let (data, period, first, warm, chosen) = edcf_prepare(input, Kernel::Auto)?;
+
+    // Validate output buffer size
+    if out.len() != data.len() {
+        return Err(EdcfError::OutputLenMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
+    }
+
+    // Guard against aliasing with the input slice (in-place not supported)
+    let in_ptr = data.as_ptr();
+    let out_ptr = out.as_ptr();
+    if core::ptr::eq(in_ptr, out_ptr) {
+        let mut temp = alloc_with_nan_prefix(out.len(), warm);
+        edcf_compute_into(data, period, first, chosen, &mut temp);
+        out.copy_from_slice(&temp);
+        return Ok(());
+    }
+
+    // Prefill warmup with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warm = warm.min(out.len());
+    for v in &mut out[..warm] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Compute the remainder directly into the provided buffer
+    edcf_compute_into(data, period, first, chosen, out);
+
+    Ok(())
+}
+
 /// Computes EDCF directly into a provided output slice, avoiding allocation.
 /// The output slice must be the same length as the input data.
 #[inline]
@@ -1134,6 +1174,45 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     use proptest::prelude::*;
     use std::error::Error;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_edcf_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small, non-trivial input with NaN warmup and varying values
+        let mut data: Vec<f64> = Vec::new();
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..250usize {
+            let x = (i as f64).sin() * 3.0 + (i as f64) * 0.05 + ((i % 7) as f64) * 0.1;
+            data.push(x);
+        }
+
+        let input = EdcfInput::from_slice(&data, EdcfParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = edcf(&input)?.values;
+
+        // Preallocate output and call into API
+        let mut out = vec![0.0; data.len()];
+        edcf_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at {}: expected {:?}, got {:?}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_edcf_partial_params(
         test_name: &str,

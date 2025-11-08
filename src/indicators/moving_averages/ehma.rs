@@ -83,6 +83,8 @@ impl<'a> AsRef<[f64]> for EhmaInput<'a> {
     }
 }
 
+    
+
 // ==================== DATA STRUCTURES ====================
 /// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
@@ -338,6 +340,36 @@ pub fn ehma_into_slice(dst: &mut [f64], input: &EhmaInput, kern: Kernel) -> Resu
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
     }
+
+    Ok(())
+}
+
+/// Writes EHMA results into the provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn ehma_into(input: &EhmaInput, out: &mut [f64]) -> Result<(), EhmaError> {
+    let (data, weights, period, first, inv_coef, chosen) = ehma_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(EhmaError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warmup_end = first + period - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let warm = warmup_end.min(out.len());
+    for v in &mut out[..warm] {
+        *v = qnan;
+    }
+
+    // Compute into the destination buffer for the valid range
+    ehma_compute_into(data, &weights, period, first, inv_coef, chosen, out);
 
     Ok(())
 }
@@ -2560,6 +2592,53 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_ehma_into_matches_api() {
+        // Construct a small but non-trivial input series
+        let n = 256usize;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = i as f64;
+            // Blend of sinusoid and gentle trend
+            data.push((x * 0.03125).sin() * 2.0 + (x * 0.001));
+        }
+
+        // Default params (period = 14)
+        let input = EhmaInput::from_slice(&data, EhmaParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = ehma(&input).expect("ehma baseline should succeed").values;
+
+        // Preallocate destination and compute via into API
+        let mut out = vec![0.0; data.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            ehma_into(&input, &mut out).expect("ehma_into should succeed");
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, the native ehma_into is cfg'd out; use slice variant for parity
+            ehma_into_slice(&mut out, &input, detect_best_kernel()).expect("ehma_into_slice ok");
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: NaN == NaN, finite values equal within tight epsilon
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "divergence at index {}: baseline={}, into={}",
+                i,
+                a,
+                b
+            );
         }
     }
 }

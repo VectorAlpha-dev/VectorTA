@@ -297,6 +297,46 @@ pub fn aso_with_kernel(input: &AsoInput, kernel: Kernel) -> Result<AsoOutput, As
     Ok(AsoOutput { bulls, bears })
 }
 
+/// Writes ASO bulls and bears into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - Output slice lengths must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn aso_into(input: &AsoInput, bulls_out: &mut [f64], bears_out: &mut [f64]) -> Result<(), AsoError> {
+    let (open, high, low, close, period, mode, first, chosen) = aso_prepare(input, Kernel::Auto)?;
+
+    if bulls_out.len() != close.len() || bears_out.len() != close.len() {
+        return Err(AsoError::InvalidPeriod {
+            period: bulls_out.len(),
+            data_len: close.len(),
+        });
+    }
+
+    // Prefill warmup prefix with quiet-NaN to match alloc_with_nan_prefix semantics
+    let warm = first + period - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let warm = warm.min(close.len());
+    for v in &mut bulls_out[..warm] { *v = qnan; }
+    for v in &mut bears_out[..warm] { *v = qnan; }
+
+    // Compute results directly into destination buffers
+    aso_compute_into(
+        open,
+        high,
+        low,
+        close,
+        period,
+        mode,
+        first,
+        chosen,
+        bulls_out,
+        bears_out,
+    );
+
+    Ok(())
+}
+
 /// Zero-allocation version for performance-critical paths
 #[inline]
 pub fn aso_into_slices(
@@ -2995,6 +3035,50 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
     gen_batch_tests!(check_batch_no_poison);
+
+    // Parity test: native into API matches Vec-returning API exactly (including NaN warmups)
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_aso_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = AsoInput::from_candles(&candles, "close", AsoParams::default());
+
+        // Baseline using existing API
+        let base = aso(&input)?;
+
+        // Preallocate outputs and call the new into API
+        let mut bulls = vec![0.0; candles.close.len()];
+        let mut bears = vec![0.0; candles.close.len()];
+        aso_into(&input, &mut bulls, &mut bears)?;
+
+        assert_eq!(bulls.len(), base.bulls.len());
+        assert_eq!(bears.len(), base.bears.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..bulls.len() {
+            assert!(
+                eq_or_both_nan(bulls[i], base.bulls[i]),
+                "bulls mismatch at {}: got {}, expected {}",
+                i,
+                bulls[i],
+                base.bulls[i]
+            );
+            assert!(
+                eq_or_both_nan(bears[i], base.bears[i]),
+                "bears mismatch at {}: got {}, expected {}",
+                i,
+                bears[i],
+                base.bears[i]
+            );
+        }
+
+        Ok(())
+    }
 
     // Test new API features
     #[test]

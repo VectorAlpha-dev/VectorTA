@@ -1070,6 +1070,45 @@ mod tests {
         assert_eq!(output_custom.values.len(), candles.close.len());
         Ok(())
     }
+
+    #[test]
+    fn test_vwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Construct a non-trivial synthetic series
+        let n = 256usize;
+        let mut prices = Vec::with_capacity(n);
+        let mut volumes = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64;
+            prices.push(100.0 + (t * 0.05).sin() * 2.0 + (t * 0.01).cos());
+            volumes.push(((i * 3) % 50 + 1) as f64);
+        }
+
+        let params = VwmaParams { period: Some(20) };
+        let input = VwmaInput::from_slice(&prices, &volumes, params);
+
+        // Baseline via Vec-returning API
+        let baseline = vwma(&input)?.values;
+
+        // into() path writes directly into caller-provided buffer
+        let mut out = vec![0.0; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            vwma_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, call the slice variant from tests
+            vwma_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        for (a, b) in baseline.iter().zip(out.iter()) {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(equal, "VWMA into parity failed: expected {}, got {}", a, b);
+        }
+
+        Ok(())
+    }
     fn check_vwma_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1997,13 +2036,23 @@ pub fn vwma_into_slice(dst: &mut [f64], input: &VwmaInput, kern: Kernel) -> Resu
         }
     }
 
-    // Fill warmup with NaN
+    // Fill warmup with quiet-NaN to match alloc_with_nan_prefix semantics
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
-        *v = f64::NAN;
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
     Ok(())
+}
+
+/// Writes VWMA into a caller-provided buffer without allocating.
+///
+/// Preserves NaN warmups identical to the Vec-returning API (quiet-NaN pattern)
+/// and requires `out.len() == input length`.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn vwma_into(input: &VwmaInput, out: &mut [f64]) -> Result<(), VwmaError> {
+    vwma_into_slice(out, input, Kernel::Auto)
 }
 
 #[cfg(feature = "wasm")]

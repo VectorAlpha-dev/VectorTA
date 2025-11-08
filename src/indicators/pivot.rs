@@ -350,6 +350,102 @@ pub fn pivot_with_kernel(input: &PivotInput, kernel: Kernel) -> Result<PivotOutp
     })
 }
 
+/// Writes Pivot levels into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - All output slices must have length equal to the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn pivot_into(
+    input: &PivotInput,
+    r4: &mut [f64],
+    r3: &mut [f64],
+    r2: &mut [f64],
+    r1: &mut [f64],
+    pp: &mut [f64],
+    s1: &mut [f64],
+    s2: &mut [f64],
+    s3: &mut [f64],
+    s4: &mut [f64],
+) -> Result<(), PivotError> {
+    let (high, low, close, open) = match &input.data {
+        PivotData::Candles { candles } => {
+            let high = source_type(candles, "high");
+            let low = source_type(candles, "low");
+            let close = source_type(candles, "close");
+            let open = source_type(candles, "open");
+            (high, low, close, open)
+        }
+        PivotData::Slices { high, low, close, open } => (*high, *low, *close, *open),
+    };
+
+    let len = high.len();
+    if high.is_empty() || low.is_empty() || close.is_empty() {
+        return Err(PivotError::EmptyData);
+    }
+    if low.len() != len || close.len() != len || open.len() != len {
+        return Err(PivotError::EmptyData);
+    }
+    if r4.len() != len
+        || r3.len() != len
+        || r2.len() != len
+        || r1.len() != len
+        || pp.len() != len
+        || s1.len() != len
+        || s2.len() != len
+        || s3.len() != len
+        || s4.len() != len
+    {
+        // Consistent with existing error semantics in this module
+        return Err(PivotError::EmptyData);
+    }
+
+    let mode = input.get_mode();
+
+    // Compute warmup exactly as the Vec-returning API
+    let first_valid_idx = first_valid_ohlc(high, low, close).ok_or(PivotError::AllValuesNaN)?;
+    if first_valid_idx >= len {
+        return Err(PivotError::NotEnoughValidData);
+    }
+
+    // Prefill quiet-NaN warmups to match alloc_with_nan_prefix
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for i in 0..first_valid_idx {
+        r4[i] = qnan;
+        r3[i] = qnan;
+        r2[i] = qnan;
+        r1[i] = qnan;
+        pp[i] = qnan;
+        s1[i] = qnan;
+        s2[i] = qnan;
+        s3[i] = qnan;
+        s4[i] = qnan;
+    }
+
+    // Compute into the provided buffers using the existing kernel dispatcher
+    let chosen = detect_best_kernel();
+    pivot_compute_into(
+        high,
+        low,
+        close,
+        open,
+        mode,
+        first_valid_idx,
+        chosen,
+        r4,
+        r3,
+        r2,
+        r1,
+        pp,
+        s1,
+        s2,
+        s3,
+        s4,
+    );
+
+    Ok(())
+}
+
 #[inline]
 pub fn pivot_into_slices(
     r4: &mut [f64],
@@ -3504,4 +3600,66 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    // ========== INTO PARITY TEST ==========
+    #[test]
+    fn test_pivot_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use the existing CSV input for parity, consistent with other tests
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file)?;
+        let params = PivotParams::default();
+        let input = PivotInput::from_candles(&candles, params);
+
+        // Baseline via existing Vec-returning API
+        let base = pivot(&input)?;
+
+        let len = candles.close.len();
+        // Preallocate output buffers
+        let mut r4 = vec![0.0; len];
+        let mut r3 = vec![0.0; len];
+        let mut r2 = vec![0.0; len];
+        let mut r1 = vec![0.0; len];
+        let mut pp = vec![0.0; len];
+        let mut s1 = vec![0.0; len];
+        let mut s2 = vec![0.0; len];
+        let mut s3 = vec![0.0; len];
+        let mut s4 = vec![0.0; len];
+
+        // Call the new into API
+        #[cfg(not(feature = "wasm"))]
+        {
+            pivot_into(
+                &input, &mut r4, &mut r3, &mut r2, &mut r1, &mut pp, &mut s1, &mut s2, &mut s3,
+                &mut s4,
+            )?;
+
+            assert_eq!(r4.len(), base.r4.len());
+            assert_eq!(r3.len(), base.r3.len());
+            assert_eq!(r2.len(), base.r2.len());
+            assert_eq!(r1.len(), base.r1.len());
+            assert_eq!(pp.len(), base.pp.len());
+            assert_eq!(s1.len(), base.s1.len());
+            assert_eq!(s2.len(), base.s2.len());
+            assert_eq!(s3.len(), base.s3.len());
+            assert_eq!(s4.len(), base.s4.len());
+
+            fn eq_or_both_nan(a: f64, b: f64) -> bool {
+                (a.is_nan() && b.is_nan()) || (a == b)
+            }
+
+            for i in 0..len {
+                assert!(eq_or_both_nan(r4[i], base.r4[i]), "r4 mismatch at {i}");
+                assert!(eq_or_both_nan(r3[i], base.r3[i]), "r3 mismatch at {i}");
+                assert!(eq_or_both_nan(r2[i], base.r2[i]), "r2 mismatch at {i}");
+                assert!(eq_or_both_nan(r1[i], base.r1[i]), "r1 mismatch at {i}");
+                assert!(eq_or_both_nan(pp[i], base.pp[i]), "pp mismatch at {i}");
+                assert!(eq_or_both_nan(s1[i], base.s1[i]), "s1 mismatch at {i}");
+                assert!(eq_or_both_nan(s2[i], base.s2[i]), "s2 mismatch at {i}");
+                assert!(eq_or_both_nan(s3[i], base.s3[i]), "s3 mismatch at {i}");
+                assert!(eq_or_both_nan(s4[i], base.s4[i]), "s4 mismatch at {i}");
+            }
+        }
+
+        Ok(())
+    }
 }

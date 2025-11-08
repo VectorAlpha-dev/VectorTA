@@ -409,6 +409,18 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
     Ok(())
 }
 
+/// Writes RVI results into the provided output slice without allocating.
+///
+/// - Preserves NaN warmup semantics exactly as `rvi()` (prefix length =
+///   `first_valid + (period-1) + (ma_len-1)`).
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn rvi_into(input: &RviInput, out: &mut [f64]) -> Result<(), RviError> {
+    // Delegate to the slice helper with Kernel::Auto to mirror rvi().
+    rvi_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn rvi_scalar(
     data: &[f64],
@@ -3312,6 +3324,48 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_rvi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use the existing CSV candles to match other tests.
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file)?;
+        let input = RviInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = rvi(&input)?.values;
+
+        // Preallocate and compute via into()
+        let mut out = vec![0.0f64; candles.close.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            rvi_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // On WASM builds, fall back to the slice helper to avoid symbol clash
+            rvi_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "wasm")]

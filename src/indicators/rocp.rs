@@ -196,6 +196,17 @@ pub fn rocp(input: &RocpInput) -> Result<RocpOutput, RocpError> {
     rocp_with_kernel(input, Kernel::Auto)
 }
 
+/// Write ROCP values directly into the provided output slice without allocations.
+///
+/// - Preserves NaN warmup prefix exactly as the Vec-returning API (first + period entries are NaN).
+/// - The output slice length must equal the input data length.
+/// - Uses `Kernel::Auto` for dispatch (short-circuits to scalar for ROCP).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn rocp_into(input: &RocpInput, out: &mut [f64]) -> Result<(), RocpError> {
+    rocp_into_slice(out, input, Kernel::Auto)
+}
+
 pub fn rocp_with_kernel(input: &RocpInput, kernel: Kernel) -> Result<RocpOutput, RocpError> {
     let data: &[f64] = match &input.data {
         RocpData::Candles { candles, source } => source_type(candles, source),
@@ -1457,6 +1468,41 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_rocp_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use existing CSV input data for parity.
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let params = RocpParams { period: Some(10) };
+        let input = RocpInput::from_candles(&candles, "close", params);
+
+        // Baseline via Vec-returning API
+        let baseline = rocp(&input)?.values;
+
+        // Preallocate output and call the new no-allocation API
+        let mut out = vec![0.0; candles.close.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            rocp_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // When wasm feature is on, native rocp_into is not built; use into_slice parity
+            rocp_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        for i in 0..baseline.len() {
+            let a = baseline[i];
+            let b = out[i];
+            let equal = (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12;
+            assert!(equal, "ROCP parity mismatch at index {}: api={} into={}", i, a, b);
+        }
+
         Ok(())
     }
 

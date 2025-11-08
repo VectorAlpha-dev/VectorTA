@@ -1648,6 +1648,45 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_sqwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a non-trivial input with a NaN prefix to exercise warmup logic
+        let len = 256usize;
+        let mut data = vec![f64::NAN; 3];
+        for i in 3..len {
+            let x = i as f64;
+            data.push((x * 0.017).sin() * 10.0 + (x * 0.013).cos() * 3.0 + (i % 7) as f64);
+        }
+
+        // SQWMA default params (period=14)
+        let input = SqwmaInput::from_slice(&data, SqwmaParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = sqwma(&input)?.values;
+
+        // Compute into preallocated buffer
+        let mut out = vec![0.0; len];
+        sqwma_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "diverged at index {}: vec={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "python")]
@@ -2006,6 +2045,18 @@ pub fn sqwma_into_slice(
     }
 
     Ok(())
+}
+
+/// Write SQWMA results into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API does.
+/// - `out.len()` must equal the input length; returns the module's existing
+///   `InvalidPeriod/length` error on mismatch.
+/// - Uses `Kernel::Auto` for dispatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn sqwma_into(input: &SqwmaInput, out: &mut [f64]) -> Result<(), SqwmaError> {
+    sqwma_into_slice(out, input, Kernel::Auto)
 }
 
 // ================== Zero-Copy WASM Functions ==================

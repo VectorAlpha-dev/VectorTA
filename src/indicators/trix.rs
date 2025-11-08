@@ -420,6 +420,45 @@ pub fn trix_with_kernel(input: &TrixInput, kernel: Kernel) -> Result<TrixOutput,
     Ok(TrixOutput { values: out })
 }
 
+/// Writes TRIX results into the provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn trix_into(input: &TrixInput, out: &mut [f64]) -> Result<(), TrixError> {
+    let (data, period, first, chosen, alpha, warmup_end) = trix_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(TrixError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let warm = warmup_end.min(out.len());
+    for v in &mut out[..warm] {
+        *v = qnan;
+    }
+
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                trix_compute_into_scalar(data, period, first, alpha, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                trix_compute_into_scalar(data, period, first, alpha, out)
+            }
+            #[allow(unreachable_patterns)]
+            _ => trix_compute_into_scalar(data, period, first, alpha, out),
+        }
+    }
+    Ok(())
+}
+
 // Delete the old trix_scalar - it's no longer needed with the new compute_into approach
 
 // AVX stubs removed - they're now handled in trix_with_kernel
@@ -1505,6 +1544,54 @@ pub fn register_trix_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
     m.add_function(wrap_pyfunction!(trix_batch_py, m)?)?;
     m.add_class::<TrixStreamPy>()?;
     Ok(())
+}
+
+// ============================================================================
+// Into parity test
+// ============================================================================
+#[cfg(test)]
+mod tests_into {
+    use super::*;
+
+    fn eq_or_both_nan(a: f64, b: f64) -> bool {
+        (a.is_nan() && b.is_nan()) || (a == b)
+    }
+
+    #[test]
+    fn test_trix_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use the same CSV dataset as existing TRIX tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = crate::utilities::data_loader::read_candles_from_csv(file_path)?;
+
+        let params = TrixParams::default();
+        let input = TrixInput::from_candles(&candles, "close", params);
+
+        // Baseline via Vec-returning API
+        let baseline = trix(&input)?.values;
+
+        // Preallocate destination and use the new into API
+        let mut out = vec![0.0; baseline.len()];
+
+        // Native-only API; on wasm we export a different signature
+        #[cfg(not(feature = "wasm"))]
+        {
+            trix_into(&input, &mut out)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        for i in 0..out.len() {
+            let a = baseline[i];
+            let b = out[i];
+            if a.is_nan() || b.is_nan() {
+                assert!(eq_or_both_nan(a, b), "NaN mismatch at index {}: {:?} vs {:?}", i, a, b);
+            } else {
+                // Paths are identical; exact equality expected, allow tiny epsilon just in case
+                let diff = (a - b).abs();
+                assert!(diff <= 1e-12, "Value mismatch at {}: a={} b={} diff={}", i, a, b, diff);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -225,6 +225,17 @@ pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdErr
     Ok(AdOutput { values: out })
 }
 
+/// Writes AD results into the provided output slice without allocating.
+///
+/// - Preserves warmup semantics (AD has no NaN warmup; prefix length = 0).
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn ad_into(input: &AdInput, out: &mut [f64]) -> Result<(), AdError> {
+    // Resolve the slices and validate lengths inside the slice-based helper.
+    ad_into_slice(out, input, Kernel::Auto)
+}
+
 /// Write AD values directly to output slice - no allocations
 pub fn ad_into_slice(dst: &mut [f64], input: &AdInput, kern: Kernel) -> Result<(), AdError> {
     let (high, low, close, volume) = match &input.data {
@@ -1343,7 +1354,7 @@ pub fn ad_batch_into(
 mod tests {
     use super::*;
     use crate::skip_if_unsupported;
-    use crate::utilities::data_loader::read_candles_from_csv;
+    use crate::utilities::data_loader::{read_candles_from_csv, Candles};
     use crate::utilities::enums::Kernel;
 
     fn check_ad_partial_params(
@@ -2043,4 +2054,59 @@ mod tests {
     gen_batch_tests!(check_batch_single_row);
     gen_batch_tests!(check_batch_multi_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_ad_into_matches_api() {
+        // Build a small but non-trivial OHLCV series via Candles
+        let n = 256usize;
+        let mut ts = Vec::with_capacity(n);
+        let mut open = Vec::with_capacity(n);
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        let mut volume = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let i_f = i as f64;
+            ts.push(i as i64);
+            let o = 100.0 + (i % 13) as f64 * 0.75; // varied but stable
+            let l = o - 2.0;
+            let h = o + 2.0 + ((i % 3) as f64) * 0.1; // ensure h > l, small variation
+            let c = l + ((i % 5) as f64) * 0.5; // within [l, h]
+            let v = 1000.0 + 10.0 * i_f;
+            open.push(o);
+            low.push(l);
+            high.push(h);
+            close.push(c);
+            volume.push(v);
+        }
+
+        let candles = Candles::new(ts, open, high.clone(), low.clone(), close.clone(), volume.clone());
+        let input = AdInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = ad(&input).expect("ad() should succeed").values;
+
+        // Preallocate output and call into API
+        let mut out = vec![0.0; baseline.len()];
+        ad_into(&input, &mut out).expect("ad_into() should succeed");
+
+        assert_eq!(out.len(), baseline.len());
+
+        // Equality helper: exact for finite; allow NaN == NaN (though AD has no NaNs)
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for (i, (a, b)) in out.iter().copied().zip(baseline.iter().copied()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "ad_into parity failed at index {}: {} vs {}",
+                i,
+                a,
+                b
+            );
+        }
+    }
 }

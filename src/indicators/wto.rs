@@ -323,6 +323,57 @@ pub fn wto_into_slices(
     Ok(())
 }
 
+/// Compute WaveTrend Oscillator into caller-provided buffers (no allocations).
+///
+/// Preserves NaN warmups exactly like the Vec-returning API and writes results
+/// into the provided output slices. Each output slice length must match the
+/// input length.
+#[cfg(not(feature = "wasm"))]
+pub fn wto_into(
+    input: &WtoInput,
+    wt1_out: &mut [f64],
+    wt2_out: &mut [f64],
+    hist_out: &mut [f64],
+) -> Result<(), WtoError> {
+    let (data, channel_length, average_length, first, chosen) =
+        wto_prepare(input, Kernel::Auto)?;
+
+    if wt1_out.len() != data.len() || wt2_out.len() != data.len() || hist_out.len() != data.len() {
+        return Err(WtoError::InvalidPeriod {
+            period: channel_length,
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefixes with the crate's canonical quiet-NaN pattern
+    let warmup = first + average_length + 3; // matches allocation path in wto_with_kernel
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let w = warmup.min(wt1_out.len());
+    for v in &mut wt1_out[..w] {
+        *v = qnan;
+    }
+    let w = warmup.min(wt2_out.len());
+    for v in &mut wt2_out[..w] {
+        *v = qnan;
+    }
+    let w = warmup.min(hist_out.len());
+    for v in &mut hist_out[..w] {
+        *v = qnan;
+    }
+
+    // Compute in-place using the existing dispatcher
+    wto_compute_into(
+        data,
+        channel_length,
+        average_length,
+        first,
+        chosen,
+        wt1_out,
+        wt2_out,
+        hist_out,
+    )
+}
+
 /// Prepare and validate input data
 #[inline(always)]
 fn wto_prepare<'a>(
@@ -2979,4 +3030,60 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
+
+    // Parity test for the native into API (lengths must match and values must be identical)
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_wto_into_matches_api() {
+        // Use the existing CSV so parity is checked on real candle data
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("failed to load candles");
+
+        let input = WtoInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let base = wto(&input).expect("wto baseline failed");
+
+        // Preallocate outputs (will be overwritten, including warmups)
+        let n = candles.close.len();
+        let mut wt1 = vec![0.0; n];
+        let mut wt2 = vec![0.0; n];
+        let mut hist = vec![0.0; n];
+
+        // Zero-allocation path
+        wto_into(&input, &mut wt1, &mut wt2, &mut hist).expect("wto_into failed");
+
+        // Helper: NaN == NaN, otherwise exact or tight epsilon
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        assert_eq!(wt1.len(), base.wavetrend1.len());
+        assert_eq!(wt2.len(), base.wavetrend2.len());
+        assert_eq!(hist.len(), base.histogram.len());
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(wt1[i], base.wavetrend1[i]),
+                "wt1 mismatch at {}: into={}, api={}",
+                i,
+                wt1[i],
+                base.wavetrend1[i]
+            );
+            assert!(
+                eq_or_both_nan(wt2[i], base.wavetrend2[i]),
+                "wt2 mismatch at {}: into={}, api={}",
+                i,
+                wt2[i],
+                base.wavetrend2[i]
+            );
+            assert!(
+                eq_or_both_nan(hist[i], base.histogram[i]),
+                "hist mismatch at {}: into={}, api={}",
+                i,
+                hist[i],
+                base.histogram[i]
+            );
+        }
+    }
 }

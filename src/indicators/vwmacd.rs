@@ -429,6 +429,72 @@ pub fn vwmacd_into_slice(
     )
 }
 
+/// Compute VWMACD into caller-provided buffers (no allocations).
+///
+/// - Preserves NaN warmup prefixes exactly like the Vec-returning API.
+/// - All output slice lengths must equal the input length.
+/// - Uses kernel auto-selection (Kernel::Auto) internally.
+#[cfg(not(feature = "wasm"))]
+pub fn vwmacd_into(
+    input: &VwmacdInput,
+    macd_out: &mut [f64],
+    signal_out: &mut [f64],
+    hist_out: &mut [f64],
+) -> Result<(), VwmacdError> {
+    let (
+        close,
+        volume,
+        fast,
+        slow,
+        signal,
+        fast_ma_type,
+        slow_ma_type,
+        signal_ma_type,
+        first,
+        macd_warmup_abs,
+        total_warmup_abs,
+        chosen,
+    ) = vwmacd_prepare(input, Kernel::Auto)?;
+
+    let len = close.len();
+    if macd_out.len() != len || signal_out.len() != len || hist_out.len() != len {
+        return Err(VwmacdError::InvalidPeriod {
+            fast,
+            slow,
+            signal,
+            data_len: len,
+        });
+    }
+
+    // Prefill warmup prefixes with quiet NaN to match alloc_with_nan_prefix semantics
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for i in 0..macd_warmup_abs.min(len) {
+        macd_out[i] = qnan;
+    }
+    for i in 0..total_warmup_abs.min(len) {
+        signal_out[i] = qnan;
+        hist_out[i] = qnan;
+    }
+
+    vwmacd_compute_into(
+        close,
+        volume,
+        fast,
+        slow,
+        signal,
+        fast_ma_type,
+        slow_ma_type,
+        signal_ma_type,
+        first,
+        macd_warmup_abs,
+        total_warmup_abs,
+        chosen,
+        macd_out,
+        signal_out,
+        hist_out,
+    )
+}
+
 #[inline]
 pub unsafe fn vwmacd_scalar(
     close: &[f64],
@@ -4173,6 +4239,60 @@ mod tests {
         let (macd_row, signal_row, hist_row) =
             output.values_for(&params).expect("row for params missing");
         assert_eq!(macd_row.len(), close.len());
+        Ok(())
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_vwmacd_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the existing CSV test data set
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = VwmacdInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let base = vwmacd(&input)?;
+
+        // Preallocate outputs and compute via into
+        let n = candles.close.len();
+        let mut macd_out = vec![0.0; n];
+        let mut signal_out = vec![0.0; n];
+        let mut hist_out = vec![0.0; n];
+        vwmacd_into(&input, &mut macd_out, &mut signal_out, &mut hist_out)?;
+
+        assert_eq!(base.macd.len(), n);
+        assert_eq!(base.signal.len(), n);
+        assert_eq!(base.hist.len(), n);
+
+        // Treat NaN == NaN as equal; exact equality for finite values
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(base.macd[i], macd_out[i]),
+                "MACD mismatch at {}: base={}, into={}",
+                i,
+                base.macd[i],
+                macd_out[i]
+            );
+            assert!(
+                eq_or_both_nan(base.signal[i], signal_out[i]),
+                "Signal mismatch at {}: base={}, into={}",
+                i,
+                base.signal[i],
+                signal_out[i]
+            );
+            assert!(
+                eq_or_both_nan(base.hist[i], hist_out[i]),
+                "Hist mismatch at {}: base={}, into={}",
+                i,
+                base.hist[i],
+                hist_out[i]
+            );
+        }
+
         Ok(())
     }
 

@@ -439,6 +439,61 @@ pub fn bollinger_bands_with_kernel(
     })
 }
 
+/// Compute Bollinger Bands into caller-provided buffers (no per-call allocations).
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - All output slice lengths must equal the input length.
+/// - Uses `Kernel::Auto` for internal dispatch.
+#[cfg(not(feature = "wasm"))]
+pub fn bollinger_bands_into(
+    input: &BollingerBandsInput,
+    out_upper: &mut [f64],
+    out_middle: &mut [f64],
+    out_lower: &mut [f64],
+) -> Result<(), BollingerBandsError> {
+    let (data, period, devup, devdn, matype, devtype, first, chosen) =
+        bb_prepare(input, Kernel::Auto)?;
+
+    if out_upper.len() != data.len()
+        || out_middle.len() != data.len()
+        || out_lower.len() != data.len()
+    {
+        return Err(BollingerBandsError::InvalidPeriod {
+            period,
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefixes with the crate's quiet-NaN pattern
+    let warm = first + period - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let w = warm.min(data.len());
+    for v in &mut out_upper[..w] {
+        *v = qnan;
+    }
+    for v in &mut out_middle[..w] {
+        *v = qnan;
+    }
+    for v in &mut out_lower[..w] {
+        *v = qnan;
+    }
+
+    // Compute remaining values into provided buffers
+    bollinger_bands_compute_into(
+        data,
+        period,
+        devup,
+        devdn,
+        &matype,
+        devtype,
+        first,
+        chosen,
+        out_upper,
+        out_middle,
+        out_lower,
+    )
+}
+
 #[inline]
 pub fn bollinger_bands_into_slices(
     out_u: &mut [f64],
@@ -1653,6 +1708,67 @@ mod tests {
         assert_eq!(output_partial.upper_band.len(), candles.close.len());
         assert_eq!(output_partial.middle_band.len(), candles.close.len());
         assert_eq!(output_partial.lower_band.len(), candles.close.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_bollinger_bands_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Prepare deterministic input series (length 256)
+        let mut data = Vec::with_capacity(256);
+        for i in 0..256u32 {
+            let x = i as f64;
+            // Mildly varying pattern; no NaNs
+            data.push((x * 0.25).sin() * 1000.0 + ((i % 7) as f64));
+        }
+        let input = BollingerBandsInput::from_slice(&data, BollingerBandsParams::default());
+
+        // Baseline via existing Vec-returning API
+        let base = bollinger_bands(&input)?;
+
+        // Preallocate output buffers
+        let n = data.len();
+        let mut up = vec![0.0; n];
+        let mut mid = vec![0.0; n];
+        let mut low = vec![0.0; n];
+
+        // New into API
+        #[cfg(not(feature = "wasm"))]
+        {
+            bollinger_bands_into(&input, &mut up, &mut mid, &mut low)?;
+        }
+
+        // Helper: treat NaN == NaN; prefer exact equality for finite
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        assert_eq!(up.len(), base.upper_band.len());
+        assert_eq!(mid.len(), base.middle_band.len());
+        assert_eq!(low.len(), base.lower_band.len());
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(up[i], base.upper_band[i]),
+                "upper mismatch at {}: {} vs {}",
+                i,
+                up[i],
+                base.upper_band[i]
+            );
+            assert!(
+                eq_or_both_nan(mid[i], base.middle_band[i]),
+                "middle mismatch at {}: {} vs {}",
+                i,
+                mid[i],
+                base.middle_band[i]
+            );
+            assert!(
+                eq_or_both_nan(low[i], base.lower_band[i]),
+                "lower mismatch at {}: {} vs {}",
+                i,
+                low[i],
+                base.lower_band[i]
+            );
+        }
+
         Ok(())
     }
 

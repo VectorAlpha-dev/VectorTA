@@ -227,6 +227,17 @@ pub fn reflex_with_kernel(
     Ok(ReflexOutput { values: out })
 }
 
+/// Compute Reflex into a caller-provided output buffer without allocation.
+///
+/// - Preserves warmup behavior: the first `period` outputs are set to `0.0`.
+/// - The output slice length must equal the input length; a mismatch returns the
+///   module's existing length error.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn reflex_into(input: &ReflexInput, out: &mut [f64]) -> Result<(), ReflexError> {
+    reflex_into_slice(out, input, Kernel::Auto)
+}
+
 /// Computes Reflex directly into a provided output slice, avoiding allocation.
 /// The output slice must be the same length as the input data.
 #[inline]
@@ -1868,6 +1879,41 @@ mod tests {
     // Release mode stub - does nothing
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_reflex_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with an initial quiet-NaN prefix
+        let mut data = vec![f64::from_bits(0x7ff8_0000_0000_0000); 3];
+        data.extend((0..256).map(|i| ((i as f64) * 0.1).sin() * 1.23 + (i as f64) * 0.01));
+
+        let input = ReflexInput::from_slice(&data, ReflexParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = reflex_with_kernel(&input, Kernel::Auto)?.values;
+
+        // Preallocate and compute via new into API
+        let mut out = vec![0.0; data.len()];
+        super::reflex_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
         Ok(())
     }
 

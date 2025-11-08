@@ -284,6 +284,30 @@ pub fn ift_rsi_with_kernel(
     Ok(IftRsiOutput { values: out })
 }
 
+/// Writes IFT-RSI values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API.
+/// - The output slice length must equal the input data length.
+/// - Uses `Kernel::Auto` dispatch (mirrors module default).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn ift_rsi_into(input: &IftRsiInput, out: &mut [f64]) -> Result<(), IftRsiError> {
+    let data: &[f64] = match &input.data {
+        IftRsiData::Candles { candles, source } => source_type(candles, source),
+        IftRsiData::Slice(sl) => sl,
+    };
+
+    if out.len() != data.len() {
+        return Err(IftRsiError::LengthMismatch {
+            dst_len: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    let kern = Kernel::Auto;
+    ift_rsi_into_slice(out, input, kern)
+}
+
 #[inline(always)]
 fn ift_rsi_compute_into(
     data: &[f64],
@@ -1436,6 +1460,46 @@ mod tests {
         let input = IftRsiInput::from_candles(&candles, "close", default_params);
         let output = ift_rsi_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_ift_rsi_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with a NaN prefix
+        let n = 256usize;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            if i < 3 { // ensure first-valid > 0 to exercise warmup logic
+                data.push(f64::NAN);
+            } else {
+                // oscillatory but bounded series
+                let x = (i as f64).sin() * 5.0 + 100.0 + ((i % 7) as f64);
+                data.push(x);
+            }
+        }
+
+        let input = IftRsiInput::from_slice(&data, IftRsiParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = ift_rsi(&input)?.values;
+
+        // New into-API into a preallocated buffer
+        let mut out = vec![0.0; data.len()];
+        ift_rsi_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+        for i in 0..out.len() {
+            let a = baseline[i];
+            let b = out[i];
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(
+                equal,
+                "Mismatch at {}: baseline={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
         Ok(())
     }
 

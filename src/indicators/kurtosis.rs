@@ -322,6 +322,32 @@ pub fn kurtosis_into_slice(
     Ok(())
 }
 
+/// Writes Kurtosis results into the provided output slice without allocating.
+///
+/// - Preserves NaN warmups like the Vec API (quiet-NaN prefix).
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn kurtosis_into(input: &KurtosisInput, out: &mut [f64]) -> Result<(), KurtosisError> {
+    // Reuse existing validation and kernel dispatch, then normalize warmup to quiet-NaN.
+    kurtosis_into_slice(out, input, Kernel::Auto)?;
+
+    // Compute warmup prefix and rewrite using the same quiet-NaN pattern used by alloc_with_nan_prefix.
+    let data: &[f64] = input.as_ref();
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(KurtosisError::AllValuesNaN)?;
+    let warmup_end = first + input.get_period() - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let warm = warmup_end.min(out.len());
+    for v in &mut out[..warm] {
+        *v = qnan;
+    }
+
+    Ok(())
+}
+
 #[inline]
 pub fn kurtosis_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     for i in (first + period - 1)..data.len() {
@@ -936,6 +962,54 @@ mod tests {
         let input = KurtosisInput::from_candles(&candles, "close", default_params);
         let output = kurtosis_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_kurtosis_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Small but non-trivial slice (includes trend + noise pattern)
+        let len = 256usize;
+        let mut data = Vec::with_capacity(len);
+        for i in 0..len {
+            let x = i as f64;
+            // deterministic mix to avoid accidental symmetry/zeros
+            let v = (x * 0.01).sin() * 2.0 + (x * 0.007).cos() * 0.5 + x * 1e-3;
+            data.push(v);
+        }
+
+        let input = KurtosisInput::from_slice(&data, KurtosisParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = kurtosis(&input)?.values;
+
+        // Preallocate and compute via into()
+        let mut out = vec![0.0f64; len];
+        #[cfg(not(feature = "wasm"))]
+        {
+            kurtosis_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In WASM builds, fall back to into_slice wrapper semantics for parity
+            kurtosis_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
 
         Ok(())
     }

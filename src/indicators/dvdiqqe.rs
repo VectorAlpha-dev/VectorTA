@@ -964,6 +964,29 @@ pub fn dvdiqqe_into_slices(
     )
 }
 
+/// Writes DVDIQQE outputs into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - Each output slice length must equal the input length.
+/// - Uses `Kernel::Auto` for internal sub-kernels.
+#[cfg(not(feature = "wasm"))]
+pub fn dvdiqqe_into(
+    input: &DvdiqqeInput,
+    dvdi_out: &mut [f64],
+    fast_tl_out: &mut [f64],
+    slow_tl_out: &mut [f64],
+    center_out: &mut [f64],
+) -> Result<(), DvdiqqeError> {
+    dvdiqqe_into_slices(
+        dvdi_out,
+        fast_tl_out,
+        slow_tl_out,
+        center_out,
+        input,
+        Kernel::Auto,
+    )
+}
+
 /// Single-buffer in-place helper to mirror alma's in-place style and match WASM dvdiqqe_into layout
 #[inline]
 pub fn dvdiqqe_into_flat(
@@ -3059,6 +3082,72 @@ mod tests {
                 result.dvdi[i].is_finite(),
                 "Expected finite value after warmup at index {}",
                 i
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_dvdiqqe_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the same CSV as other tests to ensure consistent warmup and values
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = DvdiqqeInput::with_default_candles(&candles);
+        let baseline = dvdiqqe(&input)?;
+
+        let len = candles.close.len();
+        let mut dvdi = vec![0.0; len];
+        let mut fast = vec![0.0; len];
+        let mut slow = vec![0.0; len];
+        let mut center = vec![0.0; len];
+
+        // Call the new no-allocation API
+        #[cfg(not(feature = "wasm"))]
+        {
+            dvdiqqe_into(&input, &mut dvdi, &mut fast, &mut slow, &mut center)?;
+        }
+
+        // Length parity
+        assert_eq!(baseline.dvdi.len(), dvdi.len());
+        assert_eq!(baseline.fast_tl.len(), fast.len());
+        assert_eq!(baseline.slow_tl.len(), slow.len());
+        assert_eq!(baseline.center_line.len(), center.len());
+
+        // Helper for equality with NaN handling and tight epsilon for finite values
+        fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan_eps(baseline.dvdi[i], dvdi[i]),
+                "dvdi mismatch at {}: baseline={}, into={}",
+                i,
+                baseline.dvdi[i],
+                dvdi[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(baseline.fast_tl[i], fast[i]),
+                "fast_tl mismatch at {}: baseline={}, into={}",
+                i,
+                baseline.fast_tl[i],
+                fast[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(baseline.slow_tl[i], slow[i]),
+                "slow_tl mismatch at {}: baseline={}, into={}",
+                i,
+                baseline.slow_tl[i],
+                slow[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(baseline.center_line[i], center[i]),
+                "center_line mismatch at {}: baseline={}, into={}",
+                i,
+                baseline.center_line[i],
+                center[i]
             );
         }
 

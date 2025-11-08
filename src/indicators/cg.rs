@@ -625,6 +625,17 @@ pub fn cg_into_slice(dst: &mut [f64], input: &CgInput, kern: Kernel) -> Result<(
     Ok(())
 }
 
+/// Writes CG results into the provided output slice without allocating.
+///
+/// - Preserves NaN warmup semantics (prefix length = `first_valid + period`).
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn cg_into(input: &CgInput, out: &mut [f64]) -> Result<(), CgError> {
+    // Delegate to the slice-based helper with Kernel::Auto dispatch, matching cg().
+    cg_into_slice(out, input, Kernel::Auto)
+}
+
 #[derive(Debug, Clone)]
 pub struct CgStream {
     period: usize,
@@ -1773,6 +1784,42 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+
+        Ok(())
+    }
+
+    // Ensures the no-allocation API matches the Vec-returning API exactly (including NaN warmups)
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_cg_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with an initial NaN prefix
+        let mut data = vec![f64::NAN; 3];
+        data.extend((0..256).map(|i| (i as f64).sin() * 0.5 + (i as f64) * 0.01));
+
+        let input = CgInput::from_slice(&data, CgParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = cg_with_kernel(&input, Kernel::Auto)?.values;
+
+        // Preallocate output and compute via into API
+        let mut out = vec![0.0; data.len()];
+        cg_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
 
         Ok(())
     }

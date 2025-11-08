@@ -240,6 +240,36 @@ pub fn mom_with_kernel(input: &MomInput, kernel: Kernel) -> Result<MomOutput, Mo
     Ok(MomOutput { values: out })
 }
 
+/// Writes MOM results into the provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn mom_into(input: &MomInput, out: &mut [f64]) -> Result<(), MomError> {
+    let (data, period, first, chosen) = mom_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(MomError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warm = first + period;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let n = warm.min(out.len());
+    for v in &mut out[..n] {
+        *v = qnan;
+    }
+
+    // Compute into the destination buffer for the valid range
+    mom_compute_into(data, period, first, chosen, out);
+
+    Ok(())
+}
+
 #[inline(always)]
 pub fn mom_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     for i in (first_valid + period)..data.len() {
@@ -779,6 +809,38 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_mom_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Small but non-trivial input with a NaN prefix to exercise warmup logic
+        let mut data = Vec::with_capacity(256);
+        data.push(f64::NAN);
+        for i in 0..255 {
+            // some variation, not strictly linear
+            let x = (i as f64).sin() * 10.0 + (i as f64) * 0.5;
+            data.push(x);
+        }
+
+        let params = MomParams { period: Some(10) };
+        let input = MomInput::from_slice(&data, params);
+
+        // Baseline via existing Vec-returning API
+        let base = mom(&input)?.values;
+
+        // into API output
+        let mut into_out = vec![0.0; data.len()];
+        mom_into(&input, &mut into_out)?;
+
+        assert_eq!(base.len(), into_out.len());
+
+        // Equality check: NaN == NaN; otherwise exact equality
+        for (i, (a, b)) in base.iter().zip(into_out.iter()).enumerate() {
+            let ok = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(ok, "mismatch at index {}: base={}, into={}", i, a, b);
+        }
+        Ok(())
+    }
 
     fn check_mom_partial_params(
         test_name: &str,
