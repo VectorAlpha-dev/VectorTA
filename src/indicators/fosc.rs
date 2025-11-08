@@ -316,6 +316,17 @@ pub fn fosc_into_slice(dst: &mut [f64], input: &FoscInput, kern: Kernel) -> Resu
     Ok(())
 }
 
+/// Write Forecast Oscillator (FOSC) outputs into a caller-provided buffer without allocating.
+///
+/// - Preserves the NaN warmup prefix exactly like `fosc()`/`fosc_with_kernel()`.
+/// - The output slice length must equal the input length.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn fosc_into(input: &FoscInput, out: &mut [f64]) -> Result<(), FoscError> {
+    fosc_into_slice(out, input, Kernel::Auto)
+}
+
 // --------- Scalar Core ---------
 
 #[inline]
@@ -2141,4 +2152,47 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
     gen_batch_tests!(check_batch_no_poison);
+
+    // Parity test for native `_into` API
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_fosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Non-trivial synthetic data (positive, varying)
+        let n = 512usize;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = i as f64;
+            // Smoothly varying, non-zero series
+            data.push(50.0 + 0.05 * x + (0.1 * x).sin() * 2.0);
+        }
+
+        let input = FoscInput::from_slice(&data, FoscParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = fosc_with_kernel(&input, Kernel::Auto)?.values;
+
+        // Preallocate output and compute via `_into`
+        let mut out = vec![0.0; data.len()];
+        fosc_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Equality check treating NaN == NaN; exact equality preferred
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 }

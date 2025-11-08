@@ -287,6 +287,56 @@ pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, At
     Ok(AtrOutput { values: out })
 }
 
+/// Write ATR results into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup prefix exactly like the Vec-returning API.
+/// - The output slice length must equal the input length.
+/// - Uses kernel auto-detection (same as `atr()`/`atr_with_kernel`).
+#[cfg(not(feature = "wasm"))]
+pub fn atr_into(input: &AtrInput, out: &mut [f64]) -> Result<(), AtrError> {
+    // Extract input slices and validate lengths/params identically to the Vec API
+    let (high, low, close) = match &input.data {
+        AtrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
+        AtrData::Slices { high, low, close } => (*high, *low, *close),
+    };
+
+    let length = input.params.length.unwrap_or(14);
+    let (high, low, close, length) = atr_prepare(high, low, close, length)?;
+
+    // Compute first-valid and warmup exactly like atr_with_kernel
+    let first = first_valid_hlc(high, low, close);
+    if close.len().saturating_sub(first) < length {
+        return Err(AtrError::NotEnoughData {
+            length,
+            data_len: close.len(),
+        });
+    }
+    let warmup = first + length - 1;
+
+    // Validate destination length matches input length; reuse existing error
+    if out.len() != close.len() {
+        return Err(AtrError::InconsistentSliceLengths {
+            high_len: high.len(),
+            low_len: low.len(),
+            close_len: out.len(),
+        });
+    }
+
+    // Prefill NaN warmup with the same quiet-NaN pattern used elsewhere
+    let prefix = warmup.min(out.len());
+    for v in &mut out[..prefix] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Dispatch and compute into the provided buffer
+    let chosen = match Kernel::Auto {
+        Kernel::Auto => detect_best_kernel(),
+        k => k,
+    };
+    atr_compute_into(high, low, close, length, first, chosen, out);
+    Ok(())
+}
+
 #[inline(always)]
 fn atr_compute_into_scalar(
     high: &[f64],
@@ -1500,6 +1550,44 @@ mod tests {
         let input = AtrInput::from_slices(&high, &low, &close, params);
         let result = atr_with_kernel(&input, kernel);
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_atr_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare a modest input slice from the CSV used by existing tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = AtrInput::with_default_candles(&candles);
+
+        // Baseline via existing Vec-returning API
+        let baseline = atr(&input)?;
+
+        // Preallocate output and compute via new into API
+        let mut out = vec![0.0f64; candles.close.len()];
+        atr_into(&input, &mut out)?;
+
+        assert_eq!(baseline.values.len(), out.len());
+
+        // Helper: exact for NaNs (bit match) and tight epsilon for finite
+        fn eq_or_nan_bits(a: f64, b: f64) -> bool {
+            if !a.is_finite() || !b.is_finite() {
+                a.to_bits() == b.to_bits()
+            } else {
+                (a - b).abs() <= 1e-12
+            }
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_nan_bits(baseline.values[i], out[i]),
+                "Mismatch at {}: api={} into={}",
+                i,
+                baseline.values[i],
+                out[i]
+            );
+        }
         Ok(())
     }
 

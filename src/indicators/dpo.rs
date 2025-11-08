@@ -279,11 +279,24 @@ pub fn dpo_into_slice(dst: &mut [f64], input: &DpoInput, kern: Kernel) -> Result
     // Single, precise prefix write. No full-buffer NaN fill.
     let back = period / 2 + 1;
     let warm = (first + period - 1).max(back);
+    // Match alloc_with_nan_prefix quiet-NaN bit pattern for parity with Vec API
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warm] {
-        *v = f64::NAN;
+        *v = qnan;
     }
 
     Ok(())
+}
+
+/// Writes DPO values into a caller-provided output slice without allocating.
+///
+/// - Preserves NaN warmup prefix exactly like the Vec-returning API.
+/// - The output slice length must match the input length.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn dpo_into(input: &DpoInput, out: &mut [f64]) -> Result<(), DpoError> {
+    dpo_into_slice(out, input, Kernel::Auto)
 }
 
 pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, DpoError> {
@@ -1647,6 +1660,45 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_dpo_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input: leading NaNs + mixed signal
+        let mut data = Vec::with_capacity(512);
+        for _ in 0..4 { data.push(f64::NAN); }
+        for i in 0..508 {
+            let x = i as f64;
+            data.push((0.1 * x).sin() * 50.0 + 0.01 * x);
+        }
+
+        let params = DpoParams { period: Some(5) };
+        let input = DpoInput::from_slice(&data, params);
+
+        // Baseline via Vec-returning API
+        let baseline = dpo(&input)?.values;
+
+        // Preallocated output
+        let mut out = vec![0.0; data.len()];
+
+        // Native into API (guarded to avoid wasm symbol clash)
+        #[cfg(not(feature = "wasm"))]
+        {
+            dpo_into(&input, &mut out)?;
+            assert_eq!(out.len(), baseline.len());
+            for (idx, (a, b)) in out.iter().zip(baseline.iter()).enumerate() {
+                let equal = (a.is_nan() && b.is_nan()) || (a == b);
+                assert!(
+                    equal,
+                    "dpo_into parity mismatch at idx {}: got {}, expected {}",
+                    idx,
+                    a,
+                    b
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]

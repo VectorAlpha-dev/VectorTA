@@ -175,6 +175,17 @@ pub fn lrsi(input: &LrsiInput) -> Result<LrsiOutput, LrsiError> {
     lrsi_with_kernel(input, Kernel::Auto)
 }
 
+/// Writes LRSI into the provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - `out.len()` must equal the input length; returns `OutputLengthMismatch` otherwise.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn lrsi_into(input: &LrsiInput, out: &mut [f64]) -> Result<(), LrsiError> {
+    lrsi_into_slice(out, input, Kernel::Auto)
+}
+
 pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput, LrsiError> {
     let (high, low) = match &input.data {
         LrsiData::Candles { candles } => {
@@ -329,6 +340,61 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests_into_api {
+    use super::*;
+
+    #[test]
+    fn test_lrsi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Construct a small input with a NaN prefix and varying values
+        let n = 256usize;
+        let mut high = vec![f64::NAN; n];
+        let mut low = vec![f64::NAN; n];
+
+        // First valid at index 3; ensure at least 4 valid after that
+        let mut v = 100.0f64;
+        for i in 3..n {
+            // Create a simple rising high/low band
+            high[i] = v + 1.0;
+            low[i] = v - 1.0;
+            // Inject a few NaNs deeper in the series to test handling
+            if i % 37 == 0 { high[i] = f64::NAN; }
+            if i % 53 == 0 { low[i] = f64::NAN; }
+            v += (i as f64).sin() * 0.25 + 0.5;
+        }
+
+        let input = LrsiInput::from_slices(&high, &low, LrsiParams::default());
+
+        // Baseline Vec-returning API
+        let base = lrsi(&input)?.values;
+
+        // New into API
+        let mut out = vec![0.0f64; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            lrsi_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // Guard for wasm builds: fall back to existing into_slice path
+            lrsi_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(base.len(), out.len());
+        for (i, (&a, &b)) in base.iter().zip(out.iter()).enumerate() {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(
+                equal,
+                "mismatch at index {}: base={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
+    }
 }
 
 #[inline]

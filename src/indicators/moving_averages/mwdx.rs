@@ -264,6 +264,19 @@ pub fn mwdx_with_kernel(input: &MwdxInput, kernel: Kernel) -> Result<MwdxOutput,
     Ok(MwdxOutput { values: out })
 }
 
+/// Writes MWDX results into a caller-provided output slice (no allocation).
+///
+/// - Preserves leading-NaN warmups identically to `mwdx()`/`mwdx_with_kernel()`.
+/// - The output slice length must equal the input data length; otherwise returns `InvalidLength`.
+/// - Uses `Kernel::Auto` for runtime selection (same as `mwdx()`).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn mwdx_into(input: &MwdxInput, dst: &mut [f64]) -> Result<(), MwdxError> {
+    // Delegate to the existing into-style helper with Kernel::Auto while
+    // keeping semantics identical to the Vec-returning API.
+    mwdx_into_slice(dst, input, Kernel::Auto)
+}
+
 /// Computes MWDX directly into a provided output slice, avoiding allocation.
 /// The output slice must be the same length as the input data.
 #[inline]
@@ -1535,6 +1548,49 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    // Parity test for the new into API
+    #[test]
+    fn test_mwdx_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a moderately sized input with a small NaN warmup prefix
+        let n = 256usize;
+        let mut data = vec![0.0f64; n];
+        data[0] = f64::NAN;
+        data[1] = f64::NAN;
+        for i in 2..n {
+            let x = i as f64;
+            // Mix smooth and varying components to avoid trivial sequences
+            data[i] = (x * 0.015).sin() * 50.0 + (x * 0.003).cos() * 10.0 + x * 0.01;
+        }
+
+        let input = MwdxInput::from_slice(&data, MwdxParams::default());
+
+        // Baseline via Vec-returning API (Kernel::Auto)
+        let baseline = mwdx(&input)?.values;
+
+        // Into-API result into a preallocated buffer
+        let mut out = vec![0.0f64; n];
+        mwdx_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: NaN == NaN, otherwise exact equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mwdx_into parity mismatch at {}: baseline={:?}, into={:?}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 }
 
 // Python bindings

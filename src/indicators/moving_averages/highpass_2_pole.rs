@@ -339,7 +339,11 @@ fn highpass_2_pole_with_kernel_into(
     // Only fill [0..first) with NaN, not the entire warmup range
     // The kernel will seed from first and compute the rest
     if first > 0 {
-        out[..first].fill(f64::NAN);
+        // Match alloc_with_nan_prefix quiet-NaN pattern for parity
+        let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+        for v in &mut out[..first] {
+            *v = qnan;
+        }
     }
 
     unsafe {
@@ -1153,6 +1157,44 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use paste::paste;
+
+    #[test]
+    fn test_highpass_2_pole_into_matches_api() {
+        // Build a small but non-trivial slice with a NaN prefix
+        let len = 256usize;
+        let mut data = vec![0.0f64; len];
+        // Leading NaNs to exercise warmup handling
+        data[0] = f64::NAN;
+        data[1] = f64::NAN;
+        data[2] = f64::NAN;
+        for i in 3..len {
+            let x = i as f64;
+            data[i] = (x * 0.01).sin() + (x * 0.02).cos() + ((i % 7) as f64) * 0.1;
+        }
+
+        let input = HighPass2Input::from_slice(&data, HighPass2Params::default());
+
+        let baseline = highpass_2_pole(&input).expect("baseline API should succeed");
+        assert_eq!(baseline.values.len(), len);
+
+        let mut out = vec![0.0f64; len];
+        highpass_2_pole_into(&input, &mut out).expect("into API should succeed");
+        assert_eq!(out.len(), len);
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline.values[i], out[i]),
+                "mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline.values[i],
+                out[i]
+            );
+        }
+    }
 
     fn check_highpass2_partial_params(
         test_name: &str,

@@ -304,6 +304,55 @@ pub fn buff_averages_with_kernel(
     })
 }
 
+/// Writes Buff Averages outputs into caller-provided buffers without allocating.
+///
+/// - Preserves the exact NaN warmup prefix semantics as the Vec API
+///   (prefix length = `first_valid + slow_period - 1`).
+/// - Both `fast_out` and `slow_out` must have length equal to `input` length.
+///
+/// Returns `Ok(())` on success or the module's existing error on validation failure.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn buff_averages_into(
+    input: &BuffAveragesInput,
+    fast_out: &mut [f64],
+    slow_out: &mut [f64],
+) -> Result<(), BuffAveragesError> {
+    let (price, volume, fast_period, slow_period, first, chosen) =
+        buff_averages_prepare(input, Kernel::Auto)?;
+
+    if fast_out.len() != price.len() || slow_out.len() != price.len() {
+        return Err(BuffAveragesError::InvalidPeriod {
+            period: fast_out.len().max(slow_out.len()),
+            data_len: price.len(),
+        });
+    }
+
+    // Prefill warmup prefixes with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warm = first + slow_period - 1;
+    let nan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let warmup_len = warm.min(price.len());
+    for v in &mut fast_out[..warmup_len] {
+        *v = nan;
+    }
+    for v in &mut slow_out[..warmup_len] {
+        *v = nan;
+    }
+
+    buff_averages_compute_into(
+        price,
+        volume,
+        fast_period,
+        slow_period,
+        first,
+        chosen,
+        fast_out,
+        slow_out,
+    );
+
+    Ok(())
+}
+
 /// Zero-allocation version for performance-critical paths
 #[inline]
 pub fn buff_averages_into_slices(
@@ -3108,5 +3157,48 @@ mod tests {
             // Should either succeed or fail gracefully
             let _ = buff_averages(&input);
         }
+    }
+
+    #[test]
+    fn test_buff_averages_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a moderate-size input with distinct price and volume
+        let len = 256usize;
+        let price: Vec<f64> = (0..len).map(|i| (i as f64) * 1.5 + 10.0).collect();
+        let volume: Vec<f64> = (0..len).map(|i| (i as f64) * 2.0 + 100.0).collect();
+
+        let params = BuffAveragesParams::default();
+        let input = BuffAveragesInput::from_slices(&price, &volume, params);
+
+        // Baseline via Vec-returning API
+        let base = buff_averages(&input)?;
+
+        // Preallocate outputs and compute via into API
+        let mut out_fast = vec![0.0; len];
+        let mut out_slow = vec![0.0; len];
+        super::buff_averages_into(&input, &mut out_fast, &mut out_slow)?;
+
+        fn eq_nan_or_close(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        assert_eq!(base.fast_buff.len(), out_fast.len());
+        assert_eq!(base.slow_buff.len(), out_slow.len());
+        for i in 0..len {
+            assert!(
+                eq_nan_or_close(base.fast_buff[i], out_fast[i]),
+                "fast mismatch at {}: {} vs {}",
+                i,
+                base.fast_buff[i],
+                out_fast[i]
+            );
+            assert!(
+                eq_nan_or_close(base.slow_buff[i], out_slow[i]),
+                "slow mismatch at {}: {} vs {}",
+                i,
+                base.slow_buff[i],
+                out_slow[i]
+            );
+        }
+        Ok(())
     }
 }

@@ -318,10 +318,23 @@ pub fn mass_into_slice(
     }
     mass_compute_into(high, low, period, first, chosen, dst);
     let warmup_end = first + 16 + period - 1;
+    // Match alloc_with_nan_prefix quiet-NaN pattern for warmup prefix
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_end] {
-        *v = f64::NAN;
+        *v = qnan;
     }
     Ok(())
+}
+
+/// Writes Mass Index values into a caller-provided buffer without allocating.
+///
+/// - Preserves the NaN warmup prefix exactly as the Vec-returning API.
+/// - `out.len()` must equal the input length; returns an error on mismatch.
+/// - Uses `Kernel::Auto` dispatch consistent with this module’s runtime selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn mass_into(input: &MassInput, out: &mut [f64]) -> Result<(), MassError> {
+    mass_into_slice(out, input, Kernel::Auto)
 }
 
 #[inline]
@@ -959,6 +972,65 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_mass_into_matches_api() {
+        // Construct a small but non-trivial OHLC set (uses only high/low)
+        let len = 256usize;
+        let mut ts = Vec::with_capacity(len);
+        let mut open = Vec::with_capacity(len);
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        let mut close = Vec::with_capacity(len);
+        let mut volume = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let x = i as f64;
+            // Base price oscillates mildly
+            let base = (x * 0.01).mul_add(100.0, (x * 0.07).sin() * 2.0);
+            // Range varies to exercise EMA of range
+            let range = 1.0 + (x * 0.005).sin().abs() * 3.0;
+            let h = base + range * 0.5;
+            let l = base - range * 0.5;
+
+            ts.push(i as i64);
+            open.push(base);
+            high.push(h);
+            low.push(l);
+            close.push(base * 0.999 + 0.001 * h);
+            volume.push(1000.0 + (i % 10) as f64);
+        }
+
+        let candles = crate::utilities::data_loader::Candles::new(
+            ts, open, high.clone(), low.clone(), close, volume,
+        );
+
+        let input = MassInput::from_candles(&candles, "high", "low", MassParams::default());
+
+        // Baseline via Vec-returning API
+        let base = mass(&input).expect("mass() should succeed");
+
+        // Into-API into preallocated buffer
+        let mut out = vec![0.0f64; len];
+        mass_into(&input, &mut out).expect("mass_into() should succeed");
+
+        assert_eq!(base.values.len(), out.len());
+
+        // Helper: treat NaN == NaN as equal
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(base.values[i], out[i]),
+                "Mismatch at index {}: got {}, expected {}",
+                i,
+                out[i],
+                base.values[i]
+            );
+        }
+    }
 
     fn check_mass_partial_params(
         test_name: &str,

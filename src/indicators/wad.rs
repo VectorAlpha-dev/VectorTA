@@ -1395,6 +1395,50 @@ mod tests {
 
     #[cfg(feature = "proptest")]
     generate_all_wad_tests!(check_wad_property);
+
+    #[test]
+    fn test_wad_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use repository CSV fixture to match other tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = WadInput::from_candles(&candles);
+
+        // Baseline via existing Vec-returning API
+        let baseline = wad(&input)?.values;
+
+        // New API: preallocated output buffer
+        let mut out = vec![0.0; baseline.len()];
+        #[allow(unused_variables)]
+        {
+            #[cfg(not(feature = "wasm"))]
+            {
+                wad_into(&input, &mut out)?;
+            }
+            #[cfg(feature = "wasm")]
+            {
+                wad_into_slice(&mut out, &input, Kernel::Auto)?;
+            }
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Treat NaN == NaN as equal; otherwise exact equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..baseline.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "Mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 }
 
 // Helper functions for WASM zero-copy optimization
@@ -1454,6 +1498,16 @@ pub fn wad_into_slice(dst: &mut [f64], input: &WadInput, kern: Kernel) -> Result
     }
 
     Ok(())
+}
+
+#[cfg(not(feature = "wasm"))]
+/// Write Williams Accumulation/Distribution (WAD) values into a caller-provided buffer.
+///
+/// - Preserves the module's warmup behavior (WAD has no NaN warmup; first value is 0.0).
+/// - `out.len()` must equal the input series length; returns the module's length error on mismatch.
+/// - Uses `Kernel::Auto` for runtime kernel selection and performs no internal allocations.
+pub fn wad_into(input: &WadInput, out: &mut [f64]) -> Result<(), WadError> {
+    wad_into_slice(out, input, Kernel::Auto)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]

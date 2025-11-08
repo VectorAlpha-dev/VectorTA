@@ -271,6 +271,16 @@ pub fn wilders_with_kernel(
     Ok(WildersOutput { values: out })
 }
 
+/// Writes Wilder's Moving Average into the provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like `wilders()`/`wilders_with_kernel()`.
+/// - `out.len()` must equal the input length; returns `OutputLengthMismatch` otherwise.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn wilders_into(input: &WildersInput, out: &mut [f64]) -> Result<(), WildersError> {
+    wilders_into_slice(out, input, Kernel::Auto)
+}
+
 // --- Scalar calculation (core logic) ---
 
 #[inline]
@@ -1193,6 +1203,48 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_wilders_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare input: two NaNs then a ramp of finite values
+        let mut data = Vec::with_capacity(256);
+        data.push(f64::NAN);
+        data.push(f64::NAN);
+        for i in 1..=254 {
+            data.push(i as f64);
+        }
+
+        let params = WildersParams { period: Some(5) };
+        let input = WildersInput::from_slice(&data, params);
+
+        // Baseline via existing Vec-returning API
+        let expected = wilders(&input)?.values;
+
+        // Preallocate output and call new into API
+        let mut out = vec![0.0; data.len()];
+
+        #[cfg(not(feature = "wasm"))]
+        {
+            wilders_into(&input, &mut out)?;
+        }
+
+        #[cfg(feature = "wasm")]
+        {
+            // Fallback in wasm builds: parity still validated via into_slice helper
+            wilders_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(out.len(), expected.len());
+        for (i, (a, b)) in out.iter().zip(expected.iter()).enumerate() {
+            if a.is_nan() || b.is_nan() {
+                assert!(a.is_nan() && b.is_nan(), "NaN parity mismatch at index {}", i);
+            } else {
+                let diff = (a - b).abs();
+                assert!(diff <= 1e-12, "Mismatch at {}: got {}, expected {}, diff {}", i, a, b, diff);
+            }
+        }
+        Ok(())
+    }
 
     fn check_wilders_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

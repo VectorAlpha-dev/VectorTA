@@ -591,6 +591,51 @@ pub fn nadaraya_watson_envelope_with_kernel(
     Ok(NweOutput { upper, lower })
 }
 
+/// Compute Nadaraya-Watson Envelope into caller-provided buffers (no allocations).
+///
+/// - Preserves the exact NaN warmup prefixes as the Vec-returning API.
+/// - Output slice lengths must match the input length.
+/// - Automatically selects the best available kernel (AVX512 → AVX2 → Scalar).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn nadaraya_watson_envelope_into(
+    input: &NweInput,
+    upper_out: &mut [f64],
+    lower_out: &mut [f64],
+) -> Result<(), NweError> {
+    let len = input.as_ref().len();
+    if upper_out.len() != len || lower_out.len() != len {
+        // Follow existing module semantics for length mismatch
+        return Err(NweError::NotEnoughValidData {
+            needed: len,
+            valid: upper_out.len().min(lower_out.len()),
+        });
+    }
+
+    let chosen = detect_best_kernel();
+
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    unsafe {
+        match chosen {
+            Kernel::Avx512 => {
+                return nadaraya_watson_envelope_into_slices_avx512(input, upper_out, lower_out)
+            }
+            Kernel::Avx2 => {
+                return nadaraya_watson_envelope_into_slices_avx2(input, upper_out, lower_out)
+            }
+            _ => {
+                return nadaraya_watson_envelope_into_slices(input, upper_out, lower_out);
+            }
+        }
+    }
+
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        let _ = chosen; // silence unused on non-AVX builds
+        nadaraya_watson_envelope_into_slices(input, upper_out, lower_out)
+    }
+}
+
 // ==================== SIMD KERNELS (optional) ====================
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -2696,4 +2741,66 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
+
+    // Parity test for native into API vs existing Vec API
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_nadaraya_watson_envelope_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use a length that ensures some non-NaN outputs given MAE(499) warmup
+        let len = 600usize;
+        let data: Vec<f64> = (0..len)
+            .map(|i| {
+                let x = i as f64;
+                10000.0 + (x * 0.01).sin() * 50.0 + x * 0.005
+            })
+            .collect();
+
+        let params = NweParams {
+            bandwidth: Some(8.0),
+            multiplier: Some(3.0),
+            lookback: Some(50),
+        };
+        let input = NweInput::from_slice(&data, params);
+
+        // Baseline via existing Vec-returning API with auto kernel selection
+        let baseline = nadaraya_watson_envelope_with_kernel(&input, Kernel::Auto)?;
+
+        // Into API writes directly into caller-provided buffers
+        let mut upper = vec![0.0; len];
+        let mut lower = vec![0.0; len];
+        nadaraya_watson_envelope_into(&input, &mut upper, &mut lower)?;
+
+        assert_eq!(upper.len(), baseline.upper.len());
+        assert_eq!(lower.len(), baseline.lower.len());
+
+        // Helper for equality with NaN == NaN and tight epsilon for finite values
+        fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
+            if a.is_nan() && b.is_nan() {
+                true
+            } else {
+                (a - b).abs() <= 1e-12
+            }
+        }
+
+        for (i, (&u_into, &u_api)) in upper.iter().zip(baseline.upper.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan_eps(u_into, u_api),
+                "upper diverged at {}: into={} api={}",
+                i,
+                u_into,
+                u_api
+            );
+        }
+        for (i, (&l_into, &l_api)) in lower.iter().zip(baseline.lower.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan_eps(l_into, l_api),
+                "lower diverged at {}: into={} api={}",
+                i,
+                l_into,
+                l_api
+            );
+        }
+
+        Ok(())
+    }
 }

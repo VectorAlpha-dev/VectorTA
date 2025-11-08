@@ -556,6 +556,17 @@ pub fn ehlers_ecema_into_slice(
     Ok(())
 }
 
+/// Writes EC-EMA values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly as the allocating API.
+/// - The output slice length must match the input length.
+/// - Uses `Kernel::Auto` for runtime dispatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn ehlers_ecema_into(input: &EhlersEcemaInput, out: &mut [f64]) -> Result<(), EhlersEcemaError> {
+    ehlers_ecema_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline(always)]
 unsafe fn ehlers_ecema_scalar_into_with_mode(
     data: &[f64],
@@ -2497,4 +2508,55 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_ehlers_ecema_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input (with NaN warmup and varying values)
+        let len = 256usize;
+        let mut data = vec![0.0f64; len];
+        // introduce a few NaNs at the start to exercise warmup handling
+        for i in 0..3 { data[i] = f64::NAN; }
+        for i in 3..len {
+            let x = i as f64;
+            data[i] = 1000.0 + (x * 0.1).sin() * 5.0 + x * 0.05;
+        }
+
+        let params = EhlersEcemaParams::default();
+        let input = EhlersEcemaInput::from_slice(&data, params);
+
+        // Baseline via allocating API
+        let baseline = ehlers_ecema(&input)?.values;
+
+        // Preallocate output and compute via into API
+        let mut out = vec![0.0f64; len];
+        // Note: native into is cfg(not(wasm)); for wasm builds this test is skipped
+        #[cfg(not(feature = "wasm"))]
+        {
+            ehlers_ecema_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, fall back to into_slice with Auto to keep parity
+            ehlers_ecema_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: NaN == NaN, else exact or tight epsilon
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at idx {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 }

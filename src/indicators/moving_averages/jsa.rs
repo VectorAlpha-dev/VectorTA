@@ -245,6 +245,13 @@ pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, Js
 }
 
 #[inline]
+/// Write JSA results into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup prefix exactly as the Vec-returning API
+///   (`first_valid + period` positions set to quiet-NaN).
+/// - `out.len()` must equal the input data length, otherwise returns
+///   `JsaError::OutputLenMismatch`.
+#[inline]
 pub fn jsa_into(input: &JsaInput, out: &mut [f64]) -> Result<(), JsaError> {
     jsa_with_kernel_into(input, Kernel::Auto, out)
 }
@@ -1989,4 +1996,36 @@ mod tests {
     // Generate property test variants for each kernel
     #[cfg(feature = "proptest")]
     generate_all_jsa_tests!(check_jsa_property);
+
+    #[test]
+    fn test_jsa_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a non-trivial input with a NaN warmup prefix and finite tail
+        let mut data = Vec::with_capacity(256);
+        for _ in 0..8 {
+            data.push(f64::NAN);
+        }
+        for i in 0..248u64 {
+            // mildly varying values to exercise the kernel
+            let x = (i as f64).sin() * 3.14159 + (i as f64) * 0.01;
+            data.push(x);
+        }
+
+        let input = JsaInput::from_slice(&data, JsaParams::default());
+
+        // Baseline via Vec-returning API
+        let base = jsa(&input)?.values;
+
+        // Preallocate output buffer for into()
+        let mut out = vec![0.0; data.len()];
+        jsa_into(&input, &mut out)?;
+
+        assert_eq!(base.len(), out.len(), "lengths must match");
+
+        // Compare position-wise (NaN == NaN allowed). Use exact equality for finite values.
+        for (i, (&a, &b)) in base.iter().zip(out.iter()).enumerate() {
+            let both_nan = a.is_nan() && b.is_nan();
+            assert!(both_nan || a == b, "mismatch at idx {}: {} vs {}", i, a, b);
+        }
+        Ok(())
+    }
 }

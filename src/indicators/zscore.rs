@@ -2322,6 +2322,16 @@ pub fn zscore_into_slice(
     Ok(())
 }
 
+/// Write Z-Score values into a caller-provided buffer without allocating.
+///
+/// - Preserves the NaN warmup prefix exactly like the Vec-returning API
+///   (first_valid + period - 1 entries are set to NaN).
+/// - The `out` slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+pub fn zscore_into(input: &ZscoreInput, out: &mut [f64]) -> Result<(), ZscoreError> {
+    zscore_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 unsafe fn zscore_compute_into_scalar(
     data: &[f64],
@@ -2334,7 +2344,7 @@ unsafe fn zscore_compute_into_scalar(
 ) -> Result<(), ZscoreError> {
     let warmup_end = first + period - 1;
     for v in &mut out[..warmup_end] {
-        *v = f64::NAN;
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
     if data.len() <= warmup_end {
@@ -2343,48 +2353,54 @@ unsafe fn zscore_compute_into_scalar(
 
     // Fast paths for devtype 0 (standard deviation)
     if devtype == 0 {
-        // SMA mean + population stddev via rolling sums
+        // SMA mean + population stddev via rolling sums (match classic kernel exactly)
         if ma_type == "sma" {
-            let den = period as f64;
-
-            let mut sum = 0.0;
-            let mut sum2 = 0.0;
+            let inv = 1.0 / (period as f64);
+            let mut sum = 0.0f64;
+            let mut sum_sqr = 0.0f64;
             {
                 let mut j = first;
                 while j <= warmup_end {
-                    let v = data[j];
+                    let v = *data.get_unchecked(j);
                     sum += v;
-                    sum2 += v * v;
+                    sum_sqr = v.mul_add(v, sum_sqr);
                     j += 1;
                 }
             }
+            let mut mean = sum * inv;
+            let mut variance = (-mean).mul_add(mean, sum_sqr * inv);
+            if variance < 0.0 {
+                variance = 0.0;
+            }
+            let mut sd = if variance == 0.0 { 0.0 } else { variance.sqrt() * nbdev };
 
-            let mut mean = sum / den;
-            let mut var = sum2 / den - mean * mean;
-            let mut sd = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
-
-            out[warmup_end] = if sd == 0.0 || sd.is_nan() {
+            let xw = *data.get_unchecked(warmup_end);
+            *out.get_unchecked_mut(warmup_end) = if sd == 0.0 || sd.is_nan() {
                 f64::NAN
             } else {
-                (data[warmup_end] - mean) / sd
+                (xw - mean) / sd
             };
 
+            let n = data.len();
             let mut i = warmup_end + 1;
-            while i < data.len() {
-                let new = data[i];
-                let old = data[i - period];
+            while i < n {
+                let old_val = *data.get_unchecked(i - period);
+                let new_val = *data.get_unchecked(i);
+                let dd = new_val - old_val;
+                sum += dd;
+                sum_sqr = (new_val + old_val).mul_add(dd, sum_sqr);
+                mean = sum * inv;
 
-                sum += new - old;
-                sum2 += new * new - old * old;
+                variance = (-mean).mul_add(mean, sum_sqr * inv);
+                if variance < 0.0 {
+                    variance = 0.0;
+                }
+                sd = if variance == 0.0 { 0.0 } else { variance.sqrt() * nbdev };
 
-                mean = sum / den;
-                var = sum2 / den - mean * mean;
-                sd = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
-
-                out[i] = if sd == 0.0 || sd.is_nan() {
+                *out.get_unchecked_mut(i) = if sd == 0.0 || sd.is_nan() {
                     f64::NAN
                 } else {
-                    (new - mean) / sd
+                    (new_val - mean) / sd
                 };
                 i += 1;
             }
@@ -2392,54 +2408,62 @@ unsafe fn zscore_compute_into_scalar(
             return Ok(());
         }
 
-        // EMA mean + population stddev around EMA via window sums and EMA updates
+        // EMA mean + population stddev around EMA via window sums and EMA updates (match classic)
         if ma_type == "ema" {
             let den = period as f64;
+            let inv = 1.0 / den;
             let alpha = 2.0 / (den + 1.0);
             let one_minus_alpha = 1.0 - alpha;
 
-            let mut sum = 0.0;
-            let mut sum2 = 0.0;
+            let mut sum = 0.0f64;
+            let mut sum2 = 0.0f64;
             {
                 let mut j = first;
                 while j <= warmup_end {
-                    let v = data[j];
+                    let v = *data.get_unchecked(j);
                     sum += v;
-                    sum2 += v * v;
+                    sum2 = v.mul_add(v, sum2);
                     j += 1;
                 }
             }
-            let mut ema = sum / den;
+            let mut ema = sum * inv;
 
-            let mut mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
+            let mut ex = sum * inv;
+            let mut ex2 = sum2 * inv;
+            let mut mse = (-2.0 * ema).mul_add(ex, ema.mul_add(ema, ex2));
             if mse < 0.0 {
                 mse = 0.0;
             }
             let mut sd = mse.sqrt() * nbdev;
 
-            out[warmup_end] = if sd == 0.0 || sd.is_nan() {
+            let xw = *data.get_unchecked(warmup_end);
+            *out.get_unchecked_mut(warmup_end) = if sd == 0.0 || sd.is_nan() {
                 f64::NAN
             } else {
-                (data[warmup_end] - ema) / sd
+                (xw - ema) / sd
             };
 
+            let n = data.len();
             let mut i = warmup_end + 1;
-            while i < data.len() {
-                let new = data[i];
-                let old = data[i - period];
+            while i < n {
+                let new = *data.get_unchecked(i);
+                let old = *data.get_unchecked(i - period);
 
-                sum += new - old;
-                sum2 += new * new - old * old;
+                let dd = new - old;
+                sum += dd;
+                sum2 = (new + old).mul_add(dd, sum2);
+                ex = sum * inv;
+                ex2 = sum2 * inv;
 
-                ema = alpha * new + one_minus_alpha * ema;
+                ema = ema.mul_add(one_minus_alpha, alpha * new);
 
-                mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
+                mse = (-2.0 * ema).mul_add(ex, ema.mul_add(ema, ex2));
                 if mse < 0.0 {
                     mse = 0.0;
                 }
                 sd = mse.sqrt() * nbdev;
 
-                out[i] = if sd == 0.0 || sd.is_nan() {
+                *out.get_unchecked_mut(i) = if sd == 0.0 || sd.is_nan() {
                     f64::NAN
                 } else {
                     (new - ema) / sd
@@ -3362,4 +3386,48 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_zscore_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the same CSV as other tests for realistic coverage
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Default params match existing tests
+        let input = ZscoreInput::from_candles(&candles, "close", ZscoreParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = zscore(&input)?.values;
+
+        // Preallocate output and call the no-allocation API
+        let mut out = vec![0.0; baseline.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            zscore_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, use the slice variant to avoid symbol clash
+            zscore_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Treat NaN == NaN; otherwise require exact or tight epsilon equality
+        // Allow a very small epsilon to account for FMA vs non-FMA differences
+        // that can appear in release vs debug or across CPU targets.
+        let eq_or_both_nan = |a: f64, b: f64| -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-9)
+        };
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "Mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+        Ok(())
+    }
 }

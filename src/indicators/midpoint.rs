@@ -246,6 +246,17 @@ pub fn midpoint_with_kernel(
     Ok(MidpointOutput { values: out })
 }
 
+/// Write Midpoint values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup semantics identical to `midpoint()`.
+/// - The `out` slice length must equal the input length.
+/// - Uses the module's kernel auto-detection (Kernel::Auto).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn midpoint_into(input: &MidpointInput, out: &mut [f64]) -> Result<(), MidpointError> {
+    midpoint_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn midpoint_into_slice(
     out: &mut [f64],
@@ -1783,6 +1794,51 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
     gen_batch_tests!(check_batch_multiple_periods);
     gen_batch_tests!(check_batch_edge_cases);
+
+    #[test]
+    #[cfg(not(feature = "wasm"))]
+    fn test_midpoint_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small non-trivial slice with a NaN prefix and varied values
+        let len = 512usize;
+        let mut data = vec![0.0f64; len];
+        // Warmup NaNs to exercise first-valid logic
+        data[0] = f64::NAN;
+        data[1] = f64::NAN;
+        data[2] = f64::NAN;
+        for i in 3..len {
+            let x = i as f64;
+            // Mix of trend + small oscillation
+            data[i] = 100.0 + 0.05 * x + (0.01 * x).sin() * 2.0;
+        }
+
+        let input = MidpointInput::from_slice(&data, MidpointParams::default());
+
+        // Baseline via allocating API
+        let baseline = midpoint(&input)?.values;
+
+        // Into variant writes in-place with identical warmup handling
+        let mut out = vec![0.0f64; len];
+        midpoint_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "mismatch at {}: baseline={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 }
 
 // --- BATCH INNER INTO ---

@@ -255,6 +255,32 @@ pub fn bop_with_kernel(input: &BopInput, kernel: Kernel) -> Result<BopOutput, Bo
     Ok(BopOutput { values: out })
 }
 
+/// Write BOP values into a caller-provided output buffer (no allocations).
+///
+/// - Preserves NaN warmup prefix exactly like the Vec-returning API.
+/// - `out.len()` must equal the input length; returns the module's length error on mismatch.
+#[cfg(not(feature = "wasm"))]
+pub fn bop_into(input: &BopInput, out: &mut [f64]) -> Result<(), BopError> {
+    let (open, high, low, close): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
+        BopData::Candles { candles } => (
+            source_type(candles, "open"),
+            source_type(candles, "high"),
+            source_type(candles, "low"),
+            source_type(candles, "close"),
+        ),
+        BopData::Slices {
+            open,
+            high,
+            low,
+            close,
+        } => (open, high, low, close),
+    };
+
+    // Use the existing into-slice kernel with Kernel::Auto; it handles
+    // length validation and warmup NaN prefixing identically to the Vec API.
+    bop_into_slice(out, open, high, low, close, Kernel::Auto)
+}
+
 #[inline(always)]
 unsafe fn bop_scalar_from(
     open: &[f64],
@@ -1466,6 +1492,68 @@ mod tests {
     }
 
     gen_batch_tests!(check_batch_no_poison);
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_bop_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a small but non-trivial OHLC candle set (length 256) with a NaN warmup.
+        let n = 256usize;
+        let mut ts = Vec::with_capacity(n);
+        let mut open = Vec::with_capacity(n);
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        let mut vol = Vec::with_capacity(n);
+
+        for i in 0..n {
+            ts.push(i as i64);
+            let base = 100.0 + (i as f64) * 0.1;
+            let o = base + (i as f64).sin() * 0.01;
+            let c = base + (i as f64).cos() * 0.02;
+            let h = base + 1.0;
+            let l = base - 1.0;
+
+            open.push(o);
+            high.push(h);
+            low.push(l);
+            close.push(c);
+            vol.push(1_000.0 + i as f64);
+        }
+
+        // Introduce a NaN prefix to exercise warmup handling.
+        open[0] = f64::NAN;
+        high[0] = f64::NAN;
+        low[0] = f64::NAN;
+        close[0] = f64::NAN;
+
+        let candles = crate::utilities::data_loader::Candles::new(ts, open, high, low, close, vol);
+        let input = BopInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = bop(&input)?;
+
+        // Into API writes into caller-provided buffer without allocating
+        let mut out = vec![0.0f64; baseline.values.len()];
+        bop_into(&input, &mut out)?;
+
+        // Helper treats NaN == NaN as equal; otherwise exact equality.
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        assert_eq!(out.len(), baseline.values.len());
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(out[i], baseline.values[i]),
+                "mismatch at index {}: into={} vs api={}",
+                i,
+                out[i],
+                baseline.values[i]
+            );
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "python")]

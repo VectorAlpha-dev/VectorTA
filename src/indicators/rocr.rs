@@ -250,6 +250,17 @@ pub fn rocr_with_kernel(input: &RocrInput, kernel: Kernel) -> Result<RocrOutput,
     Ok(RocrOutput { values: out })
 }
 
+/// Write ROCR into a caller-provided buffer without allocating.
+///
+/// - Preserves the exact NaN warmup prefix semantics of the Vec API.
+/// - The output slice length must equal the input length.
+/// - Uses kernel auto-selection identical to `rocr()`.
+#[cfg(not(feature = "wasm"))]
+pub fn rocr_into(input: &RocrInput, out: &mut [f64]) -> Result<(), RocrError> {
+    // Delegate to the shared compute path that also handles warmups
+    rocr_into_slice(out, input, Kernel::Auto)
+}
+
 /// Write ROCR directly to output slice - zero allocations (for WASM optimization)
 pub fn rocr_into_slice(dst: &mut [f64], input: &RocrInput, kern: Kernel) -> Result<(), RocrError> {
     let (data, period, first, chosen) = rocr_prepare(input, kern)?;
@@ -1322,6 +1333,33 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_rocr_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use repository CSV data for parity, matching other ROCR tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = RocrInput::from_candles(&candles, "close", RocrParams::default());
+        let baseline = rocr(&input)?.values;
+
+        let mut out = vec![0.0; candles.close.len()];
+        rocr_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || (a - b).abs() <= 1e-12
+        }
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "mismatch at index {}: api={} into={}",
+                i, a, b
+            );
+        }
+        Ok(())
+    }
 
     fn check_rocr_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

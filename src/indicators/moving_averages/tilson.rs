@@ -246,6 +246,35 @@ pub fn tilson_with_kernel(
     Ok(TilsonOutput { values: out })
 }
 
+/// Write Tilson T3 results directly into a caller-provided buffer without allocations.
+///
+/// - Preserves the indicator's NaN warmup semantics: fills the warmup prefix with the
+///   same quiet-NaN bit pattern used by `alloc_with_nan_prefix`.
+/// - Uses `Kernel::Auto` for runtime dispatch (same as the Vec-returning API).
+/// - `out.len()` must equal the input length; returns the module's existing
+///   `InvalidPeriod { period: out.len(), data_len }` on mismatch.
+#[cfg(not(feature = "wasm"))]
+pub fn tilson_into(input: &TilsonInput, out: &mut [f64]) -> Result<(), TilsonError> {
+    let (data, period, v_factor, first, len, chosen) = tilson_prepare(input, Kernel::Auto)?;
+
+    if out.len() != len {
+        return Err(TilsonError::InvalidPeriod {
+            period: out.len(),
+            data_len: len,
+        });
+    }
+
+    // Prefill warmup prefix with the exact quiet-NaN pattern used by Vec API
+    let warm = (first + 6 * (period - 1)).min(len);
+    for i in 0..warm {
+        out[i] = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Compute values into the provided buffer
+    tilson_compute_into(data, period, v_factor, first, chosen, out)?;
+    Ok(())
+}
+
 #[inline]
 pub fn tilson_into_slice(
     dst: &mut [f64],
@@ -2145,6 +2174,38 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_tilson_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with a NaN prefix
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..252u32 {
+            data.push((i as f64).sin() * 100.0 + (i as f64) * 0.1);
+        }
+
+        let input = TilsonInput::from_slice(&data, TilsonParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = tilson(&input)?.values;
+
+        // Preallocated output buffer
+        let mut out = vec![0.0; data.len()];
+
+        // Native into API; skip on wasm to avoid name clash with wasm bindgen export
+        #[cfg(not(feature = "wasm"))]
+        {
+            tilson_into(&input, &mut out)?;
+
+            assert_eq!(baseline.len(), out.len());
+            for (a, b) in baseline.iter().zip(out.iter()) {
+                let equal = (a.is_nan() && b.is_nan()) || (a == b);
+                assert!(equal, "Mismatch: baseline={} into={}", a, b);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // ========== Helper Functions for Bindings ==========

@@ -204,6 +204,81 @@ pub fn tsf(input: &TsfInput) -> Result<TsfOutput, TsfError> {
     tsf_with_kernel(input, Kernel::Auto)
 }
 
+/// Writes TSF outputs into the provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - `out.len()` must equal the input length.
+/// - Uses `Kernel::Auto` (short-circuited to `Scalar` for TSF) for computation.
+#[cfg(not(feature = "wasm"))]
+pub fn tsf_into(input: &TsfInput, out: &mut [f64]) -> Result<(), TsfError> {
+    // Resolve input slice
+    let data: &[f64] = match &input.data {
+        TsfData::Candles { candles, source } => source_type(candles, source),
+        TsfData::Slice(sl) => sl,
+    };
+
+    let len = data.len();
+    if len == 0 {
+        return Err(TsfError::EmptyInputData);
+    }
+
+    // First non-NaN and params (mirror tsf_with_kernel validations)
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(TsfError::AllValuesNaN)?;
+    let period = input.get_period();
+
+    if period < 2 {
+        return Err(TsfError::PeriodTooSmall { period });
+    }
+    if period > len {
+        return Err(TsfError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if (len - first) < period {
+        return Err(TsfError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+    if out.len() != len {
+        return Err(TsfError::MismatchedOutputLen {
+            expected: len,
+            actual: out.len(),
+        });
+    }
+
+    // Prefill NaN warmup to match alloc_with_nan_prefix's quiet-NaN pattern
+    let warmup_end = first + period - 1;
+    let nanq = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..warmup_end] {
+        *v = nanq;
+    }
+
+    // Select kernel: Auto → Scalar for TSF (see tsf_with_kernel)
+    let chosen = match Kernel::Auto {
+        Kernel::Auto => Kernel::Scalar,
+        other => other,
+    };
+
+    // Compute into caller buffer (kernels do not write warmup prefix)
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => tsf_scalar(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => tsf_avx2(data, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => tsf_avx512(data, period, first, out),
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
 pub fn tsf_with_kernel(input: &TsfInput, kernel: Kernel) -> Result<TsfOutput, TsfError> {
     let data: &[f64] = match &input.data {
         TsfData::Candles { candles, source } => source_type(candles, source),
@@ -315,10 +390,11 @@ pub fn tsf_into_slice(dst: &mut [f64], input: &TsfInput, kern: Kernel) -> Result
         _ => unreachable!(),
     }
 
-    // Fill warmup with NaN
+    // Fill warmup with quiet-NaN (match alloc_with_nan_prefix)
     let warmup_end = first + period - 1;
+    let nanq = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_end] {
-        *v = f64::NAN;
+        *v = nanq;
     }
 
     Ok(())
@@ -2534,6 +2610,45 @@ mod tests {
 
     #[cfg(feature = "proptest")]
     generate_all_tsf_tests!(check_tsf_property);
+
+    #[test]
+    fn test_tsf_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare a realistic dataset used by other TSF tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = TsfInput::from_candles(&candles, "close", TsfParams::default());
+
+        // Baseline using the Vec-returning API
+        let baseline = tsf(&input)?.values;
+
+        // Preallocate output and compute via new into API
+        let mut out = vec![0.0; candles.close.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            tsf_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // The native tsf_into is not available under wasm feature; skip
+            return Ok(());
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "Mismatch at index {i}: baseline={} out={}",
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
