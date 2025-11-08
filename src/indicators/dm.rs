@@ -662,6 +662,45 @@ pub fn dm_with_kernel(input: &DmInput, kernel: Kernel) -> Result<DmOutput, DmErr
     Ok(DmOutput { plus, minus })
 }
 
+/// Writes (+DM, −DM) into caller-provided output slices without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - Both `plus_out.len()` and `minus_out.len()` must equal the input length.
+/// - Errors mirror the existing API semantics.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn dm_into(
+    input: &DmInput,
+    plus_out: &mut [f64],
+    minus_out: &mut [f64],
+) -> Result<(), DmError> {
+    // Match default behavior: Auto short-circuits to Scalar for DM
+    let (high, low, period, first, chosen) = dm_prepare(input, Kernel::Auto)?;
+
+    // Length validation: reuse existing InvalidPeriod shape on mismatch
+    if plus_out.len() != high.len() || minus_out.len() != high.len() {
+        return Err(DmError::InvalidPeriod {
+            period,
+            data_len: high.len(),
+        });
+    }
+
+    // Prefill NaN warmups with the same quiet-NaN bit pattern as alloc_with_nan_prefix
+    let warm = first + period - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let warm_end = warm.min(high.len());
+    for v in &mut plus_out[..warm_end] {
+        *v = qnan;
+    }
+    for v in &mut minus_out[..warm_end] {
+        *v = qnan;
+    }
+
+    // Compute into provided buffers
+    dm_compute_into(high, low, period, first, chosen, plus_out, minus_out);
+    Ok(())
+}
+
 #[inline]
 pub fn dm_into_slice(
     plus_dst: &mut [f64],
@@ -1830,6 +1869,59 @@ mod tests {
 
     #[cfg(feature = "proptest")]
     generate_all_dm_tests!(check_dm_property);
+
+    #[test]
+    fn test_dm_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a small but non-trivial synthetic HL series (all finite)
+        let n = 256usize;
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut price = 100.0f64;
+        for i in 0..n {
+            // Mild drift and oscillation
+            let drift = ((i % 7) as i32 - 3) as f64 * 0.3;
+            price = (price + drift).max(1.0);
+            let spread = 0.5 + 0.1 * ((i % 5) as f64);
+            high.push(price + spread);
+            low.push((price - spread).max(0.01));
+        }
+
+        let input = DmInput::from_slices(&high, &low, DmParams::default());
+
+        // Baseline via Vec-returning API
+        let base = dm(&input)?;
+
+        // Into API with preallocated buffers
+        let mut plus = vec![0.0; n];
+        let mut minus = vec![0.0; n];
+        #[cfg(not(feature = "wasm"))]
+        dm_into(&input, &mut plus, &mut minus)?;
+
+        // Helper: treat NaN == NaN as equal
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            a == b || (a.is_nan() && b.is_nan())
+        }
+
+        assert_eq!(base.plus.len(), n);
+        assert_eq!(base.minus.len(), n);
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(base.plus[i], plus[i]),
+                "plus mismatch at {}: base={} into={}",
+                i,
+                base.plus[i],
+                plus[i]
+            );
+            assert!(
+                eq_or_both_nan(base.minus[i], minus[i]),
+                "minus mismatch at {}: base={} into={}",
+                i,
+                base.minus[i],
+                minus[i]
+            );
+        }
+        Ok(())
+    }
 
     fn check_batch_default_row(
         test: &str,

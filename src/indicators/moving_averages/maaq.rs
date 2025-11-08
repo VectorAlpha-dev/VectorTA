@@ -2027,6 +2027,37 @@ mod tests {
 
     #[cfg(feature = "proptest")]
     generate_all_maaq_tests!(check_maaq_property);
+
+    // Parity test for native into API vs Vec API
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_maaq_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a series with a small NaN prefix and varying values
+        let mut data: Vec<f64> = vec![f64::NAN, f64::NAN, f64::NAN];
+        for i in 0..256u32 {
+            let x = (i as f64).sin() * 0.5 + (i as f64) * 0.1 + ((i % 7) as f64) * 0.01;
+            data.push(x);
+        }
+
+        let input = MaaqInput::from_slice(&data, MaaqParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = maaq(&input)?.values;
+
+        // Zero-allocation path into preallocated buffer
+        let mut out = vec![0.0; data.len()];
+        super::maaq_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Equality: NaN == NaN, otherwise exact or tight epsilon
+        for (idx, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
+            let equal = (a.is_nan() && b.is_nan()) || ((a - b).abs() <= 1e-12);
+            assert!(equal, "Mismatch at {}: {} vs {}", idx, a, b);
+        }
+
+        Ok(())
+    }
 }
 
 // --- Python bindings ---
@@ -2402,6 +2433,18 @@ pub fn maaq_into_slice(dst: &mut [f64], input: &MaaqInput, kern: Kernel) -> Resu
     }
 
     Ok(())
+}
+
+// ================== Native Into API (no allocations) ==================
+
+/// Compute MAAQ directly into a caller-provided output buffer.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API.
+/// - `out.len()` must equal the input length; returns an error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn maaq_into(input: &MaaqInput, out: &mut [f64]) -> Result<(), MaaqError> {
+    maaq_into_slice(out, input, Kernel::Auto)
 }
 
 // ================== Fast / Unsafe API (Zero-Copy) ==================

@@ -79,6 +79,53 @@ impl<'a> AsRef<[f64]> for VidyaInput<'a> {
     }
 }
 
+#[cfg(test)]
+mod tests_into_parity {
+    use super::*;
+    use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_vidya_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use the repo's existing CSV data to construct the input
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = VidyaInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = vidya(&input)?.values;
+
+        // No-allocation API writes into caller-provided buffer
+        let mut out = vec![0.0; candles.close.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            vidya_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native symbol is not available; use the same path as the JS wrapper
+            vidya_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "Mismatch at index {}: baseline={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum VidyaData<'a> {
     Candles {
@@ -411,6 +458,17 @@ pub fn vidya_into_slice(
     }
 
     Ok(())
+}
+
+/// Compute VIDYA into a caller-provided buffer (no allocations).
+///
+/// - Preserves the module's NaN warmup behavior by writing a quiet-NaN prefix
+///   identical to the Vec-returning API.
+/// - `out.len()` must equal the input length; otherwise an error is returned.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn vidya_into(input: &VidyaInput, out: &mut [f64]) -> Result<(), VidyaError> {
+    vidya_into_slice(out, input, Kernel::Auto)
 }
 
 #[inline]

@@ -255,6 +255,21 @@ pub fn cksp(input: &CkspInput) -> Result<CkspOutput, CkspError> {
     cksp_with_kernel(input, Kernel::Auto)
 }
 
+/// Write CKSP outputs into caller-provided buffers without allocations.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API.
+/// - `out_long.len()` and `out_short.len()` must equal the input length.
+/// - Uses `Kernel::Auto` runtime selection (same as `cksp()`).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn cksp_into(
+    input: &CkspInput,
+    out_long: &mut [f64],
+    out_short: &mut [f64],
+) -> Result<(), CkspError> {
+    cksp_into_slices(out_long, out_short, input, Kernel::Auto)
+}
+
 pub fn cksp_with_kernel(input: &CkspInput, kernel: Kernel) -> Result<CkspOutput, CkspError> {
     let (high, low, close) = match &input.data {
         CkspData::Candles { candles } => {
@@ -3095,6 +3110,62 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_cksp_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the same dataset as other tests for realism
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Build input with default params
+        let input = CkspInput::from_candles(&candles, CkspParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = cksp(&input)?;
+
+        // Preallocate outputs and compute via into-API
+        let n = candles.close.len();
+        let mut out_long = vec![0.0; n];
+        let mut out_short = vec![0.0; n];
+
+        // Native into API (guarded away when building for wasm)
+        #[cfg(not(feature = "wasm"))]
+        {
+            cksp_into(&input, &mut out_long, &mut out_short)?;
+        }
+
+        // If building with wasm feature, fall back to into_slices helper for parity check
+        #[cfg(feature = "wasm")]
+        {
+            cksp_into_slices(&mut out_long, &mut out_short, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.long_values.len(), out_long.len());
+        assert_eq!(baseline.short_values.len(), out_short.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline.long_values[i], out_long[i]),
+                "long mismatch at {}: baseline={}, into={}",
+                i,
+                baseline.long_values[i],
+                out_long[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.short_values[i], out_short[i]),
+                "short mismatch at {}: baseline={}, into={}",
+                i,
+                baseline.short_values[i],
+                out_short[i]
+            );
+        }
+
+        Ok(())
+    }
 }
 
 // ========================= Python Bindings =========================

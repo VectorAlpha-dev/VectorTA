@@ -324,6 +324,47 @@ pub fn dma_with_kernel(input: &DmaInput, kernel: Kernel) -> Result<DmaOutput, Dm
     Ok(DmaOutput { values: out })
 }
 
+/// Write DMA output into a caller-provided buffer without allocations.
+///
+/// - Preserves the NaN warmup prefix exactly like the Vec-returning API
+///   (uses the same quiet-NaN pattern).
+/// - `out.len()` must equal the input length; returns `InvalidPeriod` on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline(always)]
+pub fn dma_into(input: &DmaInput, out: &mut [f64]) -> Result<(), DmaError> {
+    let (data, hull_len, ema_len, ema_gain_limit, hull_ma_type, first, chosen) =
+        dma_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(DmaError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix using the same quiet-NaN as alloc_with_nan_prefix
+    let sqrt_len = (hull_len as f64).sqrt().round() as usize;
+    let warmup_end = first + hull_len.max(ema_len) + sqrt_len - 1;
+    let end = warmup_end.min(out.len());
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..end] {
+        *v = qnan;
+    }
+
+    // Compute directly into the provided buffer
+    dma_compute_into(
+        data,
+        hull_len,
+        ema_len,
+        ema_gain_limit,
+        &hull_ma_type,
+        first,
+        chosen,
+        out,
+    );
+    Ok(())
+}
+
 #[inline(always)]
 pub fn dma_into_slice(dst: &mut [f64], input: &DmaInput, kern: Kernel) -> Result<(), DmaError> {
     let (data, hull_len, ema_len, ema_gain_limit, hull_ma_type, first, chosen) =
@@ -3306,6 +3347,42 @@ mod tests {
             assert_ne!(b, 0x11111111_11111111);
             assert_ne!(b, 0x22222222_22222222);
             assert_ne!(b, 0x33333333_33333333);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_dma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with a NaN prefix
+        let mut data = Vec::with_capacity(160);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..157 {
+            let x = (i as f64 * 0.15).sin() * 5.0 + (i as f64) * 0.01;
+            data.push(x);
+        }
+
+        let input = DmaInput::from_slice(&data, DmaParams::default());
+
+        // Baseline via the Vec-returning API
+        let baseline = dma(&input)?;
+
+        // Preallocate output buffer and compute via the new into API
+        let mut out = vec![0.0; data.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            dma_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native dma_into is not available; fall back to slice variant
+            dma_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.values.len(), out.len());
+        // NaN-aware equality check (prefer exact equality for finite values)
+        for (a, b) in baseline.values.iter().copied().zip(out.iter().copied()) {
+            let both_nan = a.is_nan() && b.is_nan();
+            assert!(both_nan || a == b, "mismatch: got {b:?}, expected {a:?}");
         }
         Ok(())
     }

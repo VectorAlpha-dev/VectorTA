@@ -270,10 +270,11 @@ pub fn cfo_into_slice(dst: &mut [f64], input: &CfoInput, kernel: Kernel) -> Resu
         other => other,
     };
 
-    // Fill warmup period with NaN
+    // Fill warmup period with the same quiet-NaN pattern used by alloc_with_nan_prefix
     let warmup_end = first + period - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_end] {
-        *v = f64::NAN;
+        *v = qnan;
     }
 
     unsafe {
@@ -292,6 +293,16 @@ pub fn cfo_into_slice(dst: &mut [f64], input: &CfoInput, kernel: Kernel) -> Resu
     }
 
     Ok(())
+}
+
+/// Writes CFO values into a caller-provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - `out.len()` must equal the input length; errors mirror the existing API.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn cfo_into(input: &CfoInput, out: &mut [f64]) -> Result<(), CfoError> {
+    cfo_into_slice(out, input, Kernel::Auto)
 }
 
 pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, CfoError> {
@@ -1341,6 +1352,53 @@ mod tests {
                 diff
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_cfo_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Small, deterministic input with NaN prefix and no zeros
+        let mut data = Vec::with_capacity(256);
+        // Leading NaNs ensure warmup prefix behavior is exercised
+        data.push(f64::NAN);
+        data.push(f64::NAN);
+        for i in 1..=254u32 {
+            data.push(50.0 + (i as f64) * 0.25);
+        }
+
+        let input = CfoInput::from_slice(&data, CfoParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = cfo(&input)?.values;
+
+        // No-allocation API writes into caller-provided buffer
+        let mut out = vec![0.0; data.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            cfo_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native symbol is not available; use the same path as the JS wrapper
+            cfo_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
         Ok(())
     }
 

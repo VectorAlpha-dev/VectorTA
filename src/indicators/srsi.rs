@@ -1889,6 +1889,17 @@ pub fn srsi_into_slice(
     Ok(())
 }
 
+/// Write SRSI outputs into caller-provided buffers without allocating output vectors.
+///
+/// - Preserves NaN warmup prefixes exactly like `srsi()`/`srsi_with_kernel()`.
+/// - `out_k.len()` and `out_d.len()` must equal the input length.
+/// - Uses `Kernel::Auto` for internal dispatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn srsi_into(input: &SrsiInput, out_k: &mut [f64], out_d: &mut [f64]) -> Result<(), SrsiError> {
+    srsi_into_slice(out_k, out_d, input, Kernel::Auto)
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn srsi_js(
@@ -2716,6 +2727,57 @@ mod tests {
 
     #[cfg(feature = "proptest")]
     generate_all_srsi_tests!(check_srsi_property);
+
+    #[test]
+    fn test_srsi_into_matches_api() {
+        // Use the existing CSV input data to match other SRSI tests
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file).expect("load csv");
+        let input = SrsiInput::from_candles(&c, "close", SrsiParams::default());
+
+        // Baseline via Vec-returning API
+        let base = srsi(&input).expect("srsi baseline");
+
+        // Preallocate outputs and call into API
+        let mut out_k = vec![0.0; c.close.len()];
+        let mut out_d = vec![0.0; c.close.len()];
+
+        // Native into API (Auto kernel)
+        #[cfg(not(feature = "wasm"))]
+        {
+            srsi_into(&input, &mut out_k, &mut out_d).expect("srsi_into");
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, parity still holds using the slice variant
+            srsi_into_slice(&mut out_k, &mut out_d, &input, Kernel::Auto)
+                .expect("srsi_into_slice");
+        }
+
+        assert_eq!(base.k.len(), c.close.len());
+        assert_eq!(base.d.len(), c.close.len());
+        assert_eq!(out_k.len(), c.close.len());
+        assert_eq!(out_d.len(), c.close.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..c.close.len() {
+            assert!(
+                eq_or_both_nan(base.k[i], out_k[i]),
+                "SRSI K mismatch at {i}: {} vs {}",
+                base.k[i],
+                out_k[i]
+            );
+            assert!(
+                eq_or_both_nan(base.d[i], out_d[i]),
+                "SRSI D mismatch at {i}: {} vs {}",
+                base.d[i],
+                out_d[i]
+            );
+        }
+    }
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);

@@ -273,12 +273,12 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
     Ok(HwmaOutput { values: out })
 }
 
-/// Computes HWMA into a pre-allocated output buffer.
+/// Computes HWMA into a pre-allocated output buffer (no allocations).
 ///
-/// # Zero-Copy Design
-/// This function follows a zero-copy philosophy for optimal performance.
-/// The output buffer must be pre-allocated by the caller and should already
-/// contain appropriate NaN values in the warmup period if needed.
+/// - Preserves the indicator's warmup behavior by pre-filling the warmup
+///   prefix with quiet-NaNs using the same pattern as `alloc_with_nan_prefix`.
+/// - Writes results in-place to the provided `out` slice. The output length
+///   must match the input length; otherwise an error is returned.
 ///
 /// # Arguments
 /// * `input` - The HWMA input containing data and parameters
@@ -286,7 +286,7 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
 ///
 /// # Returns
 /// * `Ok(())` if successful
-/// * `Err(HwmaError)` if the computation fails
+/// * `Err(HwmaError)` if validation fails
 #[inline]
 pub fn hwma_into(input: &HwmaInput, out: &mut [f64]) -> Result<(), HwmaError> {
     hwma_with_kernel_into(input, Kernel::Auto, out)
@@ -294,14 +294,10 @@ pub fn hwma_into(input: &HwmaInput, out: &mut [f64]) -> Result<(), HwmaError> {
 
 /// Computes HWMA into a pre-allocated output buffer with specified kernel.
 ///
-/// # Zero-Copy Design
-/// This function is designed for zero-copy operation and maximum performance.
-/// Unlike the allocating version, this function does NOT initialize the warmup
-/// period with NaN values. The caller is responsible for any necessary
-/// initialization of the output buffer.
-///
-/// This design choice eliminates redundant memory operations when the buffer
-/// is already properly initialized (e.g., from Python/WASM bindings).
+/// This function validates lengths, computes the warmup prefix exactly like the
+/// allocating API, pre-fills the warmup prefix with a quiet-NaN bit pattern,
+/// and then dispatches to the selected compute kernel to write the valid
+/// suffix into `out`.
 ///
 /// # Arguments
 /// * `input` - The HWMA input containing data and parameters
@@ -381,9 +377,11 @@ pub fn hwma_with_kernel_into(
         }
     }
 
-    // Match ALMA: write only the warmup prefix, no full-vector fill
+    // Match ALMA: write only the warmup prefix using the canonical quiet-NaN
+    // pattern used by `alloc_with_nan_prefix`.
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..first] {
-        *v = f64::NAN;
+        *v = qnan;
     }
 
     Ok(())
@@ -2041,6 +2039,39 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[test]
+    fn test_hwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Small but non-trivial input with a NaN warmup prefix
+        let mut data = vec![f64::NAN; 7];
+        data.extend((0..256).map(|i| (i as f64).sin() * 10.0 + 100.0));
+
+        let params = HwmaParams::default();
+        let input = HwmaInput::from_slice(&data, params);
+
+        // Baseline via allocating API
+        let baseline = hwma(&input)?.values;
+
+        // Into path with preallocated buffer (contents will be overwritten)
+        let mut out = vec![0.0; data.len()];
+        hwma_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "mismatch at idx {}: alloc={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
+    }
 
     fn check_hwma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

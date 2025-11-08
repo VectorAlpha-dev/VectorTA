@@ -1042,6 +1042,18 @@ pub fn acosc_into_slice(
     Ok(())
 }
 
+// Native zero-allocation API: writes results into caller-provided buffers.
+// Preserves NaN warmups exactly like the Vec-returning API; lengths must equal input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn acosc_into(
+    input: &AcoscInput,
+    osc_out: &mut [f64],
+    change_out: &mut [f64],
+) -> Result<(), AcoscError> {
+    acosc_into_slice(osc_out, change_out, input, Kernel::Auto)
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn acosc_into(
@@ -1752,5 +1764,54 @@ mod tests {
                 kernel: Kernel::Avx2
             })
         ));
+    }
+
+    #[test]
+    fn test_acosc_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input from real candles
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let n = candles.high.len().min(512).max(64); // ensure >= 64 and not too big
+        let high = &candles.high[..n];
+        let low = &candles.low[..n];
+
+        let params = AcoscParams::default();
+        let input = AcoscInput::from_slices(high, low, params);
+
+        // Baseline via Vec-returning API
+        let base = acosc(&input)?;
+
+        // Preallocate outputs; function will fill NaN warmups identically
+        let mut out_osc = vec![0.0; n];
+        let mut out_change = vec![0.0; n];
+
+        // New zero-allocation API
+        acosc_into(&input, &mut out_osc, &mut out_change)?;
+
+        assert_eq!(base.osc.len(), out_osc.len());
+        assert_eq!(base.change.len(), out_change.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(base.osc[i], out_osc[i]),
+                "osc mismatch at {}: base={} out={}",
+                i,
+                base.osc[i],
+                out_osc[i]
+            );
+            assert!(
+                eq_or_both_nan(base.change[i], out_change[i]),
+                "change mismatch at {}: base={} out={}",
+                i,
+                base.change[i],
+                out_change[i]
+            );
+        }
+
+        Ok(())
     }
 }

@@ -83,6 +83,8 @@ impl Default for ModGodModeMode {
     }
 }
 
+    
+
 impl std::str::FromStr for ModGodModeMode {
     type Err = String;
 
@@ -1332,6 +1334,97 @@ pub fn mod_god_mode_into_slices(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// PUBLIC ZERO-ALLOC API
+// ============================================================================
+
+/// Write Modified God Mode outputs directly into caller-provided buffers (no allocation).
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - All output slice lengths must equal the input length.
+/// - Uses kernel auto-detection by default (Kernel::Auto).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn mod_god_mode_into(
+    input: &ModGodModeInput,
+    out_wavetrend: &mut [f64],
+    out_signal: &mut [f64],
+    out_histogram: &mut [f64],
+) -> Result<(), ModGodModeError> {
+    // Determine input length and obtain close for warmup computation
+    let (high, low, close, volume) = match &input.data {
+        ModGodModeData::Candles { candles } => {
+            let vol = if input.get_use_volume() {
+                Some(candles.volume.as_slice())
+            } else {
+                None
+            };
+            (
+                candles.high.as_slice(),
+                candles.low.as_slice(),
+                candles.close.as_slice(),
+                vol,
+            )
+        }
+        ModGodModeData::Slices {
+            high,
+            low,
+            close,
+            volume,
+        } => {
+            let vol = if input.get_use_volume() { *volume } else { None };
+            (*high, *low, *close, vol)
+        }
+    };
+
+    let len = close.len();
+    if out_wavetrend.len() != len || out_signal.len() != len || out_histogram.len() != len {
+        let dst_len = out_wavetrend
+            .len()
+            .min(out_signal.len())
+            .min(out_histogram.len());
+        return Err(ModGodModeError::InvalidDestinationLen { dst: dst_len, src: len });
+    }
+
+    if len == 0 {
+        return Err(ModGodModeError::EmptyInputData);
+    }
+
+    let first = close
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(ModGodModeError::AllValuesNaN)?;
+
+    let n1 = input.get_n1();
+    let n2 = input.get_n2();
+    let n3 = input.get_n3();
+    if n1 == 0 || n2 == 0 || n3 == 0 {
+        return Err(ModGodModeError::InvalidPeriod { n1, n2, n3, data_len: len });
+    }
+
+    let need = n1.max(n2).max(n3);
+    if len - first < need {
+        return Err(ModGodModeError::NotEnoughValidData { needed: need, valid: len - first });
+    }
+
+    // Prefill NaN warmup prefixes to mirror Vec API behavior
+    let warm = first + need - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out_wavetrend[..warm] {
+        *v = qnan;
+    }
+    for v in &mut out_signal[..warm] {
+        *v = qnan;
+    }
+    for v in &mut out_histogram[..warm] {
+        *v = qnan;
+    }
+
+    // Delegate core computation to zero-copy kernel dispatcher
+    let _ = (high, low, volume); // silence unused tuple fields in this wrapper
+    mod_god_mode_into_slices(out_wavetrend, out_signal, out_histogram, input, Kernel::Auto)
 }
 
 // ============================================================================
@@ -4691,6 +4784,61 @@ mod tests {
                     prop_assert_eq!(output.histogram.len(), len);
                 }
             }
+        }
+    }
+
+    // Parity test: native into() matches Vec API including NaN warmups
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_mod_god_mode_into_matches_api() {
+        fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        // Use the shared CSV used by existing accuracy tests
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file).expect("failed to read candles CSV");
+        let params = ModGodModeParams::default();
+        let input = ModGodModeInput::from_candles(&candles, params);
+
+        // Baseline via Vec-returning API
+        let base = mod_god_mode(&input).expect("baseline mod_god_mode should succeed");
+
+        // Preallocated outputs
+        let len = candles.close.len();
+        let mut wt = vec![0.0; len];
+        let mut sig = vec![0.0; len];
+        let mut hist = vec![0.0; len];
+
+        mod_god_mode_into(&input, &mut wt, &mut sig, &mut hist)
+            .expect("mod_god_mode_into should succeed");
+
+        assert_eq!(wt.len(), base.wavetrend.len());
+        assert_eq!(sig.len(), base.signal.len());
+        assert_eq!(hist.len(), base.histogram.len());
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan_eps(wt[i], base.wavetrend[i]),
+                "wavetrend mismatch at {}: got {:?} expected {:?}",
+                i,
+                wt[i],
+                base.wavetrend[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(sig[i], base.signal[i]),
+                "signal mismatch at {}: got {:?} expected {:?}",
+                i,
+                sig[i],
+                base.signal[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(hist[i], base.histogram[i]),
+                "histogram mismatch at {}: got {:?} expected {:?}",
+                i,
+                hist[i],
+                base.histogram[i]
+            );
         }
     }
 }

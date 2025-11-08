@@ -294,6 +294,86 @@ pub fn correlation_cycle_with_kernel(
     })
 }
 
+/// Compute Correlation Cycle into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - All output slice lengths must equal the input length.
+/// - Uses `Kernel::Auto` selection internally and writes results in-place.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn correlation_cycle_into(
+    input: &CorrelationCycleInput,
+    out_real: &mut [f64],
+    out_imag: &mut [f64],
+    out_angle: &mut [f64],
+    out_state: &mut [f64],
+) -> Result<(), CorrelationCycleError> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+
+    // Length validation (match module’s existing error style on mismatch)
+    if out_real.len() != len
+        || out_imag.len() != len
+        || out_angle.len() != len
+        || out_state.len() != len
+    {
+        return Err(CorrelationCycleError::InvalidPeriod {
+            period: out_real.len(),
+            data_len: len,
+        });
+    }
+
+    if len == 0 {
+        return Err(CorrelationCycleError::EmptyData);
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(CorrelationCycleError::AllValuesNaN)?;
+
+    let period = input.get_period();
+    if period == 0 || period > len {
+        return Err(CorrelationCycleError::InvalidPeriod { period, data_len: len });
+    }
+    if len - first < period {
+        return Err(CorrelationCycleError::NotEnoughValidData { needed: period, valid: len - first });
+    }
+
+    let threshold = input.get_threshold();
+
+    // Prefill warmup prefixes with the repo’s quiet-NaN pattern (matches alloc_with_nan_prefix)
+    let warm_ria = first + period;
+    let warm_s = first + period + 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out_real[..warm_ria.min(len)] { *v = qnan; }
+    for v in &mut out_imag[..warm_ria.min(len)] { *v = qnan; }
+    for v in &mut out_angle[..warm_ria.min(len)] { *v = qnan; }
+    for v in &mut out_state[..warm_s.min(len)] { *v = qnan; }
+
+    // Compute body using the same kernels as the Vec API (Kernel::Auto)
+    unsafe {
+        match detect_best_kernel() {
+            Kernel::Scalar | Kernel::ScalarBatch => correlation_cycle_compute_into(
+                data, period, threshold, first, out_real, out_imag, out_angle, out_state,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => correlation_cycle_avx2(
+                data, period, threshold, first, out_real, out_imag, out_angle, out_state,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => correlation_cycle_avx512(
+                data, period, threshold, first, out_real, out_imag, out_angle, out_state,
+            ),
+            _ => correlation_cycle_compute_into(
+                data, period, threshold, first, out_real, out_imag, out_angle, out_state,
+            ),
+        }
+    }
+
+    Ok(())
+}
+
 #[inline(always)]
 pub fn correlation_cycle_into_slices(
     dst_real: &mut [f64],
@@ -2163,6 +2243,83 @@ mod tests {
         check_cc_streaming,
         check_cc_no_poison
     );
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_correlation_cycle_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the same CSV dataset as the module's other tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Build input with default params
+        let input = CorrelationCycleInput::from_candles(
+            &candles,
+            "close",
+            CorrelationCycleParams::default(),
+        );
+
+        // Baseline via existing Vec-returning API
+        let baseline = correlation_cycle(&input)?;
+
+        // Preallocate outputs and call new into API
+        let len = candles.close.len();
+        let mut out_real = vec![0.0f64; len];
+        let mut out_imag = vec![0.0f64; len];
+        let mut out_angle = vec![0.0f64; len];
+        let mut out_state = vec![0.0f64; len];
+
+        correlation_cycle_into(
+            &input,
+            &mut out_real,
+            &mut out_imag,
+            &mut out_angle,
+            &mut out_state,
+        )?;
+
+        // Length parity
+        assert_eq!(baseline.real.len(), out_real.len());
+        assert_eq!(baseline.imag.len(), out_imag.len());
+        assert_eq!(baseline.angle.len(), out_angle.len());
+        assert_eq!(baseline.state.len(), out_state.len());
+
+        // Value parity (treat NaN == NaN; exact for finite, epsilon fallback)
+        fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan_eps(baseline.real[i], out_real[i]),
+                "real mismatch at {}: base={}, into={}",
+                i,
+                baseline.real[i],
+                out_real[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(baseline.imag[i], out_imag[i]),
+                "imag mismatch at {}: base={}, into={}",
+                i,
+                baseline.imag[i],
+                out_imag[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(baseline.angle[i], out_angle[i]),
+                "angle mismatch at {}: base={}, into={}",
+                i,
+                baseline.angle[i],
+                out_angle[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(baseline.state[i], out_state[i]),
+                "state mismatch at {}: base={}, into={}",
+                i,
+                baseline.state[i],
+                out_state[i]
+            );
+        }
+
+        Ok(())
+    }
 
     #[cfg(feature = "proptest")]
     fn check_correlation_cycle_property(

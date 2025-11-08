@@ -284,6 +284,17 @@ pub fn dx_with_kernel(input: &DxInput, kernel: Kernel) -> Result<DxOutput, DxErr
     Ok(DxOutput { values: out })
 }
 
+/// Write DX values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup semantics (prefix up to `first_valid + period - 1`).
+/// - `out.len()` must equal the effective input length (min of H/L/C lengths).
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn dx_into(input: &DxInput, out: &mut [f64]) -> Result<(), DxError> {
+    dx_into_slice(out, input, Kernel::Auto)
+}
+
 // Scalar implementation (single-pass, loop-jammed; follows DxStream algebra)
 #[inline]
 pub fn dx_scalar(
@@ -1123,6 +1134,57 @@ mod tests {
         let input = DxInput::from_candles(&candles, default_params);
         let output = dx_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_dx_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a small but non-trivial HLC series
+        let n = 512usize;
+        let mut close = vec![0.0f64; n];
+        for i in 0..n {
+            let t = i as f64;
+            close[i] = 100.0 + 0.1 * t + (t * 0.2).sin() * 2.0;
+        }
+        let mut high = vec![0.0f64; n];
+        let mut low = vec![0.0f64; n];
+        for i in 0..n {
+            let t = i as f64;
+            // Keep high above low with mild variability around close
+            high[i] = close[i] + 0.6 + 0.05 * (t * 0.3).sin();
+            low[i] = close[i] - 0.6 - 0.05 * (t * 0.3).cos();
+            if low[i] > high[i] {
+                core::mem::swap(&mut low[i], &mut high[i]);
+            }
+        }
+
+        let params = DxParams { period: Some(14) };
+        let input = DxInput::from_hlc_slices(&high, &low, &close, params);
+
+        // Baseline via Vec-returning API
+        let base = dx(&input)?.values;
+
+        // Into API writes directly into caller buffer
+        let mut into_out = vec![0.0f64; n];
+        dx_into(&input, &mut into_out)?;
+
+        // Equality helper: NaN == NaN; finite compare exactly (or tight epsilon)
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        assert_eq!(base.len(), into_out.len());
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(base[i], into_out[i]),
+                "dx_into mismatch at {}: base={}, into={}",
+                i,
+                base[i],
+                into_out[i]
+            );
+        }
         Ok(())
     }
 

@@ -1454,6 +1454,43 @@ mod tests {
 
     #[cfg(feature = "proptest")]
     generate_all_smma_tests!(check_smma_property);
+
+    #[test]
+    fn test_smma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = SmmaInput::with_default_candles(&candles);
+        let baseline = smma(&input)?.values;
+
+        let mut out = vec![0.0f64; baseline.len()];
+
+        #[cfg(not(feature = "wasm"))]
+        {
+            smma_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In WASM builds, the native name is taken by the bindgen export; use slice variant.
+            smma_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(out.len(), baseline.len());
+
+        // NaN-aware equality: treat NaN == NaN as equal; otherwise require exact match.
+        for (i, (&a, &b)) in out.iter().zip(baseline.iter()).enumerate() {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(
+                equal,
+                "into parity mismatch at idx {}: got {}, expected {}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
     fn check_batch_default_row(
         test: &str,
         kernel: Kernel,
@@ -1821,6 +1858,19 @@ pub fn smma_into_slice(dst: &mut [f64], input: &SmmaInput, kern: Kernel) -> Resu
     smma_compute_into(data, period, first, chosen, dst);
 
     Ok(())
+}
+
+/// Native zero-allocation API: writes SMMA output into `out`, preserving NaN warmups.
+///
+/// - The length of `out` must equal the input length; otherwise returns
+///   `SmmaError::OutputLenMismatch`.
+/// - Uses `Kernel::Auto` for runtime kernel selection and matches the warmup
+///   NaN prefix behavior of the `smma()` Vec-returning API.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn smma_into(input: &SmmaInput, out: &mut [f64]) -> Result<(), SmmaError> {
+    // Delegate to the slice-based implementation with Auto kernel selection.
+    smma_into_slice(out, input, Kernel::Auto)
 }
 
 #[cfg(feature = "wasm")]

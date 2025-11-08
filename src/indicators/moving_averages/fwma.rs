@@ -413,15 +413,41 @@ pub fn fwma_into_slice(dst: &mut [f64], input: &FwmaInput, kern: Kernel) -> Resu
         });
     }
 
-    // Compute FWMA values directly into dst
-    fwma_compute_into(data, &fib, period, first, chosen, dst);
-
-    // Fill warmup period with NaN
-    let warmup_end = first + period - 1;
+    // Prefill warmup region with the same quiet-NaN pattern as alloc_with_nan_prefix
+    let warmup_end = (first + period - 1).min(dst.len());
     for v in &mut dst[..warmup_end] {
-        *v = f64::NAN;
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
+    // Compute FWMA values directly into dst (writes only the post-warmup region)
+    fwma_compute_into(data, &fib, period, first, chosen, dst);
+
+    Ok(())
+}
+
+/// Native zero-allocation API: writes FWMA output into `out`, preserving NaN warmups.
+///
+/// - Length of `out` must equal input length; returns `InvalidPeriod` on mismatch.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn fwma_into(input: &FwmaInput, out: &mut [f64]) -> Result<(), FwmaError> {
+    let (data, fib, period, first, chosen) = fwma_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(FwmaError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup region with identical quiet-NaN pattern used by Vec-returning API
+    let warm = (first + period - 1).min(out.len());
+    for v in &mut out[..warm] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    fwma_compute_into(data, &fib, period, first, chosen, out);
     Ok(())
 }
 
@@ -1590,6 +1616,43 @@ mod tests {
     // Generate property tests only when proptest feature is enabled
     #[cfg(feature = "proptest")]
     generate_all_fwma_tests!(check_fwma_property);
+
+    #[test]
+    fn test_fwma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = FwmaInput::with_default_candles(&candles);
+        let baseline = fwma(&input)?.values;
+
+        let mut out = vec![0.0f64; baseline.len()];
+
+        #[cfg(not(feature = "wasm"))]
+        {
+            fwma_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In WASM builds, the native name is taken by the bindgen export; use slice variant.
+            fwma_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(out.len(), baseline.len());
+
+        // NaN-aware equality: treat NaN == NaN as equal; otherwise require exact match.
+        for (i, (&a, &b)) in out.iter().zip(baseline.iter()).enumerate() {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(
+                equal,
+                "into parity mismatch at idx {}: got {}, expected {}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);

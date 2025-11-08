@@ -1330,6 +1330,34 @@ pub fn halftrend_into_slice(
     )
 }
 
+/// Write HalfTrend outputs into caller-provided slices without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - All output slice lengths must equal the input length.
+/// - Uses `Kernel::Auto` runtime selection for the compute path.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn halftrend_into(
+    input: &HalfTrendInput,
+    out_halftrend: &mut [f64],
+    out_trend: &mut [f64],
+    out_atr_high: &mut [f64],
+    out_atr_low: &mut [f64],
+    out_buy_signal: &mut [f64],
+    out_sell_signal: &mut [f64],
+) -> Result<(), HalfTrendError> {
+    halftrend_into_slices_kernel(
+        out_halftrend,
+        out_trend,
+        out_atr_high,
+        out_atr_low,
+        out_buy_signal,
+        out_sell_signal,
+        input,
+        Kernel::Auto,
+    )
+}
+
 // ==================== TESTS ====================
 #[cfg(test)]
 mod tests {
@@ -1337,6 +1365,61 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use std::error::Error;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_halftrend_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a small but non-trivial synthetic OHLC slice.
+        let len = 256usize;
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        let mut close = Vec::with_capacity(len);
+        for i in 0..len {
+            let t = i as f64;
+            let c = 100.0 + 0.1 * t + (t * 0.03).sin();
+            close.push(c);
+            high.push(c + 1.0 + (t * 0.01).cos() * 0.1);
+            low.push(c - 1.0 - (t * 0.02).sin() * 0.1);
+        }
+
+        let input = HalfTrendInput::from_slices(&high, &low, &close, HalfTrendParams::default());
+
+        // Baseline via existing Vec-returning API (Kernel::Auto).
+        let base = halftrend(&input)?;
+
+        // Preallocate outputs and call the new no-allocation API.
+        let mut ht = vec![0.0; len];
+        let mut tr = vec![0.0; len];
+        let mut ah = vec![0.0; len];
+        let mut al = vec![0.0; len];
+        let mut bs = vec![0.0; len];
+        let mut ss = vec![0.0; len];
+
+        halftrend_into(&input, &mut ht, &mut tr, &mut ah, &mut al, &mut bs, &mut ss)?;
+
+        // Helper: NaN == NaN, otherwise exact or tight epsilon.
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        assert_eq!(base.halftrend.len(), ht.len());
+        assert_eq!(base.trend.len(), tr.len());
+        assert_eq!(base.atr_high.len(), ah.len());
+        assert_eq!(base.atr_low.len(), al.len());
+        assert_eq!(base.buy_signal.len(), bs.len());
+        assert_eq!(base.sell_signal.len(), ss.len());
+
+        for i in 0..len {
+            assert!(eq_or_both_nan(base.halftrend[i], ht[i]), "halftrend mismatch at {}", i);
+            assert!(eq_or_both_nan(base.trend[i], tr[i]), "trend mismatch at {}", i);
+            assert!(eq_or_both_nan(base.atr_high[i], ah[i]), "atr_high mismatch at {}", i);
+            assert!(eq_or_both_nan(base.atr_low[i], al[i]), "atr_low mismatch at {}", i);
+            assert!(eq_or_both_nan(base.buy_signal[i], bs[i]), "buy_signal mismatch at {}", i);
+            assert!(eq_or_both_nan(base.sell_signal[i], ss[i]), "sell_signal mismatch at {}", i);
+        }
+
+        Ok(())
+    }
 
     fn check_halftrend_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

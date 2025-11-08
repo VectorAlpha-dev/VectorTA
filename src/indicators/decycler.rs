@@ -292,13 +292,24 @@ pub fn decycler_into_slice(
         }
     }?;
 
-    // Fill warmup period with NaN
+    // Fill warmup period with canonical quiet-NaN to match alloc_with_nan_prefix
     let warmup_period = first + 2;
     for v in &mut out[..warmup_period] {
-        *v = f64::NAN;
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
     Ok(())
+}
+
+/// Writes Decycler output into caller-provided buffer without allocating.
+///
+/// - Preserves the same NaN warmup prefix as the Vec-returning API.
+/// - `out.len()` must equal the input length.
+/// - Uses `Kernel::Auto` for internal kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn decycler_into(input: &DecyclerInput, out: &mut [f64]) -> Result<(), DecyclerError> {
+    decycler_into_slice(out, input, Kernel::Auto)
 }
 
 #[inline]
@@ -953,6 +964,52 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
+
+    #[test]
+    fn test_decycler_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Small but non-trivial synthetic input (covers warmup and steady state)
+        let n = 512usize;
+        let data: Vec<f64> = (0..n)
+            .map(|i| ((i as f64) * 0.037).sin() * 5.0 + 100.0)
+            .collect();
+        let params = DecyclerParams::default();
+        let input = DecyclerInput::from_slice(&data, params);
+
+        // Baseline via Vec-returning API
+        let baseline = decycler(&input)?.values;
+
+        // Into API with preallocated buffer
+        let mut out = vec![0.0; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            decycler_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // Wasm build keeps name for JS export; use slice variant for parity here
+            decycler_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "Mismatch at index {}: baseline={} out={} (bits {:016X} vs {:016X})",
+                i,
+                baseline[i],
+                out[i],
+                baseline[i].to_bits(),
+                out[i].to_bits()
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_decycler_partial_params(
         test_name: &str,

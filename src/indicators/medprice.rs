@@ -229,6 +229,17 @@ pub fn medprice_with_kernel(
     Ok(MedpriceOutput { values: out })
 }
 
+/// Writes MEDPRICE results into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly as `medprice()`/`medprice_with_kernel()`.
+/// - `out.len()` must equal the input series length; returns an error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn medprice_into(input: &MedpriceInput, out: &mut [f64]) -> Result<(), MedpriceError> {
+    // Delegate to the existing slice-based writer using Kernel::Auto.
+    medprice_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline(always)]
 pub fn medprice_compute_into(
     high: &[f64],
@@ -962,6 +973,65 @@ mod tests {
     }
 
     gen_batch_tests!(check_batch_default_row);
+
+    #[test]
+    fn test_medprice_into_matches_api() {
+        // Build a small-but-nontrivial OHLCV series with NaN warmup
+        let n = 256usize;
+        let mut ts: Vec<i64> = (0..n as i64).collect();
+        let mut open = vec![0.0; n];
+        let mut high = vec![0.0; n];
+        let mut low = vec![0.0; n];
+        let mut close = vec![0.0; n];
+        let mut vol = vec![1.0; n];
+
+        for i in 0..n {
+            if i < 3 {
+                // Warmup NaNs in high/low
+                high[i] = f64::NAN;
+                low[i] = f64::NAN;
+                open[i] = f64::NAN;
+                close[i] = f64::NAN;
+            } else {
+                // Varying prices
+                let x = i as f64;
+                low[i] = 95.0 + (x.sin() * 2.0);
+                high[i] = low[i] + 10.0 + (x.cos());
+                open[i] = low[i] + 3.0;
+                close[i] = high[i] - 4.0;
+            }
+        }
+
+        let candles = crate::utilities::data_loader::Candles::new(ts.clone(), open, high.clone(), low.clone(), close, vol);
+        let input = MedpriceInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = medprice(&input).expect("baseline medprice failed").values;
+
+        // Preallocate destination and compute via into-API
+        let mut out = vec![0.0; baseline.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            medprice_into(&input, &mut out).expect("medprice_into failed");
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Equality: NaN == NaN, else exact equality (identical path)
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "value mismatch at {}: baseline={:?}, into={:?}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+    }
 }
 
 // =============================================================================

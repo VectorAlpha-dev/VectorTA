@@ -491,6 +491,36 @@ pub fn trima_into_slice(
     Ok(())
 }
 
+/// Write TRIMA into a caller-provided buffer without allocations.
+///
+/// - Preserves the NaN warmup prefix exactly like the Vec-returning API
+///   (uses the same quiet-NaN pattern as `alloc_with_nan_prefix`).
+/// - `out.len()` must equal the input length; returns `InvalidPeriod` on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline(always)]
+pub fn trima_into(input: &TrimaInput, out: &mut [f64]) -> Result<(), TrimaError> {
+    let (data, period, m1, m2, first, chosen) = trima_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(TrimaError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix using the same quiet-NaN bit pattern
+    let warm = first + period - 1;
+    let end = warm.min(out.len());
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..end] {
+        *v = qnan;
+    }
+
+    // Compute directly into the provided buffer
+    trima_compute_into(data, period, m1, m2, first, chosen, out);
+    Ok(())
+}
+
 #[inline]
 /// Classic kernel - optimized loop-jammed implementation without function calls
 pub fn trima_scalar_classic(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
@@ -2656,4 +2686,40 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_trima_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a small but non-trivial input with a NaN prefix
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..252 {
+            let x = (i as f64 * 0.131).sin() * 7.0 + (i as f64) * 0.02;
+            data.push(x);
+        }
+
+        let input = TrimaInput::from_slice(&data, TrimaParams::default());
+
+        // Baseline via the Vec-returning API
+        let baseline = trima(&input)?;
+
+        // Preallocate output buffer and compute via the new into API
+        let mut out = vec![0.0; data.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            trima_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native trima_into is not available; fall back to slice variant
+            trima_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.values.len(), out.len());
+        // NaN-aware equality check (prefer exact equality for finite values)
+        for (a, b) in baseline.values.iter().copied().zip(out.iter().copied()) {
+            let both_nan = a.is_nan() && b.is_nan();
+            assert!(both_nan || a == b, "mismatch: got {b:?}, expected {a:?}");
+        }
+        Ok(())
+    }
 }

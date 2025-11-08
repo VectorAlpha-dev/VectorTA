@@ -435,6 +435,63 @@ pub fn supertrend_with_kernel(
     Ok(SuperTrendOutput { trend, changed })
 }
 
+/// Writes SuperTrend outputs into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly as `supertrend()`/`supertrend_with_kernel()`.
+/// - `trend_out.len()` and `changed_out.len()` must equal the input length.
+/// - Uses `Kernel::Auto` to select the best available implementation.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn supertrend_into(
+    input: &SuperTrendInput,
+    trend_out: &mut [f64],
+    changed_out: &mut [f64],
+) -> Result<(), SuperTrendError> {
+    let (high, _low, _close) = input.as_hlc();
+    let len = high.len();
+
+    if trend_out.len() != len {
+        return Err(SuperTrendError::OutputLengthMismatch {
+            expected: len,
+            got: trend_out.len(),
+        });
+    }
+    if changed_out.len() != len {
+        return Err(SuperTrendError::OutputLengthMismatch {
+            expected: len,
+            got: changed_out.len(),
+        });
+    }
+
+    let (high, low, close, period, factor, first_valid_idx, atr_values, chosen) =
+        supertrend_prepare(input, Kernel::Auto)?;
+
+    // Fill warmup prefix with NaNs to match Vec-returning APIs
+    let warmup_end = first_valid_idx + period - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut trend_out[..warmup_end.min(len)] {
+        *v = qnan;
+    }
+    for v in &mut changed_out[..warmup_end.min(len)] {
+        *v = qnan;
+    }
+
+    supertrend_compute_into(
+        high,
+        low,
+        close,
+        period,
+        factor,
+        first_valid_idx,
+        &atr_values,
+        chosen,
+        trend_out,
+        changed_out,
+    );
+
+    Ok(())
+}
+
 // Scalar core (reference logic) - Zero allocation implementation
 #[inline(always)]
 pub fn supertrend_scalar(
@@ -2150,6 +2207,63 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
+
+    #[test]
+    fn test_supertrend_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use the existing CSV dataset for parity with other tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let params = SuperTrendParams {
+            period: Some(10),
+            factor: Some(3.0),
+        };
+        let input = SuperTrendInput::from_candles(&candles, params);
+
+        // Baseline via existing Vec-returning API
+        let baseline = supertrend_with_kernel(&input, Kernel::Auto)?;
+
+        // Preallocate outputs and compute via new into API
+        let n = candles.close.len();
+        let mut trend_out = vec![0.0; n];
+        let mut changed_out = vec![0.0; n];
+
+        // Only compiled for native; avoid wasm symbol clash
+        #[cfg(not(feature = "wasm"))]
+        {
+            supertrend_into(&input, &mut trend_out, &mut changed_out)?;
+        }
+
+        assert_eq!(baseline.trend.len(), n);
+        assert_eq!(baseline.changed.len(), n);
+        assert_eq!(trend_out.len(), n);
+        assert_eq!(changed_out.len(), n);
+
+        // Helper: treat NaN == NaN; otherwise allow tiny epsilon due to classic vs ATR-prep paths
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-9
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline.trend[i], trend_out[i]),
+                "trend mismatch at {}: baseline={}, into={}",
+                i,
+                baseline.trend[i],
+                trend_out[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.changed[i], changed_out[i]),
+                "changed mismatch at {}: baseline={}, into={}",
+                i,
+                baseline.changed[i],
+                changed_out[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_supertrend_partial_params(
         test_name: &str,

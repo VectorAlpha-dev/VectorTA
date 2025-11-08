@@ -270,6 +270,18 @@ pub fn willr_with_kernel(input: &WillrInput, kernel: Kernel) -> Result<WillrOutp
     Ok(WillrOutput { values: out })
 }
 
+/// In-place WILLR that writes into a caller-provided buffer (no allocation).
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API: all indices prior to
+///   `first_valid + period - 1` are set to NaN.
+/// - The output slice length must equal the input length; otherwise, returns
+///   `WillrError::OutputLenMismatch` (or other existing errors from validation).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn willr_into(dst: &mut [f64], input: &WillrInput) -> Result<(), WillrError> {
+    willr_into_slice(dst, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn willr_into_slice(
     dst: &mut [f64],
@@ -1967,6 +1979,38 @@ mod tests {
     use paste::paste;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[test]
+    fn test_willr_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the existing CSV candles dataset for parity with other WILLR tests.
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let params = WillrParams::default(); // period = 14
+        let input = WillrInput::from_candles(&candles, params);
+
+        // Baseline via Vec-returning API
+        let baseline = willr(&input)?.values;
+
+        // In-place API into a preallocated buffer
+        let mut out = vec![0.0f64; baseline.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            willr_into(&mut out, &input)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native willr_into is not exposed; use the slice variant.
+            willr_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        for (a, b) in baseline.iter().zip(out.iter()) {
+            let eq = (*a == *b) || (a.is_nan() && b.is_nan()) || ((*a - *b).abs() <= 1e-12);
+            assert!(eq, "mismatch: baseline={} out={}", a, b);
+        }
+        Ok(())
+    }
 
     fn check_willr_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

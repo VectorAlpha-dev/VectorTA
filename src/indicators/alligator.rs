@@ -1462,6 +1462,44 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+    
+    #[test]
+    fn test_alligator_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a small but non-trivial input with a NaN prefix
+        let mut data = Vec::with_capacity(256);
+        for _ in 0..7 { data.push(f64::NAN); }
+        for i in 0..249 {
+            let x = i as f64;
+            data.push((x * 0.01) + (x.sin() * 0.1));
+        }
+
+        let input = AlligatorInput::from_slice(&data, AlligatorParams::default());
+
+        // Baseline via Vec-returning API
+        let AlligatorOutput { jaw: bj, teeth: bt, lips: bl } = alligator(&input)?;
+
+        // Preallocate outputs and compute via into API
+        let mut oj = vec![0.0; data.len()];
+        let mut ot = vec![0.0; data.len()];
+        let mut ol = vec![0.0; data.len()];
+        alligator_into(&input, &mut oj, &mut ot, &mut ol)?;
+
+        assert_eq!(oj.len(), bj.len());
+        assert_eq!(ot.len(), bt.len());
+        assert_eq!(ol.len(), bl.len());
+
+        // Helper: NaN equals NaN; finite within tight epsilon
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..data.len() {
+            assert!(eq_or_both_nan(oj[i], bj[i]), "jaw mismatch at {}: {} vs {}", i, oj[i], bj[i]);
+            assert!(eq_or_both_nan(ot[i], bt[i]), "teeth mismatch at {}: {} vs {}", i, ot[i], bt[i]);
+            assert!(eq_or_both_nan(ol[i], bl[i]), "lips mismatch at {}: {} vs {}", i, ol[i], bl[i]);
+        }
+        Ok(())
+    }
     fn check_alligator_partial_params(
         test_name: &str,
         kernel: Kernel,
@@ -3143,6 +3181,22 @@ pub fn alligator_into_slices(
         }
     }
     Ok(())
+}
+
+/// Writes Alligator outputs into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmup prefixes exactly like the Vec-returning API.
+/// - The `jaw_out`, `teeth_out`, and `lips_out` slice lengths must equal the input length.
+/// - Uses kernel auto-detection (`Kernel::Auto`) to match the standard API behavior.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn alligator_into(
+    input: &AlligatorInput,
+    jaw_out: &mut [f64],
+    teeth_out: &mut [f64],
+    lips_out: &mut [f64],
+) -> Result<(), AlligatorError> {
+    alligator_into_slices(jaw_out, teeth_out, lips_out, input, Kernel::Auto)
 }
 
 #[cfg(feature = "wasm")]

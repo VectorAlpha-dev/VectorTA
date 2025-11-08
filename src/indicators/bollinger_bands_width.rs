@@ -514,6 +514,59 @@ pub fn bollinger_bands_width_compute_into(
     }
 }
 
+/// Compute Bollinger Bands Width into a caller-provided buffer (no allocations).
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API by pre-filling the
+///   warmup prefix with a quiet-NaN (same bit pattern as `alloc_with_nan_prefix`).
+/// - `out.len()` must equal the input length; otherwise an error is returned.
+#[cfg(not(feature = "wasm"))]
+pub fn bollinger_bands_width_into(
+    input: &BollingerBandsWidthInput,
+    out: &mut [f64],
+) -> Result<(), BollingerBandsWidthError> {
+    let data = input.as_ref();
+
+    if data.is_empty() {
+        return Err(BollingerBandsWidthError::EmptyData);
+    }
+    if out.len() != data.len() {
+        // Reuse existing error type for length mismatch, matching other modules.
+        return Err(BollingerBandsWidthError::InvalidPeriod {
+            period: 0,
+            data_len: data.len(),
+        });
+    }
+
+    let period = input.get_period();
+    if period == 0 || period > data.len() {
+        return Err(BollingerBandsWidthError::InvalidPeriod {
+            period,
+            data_len: data.len(),
+        });
+    }
+
+    let first_valid_idx = match data.iter().position(|&x| !x.is_nan()) {
+        Some(idx) => idx,
+        None => return Err(BollingerBandsWidthError::AllValuesNaN),
+    };
+    if (data.len() - first_valid_idx) < period {
+        return Err(BollingerBandsWidthError::NotEnoughValidData {
+            needed: period,
+            valid: data.len() - first_valid_idx,
+        });
+    }
+
+    // Prefill warmup prefix with quiet-NaN to match alloc_with_nan_prefix pattern
+    let warmup = first_valid_idx + period - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..warmup] {
+        *v = qnan;
+    }
+
+    // Compute into provided buffer using the existing kernel dispatcher (Auto → Scalar here)
+    bollinger_bands_width_compute_into(data, input, out, Kernel::Auto)
+}
+
 /// Write Bollinger Bands Width directly to output slice - no allocations.
 /// This function follows the alma.rs pattern for WASM bindings.
 #[inline]
@@ -1609,6 +1662,49 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
     use paste::paste;
+
+    #[test]
+    fn test_bollinger_bands_width_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Small but non-trivial input (positive values to avoid divide-by-zero in middle band)
+        let data: Vec<f64> = (0..256)
+            .map(|i| ((i as f64).sin() + 2.0) * (1.0 + (i as f64).cos() * 0.05))
+            .collect();
+
+        let input = BollingerBandsWidthInput::from_slice(&data, BollingerBandsWidthParams::default());
+
+        // Baseline via existing API
+        let baseline = bollinger_bands_width_with_kernel(&input, Kernel::Auto)?.values;
+
+        // Preallocate output and call the new into API
+        let mut out = vec![0.0; data.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            bollinger_bands_width_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, fall back to the existing into_slice wrapper with Auto kernel
+            bollinger_bands_width_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: treat NaN == NaN as equal; otherwise require exact equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at {}: baseline={:?}, into={:?}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+        Ok(())
+    }
 
     fn check_bbw_partial_params(
         test_name: &str,
