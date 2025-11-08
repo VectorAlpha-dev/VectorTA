@@ -236,6 +236,19 @@ pub fn wma_into_slice(dst: &mut [f64], input: &WmaInput, kern: Kernel) -> Result
     Ok(())
 }
 
+/// Computes WMA into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like `wma()`/`wma_with_kernel()`.
+/// - `out` length must equal the input length; otherwise returns the
+///   module's existing InvalidPeriod/length error.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn wma_into(input: &WmaInput, out: &mut [f64]) -> Result<(), WmaError> {
+    // Delegate to the internal no-alloc helper with Auto kernel selection.
+    wma_into_slice(out, input, Kernel::Auto)
+}
+
 fn wma_prepare<'a>(
     input: &'a WmaInput,
     kernel: Kernel,
@@ -811,6 +824,45 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use paste::paste;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_wma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small non-trivial input (includes NaNs and varied values)
+        let mut data = Vec::with_capacity(256);
+        // Leading NaNs to exercise first-valid warmup handling
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..252u32 {
+            // Mix linear and modular patterns for diversity
+            let v = 0.5 * (i as f64) + ((i % 7) as f64);
+            data.push(v);
+        }
+
+        let params = WmaParams { period: Some(30) }; // default in this module
+        let input = WmaInput::from_slice(&data, params);
+
+        // Baseline via existing Vec-returning API
+        let baseline = wma(&input)?.values;
+
+        // Zero-allocation path
+        let mut out = vec![0.0; data.len()];
+        wma_into(&input, &mut out)?;
+
+        // Assert same length and element-wise equality (NaN == NaN)
+        assert_eq!(baseline.len(), out.len());
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(
+                equal,
+                "Mismatch at index {}: api={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_wma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

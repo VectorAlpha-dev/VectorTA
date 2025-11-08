@@ -256,6 +256,56 @@ pub fn supersmoother_3_pole_with_kernel(
     Ok(SuperSmoother3PoleOutput { values: out })
 }
 
+/// Writes SuperSmoother 3-Pole into the caller-provided buffer without allocations.
+///
+/// - Preserves NaN warmups exactly like `supersmoother_3_pole()`/`_with_kernel()`.
+/// - The output slice length must equal the input data length.
+/// - Uses `Kernel::Auto` dispatch for compute.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn supersmoother_3_pole_into(
+    input: &SuperSmoother3PoleInput,
+    out: &mut [f64],
+    
+) -> Result<(), SuperSmoother3PoleError> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(SuperSmoother3PoleError::EmptyInputData);
+    }
+
+    if out.len() != len {
+        return Err(SuperSmoother3PoleError::OutputLengthMismatch {
+            expected: len,
+            actual: out.len(),
+        });
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(SuperSmoother3PoleError::AllValuesNaN)?;
+    let period = input.get_period();
+
+    if period == 0 || period > len {
+        return Err(SuperSmoother3PoleError::InvalidPeriod { period });
+    }
+    if (len - first) < period {
+        return Err(SuperSmoother3PoleError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+
+    // Prefill warmup prefix with the crate's canonical quiet-NaN pattern.
+    for v in &mut out[..first] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Compute directly into the provided buffer using the existing into-slice helper.
+    supersmoother_3_pole_into_slice(out, input, Kernel::Auto)
+}
+
 // Compute function for SuperSmoother 3-pole respecting first index
 #[inline(always)]
 pub unsafe fn supersmoother_3_pole_compute_into(
@@ -915,6 +965,40 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[test]
+    fn test_supersmoother_3_pole_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct input with a NaN warmup prefix and diverse finite values
+        let len = 256;
+        let mut data = Vec::with_capacity(len);
+        // Warmup NaNs at the front
+        data.push(f64::NAN);
+        data.push(f64::NAN);
+        data.push(f64::NAN);
+        data.push(f64::NAN);
+        data.push(f64::NAN);
+        // Fill the rest with a smooth but non-trivial signal
+        for i in 5..len {
+            let t = i as f64 * 0.037;
+            data.push((t.sin() * 100.0) + (0.3 * t).cos() * 10.0 + (i % 7) as f64);
+        }
+
+        let input = SuperSmoother3PoleInput::from_slice(&data, SuperSmoother3PoleParams::default());
+
+        // Baseline using the existing Vec-returning API
+        let base = supersmoother_3_pole(&input)?.values;
+
+        // New zero-allocation API
+        let mut out = vec![0.0; len];
+        supersmoother_3_pole_into(&input, &mut out)?;
+
+        assert_eq!(base.len(), out.len());
+        for (a, b) in base.iter().zip(out.iter()) {
+            let equal = (a.is_nan() && b.is_nan()) || (*a - *b).abs() <= 1e-12 || a == b;
+            assert!(equal, "mismatch: base={} vs into={}", a, b);
+        }
+        Ok(())
+    }
 
     fn check_supersmoother_3_pole_partial_params(
         test_name: &str,

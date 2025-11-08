@@ -243,6 +243,16 @@ pub fn mean_ad_with_kernel(
     }
 }
 
+/// Write Mean AD values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like `mean_ad()` (quiet-NaN prefix semantics).
+/// - `out.len()` must equal the input length; otherwise an error is returned.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn mean_ad_into(input: &MeanAdInput, out: &mut [f64]) -> Result<(), MeanAdError> {
+    mean_ad_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn mean_ad_scalar(
     data: &[f64],
@@ -1555,6 +1565,51 @@ mod tests {
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(()) // No-op in release builds
+    }
+
+    #[test]
+    fn test_mean_ad_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a small but non-trivial synthetic dataset with a NaN prefix
+        let n = 256usize;
+        let mut data = Vec::with_capacity(n);
+        data.push(f64::NAN);
+        data.push(f64::NAN);
+        data.push(f64::NAN);
+        for i in 3..n {
+            let t = i as f64;
+            let v = (t * 0.01).mul_add((t * 0.1).sin() * 100.0, (t * 0.05).cos() * 0.5);
+            data.push(v);
+        }
+
+        let input = MeanAdInput::from_slice(&data, MeanAdParams::default());
+        let baseline = mean_ad(&input)?.values;
+
+        let mut into_out = vec![0.0; baseline.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            mean_ad_into(&input, &mut into_out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native mean_ad_into is not available; fall back to slice API for parity
+            mean_ad_into_slice(&mut into_out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), into_out.len());
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || (a - b).abs() <= 1e-12
+        }
+        for (i, (a, b)) in baseline.iter().zip(into_out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(*a, *b),
+                "divergence at idx {}: api={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {

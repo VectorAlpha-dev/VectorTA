@@ -279,6 +279,82 @@ pub fn var_with_kernel(input: &VarInput, kernel: Kernel) -> Result<VarOutput, Va
     Ok(VarOutput { values: out })
 }
 
+/// Compute Rolling Variance (VAR) into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup prefix exactly like the Vec-returning API
+///   (quiet-NaN pattern) and writes results in-place after warmup.
+/// - `out` length must equal the input length.
+///
+/// Returns `Ok(())` on success or the module's existing errors on mismatch/invalid params.
+#[cfg(not(feature = "wasm"))]
+pub fn var_into(input: &VarInput, out: &mut [f64]) -> Result<(), VarError> {
+    let data: &[f64] = input.as_ref();
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(VarError::AllValuesNaN)?;
+    let len = data.len();
+    let period = input.get_period();
+    let nbdev = input.get_nbdev();
+
+    if out.len() != len {
+        return Err(VarError::InvalidPeriod {
+            period: out.len(),
+            data_len: len,
+        });
+    }
+    if period == 0 || period > len {
+        return Err(VarError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if (len - first) < period {
+        return Err(VarError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+    if nbdev.is_nan() || nbdev.is_infinite() {
+        return Err(VarError::InvalidNbdev { nbdev });
+    }
+
+    // Prefill warmup with the same quiet-NaN bit pattern used by alloc_with_nan_prefix
+    let warmup_end = (first + period - 1).min(len);
+    for v in &mut out[..warmup_end] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Match var_with_kernel's Auto selection behavior (short-circuit to Scalar by default)
+    let chosen = match Kernel::Auto {
+        Kernel::Auto => {
+            let k = detect_best_kernel();
+            match k {
+                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                    Kernel::Scalar
+                }
+                _ => k,
+            }
+        }
+        other => other,
+    };
+
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                var_scalar(data, period, first, nbdev, out)?
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => var_avx2(data, period, first, nbdev, out)?,
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => var_avx512(data, period, first, nbdev, out)?,
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
 #[inline(always)]
 pub fn var_scalar(
     data: &[f64],
@@ -1271,6 +1347,47 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use paste::paste;
+
+    #[test]
+    fn test_var_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the standard CSV candle dataset used by other VAR tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = VarInput::from_candles(&candles, "close", VarParams::default());
+
+        // Baseline via Vec-returning API
+        let VarOutput { values: expected } = var(&input)?;
+
+        // Preallocated output buffer
+        let mut out = vec![0.0f64; expected.len()];
+
+        // New no-allocation API
+        #[cfg(not(feature = "wasm"))]
+        {
+            var_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, fall back to helper to compute into an output slice
+            var_into_slice(&mut out, &input, detect_best_kernel())?;
+        }
+
+        assert_eq!(out.len(), expected.len());
+
+        // Equality check treating NaN==NaN
+        for (i, (a, b)) in out.iter().zip(expected.iter()).enumerate() {
+            let eq_or_both_nan = (*a == *b) || (a.is_nan() && b.is_nan());
+            assert!(
+                eq_or_both_nan,
+                "Mismatch at index {}: got {:?}, expected {:?}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_var_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

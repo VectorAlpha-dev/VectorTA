@@ -268,6 +268,35 @@ pub fn kama_with_kernel(input: &KamaInput, kernel: Kernel) -> Result<KamaOutput,
     Ok(KamaOutput { values: out })
 }
 
+/// Compute KAMA into a caller-provided output buffer (no allocations).
+///
+/// - Preserves NaN warmups identical to the Vec-returning API.
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+pub fn kama_into(input: &KamaInput, out: &mut [f64]) -> Result<(), KamaError> {
+    let (data, period, first, chosen) = kama_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(KamaError::BufferLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
+    }
+
+    // Prefill NaN warmup prefix using the same quiet-NaN pattern
+    let warm = first + period;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let pref = warm.min(out.len());
+    for v in &mut out[..pref] {
+        *v = qnan;
+    }
+
+    // Compute values into the provided buffer
+    kama_compute_into(data, period, first, chosen, out);
+
+    Ok(())
+}
+
 /// Compute KAMA directly into the provided output slice.
 /// The output slice must be the same length as the input data.
 #[inline]
@@ -2110,4 +2139,28 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_kama_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare a realistic input from the same dataset used elsewhere in this module
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let params = KamaParams::default();
+        let input = KamaInput::from_candles(&candles, "close", params);
+
+        // Baseline via Vec-returning API
+        let base = kama(&input)?;
+
+        // Preallocate output and compute via no-allocation API
+        let mut out = vec![0.0f64; candles.close.len()];
+        kama_into(&input, &mut out)?;
+
+        // Length and element-wise equality (NaN == NaN permitted)
+        assert_eq!(base.values.len(), out.len());
+        for (a, b) in base.values.iter().zip(out.iter()) {
+            let equal = (a.is_nan() && b.is_nan()) || (*a - *b).abs() <= 1e-12;
+            assert!(equal, "Mismatch: base={} vs into={}", a, b);
+        }
+        Ok(())
+    }
 }

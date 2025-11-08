@@ -348,9 +348,21 @@ pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result
 
     let warmup_end = first + slow - 1;
     for v in &mut dst[..warmup_end] {
-        *v = f64::NAN;
+        // Match alloc_with_nan_prefix's quiet-NaN pattern for warmups
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
     Ok(())
+}
+
+/// Percentage Price Oscillator (PPO) into an existing buffer (no allocation).
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - `out.len()` must equal the input length; returns the indicator's length/period errors on mismatch.
+/// - Uses `Kernel::Auto` dispatch matching `ppo()` semantics.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn ppo_into(input: &PpoInput, out: &mut [f64]) -> Result<(), PpoError> {
+    ppo_into_slice(out, input, Kernel::Auto)
 }
 
 #[inline]
@@ -1432,6 +1444,39 @@ mod tests {
         let input = PpoInput::from_candles(&candles, "close", default_params);
         let output = ppo_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_ppo_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = PpoInput::from_candles(&candles, "close", PpoParams::default());
+
+        // Baseline via existing Vec API
+        let baseline = ppo(&input)?.values;
+
+        // New no-allocation path
+        let mut out = vec![0.0; candles.close.len()];
+        ppo_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "Mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
         Ok(())
     }
 

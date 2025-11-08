@@ -264,6 +264,16 @@ pub fn devstop(input: &DevStopInput) -> Result<DevStopOutput, DevStopError> {
     devstop_with_kernel(input, Kernel::Auto)
 }
 
+/// Writes DevStop values into a caller-provided buffer without allocating.
+///
+/// - Preserves the module's NaN warmup semantics (first-valid index + `2*period-1`).
+/// - `out.len()` must equal the input length; returns the module's error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn devstop_into(input: &DevStopInput, out: &mut [f64]) -> Result<(), DevStopError> {
+    devstop_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline(always)]
 fn devstop_warmup(first: usize, period: usize) -> usize {
     // high/low rolling(2) warm = first + (2-1)
@@ -2318,6 +2328,56 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
+
+    #[test]
+    fn test_devstop_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Construct a small but non-trivial HL series (~256 points)
+        let n = 256usize;
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64;
+            let base = 100.0 + 0.5 * t + (t * 0.1).sin() * 0.7;
+            let h = base + 0.6 + (t * 0.05).cos() * 0.1;
+            let l = base - 0.6 - (t * 0.07).sin() * 0.1;
+            high.push(h);
+            low.push(l);
+        }
+
+        let input = DevStopInput::from_slices(&high, &low, DevStopParams::default());
+
+        // Baseline via existing Vec-returning API
+        let DevStopOutput { values: expected } = devstop(&input)?;
+
+        // New no-allocation API: preallocate and compute in-place
+        let mut got = vec![0.0; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            devstop_into(&input, &mut got)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // On wasm builds, native devstop_into is provided via wasm_bindgen; skip here.
+            return Ok(());
+        }
+
+        assert_eq!(expected.len(), got.len());
+
+        // Treat NaN == NaN; otherwise require tight equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(expected[i], got[i]),
+                "mismatch at {}: expected {:?}, got {:?}",
+                i,
+                expected[i],
+                got[i]
+            );
+        }
+        Ok(())
+    }
 
     fn check_devstop_partial_params(
         test_name: &str,

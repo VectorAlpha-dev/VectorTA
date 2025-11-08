@@ -2400,6 +2400,17 @@ pub fn avsl_js(
     Ok(out.values)
 }
 
+/// Zero-allocation native API that writes results into a caller-provided buffer.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - `out.len()` must equal the input length; returns an error on mismatch.
+/// - Uses `Kernel::Auto` for dispatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn avsl_into(input: &AvslInput, out: &mut [f64]) -> Result<(), AvslError> {
+    avsl_into_slice(out, input, Kernel::Auto)
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn avsl_alloc(len: usize) -> *mut f64 {
@@ -3041,6 +3052,38 @@ mod tests {
         assert_eq!(default_output.cols, candles.close.len());
         assert_eq!(default_output.rows, 1); // Default parameters should give 1 row
 
+        Ok(())
+    }
+
+    // Ensure the zero-allocation API matches the Vec-returning API, including NaN warmups.
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_avsl_into_matches_api() -> Result<(), Box<dyn Error>> {
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = AvslInput::from_candles(&candles, "close", "low", AvslParams::default());
+
+        // Baseline via existing API
+        let baseline = avsl(&input)?;
+
+        // Zero-allocation path
+        let mut out = vec![0.0f64; candles.close.len()];
+        avsl_into(&input, &mut out)?;
+
+        assert_eq!(baseline.values.len(), out.len());
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline.values[i], out[i]),
+                "Mismatch at index {}: api={} into={}",
+                i,
+                baseline.values[i],
+                out[i]
+            );
+        }
         Ok(())
     }
 }

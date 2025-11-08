@@ -262,6 +262,17 @@ pub fn sinwma_into_slice(
     Ok(())
 }
 
+/// Writes SINWMA into the caller-provided buffer without extra allocations.
+///
+/// - Preserves NaN warmups exactly like `sinwma()`/`sinwma_with_kernel()`.
+/// - The output slice length must equal the input data length.
+/// - Uses `Kernel::Auto` dispatch for compute.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn sinwma_into(input: &SinWmaInput, out: &mut [f64]) -> Result<(), SinWmaError> {
+    sinwma_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline(always)]
 fn sinwma_prepare<'a>(
     input: &'a SinWmaInput,
@@ -1384,6 +1395,43 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_sinwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Prepare a realistic candle input (same dataset used by other tests)
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Build default input (close, default params)
+        let input = SinWmaInput::with_default_candles(&candles);
+
+        // Compute baseline via Vec-returning API
+        let baseline = sinwma(&input)?.values;
+
+        // Preallocate output buffer and compute into it (no allocations)
+        let mut out = vec![0.0; candles.close.len()];
+        sinwma_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Equality helper: treat NaN == NaN
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for (i, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(*a, *b),
+                "mismatch at index {}: baseline={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_sinwma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

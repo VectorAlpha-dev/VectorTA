@@ -399,6 +399,21 @@ pub fn mab_into_slice(
     Ok(())
 }
 
+/// Write MAB outputs into caller-provided buffers without allocating.
+///
+/// - Preserves the indicator's NaN warmup prefix exactly.
+/// - All output slice lengths must equal the input length.
+/// - Uses `Kernel::Auto` runtime selection for the compute path.
+#[cfg(not(feature = "wasm"))]
+pub fn mab_into(
+    input: &MabInput,
+    upper_dst: &mut [f64],
+    middle_dst: &mut [f64],
+    lower_dst: &mut [f64],
+) -> Result<(), MabError> {
+    mab_into_slice(upper_dst, middle_dst, lower_dst, input, Kernel::Auto)
+}
+
 pub fn mab(input: &MabInput) -> Result<MabOutput, MabError> {
     let (_data, _warmup, kernel, _fast, _slow, _devup, _devdn) = mab_prepare(input, Kernel::Auto)?;
     mab_with_kernel(input, kernel)
@@ -425,6 +440,53 @@ pub fn mab_with_kernel(input: &MabInput, kernel: Kernel) -> Result<MabOutput, Ma
         middleband,
         lowerband,
     })
+}
+
+#[cfg(test)]
+mod into_parity_tests {
+    use super::*;
+
+    fn eq_or_both_nan(a: f64, b: f64) -> bool {
+        (a.is_nan() && b.is_nan()) || (a == b)
+    }
+
+    #[test]
+    fn test_mab_into_matches_api() {
+        // Construct input with a small NaN warmup prefix followed by finite values
+        let n = 256usize;
+        let mut data = vec![f64::NAN; n];
+        for i in 5..n {
+            data[i] = (i as f64).sin() * 0.5 + (i as f64).cos() * 0.25;
+        }
+
+        let input = MabInput::from_slice(&data, MabParams::default());
+
+        // Baseline via existing Vec-returning API
+        let base = mab(&input).expect("mab baseline should succeed");
+
+        // Zero-alloc path into preallocated buffers
+        let mut up = vec![0.0; n];
+        let mut mid = vec![0.0; n];
+        let mut lo = vec![0.0; n];
+
+        #[cfg(not(feature = "wasm"))]
+        {
+            mab_into(&input, &mut up, &mut mid, &mut lo).expect("mab_into should succeed");
+        }
+
+        assert_eq!(base.upperband.len(), n);
+        assert_eq!(base.middleband.len(), n);
+        assert_eq!(base.lowerband.len(), n);
+        assert_eq!(up.len(), n);
+        assert_eq!(mid.len(), n);
+        assert_eq!(lo.len(), n);
+
+        for i in 0..n {
+            assert!(eq_or_both_nan(base.upperband[i], up[i]), "upper mismatch at {}: base={:?} into={:?}", i, base.upperband[i], up[i]);
+            assert!(eq_or_both_nan(base.middleband[i], mid[i]), "middle mismatch at {}: base={:?} into={:?}", i, base.middleband[i], mid[i]);
+            assert!(eq_or_both_nan(base.lowerband[i], lo[i]), "lower mismatch at {}: base={:?} into={:?}", i, base.lowerband[i], lo[i]);
+        }
+    }
 }
 
 #[inline]

@@ -797,6 +797,22 @@ pub fn fvg_trailing_stop_with_kernel(
     })
 }
 
+/// Write FVG Trailing Stop outputs into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (prefix filled with NaN).
+/// - All output slice lengths must equal the input length.
+/// - Uses `Kernel::Auto` runtime dispatch.
+#[inline]
+pub fn fvg_trailing_stop_into(
+    input: &FvgTrailingStopInput,
+    upper: &mut [f64],
+    lower: &mut [f64],
+    upper_ts: &mut [f64],
+    lower_ts: &mut [f64],
+) -> Result<(), FvgTrailingStopError> {
+    fvg_trailing_stop_into_slices(upper, lower, upper_ts, lower_ts, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn fvg_trailing_stop_into_slices(
     upper: &mut [f64],
@@ -3149,4 +3165,52 @@ mod tests {
         check_fvg_ts_invalid_lookback,
         check_fvg_ts_batch_values_for
     );
+
+    #[test]
+    fn test_fvg_trailing_stop_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare small but non-trivial OHLC data
+        let n = 128usize;
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        for i in 0..n {
+            // simple rising series with mild variation to trigger some FVGs
+            let base = 100.0 + i as f64 * 0.5;
+            high.push(base + 1.0 + (i % 3) as f64 * 0.1);
+            low.push(base - 1.0 - (i % 2) as f64 * 0.1);
+            close.push(base + ((i % 5) as f64 - 2.0) * 0.05);
+        }
+
+        let params = FvgTrailingStopParams::default();
+        let input = FvgTrailingStopInput::from_slices(&high, &low, &close, params);
+
+        // Baseline via Vec-returning API (Kernel::Auto)
+        let base = fvg_trailing_stop(&input)?;
+
+        // Preallocate outputs and compute via new into API
+        let mut u = vec![0.0; n];
+        let mut d = vec![0.0; n];
+        let mut uts = vec![0.0; n];
+        let mut lts = vec![0.0; n];
+        fvg_trailing_stop_into(&input, &mut u, &mut d, &mut uts, &mut lts)?;
+
+        // Helper: NaN == NaN, else exact or tight epsilon
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        assert_eq!(u.len(), base.upper.len());
+        assert_eq!(d.len(), base.lower.len());
+        assert_eq!(uts.len(), base.upper_ts.len());
+        assert_eq!(lts.len(), base.lower_ts.len());
+
+        for i in 0..n {
+            assert!(eq_or_both_nan(u[i], base.upper[i]), "upper mismatch at {}: {} vs {}", i, u[i], base.upper[i]);
+            assert!(eq_or_both_nan(d[i], base.lower[i]), "lower mismatch at {}: {} vs {}", i, d[i], base.lower[i]);
+            assert!(eq_or_both_nan(uts[i], base.upper_ts[i]), "upper_ts mismatch at {}: {} vs {}", i, uts[i], base.upper_ts[i]);
+            assert!(eq_or_both_nan(lts[i], base.lower_ts[i]), "lower_ts mismatch at {}: {} vs {}", i, lts[i], base.lower_ts[i]);
+        }
+
+        Ok(())
+    }
 }

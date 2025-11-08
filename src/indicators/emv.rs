@@ -228,6 +228,16 @@ pub fn emv_with_kernel(input: &EmvInput, kernel: Kernel) -> Result<EmvOutput, Em
     Ok(EmvOutput { values: out })
 }
 
+/// Write EMV values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like `emv()` (quiet-NaN prefix).
+/// - `out.len()` must equal the effective input length; otherwise an error is returned.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn emv_into(input: &EmvInput, out: &mut [f64]) -> Result<(), EmvError> {
+    emv_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn emv_into_slice(dst: &mut [f64], input: &EmvInput, kern: Kernel) -> Result<(), EmvError> {
     let (high, low, close, volume) = match &input.data {
@@ -274,9 +284,11 @@ pub fn emv_into_slice(dst: &mut [f64], input: &EmvInput, kern: Kernel) -> Result
         return Err(EmvError::NotEnoughData { valid: valid_count });
     }
 
-    // Fill warmup period with NaN
-    for v in &mut dst[..(first + 1)] {
-        *v = f64::NAN;
+    // Fill warmup period with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warm = first + 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut dst[..warm] {
+        *v = qnan;
     }
 
     let chosen = match kern {
@@ -1568,6 +1580,56 @@ mod tests {
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
         Ok(()) // No-op in release builds
+    }
+
+    #[test]
+    fn test_emv_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a small but non-trivial synthetic dataset
+        let n = 256usize;
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        let mut volume = Vec::with_capacity(n);
+        for i in 0..n {
+            let base = 100.0 + (i as f64) * 0.1;
+            let spread = 1.0 + ((i % 5) as f64) * 0.2; // vary the range
+            let h = base + spread * 0.6;
+            let l = base - spread * 0.4;
+            high.push(h);
+            low.push(l);
+            close.push(0.5 * (h + l)); // not used by EMV but part of API
+            volume.push(10_000.0 + ((i * 37) % 1000) as f64 * 100.0);
+        }
+
+        let input = EmvInput::from_slices(&high, &low, &close, &volume);
+        let baseline = emv(&input)?.values;
+
+        let mut into_out = vec![0.0; baseline.len()];
+        // Use the native no-allocation API
+        #[cfg(not(feature = "wasm"))]
+        {
+            emv_into(&input, &mut into_out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native emv_into is not available; fall back to slice API for parity
+            emv_into_slice(&mut into_out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), into_out.len());
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || (a - b).abs() <= 1e-12
+        }
+        for (i, (a, b)) in baseline.iter().zip(into_out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(*a, *b),
+                "divergence at idx {}: api={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
     }
 }
 

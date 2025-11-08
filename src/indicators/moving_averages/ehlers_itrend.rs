@@ -383,6 +383,18 @@ pub fn ehlers_itrend_with_kernel(
     Ok(EhlersITrendOutput { values: out })
 }
 
+/// Writes Ehlers Instantaneous Trend into the provided buffer without allocations.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API.
+/// - The `out` length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+pub fn ehlers_itrend_into(
+    input: &EhlersITrendInput,
+    out: &mut [f64],
+) -> Result<(), EhlersITrendError> {
+    ehlers_itrend_into_slice(out, input, Kernel::Auto)
+}
+
 /// Write directly to output slice - no allocations
 pub fn ehlers_itrend_into_slice(
     dst: &mut [f64],
@@ -1769,6 +1781,51 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_ehlers_itrend_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a non-trivial input series (trend + sinusoid)
+        let n = 256usize;
+        let data: Vec<f64> = (0..n)
+            .map(|i| (i as f64) * 0.01 + ((i as f64) * 0.1).sin())
+            .collect();
+
+        let input = EhlersITrendInput::from_slice(&data, EhlersITrendParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = ehlers_itrend(&input)?.values;
+
+        // Into-API writes into provided buffer
+        let mut out = vec![0.0; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            ehlers_itrend_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native symbol is not present; fall back to slice variant
+            ehlers_itrend_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: NaN == NaN, else exact or tight epsilon
+        fn equal(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || a == b || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..n {
+            assert!(
+                equal(baseline[i], out[i]),
+                "Mismatch at {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_itrend_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

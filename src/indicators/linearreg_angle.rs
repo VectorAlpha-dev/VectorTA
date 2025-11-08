@@ -211,6 +211,23 @@ pub fn linearreg_angle(
     linearreg_angle_with_kernel(input, Kernel::Auto)
 }
 
+/// Write Linear Regression Angle outputs into a caller-provided buffer with no allocations.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API: the first
+///   `first_valid + period - 1` elements are set to NaN.
+/// - The output slice length must match the input length.
+///
+/// This is the native (non-WASM) entry point. For the WASM build, a separate
+/// `linearreg_angle_into` with pointers is exposed via wasm-bindgen.
+#[cfg(not(feature = "wasm"))]
+pub fn linearreg_angle_into(
+    input: &Linearreg_angleInput,
+    out: &mut [f64],
+) -> Result<(), Linearreg_angleError> {
+    // Delegate to the existing into-slice kernel dispatcher using Auto.
+    linearreg_angle_into_slice(out, input, Kernel::Auto)
+}
+
 pub fn linearreg_angle_with_kernel(
     input: &Linearreg_angleInput,
     kernel: Kernel,
@@ -1363,6 +1380,59 @@ mod tests {
                 )*
             }
         }
+    }
+
+    #[test]
+    fn test_linearreg_angle_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input slice with a few leading NaNs
+        let len = 256usize;
+        let mut data = Vec::with_capacity(len);
+        for i in 0..len {
+            let x = i as f64;
+            // Smoothly varying series with trend + curvature
+            let v = (0.05 * x).sin() * 3.0 + 0.01 * x + (0.001 * x * x);
+            data.push(v);
+        }
+        // Introduce a couple of NaNs at the start to exercise warmup handling
+        data[0] = f64::NAN;
+        data[1] = f64::NAN;
+
+        let params = Linearreg_angleParams::default();
+        let input = Linearreg_angleInput::from_slice(&data, params);
+
+        // Baseline via Vec-returning API
+        let baseline = linearreg_angle(&input)?.values;
+
+        // Preallocate output buffer and invoke the new into API
+        let mut into_out = vec![0.0f64; len];
+        #[cfg(not(feature = "wasm"))]
+        {
+            linearreg_angle_into(&input, &mut into_out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In WASM builds the native into is not available; use into_slice directly
+            linearreg_angle_into_slice(&mut into_out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), into_out.len());
+
+        // Helper: NaN == NaN, else exact equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline[i], into_out[i]),
+                "Mismatch at index {}: api={} into={}",
+                i,
+                baseline[i],
+                into_out[i]
+            );
+        }
+
+        Ok(())
     }
     #[cfg(feature = "proptest")]
     #[allow(clippy::float_cmp)]

@@ -491,6 +491,21 @@ pub fn damiani_volatmeter_into_slice(
     Ok(())
 }
 
+/// Write Damiani Volatmeter outputs into caller-provided buffers (no allocations).
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API does.
+/// - `vol_out.len()` and `anti_out.len()` must equal the input length; returns `InvalidPeriod` on mismatch.
+/// - Uses `Kernel::Auto` runtime selection (same as `damiani_volatmeter`).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn damiani_volatmeter_into(
+    input: &DamianiVolatmeterInput,
+    vol_out: &mut [f64],
+    anti_out: &mut [f64],
+) -> Result<(), DamianiVolatmeterError> {
+    damiani_volatmeter_into_slice(vol_out, anti_out, input, Kernel::Auto)
+}
+
 #[inline]
 pub unsafe fn damiani_volatmeter_scalar(
     high: &[f64],
@@ -2040,6 +2055,87 @@ mod tests {
         let output = damiani_volatmeter_with_kernel(&input, kernel)?;
         assert_eq!(output.vol.len(), candles.close.len());
         assert_eq!(output.anti.len(), candles.close.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_damiani_volatmeter_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Construct a small but non-trivial OHLCV series (len = 256)
+        let len = 256usize;
+        let mut ts = Vec::with_capacity(len);
+        let mut open = Vec::with_capacity(len);
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        let mut close = Vec::with_capacity(len);
+        let mut vol = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let i_f = i as f64;
+            let o = 100.0 + 0.1 * i_f + (i_f * 0.05).sin() * 0.5;
+            let c = o + (i_f * 0.3).cos() * 0.2;
+            let mut h = o + 1.0 + (i % 7) as f64 * 0.01;
+            let mut l = o - 1.0 - (i % 5) as f64 * 0.01;
+            if h < o { h = o; }
+            if h < c { h = c; }
+            if l > o { l = o; }
+            if l > c { l = c; }
+
+            ts.push(i as i64);
+            open.push(o);
+            high.push(h);
+            low.push(l);
+            close.push(c);
+            vol.push(1000.0 + (i % 10) as f64);
+        }
+
+        let candles = Candles::new(ts, open, high, low, close.clone(), vol);
+        let input = DamianiVolatmeterInput::from_candles(
+            &candles,
+            "close",
+            DamianiVolatmeterParams::default(),
+        );
+
+        // Baseline via Vec-returning API
+        let base = damiani_volatmeter(&input)?;
+
+        // Into-API outputs
+        let mut out_vol = vec![0.0; len];
+        let mut out_anti = vec![0.0; len];
+        #[cfg(not(feature = "wasm"))]
+        {
+            damiani_volatmeter_into(&input, &mut out_vol, &mut out_anti)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, the native symbol is not emitted. Use the slice variant directly.
+            damiani_volatmeter_into_slice(&mut out_vol, &mut out_anti, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(out_vol.len(), base.vol.len());
+        assert_eq!(out_anti.len(), base.anti.len());
+
+        // Helper: treat NaN == NaN; exact equality preferred; allow tiny epsilon for finite values
+        fn eq_or_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_nan(out_vol[i], base.vol[i]),
+                "vol mismatch at {}: into={}, api={}",
+                i,
+                out_vol[i],
+                base.vol[i]
+            );
+            assert!(
+                eq_or_nan(out_anti[i], base.anti[i]),
+                "anti mismatch at {}: into={}, api={}",
+                i,
+                out_anti[i],
+                base.anti[i]
+            );
+        }
+
         Ok(())
     }
     fn check_damiani_accuracy(

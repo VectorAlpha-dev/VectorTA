@@ -499,6 +499,27 @@ pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, kern: Kernel) -> Result
     Ok(())
 }
 
+/// Zero-allocation native API that writes results into a caller-provided buffer.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - `out.len()` must equal the input length; returns an error on mismatch.
+/// - Uses `Kernel::Auto` for dispatch (same as `tsi()`).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn tsi_into(input: &TsiInput, out: &mut [f64]) -> Result<(), TsiError> {
+    // Validate length matches input
+    let data_len = input.as_ref().len();
+    if out.len() != data_len {
+        return Err(TsiError::InvalidPeriod {
+            // Mirror existing length-mismatch mapping used by streaming variant
+            long_period: out.len(),
+            short_period: 0,
+            data_len: data_len,
+        });
+    }
+    tsi_into_slice(out, input, Kernel::Auto)
+}
+
 // Keep these stubs for compatibility but have them use the streaming version
 #[inline]
 pub unsafe fn tsi_scalar(
@@ -1332,6 +1353,42 @@ mod tests {
                     240 + i
                 );
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_tsi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Prefer existing repository CSV data for parity
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = TsiInput::from_candles(&candles, "close", TsiParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = tsi(&input)?.values;
+
+        // Preallocate destination and call zero-allocation API
+        let mut out = vec![0.0; candles.close.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            tsi_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // On WASM builds, native tsi_into is not emitted; use into_slice
+            tsi_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(out.len(), baseline.len());
+        let eq_or_both_nan = |a: f64, b: f64| (a.is_nan() && b.is_nan()) || (a == b);
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(out[i], baseline[i]),
+                "mismatch at {}: got {}, expected {}",
+                i,
+                out[i],
+                baseline[i]
+            );
         }
         Ok(())
     }

@@ -215,6 +215,16 @@ pub fn adx(input: &AdxInput) -> Result<AdxOutput, AdxError> {
     adx_with_kernel(input, Kernel::Auto)
 }
 
+/// Writes ADX values into a caller-provided buffer without allocating.
+///
+/// - Preserves the module’s NaN warmup semantics (first-valid index + `2*period-1`).
+/// - `out.len()` must equal the input length; returns the module’s error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn adx_into(input: &AdxInput, out: &mut [f64]) -> Result<(), AdxError> {
+    adx_into_slice(out, input, Kernel::Auto)
+}
+
 pub fn adx_with_kernel(input: &AdxInput, kernel: Kernel) -> Result<AdxOutput, AdxError> {
     let (high, low, close) = match &input.data {
         AdxData::Candles { candles } => {
@@ -1949,6 +1959,59 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_adx_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a small but non-trivial OHLC series (~256 points)
+        let n = 256usize;
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64;
+            let base = 100.0 + 0.5 * t + (t * 0.1).sin() * 0.7;
+            let c = base;
+            let h = c + 0.6 + (t * 0.05).cos() * 0.1;
+            let l = c - 0.6 - (t * 0.07).sin() * 0.1;
+            high.push(h);
+            low.push(l);
+            close.push(c);
+        }
+
+        let input = AdxInput::from_slices(&high, &low, &close, AdxParams::default());
+
+        // Baseline via existing Vec-returning API
+        let AdxOutput { values: expected } = adx(&input)?;
+
+        // New API: preallocate and compute in-place
+        let mut got = vec![0.0; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            adx_into(&input, &mut got)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // On wasm builds, adx_into is provided via wasm_bindgen with raw pointers; skip.
+            return Ok(());
+        }
+
+        assert_eq!(expected.len(), got.len());
+
+        // Helper: treat NaN == NaN; otherwise require tight equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(expected[i], got[i]),
+                "mismatch at {}: expected {:?}, got {:?}",
+                i,
+                expected[i],
+                got[i]
+            );
+        }
+        Ok(())
+    }
 
     fn check_adx_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

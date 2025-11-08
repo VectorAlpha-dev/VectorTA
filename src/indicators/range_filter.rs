@@ -407,6 +407,21 @@ pub fn range_filter(input: &RangeFilterInput) -> Result<RangeFilterOutput, Range
     range_filter_with_kernel(input, Kernel::Auto)
 }
 
+/// Writes Range Filter outputs into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmup prefixes exactly as the Vec-returning API.
+/// - All output slice lengths must equal the input length.
+/// - Dispatches with `Kernel::Auto` and uses the same compute path as `range_filter()`.
+#[inline]
+pub fn range_filter_into(
+    input: &RangeFilterInput,
+    out_filter: &mut [f64],
+    out_high: &mut [f64],
+    out_low: &mut [f64],
+) -> Result<(), RangeFilterError> {
+    range_filter_into_slice(out_filter, out_high, out_low, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn range_filter_into_slice(
     dst_filter: &mut [f64],
@@ -2662,6 +2677,59 @@ mod tests {
         let def = RangeFilterParams::default();
         let row = out.filter_values_for(&def).expect("default row missing");
         assert_eq!(row.len(), c.close.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_filter_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the existing CSV so inputs match other tests
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file)?;
+        let input = RangeFilterInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = range_filter(&input)?;
+
+        // Allocation-free path with identical length
+        let n = candles.close.len();
+        let mut f = vec![0.0; n];
+        let mut h = vec![0.0; n];
+        let mut l = vec![0.0; n];
+        range_filter_into(&input, &mut f, &mut h, &mut l)?;
+
+        assert_eq!(baseline.filter.len(), n);
+        assert_eq!(baseline.high_band.len(), n);
+        assert_eq!(baseline.low_band.len(), n);
+
+        // NaN-equals-NaN helper with tight epsilon for finite values
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline.filter[i], f[i]),
+                "filter[{}]: {:?} vs {:?}",
+                i,
+                baseline.filter[i],
+                f[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.high_band[i], h[i]),
+                "high[{}]: {:?} vs {:?}",
+                i,
+                baseline.high_band[i],
+                h[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.low_band[i], l[i]),
+                "low[{}]: {:?} vs {:?}",
+                i,
+                baseline.low_band[i],
+                l[i]
+            );
+        }
+
         Ok(())
     }
 

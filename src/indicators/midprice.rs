@@ -274,6 +274,36 @@ pub fn midprice_with_kernel(
     Ok(MidpriceOutput { values: out })
 }
 
+/// Write midprice values into the provided buffer without allocating.
+///
+/// - Preserves NaN warmups identically to the Vec-returning API.
+/// - The output slice length must match the input length.
+#[cfg(not(feature = "wasm"))]
+pub fn midprice_into(input: &MidpriceInput, out: &mut [f64]) -> Result<(), MidpriceError> {
+    let (high, low) = match &input.data {
+        MidpriceData::Candles {
+            candles,
+            high_src,
+            low_src,
+        } => {
+            let h = source_type(candles, high_src);
+            let l = source_type(candles, low_src);
+            (h, l)
+        }
+        MidpriceData::Slices { high, low } => (*high, *low),
+    };
+
+    if out.len() != high.len() || high.len() != low.len() {
+        return Err(MidpriceError::InvalidLength {
+            expected: high.len(),
+            actual: out.len(),
+        });
+    }
+
+    // Reuse the module's into-slice implementation with Kernel::Auto
+    midprice_into_slice(out, high, low, &input.params, Kernel::Auto)
+}
+
 #[inline]
 pub fn midprice_scalar(
     high: &[f64],
@@ -1988,6 +2018,48 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_midprice_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Deterministic synthetic data (no file IO)
+        let n = 256usize;
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64;
+            let h = 100.0 + 0.1 * t + (0.03 * t).sin();
+            let l = h - (2.0 + ((i % 7) as f64));
+            high.push(h);
+            low.push(l);
+        }
+
+        let params = MidpriceParams::default(); // period = 14
+        let input = MidpriceInput::from_slices(&high, &low, params.clone());
+
+        // Baseline via existing Vec-returning API
+        let baseline = midprice(&input)?.values;
+
+        // Preallocate destination and call into API
+        let mut out = vec![0.0; n];
+        midprice_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "Mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "python")]

@@ -205,6 +205,18 @@ fn highpass_into_internal(input: &HighPassInput, out: &mut [f64]) -> Result<(), 
     highpass_with_kernel_into(input, Kernel::Auto, out)
 }
 
+/// Write High-Pass outputs into a caller-provided buffer without allocating.
+///
+/// - Preserves the indicator’s warmup semantics (High-Pass computes from the first
+///   valid sample; no NaN warmup prefix is used).
+/// - The `out` slice length must exactly match the input length.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn highpass_into(input: &HighPassInput, out: &mut [f64]) -> Result<(), HighPassError> {
+    highpass_with_kernel_into(input, Kernel::Auto, out)
+}
+
 #[inline(always)]
 pub fn highpass_with_kernel(
     input: &HighPassInput,
@@ -825,6 +837,47 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     use proptest::prelude::*;
     use std::error::Error;
+
+    #[test]
+    fn test_highpass_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare non-trivial synthetic data (length 512)
+        let n = 512usize;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64;
+            let v = (t * 0.07).sin() + (t * 0.013).cos() + 0.001 * t; // mix of signals
+            data.push(v);
+        }
+
+        // Default params (period=48)
+        let input = HighPassInput::from_slice(&data, HighPassParams::default());
+
+        // Baseline via Vec-returning API
+        let base = highpass(&input)?.values;
+
+        // Preallocate output and compute via into API
+        let mut out = vec![0.0f64; n];
+        super::highpass_into(&input, &mut out)?;
+
+        assert_eq!(base.len(), out.len());
+
+        // Equality check: exact for finite values; treat NaN==NaN if any
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for (i, (&a, &b)) in base.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "mismatch at {}: api={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_highpass_partial_params(
         test_name: &str,

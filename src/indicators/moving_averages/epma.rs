@@ -327,6 +327,35 @@ pub fn epma_with_kernel(input: &EpmaInput, kernel: Kernel) -> Result<EpmaOutput,
     Ok(EpmaOutput { values: out })
 }
 
+/// Writes EPMA results into a caller-provided output slice without allocating.
+///
+/// - Preserves NaN warmup semantics by pre-filling the warmup prefix with the
+///   module's quiet-NaN pattern (same as `alloc_with_nan_prefix`).
+/// - The `out` slice length must equal the input length; otherwise returns
+///   `EpmaError::InvalidOutputLen`.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn epma_into(input: &EpmaInput, out: &mut [f64]) -> Result<(), EpmaError> {
+    let (data, period, offset, first, warmup, chosen) = epma_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(EpmaError::InvalidOutputLen {
+            expected: data.len(),
+            actual: out.len(),
+        });
+    }
+
+    // Prefill warmup with the same quiet-NaN pattern used elsewhere.
+    let w = warmup.min(out.len());
+    for v in &mut out[..w] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Compute values into the provided buffer.
+    epma_compute_into(data, period, offset, first, chosen, out);
+    Ok(())
+}
+
 /// Computes EPMA directly into a provided output slice, avoiding allocation.
 /// The output slice must be the same length as the input data.
 #[inline]
@@ -346,7 +375,8 @@ pub fn epma_into_slice(dst: &mut [f64], input: &EpmaInput, kern: Kernel) -> Resu
 
     // Fill warmup period with NaN
     for v in &mut dst[..warmup] {
-        *v = f64::NAN;
+        // Match alloc_with_nan_prefix quiet-NaN pattern
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
     Ok(())
@@ -1225,6 +1255,46 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use std::error::Error;
+
+    #[test]
+    fn test_epma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare a small but non-trivial input with some NaNs at the start
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..253u32 {
+            let v = (i as f64).sin() * 10.0 + (i as f64) * 0.01;
+            data.push(v);
+        }
+
+        let input = EpmaInput::from_slice(&data, EpmaParams::default());
+
+        // Baseline via existing Vec-returning API
+        let baseline = epma(&input)?.values;
+
+        // Preallocate output and call the new into API
+        let mut out = vec![0.0; data.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            epma_into(&input, &mut out)?;
+        }
+
+        // Helper for NaN-aware equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "Mismatch at {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+        Ok(())
+    }
 
     fn check_epma_partial_params(
         test_name: &str,

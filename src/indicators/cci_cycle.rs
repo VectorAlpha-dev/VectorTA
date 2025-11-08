@@ -441,6 +441,17 @@ pub fn cci_cycle_into_slice(
     Ok(())
 }
 
+/// Writes CCI Cycle results into the provided output slice without allocating.
+///
+/// - Preserves the indicator's NaN warmup behavior exactly.
+/// - The `out` slice length must match the input length.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn cci_cycle_into(input: &CciCycleInput, out: &mut [f64]) -> Result<(), CciCycleError> {
+    cci_cycle_into_slice(out, input, Kernel::Auto)
+}
+
 /// Prepare and validate input data
 #[inline(always)]
 fn cci_cycle_prepare<'a>(
@@ -1912,6 +1923,48 @@ mod tests {
                 i,
                 val,
                 expected_last_five[i]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_cci_cycle_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small non-trivial input with an initial NaN prefix to exercise warmup.
+        let n = 256usize;
+        let mut data: Vec<f64> = (0..n)
+            .map(|i| ((i as f64) * 0.037).sin() * 2.0 + (i as f64) * 0.01)
+            .collect();
+        data[0] = f64::NAN;
+        data[1] = f64::NAN;
+        data[2] = f64::NAN;
+
+        let params = CciCycleParams::default();
+        let input = CciCycleInput::from_slice(&data, params);
+
+        // Baseline via Vec-returning API
+        let baseline = cci_cycle(&input)?.values;
+
+        // Preallocated destination; function will set warmup NaNs
+        let mut out = vec![0.0; data.len()];
+        cci_cycle_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..out.len() {
+            let a = baseline[i];
+            let b = out[i];
+            assert!(
+                eq_or_both_nan(a, b) || (a - b).abs() <= 1e-12,
+                "cci_cycle_into parity mismatch at {}: got {}, expected {}",
+                i,
+                b,
+                a
             );
         }
         Ok(())

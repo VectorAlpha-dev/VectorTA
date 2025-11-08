@@ -238,6 +238,34 @@ pub fn rsi_with_kernel(input: &RsiInput, kernel: Kernel) -> Result<RsiOutput, Rs
     Ok(RsiOutput { values: out })
 }
 
+/// Write RSI results into a caller-provided buffer without allocating.
+///
+/// - Preserves the NaN warmup prefix exactly like the Vec-returning API.
+/// - The output slice length must equal the input length.
+/// - Uses `Kernel::Auto` for dispatch.
+#[cfg(not(feature = "wasm"))]
+pub fn rsi_into(input: &RsiInput, out: &mut [f64]) -> Result<(), RsiError> {
+    // Reuse the validated, kernel-dispatched slice implementation.
+    rsi_into_slice(out, input, Kernel::Auto)?;
+
+    // Overwrite warmup prefix with the same quiet-NaN pattern used by
+    // `alloc_with_nan_prefix` to ensure exact parity of warmup semantics.
+    let data: &[f64] = match &input.data {
+        RsiData::Candles { candles, source } => source_type(candles, source),
+        RsiData::Slice(sl) => sl,
+    };
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(RsiError::AllValuesNaN)?;
+    let warmup_end = (first + input.get_period()).min(out.len());
+    for v in &mut out[..warmup_end] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    Ok(())
+}
+
 #[inline(always)]
 fn rsi_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, out: &mut [f64]) {
     unsafe {
@@ -1846,6 +1874,49 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+}
+
+// Parity test for the new native into API
+#[cfg(test)]
+#[cfg(not(feature = "wasm"))]
+mod into_parity_tests {
+    use super::*;
+    use std::error::Error;
+    use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[inline]
+    fn eq_or_both_nan(a: f64, b: f64) -> bool {
+        (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+    }
+
+    #[test]
+    fn test_rsi_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use existing CSV test data to stay consistent with the suite
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = RsiInput::from_candles(&candles, "close", RsiParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = rsi(&input)?.values;
+
+        // Preallocate and compute via into-API
+        let mut out = vec![0.0; candles.close.len()];
+        rsi_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "rsi_into parity mismatch at {}: {} vs {}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 }
 
 // --- Python Bindings ---

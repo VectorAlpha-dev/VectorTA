@@ -758,7 +758,8 @@ pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<
     }
     let warmup_end = (first + period - 1).min(dst.len());
     for v in &mut dst[..warmup_end] {
-        *v = f64::NAN;
+        // Match alloc_with_nan_prefix's quiet-NaN pattern for parity
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
     // Select kernel implementation
@@ -772,6 +773,16 @@ pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<
     }
 
     Ok(())
+}
+
+/// Writes NAMA outputs into the provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (quiet-NaN prefix).
+/// - `out.len()` must equal the input series length.
+#[cfg(not(feature = "wasm"))]
+pub fn nama_into(input: &NamaInput, out: &mut [f64]) -> Result<(), NamaError> {
+    // Use Kernel::Auto to mirror the default selection of the Vec-returning API
+    nama_into_slice(out, input, Kernel::Auto)
 }
 
 // ==================== STREAMING (O(1) UPDATE) ====================
@@ -1607,6 +1618,47 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    // Parity test for native into API (no allocations)
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_nama_into_matches_api() {
+        // Build a small but non-trivial input with a NaN prefix
+        let n = 256usize;
+        let mut data = vec![0.0f64; n];
+        for i in 0..n {
+            let x = (i as f64 * 0.37).sin() * 10.0 + (i % 7) as f64 * 0.1;
+            data[i] = x;
+        }
+        // Introduce NaN warmup prefix to exercise first-valid handling
+        data[0] = f64::NAN;
+        data[1] = f64::NAN;
+
+        let input = NamaInput::from_slice(&data, NamaParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = nama(&input).expect("baseline computation failed").values;
+
+        // Preallocate output and compute via into API
+        let mut out = vec![0.0f64; n];
+        nama_into(&input, &mut out).expect("into computation failed");
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
     }
 
     fn check_nama_default_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

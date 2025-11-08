@@ -1042,6 +1042,20 @@ pub fn VolumeAdjustedMa_into_slice(
     Ok(())
 }
 
+/// Writes Volume Adjusted MA results into the provided output slice without allocating.
+///
+/// - Preserves the exact NaN warmup semantics of `VolumeAdjustedMa` (prefix filled to NaN).
+/// - The `out` slice length must equal the input length; otherwise returns `InvalidPeriod`.
+/// - Uses kernel auto-detection (`Kernel::Auto`).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn volume_adjusted_ma_into(
+    input: &VolumeAdjustedMaInput,
+    out: &mut [f64],
+) -> Result<(), VolumeAdjustedMaError> {
+    VolumeAdjustedMa_into_slice(out, input, Kernel::Auto)
+}
+
 // ==================== BATCH PROCESSING ====================
 #[derive(Clone, Debug)]
 pub struct VolumeAdjustedMaBatchRange {
@@ -2518,6 +2532,57 @@ mod tests {
         let result = VolumeAdjustedMa_with_kernel(&input, kernel)?;
 
         assert_eq!(result.values.len(), candles.close.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_volume_adjusted_ma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial slice input with varying values and volumes
+        let n = 256usize;
+        let mut data = vec![0.0f64; n];
+        let mut volume = vec![0.0f64; n];
+        for i in 0..n {
+            // some smooth variation + a couple of NaNs at the start to exercise warmup handling
+            data[i] = (i as f64 * 0.01).sin() * 100.0 + (i % 7) as f64;
+            volume[i] = ((i % 13) as f64 + 1.0) * 100.0;
+        }
+        data[0] = f64::NAN;
+        data[1] = f64::NAN;
+
+        let input = VolumeAdjustedMaInput::from_slices(&data, &volume, VolumeAdjustedMaParams::default());
+
+        // Baseline via Vec-returning API
+        let expected = VolumeAdjustedMa(&input)?.values;
+
+        // Preallocate output and call the new into API
+        let mut out = vec![0.0f64; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            volume_adjusted_ma_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // On wasm builds, fall back to the slice variant used by the wasm export
+            VolumeAdjustedMa_into_slice(&mut out, &input, detect_best_kernel())?;
+        }
+
+        assert_eq!(out.len(), expected.len());
+
+        // Helper: treat NaN == NaN; otherwise require tight equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(out[i], expected[i]),
+                "divergence at {}: into={}, api={}",
+                i,
+                out[i],
+                expected[i]
+            );
+        }
+
         Ok(())
     }
 

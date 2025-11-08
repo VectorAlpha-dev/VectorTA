@@ -320,9 +320,9 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
         return Err(SarError::InvalidMaximum { maximum });
     }
 
-    // Fill warmup with NaN first to match alloc_with_nan_prefix behavior
+    // Fill warmup with the same quiet-NaN pattern used by `alloc_with_nan_prefix`
     for v in &mut dst[..first.saturating_add(1)] {
-        *v = f64::NAN;
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
     let chosen = match kern {
@@ -342,6 +342,17 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
         _ => sar_scalar(high, low, first, acceleration, maximum, dst),
     }
     Ok(())
+}
+
+/// Parabolic SAR into an existing buffer (no allocation).
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
+/// - `out.len()` must equal the input length; returns existing length/validation errors on mismatch.
+/// - Uses `Kernel::Auto` dispatch matching `sar()` semantics.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn sar_into(input: &SarInput, out: &mut [f64]) -> Result<(), SarError> {
+    sar_into_slice(out, input, Kernel::Auto)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -2315,4 +2326,46 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_sar_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use repository CSV candles to mirror existing SAR tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = SarInput::from_candles(&candles, SarParams::default());
+
+        // Baseline via Vec-returning API
+        let SarOutput { values: expected } = sar(&input)?;
+
+        // Into API into a preallocated buffer
+        let mut actual = vec![0.0; candles.high.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            sar_into(&input, &mut actual)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native symbol name collides; use the slice variant for parity
+            sar_into_slice(&mut actual, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(expected.len(), actual.len());
+
+        // Treat NaN == NaN as equal; else require exact equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..expected.len() {
+            assert!(
+                eq_or_both_nan(expected[i], actual[i]),
+                "Mismatch at index {}: expected {:?}, got {:?}",
+                i,
+                expected[i],
+                actual[i]
+            );
+        }
+        Ok(())
+    }
 }

@@ -344,6 +344,17 @@ pub fn cwma_with_kernel(input: &CwmaInput, kernel: Kernel) -> Result<CwmaOutput,
     Ok(CwmaOutput { values: out })
 }
 
+/// Writes CWMA into the caller-provided buffer without extra allocations.
+///
+/// - Preserves NaN warmups exactly like `cwma()`/`cwma_with_kernel()`.
+/// - The output slice length must equal the input data length.
+/// - Uses `Kernel::Auto` dispatch for compute.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn cwma_into(input: &CwmaInput, out: &mut [f64]) -> Result<(), CwmaError> {
+    cwma_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub unsafe fn cwma_scalar(
@@ -2084,6 +2095,43 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_cwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Prepare a small but non-trivial candle input (same dataset used by other tests)
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Build default input (close, default params)
+        let input = CwmaInput::with_default_candles(&candles);
+
+        // Compute baseline via Vec-returning API
+        let baseline = cwma(&input)?.values;
+
+        // Preallocate output buffer and compute into it (no allocations)
+        let mut out = vec![0.0; candles.close.len()];
+        cwma_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Equality helper: treat NaN == NaN
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for (i, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(*a, *b),
+                "mismatch at index {}: baseline={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_cwma_partial_params(
         test_name: &str,

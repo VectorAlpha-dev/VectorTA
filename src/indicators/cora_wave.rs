@@ -274,6 +274,47 @@ pub fn cora_wave_with_kernel(
     Ok(CoraWaveOutput { values: out })
 }
 
+/// Write CoRa Wave outputs into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly as the `cora_wave()` Vec API (quiet-NaN prefix).
+/// - The output slice length must equal the input data length.
+/// - Uses Kernel::Auto for runtime selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn cora_wave_into(input: &CoraWaveInput, out: &mut [f64]) -> Result<(), CoraWaveError> {
+    let (data, weights, inv_wsum, smooth_period, first, chosen) =
+        cora_wave_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(CoraWaveError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix with quiet-NaNs to match alloc_with_nan_prefix behavior
+    let warm = first + weights.len() - 1 + smooth_period.saturating_sub(1);
+    let warm = warm.min(out.len());
+    if warm > 0 {
+        let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+        for v in &mut out[..warm] {
+            *v = qnan;
+        }
+    }
+
+    // Compute into the provided buffer
+    cora_wave_compute_into(
+        data,
+        &weights,
+        inv_wsum,
+        smooth_period,
+        first,
+        chosen,
+        out,
+    );
+    Ok(())
+}
+
 #[inline]
 pub fn cora_wave_into_slice(
     dst: &mut [f64],
@@ -2207,6 +2248,35 @@ mod tests {
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
     use std::error::Error;
+
+    #[test]
+    #[cfg(not(feature = "wasm"))]
+    fn test_cora_wave_into_matches_api() {
+        // Prepare input with a few leading NaNs and then finite values
+        let mut data = vec![f64::NAN; 5];
+        for i in 0..256 {
+            let x = (i as f64 * 0.03141592653589793).sin() * 10.0 + 50.0; // deterministic waveform
+            data.push(x);
+        }
+
+        let input = CoraWaveInput::from_slice(&data, CoraWaveParams::default());
+
+        let baseline = cora_wave(&input).expect("baseline cora_wave() failed");
+        let mut out = vec![0.0; data.len()];
+        cora_wave_into(&input, &mut out).expect("cora_wave_into() failed");
+
+        assert_eq!(baseline.values.len(), out.len());
+        for (i, (&a, &b)) in baseline.values.iter().zip(&out).enumerate() {
+            let ok = if a.is_nan() && b.is_nan() {
+                true
+            } else if a == b {
+                true
+            } else {
+                (a - b).abs() <= 1e-12
+            };
+            assert!(ok, "mismatch at index {}: {} vs {}", i, a, b);
+        }
+    }
 
     fn check_cora_wave_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
