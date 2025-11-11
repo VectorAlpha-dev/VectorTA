@@ -273,6 +273,18 @@ pub enum EhlersEcemaError {
 
     #[error("ehlers_ecema: EMA calculation failed: {0}")]
     EmaError(String),
+
+    #[error("ehlers_ecema: Output slice length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("ehlers_ecema: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("ehlers_ecema: non-batch kernel passed to batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("ehlers_ecema: size computation overflow during allocation ({what})")]
+    SizeOverflow { what: &'static str },
 }
 
 // ==================== PINE-STYLE EMA CALCULATION ====================
@@ -499,9 +511,9 @@ pub fn ehlers_ecema_into_slice(
 ) -> Result<(), EhlersEcemaError> {
     let (data, length, gain_limit, first, alpha, beta, chosen) = ehlers_ecema_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(EhlersEcemaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(EhlersEcemaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
     let pine_compatible = input.get_pine_compatible();
@@ -860,12 +872,7 @@ pub fn ehlers_ecema_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(EhlersEcemaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(EhlersEcemaError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -881,16 +888,17 @@ pub fn ehlers_ecema_batch_with_kernel(
 #[inline(always)]
 fn expand_grid(r: &EhlersEcemaBatchRange) -> Vec<EhlersEcemaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
+        if step == 0 || start == end { return vec![start]; }
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        (lo..=hi).step_by(step).collect()
     }
 
     let lengths = axis_usize(r.length);
     let gain_limits = axis_usize(r.gain_limit);
 
-    let mut out = Vec::with_capacity(lengths.len() * gain_limits.len());
+    // Pre-allocate with checked arithmetic
+    let cap = lengths.len().checked_mul(gain_limits.len()).unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
     for &l in &lengths {
         for &g in &gain_limits {
             out.push(EhlersEcemaParams {
@@ -919,10 +927,15 @@ fn ehlers_ecema_batch_inner(
         // Match alma.rs behavior
         return Err(EhlersEcemaError::AllValuesNaN);
     }
+    // Guard rows * cols for buffer sizing
+    if rows.checked_mul(cols).is_none() {
+        return Err(EhlersEcemaError::SizeOverflow { what: "rows*cols" });
+    }
     if combos.is_empty() {
-        return Err(EhlersEcemaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(EhlersEcemaError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
         });
     }
 
@@ -989,9 +1002,10 @@ fn ehlers_ecema_batch_inner_into(
 
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EhlersEcemaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(EhlersEcemaError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
         });
     }
 

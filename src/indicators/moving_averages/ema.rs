@@ -194,6 +194,14 @@ pub enum EmaError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("ema: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("ema: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("ema: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("ema: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("ema: arithmetic overflow while computing {context}")]
+    ArithmeticOverflow { context: &'static str },
 }
 
 #[inline]
@@ -296,9 +304,9 @@ pub fn ema_into(input: &EmaInput, out: &mut [f64]) -> Result<(), EmaError> {
 
     // Enforce output length parity with input
     if out.len() != data.len() {
-        return Err(EmaError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
+        return Err(EmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
 
@@ -330,9 +338,9 @@ pub fn ema_into_slice(dst: &mut [f64], input: &EmaInput, kern: Kernel) -> Result
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(EmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(EmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -601,12 +609,7 @@ pub fn ema_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(EmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(EmaError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
@@ -643,10 +646,12 @@ impl EmaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &EmaBatchRange) -> Vec<EmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // Zero step or equal bounds => singleton (stable semantics for existing tests)
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        (lo..=hi).step_by(step).collect()
     }
 
     let periods = axis_usize(r.period);
@@ -696,6 +701,10 @@ fn ema_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(EmaError::AllValuesNaN)?;
 
+    // checked rows * cols prior to allocating
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(EmaError::ArithmeticOverflow { context: "rows*cols" })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     // warm prefix per row = first (EMA defines from first onward)
@@ -2089,11 +2098,13 @@ pub fn ema_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
-        let rows = combos.len();
-        let cols = len;
-
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = len;
+        let elems = rows
+            .checked_mul(cols)
+            .ok_or(JsValue::from_str("overflow rows*cols"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, elems);
 
         // Initialize NaN prefixes before computation
         let first = data

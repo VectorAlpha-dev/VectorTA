@@ -182,6 +182,15 @@ pub enum JsaError {
 
     #[error("jsa: invalid kernel for batch op: {kernel:?}")]
     InvalidKernel { kernel: Kernel },
+
+    #[error("jsa: invalid range expansion: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("jsa: arithmetic overflow while computing sizes")] 
+    ArithmeticOverflow,
+
+    #[error("jsa: invalid kernel used for batch op: {kernel:?}")]
+    InvalidKernelForBatch { kernel: Kernel },
 }
 
 #[inline]
@@ -568,7 +577,7 @@ pub fn jsa_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        other => return Err(JsaError::InvalidKernel { kernel: other }),
+        other => return Err(JsaError::InvalidKernelForBatch { kernel: other }),
     };
 
     let simd = match kernel {
@@ -604,10 +613,33 @@ impl JsaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &JsaBatchRange) -> Vec<JsaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // zero step or equal bounds → static
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut v = Vec::new();
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                // checked add; break on overflow to avoid infinite loop
+                match cur.checked_add(step) {
+                    Some(next) => cur = next,
+                    None => break,
+                }
+            }
+        } else {
+            // reversed bounds supported (descending)
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                // checked sub; stop if step is larger than cur - end
+                if cur < end + step { break; }
+                cur -= step;
+                if cur == usize::MAX { break; }
+            }
+        }
+        if v.is_empty() { vec![start] } else { v }
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -667,7 +699,14 @@ fn jsa_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+    // Guard rows*cols before allocating
+    let _total = rows.checked_mul(cols).ok_or(JsaError::ArithmeticOverflow)?;
+    let mut warm: Vec<usize> = Vec::with_capacity(rows);
+    for c in &combos {
+        let p = c.period.unwrap();
+        let w = first.checked_add(p).ok_or(JsaError::ArithmeticOverflow)?;
+        warm.push(w);
+    }
 
     // -----------------------------------
     // 2.  allocate rows × cols as MaybeUninit
@@ -780,16 +819,20 @@ fn jsa_batch_inner_into(
     }
     let rows = combos.len();
     let cols = data.len();
-
-    // Ensure output buffer is the correct size
-    if out.len() != rows * cols {
+    // Ensure output buffer is the correct size (checked mul)
+    let expected = rows.checked_mul(cols).ok_or(JsaError::ArithmeticOverflow)?;
+    if out.len() != expected {
         return Err(JsaError::OutputLenMismatch {
-            expected: rows * cols,
+            expected,
             got: out.len(),
         });
     }
-
-    let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
+    let mut warm: Vec<usize> = Vec::with_capacity(rows);
+    for c in &combos {
+        let p = c.period.unwrap();
+        let w = first.checked_add(p).ok_or(JsaError::ArithmeticOverflow)?;
+        warm.push(w);
+    }
 
     // Cast output to MaybeUninit for initialization
     let out_uninit = unsafe {

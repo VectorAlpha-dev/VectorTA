@@ -45,12 +45,10 @@ impl DeviceArrayF32Py {
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Expose default stream to help consumers (e.g., CuPy) pick a valid device context
-        // without guessing. Using 0 denotes the legacy default stream.
-        d.set_item("stream", 0usize)?;
-        // Provide a stream hint for consumers like CuPy. Using legacy default stream (1)
-        // is broadly compatible and avoids some runtime setDevice quirks on certain setups.
-        d.set_item("stream", 1i64)?;
+        // Explicit strides (row-major, bytes): (cols * 4, 4)
+        let row_stride = (self.inner.cols as i64) * 4;
+        d.set_item("strides", (row_stride, 4i64))?;
+        // Stream omitted (producer synchronizes before returning); CAI v3 forbids 0.
         d.set_item("version", 3)?;
         Ok(d)
     }
