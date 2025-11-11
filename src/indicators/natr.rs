@@ -1442,6 +1442,48 @@ mod tests {
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
 
+    #[test]
+    fn test_natr_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Prepare a non-trivial OHLC input from the repo dataset
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Build input with default params (period = 14)
+        let input = NatrInput::with_default_candles(&candles);
+
+        // Baseline via existing Vec-returning API
+        let baseline = natr(&input)?.values;
+
+        // Preallocate output and call the new into API
+        let mut out = vec![0.0; candles.close.len()];
+        #[allow(unused_variables)]
+        {
+            // Native path only; wasm provides a different symbol for natr_into
+            #[cfg(not(feature = "wasm"))]
+            {
+                natr_into(&input, &mut out)?;
+            }
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: treat NaN == NaN; otherwise compare with tight epsilon
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..baseline.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "NATR into parity mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+        Ok(())
+    }
+
     fn check_natr_partial_params(
         test_name: &str,
         kernel: Kernel,
@@ -2414,6 +2456,17 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
     }
 
     Ok(())
+}
+
+/// Zero-allocation native API that writes results into a caller-provided buffer.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - `out.len()` must equal the input length; returns an error on mismatch.
+/// - Uses `Kernel::Auto` dispatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn natr_into(input: &NatrInput, out: &mut [f64]) -> Result<(), NatrError> {
+    natr_into_slice(out, input, Kernel::Auto)
 }
 
 #[cfg(feature = "wasm")]

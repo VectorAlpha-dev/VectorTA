@@ -288,6 +288,22 @@ pub fn kdj_with_kernel(input: &KdjInput, kernel: Kernel) -> Result<KdjOutput, Kd
     }
 }
 
+/// Writes K, D, J into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API.
+/// - Each output slice length must equal the input length; otherwise returns `BufferSizeMismatch`.
+/// - Uses `Kernel::Auto` for runtime kernel selection (same as `kdj()`), and preserves all semantics.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn kdj_into(
+    input: &KdjInput,
+    k_out: &mut [f64],
+    d_out: &mut [f64],
+    j_out: &mut [f64],
+) -> Result<(), KdjError> {
+    kdj_into_slices(k_out, d_out, j_out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn kdj_scalar(
     high: &[f64],
@@ -2133,6 +2149,59 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_kdj_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build small but non-trivial OHLC with leading NaNs to exercise warmups
+        let n = 256usize;
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        // 4 NaN prefixes so first-valid > 0
+        for _ in 0..4 { high.push(f64::NAN); low.push(f64::NAN); close.push(f64::NAN); }
+        for i in 0..(n - 4) {
+            let i_f = i as f64;
+            let base = 100.0 + 0.1 * i_f + ((i % 7) as f64) * 0.5;
+            close.push(base);
+            high.push(base + 1.0 + ((i % 5) as f64) * 0.1);
+            low.push(base - 1.0 - ((i % 7) as f64) * 0.1);
+        }
+
+        let params = KdjParams::default();
+        let input = KdjInput::from_slices(&high, &low, &close, params);
+
+        // Baseline Vec-returning API
+        let baseline = kdj(&input)?;
+
+        // Zero-allocation into API
+        let mut k = vec![0.0; close.len()];
+        let mut d = vec![0.0; close.len()];
+        let mut j = vec![0.0; close.len()];
+        kdj_into(&input, &mut k, &mut d, &mut j)?;
+
+        // Parity: exact or both-NaN equality element-wise
+        assert_eq!(baseline.k.len(), k.len());
+        assert_eq!(baseline.d.len(), d.len());
+        assert_eq!(baseline.j.len(), j.len());
+        for idx in 0..n {
+            let a = baseline.k[idx];
+            let b = k[idx];
+            let ok = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(ok, "K mismatch at {idx}: api={a} into={b}");
+
+            let a = baseline.d[idx];
+            let b = d[idx];
+            let ok = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(ok, "D mismatch at {idx}: api={a} into={b}");
+
+            let a = baseline.j[idx];
+            let b = j[idx];
+            let ok = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(ok, "J mismatch at {idx}: api={a} into={b}");
+        }
+        Ok(())
+    }
 
     fn check_kdj_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

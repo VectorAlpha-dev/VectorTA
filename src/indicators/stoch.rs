@@ -453,6 +453,270 @@ pub fn stoch_into_slices(
     Ok(())
 }
 
+// === Native no-allocation API ===
+
+#[inline]
+fn prefill_nan_prefix(dst: &mut [f64], warm: usize) {
+    let warm = warm.min(dst.len());
+    for v in &mut dst[..warm] {
+        // Match alloc_with_nan_prefix's quiet-NaN pattern
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+}
+
+#[inline]
+fn stoch_compute_into(
+    input: &StochInput,
+    out_k: &mut [f64],
+    out_d: &mut [f64],
+    kernel: Kernel,
+) -> Result<(), StochError> {
+    let (high, low, close) = match &input.data {
+        StochData::Candles { candles } => {
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|e| StochError::Other(e.to_string()))?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|e| StochError::Other(e.to_string()))?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|e| StochError::Other(e.to_string()))?;
+            (high, low, close)
+        }
+        StochData::Slices { high, low, close } => (*high, *low, *close),
+    };
+
+    let len = high.len();
+    if len == 0 || low.is_empty() || close.is_empty() {
+        return Err(StochError::EmptyData);
+    }
+    if len != low.len() || len != close.len() {
+        return Err(StochError::MismatchedLength);
+    }
+    if out_k.len() != len || out_d.len() != len {
+        return Err(StochError::MismatchedLength);
+    }
+
+    let fastk_period = input.get_fastk_period();
+    let slowk_period = input.get_slowk_period();
+    let slowd_period = input.get_slowd_period();
+
+    if fastk_period == 0 || fastk_period > len {
+        return Err(StochError::InvalidPeriod {
+            period: fastk_period,
+            data_len: len,
+        });
+    }
+    if slowk_period == 0 || slowk_period > len {
+        return Err(StochError::InvalidPeriod {
+            period: slowk_period,
+            data_len: len,
+        });
+    }
+    if slowd_period == 0 || slowd_period > len {
+        return Err(StochError::InvalidPeriod {
+            period: slowd_period,
+            data_len: len,
+        });
+    }
+
+    // Locate first fully valid sample
+    let first = high
+        .iter()
+        .zip(low.iter())
+        .zip(close.iter())
+        .position(|((h, l), c)| !h.is_nan() && !l.is_nan() && !c.is_nan())
+        .ok_or(StochError::AllValuesNaN)?;
+
+    if (len - first) < fastk_period {
+        return Err(StochError::NotEnoughValidData {
+            needed: fastk_period,
+            valid: len - first,
+        });
+    }
+
+    // Rolling HH/LL and raw %K buffer
+    let mut hh = alloc_with_nan_prefix(len, first + fastk_period - 1);
+    let mut ll = alloc_with_nan_prefix(len, first + fastk_period - 1);
+    let highs = max_rolling(&high[first..], fastk_period)
+        .map_err(|e| StochError::Other(e.to_string()))?;
+    let lows = min_rolling(&low[first..], fastk_period)
+        .map_err(|e| StochError::Other(e.to_string()))?;
+    for (i, &v) in highs.iter().enumerate() {
+        hh[first + i] = v;
+    }
+    for (i, &v) in lows.iter().enumerate() {
+        ll[first + i] = v;
+    }
+
+    let mut k_raw = alloc_with_nan_prefix(len, first + fastk_period - 1);
+
+    // Use same Auto resolution as main API (prefer Scalar for stability)
+    let chosen = match kernel {
+        Kernel::Auto => Kernel::Scalar,
+        other => other,
+    };
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => stoch_scalar(
+                high, low, close, &hh, &ll, fastk_period, first, &mut k_raw,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => stoch_avx2(
+                high, low, close, &hh, &ll, fastk_period, first, &mut k_raw,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => stoch_avx512(
+                high, low, close, &hh, &ll, fastk_period, first, &mut k_raw,
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    // Smoothing selections
+    let slowk_ma_type = input.get_slowk_ma_type();
+    let slowd_ma_type = input.get_slowd_ma_type();
+    let k_first_valid = first + fastk_period - 1;
+
+    if (slowk_ma_type == "sma" || slowk_ma_type == "SMA")
+        && (slowd_ma_type == "sma" || slowd_ma_type == "SMA")
+    {
+        // Prefill warmups exactly like classic SMA path
+        prefill_nan_prefix(out_k, k_first_valid + slowk_period - 1);
+        prefill_nan_prefix(out_d, k_first_valid + slowk_period + slowd_period - 2);
+
+        // %K SMA
+        let mut sum_k = 0.0;
+        let k_start = k_first_valid;
+        for i in k_start..(k_start + slowk_period).min(len) {
+            if !k_raw[i].is_nan() {
+                sum_k += k_raw[i];
+            }
+        }
+        if k_start + slowk_period - 1 < len {
+            out_k[k_start + slowk_period - 1] = sum_k / slowk_period as f64;
+        }
+        for i in (k_start + slowk_period)..len {
+            let old = k_raw[i - slowk_period];
+            let newv = k_raw[i];
+            if !old.is_nan() {
+                sum_k -= old;
+            }
+            if !newv.is_nan() {
+                sum_k += newv;
+            }
+            out_k[i] = sum_k / slowk_period as f64;
+        }
+
+        // %D SMA over %K
+        let mut sum_d = 0.0;
+        let d_start = k_first_valid + slowk_period - 1;
+        for i in d_start..(d_start + slowd_period).min(len) {
+            if !out_k[i].is_nan() {
+                sum_d += out_k[i];
+            }
+        }
+        if d_start + slowd_period - 1 < len {
+            out_d[d_start + slowd_period - 1] = sum_d / slowd_period as f64;
+        }
+        for i in (d_start + slowd_period)..len {
+            let old = out_k[i - slowd_period];
+            let newv = out_k[i];
+            if !old.is_nan() {
+                sum_d -= old;
+            }
+            if !newv.is_nan() {
+                sum_d += newv;
+            }
+            out_d[i] = sum_d / slowd_period as f64;
+        }
+        return Ok(());
+    }
+
+    if (slowk_ma_type == "ema" || slowk_ma_type == "EMA")
+        && (slowd_ma_type == "ema" || slowd_ma_type == "EMA")
+    {
+        // Prefill warmups exactly like classic EMA path
+        prefill_nan_prefix(out_k, k_first_valid + slowk_period - 1);
+        prefill_nan_prefix(out_d, k_first_valid + slowk_period + slowd_period - 2);
+
+        // %K EMA (seed with SMA over window)
+        let alpha_k = 2.0 / (slowk_period as f64 + 1.0);
+        let one_minus_alpha_k = 1.0 - alpha_k;
+        let k_warm = k_first_valid + slowk_period - 1;
+        let mut sum_k = 0.0;
+        let mut cnt_k = 0;
+        for i in k_first_valid..(k_first_valid + slowk_period).min(len) {
+            if !k_raw[i].is_nan() {
+                sum_k += k_raw[i];
+                cnt_k += 1;
+            }
+        }
+        if cnt_k > 0 && k_warm < len {
+            let mut ema_k = sum_k / cnt_k as f64;
+            out_k[k_warm] = ema_k;
+            for i in (k_warm + 1)..len {
+                if !k_raw[i].is_nan() {
+                    ema_k = alpha_k * k_raw[i] + one_minus_alpha_k * ema_k;
+                }
+                out_k[i] = ema_k;
+            }
+        } else {
+            for i in k_warm..len {
+                out_k[i] = f64::from_bits(0x7ff8_0000_0000_0000);
+            }
+        }
+
+        // %D EMA over %K (seed with SMA over D window)
+        let alpha_d = 2.0 / (slowd_period as f64 + 1.0);
+        let one_minus_alpha_d = 1.0 - alpha_d;
+        let d_warm = k_first_valid + slowk_period + slowd_period - 2;
+        let d_start = k_first_valid + slowk_period - 1;
+        let mut sum_d = 0.0;
+        let mut cnt_d = 0;
+        for i in d_start..(d_start + slowd_period).min(len) {
+            if !out_k[i].is_nan() {
+                sum_d += out_k[i];
+                cnt_d += 1;
+            }
+        }
+        if cnt_d > 0 && d_warm < len {
+            let mut ema_d = sum_d / cnt_d as f64;
+            out_d[d_warm] = ema_d;
+            for i in (d_warm + 1)..len {
+                if !out_k[i].is_nan() {
+                    ema_d = alpha_d * out_k[i] + one_minus_alpha_d * ema_d;
+                }
+                out_d[i] = ema_d;
+            }
+        } else {
+            for i in d_warm..len {
+                out_d[i] = f64::from_bits(0x7ff8_0000_0000_0000);
+            }
+        }
+        return Ok(());
+    }
+
+    // Generic path: reuse MA dispatcher and copy
+    let k_vec = ma(&slowk_ma_type, MaData::Slice(&k_raw), slowk_period)
+        .map_err(|e| StochError::Other(e.to_string()))?;
+    let d_vec = ma(&slowd_ma_type, MaData::Slice(&k_vec), slowd_period)
+        .map_err(|e| StochError::Other(e.to_string()))?;
+    out_k.copy_from_slice(&k_vec);
+    out_d.copy_from_slice(&d_vec);
+    Ok(())
+}
+
+/// Computes Stochastic Oscillator into caller-provided buffers without allocating outputs.
+///
+/// Preserves NaN warmups exactly like `stoch()` and writes results into `out_k` and `out_d`.
+/// Both output slices must have the same length as the input series.
+#[cfg(not(feature = "wasm"))]
+pub fn stoch_into(input: &StochInput, out_k: &mut [f64], out_d: &mut [f64]) -> Result<(), StochError> {
+    stoch_compute_into(input, out_k, out_d, Kernel::Auto)
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn stoch_avx512(
@@ -3035,6 +3299,53 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    // ---- Into parity ----
+    fn eq_or_both_nan(a: f64, b: f64) -> bool {
+        (a.is_nan() && b.is_nan()) || (a == b)
+    }
+
+    #[test]
+    fn test_stoch_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = StochInput::with_default_candles(&candles);
+
+        let baseline = stoch(&input)?;
+
+        let mut out_k = vec![0.0; baseline.k.len()];
+        let mut out_d = vec![0.0; baseline.d.len()];
+
+        #[cfg(not(feature = "wasm"))]
+        {
+            stoch_into(&input, &mut out_k, &mut out_d)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // Wasm builds don’t expose native stoch_into; fall back to slices helper
+            stoch_into_slices(&mut out_k, &mut out_d, &input, detect_best_kernel())?;
+        }
+
+        assert_eq!(out_k.len(), baseline.k.len());
+        assert_eq!(out_d.len(), baseline.d.len());
+        for i in 0..out_k.len() {
+            assert!(
+                eq_or_both_nan(out_k[i], baseline.k[i]),
+                "K mismatch at {}: got {}, expected {}",
+                i,
+                out_k[i],
+                baseline.k[i]
+            );
+            assert!(
+                eq_or_both_nan(out_d[i], baseline.d[i]),
+                "D mismatch at {}: got {}, expected {}",
+                i,
+                out_d[i],
+                baseline.d[i]
+            );
+        }
+        Ok(())
+    }
 }
 
 // === Classic Kernel Implementations ===

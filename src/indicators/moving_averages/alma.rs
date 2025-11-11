@@ -42,7 +42,9 @@ impl DeviceArrayF32Py {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
+        // shape: (rows, cols)
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        // typestr: little-endian float32
         d.set_item("typestr", "<f4")?;
         // Explicit strides for row-major FP32: (row stride in bytes, item stride in bytes)
         d.set_item(

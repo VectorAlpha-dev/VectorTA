@@ -227,6 +227,17 @@ pub fn dti(input: &DtiInput) -> Result<DtiOutput, DtiError> {
     dti_with_kernel(input, Kernel::Auto)
 }
 
+/// Zero-allocation native API that writes results into a caller-provided buffer.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - `out.len()` must equal the input length; returns an error on mismatch.
+/// - Uses `Kernel::Auto` for dispatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn dti_into(input: &DtiInput, out: &mut [f64]) -> Result<(), DtiError> {
+    dti_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result<(), DtiError> {
     let (high, low) = match &input.data {
@@ -3056,4 +3067,36 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    // Ensure the zero-allocation API matches the Vec-returning API, including NaN warmups.
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_dti_into_matches_api() -> Result<(), Box<dyn Error>> {
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = DtiInput::with_default_candles(&candles);
+
+        // Baseline via existing API
+        let baseline = dti(&input)?;
+
+        // Zero-allocation path
+        let mut out = vec![0.0f64; candles.close.len()];
+        dti_into(&input, &mut out)?;
+
+        assert_eq!(baseline.values.len(), out.len());
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline.values[i], out[i]),
+                "Mismatch at index {}: api={} into={}",
+                i,
+                baseline.values[i],
+                out[i]
+            );
+        }
+        Ok(())
+    }
 }

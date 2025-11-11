@@ -1,1 +1,5 @@
+<<<<<<< HEAD
 gitdir: /mnt/c/Rust Projects/my_project/.git/worktrees/my_project-bindings-1
+=======
+gitdir: /mnt/c/Rust Projects/my_project/.git/worktrees/my_project-bindings-2
+>>>>>>> simd-2

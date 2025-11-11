@@ -345,20 +345,35 @@ pub fn voss_into_slice(
         });
     }
 
+    // Pre-fill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warmup_end = first + min_index;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let v_end = if warmup_end < voss_dst.len() { warmup_end } else { voss_dst.len() };
+    for v in &mut voss_dst[..v_end] {
+        *v = qnan;
+    }
+    let f_end = if warmup_end < filt_dst.len() { warmup_end } else { filt_dst.len() };
+    for v in &mut filt_dst[..f_end] {
+        *v = qnan;
+    }
+
+    // Compute into provided slices (Kernel::chosen may overwrite a subset of warmup, matching Vec API)
     voss_compute_into(
         data, period, predict, bandwidth, first, min_index, chosen, voss_dst, filt_dst,
     );
 
-    // Fill warmup period with NaN
-    let warmup_end = first + min_index;
-    for v in &mut voss_dst[..warmup_end] {
-        *v = f64::NAN;
-    }
-    for v in &mut filt_dst[..warmup_end] {
-        *v = f64::NAN;
-    }
-
     Ok(())
+}
+
+/// Writes VOSS and Filt outputs into caller-provided buffers without allocations.
+///
+/// - Preserves NaN warmup prefixes exactly like the Vec-returning API.
+/// - Both output slice lengths must equal the input length.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn voss_into(input: &VossInput, voss_out: &mut [f64], filt_out: &mut [f64]) -> Result<(), VossError> {
+    voss_into_slice(voss_out, filt_out, input, Kernel::Auto)
 }
 
 #[inline]
@@ -1447,6 +1462,58 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[inline]
+    fn eq_or_both_nan(a: f64, b: f64) -> bool {
+        (a.is_nan() && b.is_nan()) || (a == b)
+    }
+
+    #[test]
+    fn test_voss_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the existing CSV to mirror other tests and real inputs
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = VossInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let base = voss(&input)?;
+
+        // Preallocate outputs and compute via into API
+        let len = candles.close.len();
+        let mut out_voss = vec![0.0f64; len];
+        let mut out_filt = vec![0.0f64; len];
+        #[cfg(not(feature = "wasm"))]
+        {
+            voss_into(&input, &mut out_voss, &mut out_filt)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // wasm build: fall back to the slice API with Kernel::Auto (same behavior)
+            voss_into_slice(&mut out_voss, &mut out_filt, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(base.voss.len(), out_voss.len());
+        assert_eq!(base.filt.len(), out_filt.len());
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(base.voss[i], out_voss[i]),
+                "voss mismatch at {}: got {}, expected {}",
+                i,
+                out_voss[i],
+                base.voss[i]
+            );
+            assert!(
+                eq_or_both_nan(base.filt[i], out_filt[i]),
+                "filt mismatch at {}: got {}, expected {}",
+                i,
+                out_filt[i],
+                base.filt[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_voss_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

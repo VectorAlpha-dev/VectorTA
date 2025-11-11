@@ -323,6 +323,29 @@ pub fn tradjema_with_kernel(
     Ok(TradjemaOutput { values: out })
 }
 
+/// Compute TRADJEMA into a caller-provided buffer (no allocations).
+///
+/// - Preserves NaN warmup prefix exactly like the Vec-returning API.
+/// - `out.len()` must equal the input data length; returns `InvalidLength` on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn tradjema_into(input: &TradjemaInput, out: &mut [f64]) -> Result<(), TradjemaError> {
+    let (h, l, c, length, first, mult, chosen) = tradjema_prepare(input, Kernel::Auto)?;
+    if out.len() != c.len() {
+        return Err(TradjemaError::InvalidLength { length: out.len(), data_len: c.len() });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN used by alloc_with_nan_prefix
+    let warm = first + length - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let w = warm.min(out.len());
+    for v in &mut out[..w] { *v = qnan; }
+
+    // Compute in-place for the remainder
+    tradjema_compute_into(h, l, c, length, mult, first, chosen, out);
+    Ok(())
+}
+
 #[inline]
 pub fn tradjema_into_slice(
     dst: &mut [f64],
@@ -2529,5 +2552,41 @@ mod tests {
         );
         assert_eq!(combos2[0].length, Some(40));
         assert_eq!(combos2[0].mult, Some(10.0));
+    }
+
+    #[test]
+    fn test_tradjema_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the same dataset as existing tests to mirror defaults and warmup
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let c = read_candles_from_csv(file)?;
+        let (h, l, cl) = (
+            c.select_candle_field("high")?,
+            c.select_candle_field("low")?,
+            c.select_candle_field("close")?,
+        );
+
+        let input = TradjemaInput::from_slices(h, l, cl, TradjemaParams::default());
+
+        // Baseline via existing Vec-returning API
+        let base = tradjema(&input)?.values;
+
+        // New into API (no allocations)
+        let mut out = vec![0.0; cl.len()];
+        tradjema_into(&input, &mut out)?;
+
+        assert_eq!(base.len(), out.len());
+
+        // Equality check: treat NaN == NaN, otherwise exact equality (paths are identical)
+        for i in 0..out.len() {
+            let a = base[i];
+            let b = out[i];
+            if a.is_nan() || b.is_nan() {
+                assert!(a.is_nan() && b.is_nan(), "NaN mismatch at index {}: {:?} vs {:?}", i, a, b);
+            } else {
+                assert_eq!(a, b, "Value mismatch at index {}: {} vs {}", i, a, b);
+            }
+        }
+
+        Ok(())
     }
 }

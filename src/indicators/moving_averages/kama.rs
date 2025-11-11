@@ -183,10 +183,14 @@ pub enum KamaError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("kama: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("kama: Buffer length mismatch: expected = {expected}, got = {got}")]
-    BufferLengthMismatch { expected: usize, got: usize },
-    #[error("kama: Invalid kernel: batch operations require batch kernels")]
-    InvalidKernel,
+    #[error("kama: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("kama: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("kama: Invalid kernel for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("kama: invalid input: {0}")]
+    InvalidInput(&'static str),
 }
 
 #[inline]
@@ -268,6 +272,35 @@ pub fn kama_with_kernel(input: &KamaInput, kernel: Kernel) -> Result<KamaOutput,
     Ok(KamaOutput { values: out })
 }
 
+/// Compute KAMA into a caller-provided output buffer (no allocations).
+///
+/// - Preserves NaN warmups identical to the Vec-returning API.
+/// - The output slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+pub fn kama_into(input: &KamaInput, out: &mut [f64]) -> Result<(), KamaError> {
+    let (data, period, first, chosen) = kama_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(KamaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
+    }
+
+    // Prefill NaN warmup prefix using the same quiet-NaN pattern
+    let warm = first + period;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let pref = warm.min(out.len());
+    for v in &mut out[..pref] {
+        *v = qnan;
+    }
+
+    // Compute values into the provided buffer
+    kama_compute_into(data, period, first, chosen, out);
+
+    Ok(())
+}
+
 /// Compute KAMA directly into the provided output slice.
 /// The output slice must be the same length as the input data.
 #[inline]
@@ -276,7 +309,7 @@ pub fn kama_into_slice(dst: &mut [f64], input: &KamaInput, kern: Kernel) -> Resu
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(KamaError::BufferLengthMismatch {
+        return Err(KamaError::OutputLengthMismatch {
             expected: data.len(),
             got: dst.len(),
         });
@@ -765,7 +798,7 @@ pub fn kama_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(KamaError::InvalidKernel),
+        _ => return Err(KamaError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -799,18 +832,45 @@ impl KamaBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &KamaBatchRange) -> Vec<KamaParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &KamaBatchRange) -> Result<Vec<KamaParams>, KamaError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, KamaError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return Ok((start..=end).step_by(step).collect());
+        }
+        // reversed bounds supported by stepping down
+        let mut v = Vec::new();
+        let mut cur = start;
+        loop {
+            v.push(cur);
+            match cur.checked_sub(step) {
+                Some(next) if next >= end => {
+                    cur = next;
+                }
+                _ => break,
+            }
+        }
+        if v.is_empty() {
+            Err(KamaError::InvalidRange { start, end, step })
+        } else {
+            Ok(v)
+        }
     }
-    let periods = axis_usize(r.period);
-    periods
+    let periods = axis_usize(r.period)?;
+    let combos: Vec<KamaParams> = periods
         .into_iter()
         .map(|p| KamaParams { period: Some(p) })
-        .collect()
+        .collect();
+    if combos.is_empty() {
+        return Err(KamaError::InvalidRange {
+            start: r.period.0,
+            end: r.period.1,
+            step: r.period.2,
+        });
+    }
+    Ok(combos)
 }
 
 #[inline(always)]
@@ -838,13 +898,18 @@ fn kama_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<KamaBatchOutput, KamaError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let cols = data.len();
     let rows = combos.len();
 
     if cols == 0 {
         return Err(KamaError::EmptyInputData);
     }
+
+    // Guard rows * cols multiplication before allocation
+    let total_cells = rows
+        .checked_mul(cols)
+        .ok_or(KamaError::InvalidInput("rows*cols overflow"))?;
 
     // Step 1: Allocate uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -882,7 +947,7 @@ fn kama_batch_inner(
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
-            buf_guard.len(),
+            total_cells,
             buf_guard.capacity(),
         )
     };
@@ -903,13 +968,7 @@ fn kama_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<KamaParams>, KamaError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(KamaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -923,6 +982,17 @@ fn kama_batch_inner_into(
     }
     let rows = combos.len();
     let cols = data.len();
+
+    // Verify output slice length
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(KamaError::InvalidInput("rows*cols overflow"))?;
+    if out.len() != expected {
+        return Err(KamaError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // ---------------------------------------------------------------
     // 1.  Shared precompute for all rows: abs_delta and prefix sums
@@ -1136,7 +1206,7 @@ pub fn kama_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -1429,7 +1499,7 @@ pub fn kama_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
@@ -2110,4 +2180,28 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_kama_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare a realistic input from the same dataset used elsewhere in this module
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let params = KamaParams::default();
+        let input = KamaInput::from_candles(&candles, "close", params);
+
+        // Baseline via Vec-returning API
+        let base = kama(&input)?;
+
+        // Preallocate output and compute via no-allocation API
+        let mut out = vec![0.0f64; candles.close.len()];
+        kama_into(&input, &mut out)?;
+
+        // Length and element-wise equality (NaN == NaN permitted)
+        assert_eq!(base.values.len(), out.len());
+        for (a, b) in base.values.iter().zip(out.iter()) {
+            let equal = (a.is_nan() && b.is_nan()) || (*a - *b).abs() <= 1e-12;
+            assert!(equal, "Mismatch: base={} vs into={}", a, b);
+        }
+        Ok(())
+    }
 }

@@ -1126,6 +1126,22 @@ pub fn chandelier_exit_with_kernel(
     })
 }
 
+/// Compute Chandelier Exit into caller-provided buffers (no allocations).
+///
+/// - Preserves NaN warmups exactly like `chandelier_exit()`.
+/// - `long_out.len()` and `short_out.len()` must equal the input length; returns the
+///   module's `InvalidPeriod` length error on mismatch.
+/// - Uses `Kernel::Auto` for dispatch and calls the existing compute-into path.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn chandelier_exit_into(
+    input: &ChandelierExitInput,
+    long_out: &mut [f64],
+    short_out: &mut [f64],
+) -> Result<(), ChandelierExitError> {
+    chandelier_exit_into_slices(long_out, short_out, input, Kernel::Auto)
+}
+
 // Into-slice APIs for zero-copy operations
 #[inline]
 pub fn chandelier_exit_into_slices(
@@ -3398,5 +3414,60 @@ mod tests {
             .unwrap();
         assert_eq!(out.rows, 2 * out.combos.len());
         assert_eq!(out.cols, c.close.len());
+    }
+
+    #[test]
+    fn test_chandelier_exit_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Synthetic small-but-nontrivial dataset (length ~256)
+        let len = 256usize;
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        let mut close = Vec::with_capacity(len);
+        for i in 0..len {
+            let base = 100.0 + (i as f64) * 0.01 + ((i % 7) as f64 - 3.0);
+            let c = base;
+            let h = c + 0.5 + 0.05 * ((i % 3) as f64);
+            let l = c - 0.5 - 0.05 * ((i % 2) as f64);
+            high.push(h);
+            low.push(l);
+            close.push(c);
+        }
+
+        let params = ChandelierExitParams::default();
+        let input = ChandelierExitInput::from_slices(&high, &low, &close, params);
+
+        // Baseline via Vec-returning API
+        let baseline = chandelier_exit(&input)?;
+
+        // Preallocate outputs and call the new into API
+        let mut out_long = vec![0.0; len];
+        let mut out_short = vec![0.0; len];
+        chandelier_exit_into(&input, &mut out_long, &mut out_short)?;
+
+        assert_eq!(out_long.len(), baseline.long_stop.len());
+        assert_eq!(out_short.len(), baseline.short_stop.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(out_long[i], baseline.long_stop[i]),
+                "long_stop mismatch at {}: into={} api={}",
+                i,
+                out_long[i],
+                baseline.long_stop[i]
+            );
+            assert!(
+                eq_or_both_nan(out_short[i], baseline.short_stop[i]),
+                "short_stop mismatch at {}: into={} api={}",
+                i,
+                out_short[i],
+                baseline.short_stop[i]
+            );
+        }
+
+        Ok(())
     }
 }

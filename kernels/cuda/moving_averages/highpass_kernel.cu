@@ -1,5 +1,10 @@
 // CUDA kernels for the single-pole High-Pass filter (optimized).
 //
+// Exported symbols (referenced by Rust wrapper):
+//   - highpass_batch_f32
+//   - highpass_many_series_one_param_time_major_f32
+// Keep these names in sync with cust::Module::get_function lookups.
+//
 // - FP64 internal math preserved to match the CPU reference path.
 // - Uses sincospi() to compute sin/cos together for theta = 2*pi/period.
 // - Grid-stride loops so one launch scales across SMs and problem sizes.

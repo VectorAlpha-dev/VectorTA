@@ -1518,6 +1518,21 @@ pub fn otto(input: &OttoInput) -> Result<OttoOutput, OttoError> {
     otto_with_kernel(input, Kernel::Auto)
 }
 
+/// Write OTTO outputs (HOTT and LOTT) into caller-provided buffers without allocating.
+///
+/// - Preserves the indicator's existing NaN warmup behavior for HOTT when using non-"VAR" MA types.
+/// - `hott_out.len()` and `lott_out.len()` must equal the input length; otherwise an `InvalidPeriod` error is returned.
+/// - Equivalent to `otto_with_kernel(input, Kernel::Auto)` but writes in-place.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn otto_into(
+    input: &OttoInput,
+    hott_out: &mut [f64],
+    lott_out: &mut [f64],
+) -> Result<(), OttoError> {
+    otto_into_slices(hott_out, lott_out, input, Kernel::Auto)
+}
+
 // ============= BATCH PROCESSING =============
 
 #[derive(Clone, Debug)]
@@ -2948,4 +2963,53 @@ mod tests {
     // Add poison check for single operations
     #[cfg(debug_assertions)]
     generate_all_otto_tests!(check_no_poison_single);
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_otto_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare synthetic input with enough length to satisfy OTTO's warmup
+        let n = 512usize;
+        let data: Vec<f64> = (0..n)
+            .map(|i| ((i as f64) * 0.013).sin() * 0.5 + 1.0)
+            .collect();
+
+        let input = super::OttoInput::from_slice(&data, super::OttoParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = super::otto(&input)?;
+
+        // In-place outputs
+        let mut hott_out = vec![0.0f64; n];
+        let mut lott_out = vec![0.0f64; n];
+
+        // Native into API (no allocations)
+        super::otto_into(&input, &mut hott_out, &mut lott_out)?;
+
+        assert_eq!(baseline.hott.len(), n);
+        assert_eq!(baseline.lott.len(), n);
+        assert_eq!(hott_out.len(), n);
+        assert_eq!(lott_out.len(), n);
+
+        // Helper: NaN equals NaN; otherwise exact equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline.hott[i], hott_out[i]),
+                "HOTT mismatch at {i}: got {}, expected {}",
+                hott_out[i],
+                baseline.hott[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.lott[i], lott_out[i]),
+                "LOTT mismatch at {i}: got {}, expected {}",
+                lott_out[i],
+                baseline.lott[i]
+            );
+        }
+
+        Ok(())
+    }
 }

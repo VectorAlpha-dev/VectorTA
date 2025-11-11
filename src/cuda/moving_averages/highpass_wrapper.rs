@@ -22,23 +22,23 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaHighpassError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Launch configuration too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaHighpassError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaHighpassError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaHighpassError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaHighpassError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -92,10 +92,9 @@ pub struct CudaHighpass {
 
 impl CudaHighpass {
     pub fn new(device_id: usize) -> Result<Self, CudaHighpassError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/highpass_kernel.ptx"));
         // Prefer DetermineTargetFromContext + O4, with optional register cap
@@ -112,10 +111,8 @@ impl CudaHighpass {
         }
         let module = Module::from_ptx(ptx, &jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -132,9 +129,7 @@ impl CudaHighpass {
 
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaHighpassError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))
+        Ok(self.stream.synchronize()?)
     }
 
     pub fn set_policy(&mut self, policy: CudaHighpassPolicy) {
@@ -159,6 +154,26 @@ impl CudaHighpass {
 
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
+    }
+
+    #[inline]
+    fn will_fit_checked(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaHighpassError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaHighpassError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -316,14 +331,13 @@ impl CudaHighpass {
         let mut func = self
             .module
             .get_function("highpass_batch_f32")
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaHighpassError::MissingKernelSymbol { name: "highpass_batch_f32" })?;
         // Prefer L1 for memory-lean kernels; ignore if unsupported.
         func.set_cache_config(CacheConfig::PreferL1).ok();
 
         // Use CUDA occupancy helpers to pick a good block size.
-        let (suggested_block_x, _min_grid) = func
-            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        let (suggested_block_x, _min_grid) =
+            func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
 
         // Policy override or auto
         let block_x = match self.policy.batch {
@@ -335,12 +349,27 @@ impl CudaHighpass {
                 Some(BatchKernelSelected::Plain { block_x });
         }
 
-        const MAX_ROWS_PER_LAUNCH: usize = 65_535; // grid.x chunking (matching ALMA grid.y policy)
+        const MAX_ROWS_PER_LAUNCH: usize = 65_535; // baseline cap
+        let dev = Device::get_device(self.device_id)?;
+        let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as usize;
+        let max_rows_cap = core::cmp::min(MAX_ROWS_PER_LAUNCH, max_grid_x);
+        let max_threads_per_block = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let mut launched = 0usize;
         while launched < n_combos {
-            let rows = (n_combos - launched).min(MAX_ROWS_PER_LAUNCH);
-            let grid: GridSize = (rows as u32, 1, 1).into();
+            let rows = (n_combos - launched).min(max_rows_cap);
+            let gx = rows as u32;
+            let grid: GridSize = (gx, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
+            if block_x > max_threads_per_block {
+                return Err(CudaHighpassError::LaunchConfigTooLarge {
+                    gx,
+                    gy: 1,
+                    gz: 1,
+                    bx: block_x,
+                    by: 1,
+                    bz: 1,
+                });
+            }
             // Record selection for BENCH_DEBUG once
             unsafe {
                 (*(self as *const _ as *mut CudaHighpass)).last_batch =
@@ -361,9 +390,7 @@ impl CudaHighpass {
                     &mut combos_i as *mut _ as *mut std::ffi::c_void,
                     &mut out_ptr as *mut _ as *mut std::ffi::c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
 
             launched += rows;
@@ -381,37 +408,39 @@ impl CudaHighpass {
     ) -> Result<DeviceArrayF32, CudaHighpassError> {
         let n_combos = combos.len();
 
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + out_bytes;
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(periods_bytes)
+            .and_then(|b| b.checked_add(out_bytes))
+            .ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaHighpassError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
         // Periods -> i32 once
         let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
 
         // Async allocations and copies on NON_BLOCKING stream.
         // Safety: synchronize before returning so inputs outlive kernel work.
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
-                .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
         self.launch_batch_kernel(&d_prices, &d_periods, series_len, n_combos, &mut d_out)?;
 
         // Keep inputs alive until kernel completes
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -446,14 +475,8 @@ impl CudaHighpass {
         }
         let arr = self.run_batch_kernel(data_f32, &combos, series_len)?;
         // Async D2H copy then a single stream sync
-        unsafe {
-            arr.buf
-                .async_copy_to(out, &self.stream)
-                .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
-        }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        unsafe { arr.buf.async_copy_to(out, &self.stream)?; }
+        self.stream.synchronize()?;
         Ok((arr.rows, arr.cols, combos))
     }
 
@@ -473,14 +496,13 @@ impl CudaHighpass {
     > {
         let (combos, _fv, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let arr = self.run_batch_kernel(data_f32, &combos, series_len)?;
-        let mut pinned =
-            unsafe { cust::memory::LockedBuffer::<f32>::uninitialized(arr.rows * arr.cols) }
-                .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
-        unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream) }
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        let mut pinned = unsafe {
+            cust::memory::LockedBuffer::<f32>::uninitialized(
+                arr.rows.checked_mul(arr.cols).ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?,
+            )
+        }?;
+        unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
+        self.stream.synchronize()?;
         Ok((arr.rows, arr.cols, combos, pinned))
     }
 
@@ -593,14 +615,13 @@ impl CudaHighpass {
         let mut func = self
             .module
             .get_function("highpass_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaHighpassError::MissingKernelSymbol { name: "highpass_many_series_one_param_time_major_f32" })?;
         // Prefer L1 for memory-lean kernels; ignore if unsupported.
         func.set_cache_config(CacheConfig::PreferL1).ok();
 
         // Occupancy recommendation
-        let (suggested_block_x, min_grid) = func
-            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        let (suggested_block_x, _min_grid) =
+            func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => suggested_block_x.max(128),
@@ -612,6 +633,15 @@ impl CudaHighpass {
         }
 
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        // Validate against device limits
+        let dev = Device::get_device(self.device_id)?;
+        let max_block = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if block_x > max_block || grid_x > max_grid_x {
+            return Err(CudaHighpassError::LaunchConfigTooLarge {
+                gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1,
+            });
+        }
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -628,9 +658,7 @@ impl CudaHighpass {
                 &mut rows_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         unsafe {
@@ -650,28 +678,30 @@ impl CudaHighpass {
     ) -> Result<DeviceArrayF32, CudaHighpassError> {
         let period = Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        let prices_bytes = data_tm_f32.len() * std::mem::size_of::<f32>();
-        let out_bytes = data_tm_f32.len() * std::mem::size_of::<f32>();
-        let required = prices_bytes + out_bytes;
+        let elems = data_tm_f32.len();
+        let prices_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaHighpassError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(
+                cols.checked_mul(rows).ok_or_else(|| CudaHighpassError::InvalidInput("size overflow".into()))?,
+                &self.stream,
+            )
+        }?;
 
         self.launch_many_series_kernel(&d_prices, period, cols, rows, &mut d_out)?;
         // Inputs created here; ensure they outlive the launch.
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHighpassError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,

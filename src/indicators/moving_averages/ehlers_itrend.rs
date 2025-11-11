@@ -151,6 +151,15 @@ pub enum EhlersITrendError {
     InvalidBatchKernel,
     #[error("ehlers_itrend: Invalid batch range")]
     InvalidBatchRange,
+    // Additional explicit variants for richer error typing (kept additive to avoid breaking callers)
+    #[error("ehlers_itrend: Output length mismatch. expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("ehlers_itrend: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("ehlers_itrend: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("ehlers_itrend: arithmetic overflow while computing {context}")]
+    SizeOverflow { context: &'static str },
 }
 
 #[inline]
@@ -383,6 +392,18 @@ pub fn ehlers_itrend_with_kernel(
     Ok(EhlersITrendOutput { values: out })
 }
 
+/// Writes Ehlers Instantaneous Trend into the provided buffer without allocations.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API.
+/// - The `out` length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+pub fn ehlers_itrend_into(
+    input: &EhlersITrendInput,
+    out: &mut [f64],
+) -> Result<(), EhlersITrendError> {
+    ehlers_itrend_into_slice(out, input, Kernel::Auto)
+}
+
 /// Write directly to output slice - no allocations
 pub fn ehlers_itrend_into_slice(
     dst: &mut [f64],
@@ -391,7 +412,7 @@ pub fn ehlers_itrend_into_slice(
 ) -> Result<(), EhlersITrendError> {
     let (data, warmup_bars, max_dc, first, warm, chosen) = ehlers_itrend_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(EhlersITrendError::InvalidOutputLen {
+        return Err(EhlersITrendError::OutputLengthMismatch {
             expected: data.len(),
             got: dst.len(),
         });
@@ -1091,6 +1112,12 @@ fn ehlers_itrend_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    // Guard total size to avoid panics/UB on very large grids
+    rows
+        .checked_mul(cols)
+        .ok_or(EhlersITrendError::SizeOverflow {
+            context: "rows*cols in batch output matrix",
+        })?;
 
     // Step 1: Allocate uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1162,6 +1189,11 @@ fn ehlers_itrend_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    rows
+        .checked_mul(cols)
+        .ok_or(EhlersITrendError::SizeOverflow {
+            context: "rows*cols in batch output matrix (into)",
+        })?;
     debug_assert_eq!(out.len(), rows * cols);
 
     // Reinterpret out as MaybeUninit for row processing
@@ -1247,21 +1279,24 @@ impl EhlersITrendBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &EhlersITrendBatchRange) -> Result<Vec<EhlersITrendParams>, EhlersITrendError> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Option<Vec<usize>> {
+    // Keep external behavior stable for tests:
+    // - step == 0 → singleton only if start == end; otherwise error maps to InvalidBatchRange
+    // - reversed bounds (start > end) → error maps to InvalidBatchRange
+    fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, EhlersITrendError> {
         if step == 0 {
             return if start == end {
-                Some(vec![start])
+                Ok(vec![start])
             } else {
-                None
+                Err(EhlersITrendError::InvalidRange { start, end, step })
             };
         }
         if start > end {
-            return None;
+            return Err(EhlersITrendError::InvalidBatchRange);
         }
-        Some((start..=end).step_by(step).collect())
+        Ok((start..=end).step_by(step).collect())
     }
-    let warmups = axis(r.warmup_bars).ok_or(EhlersITrendError::InvalidBatchRange)?;
-    let max_dcs = axis(r.max_dc_period).ok_or(EhlersITrendError::InvalidBatchRange)?;
+    let warmups = axis(r.warmup_bars).map_err(|_| EhlersITrendError::InvalidBatchRange)?;
+    let max_dcs = axis(r.max_dc_period).map_err(|_| EhlersITrendError::InvalidBatchRange)?;
     let mut out = Vec::with_capacity(warmups.len() * max_dcs.len());
     for &w in &warmups {
         for &m in &max_dcs {
@@ -1577,7 +1612,9 @@ pub fn ehlers_itrend_cuda_batch_dev_py(
         cuda.ehlers_itrend_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-
+    // CAI v3 note: The CUDA wrapper synchronizes its stream before returning the device
+    // buffer, so __cuda_array_interface__ on the returned Python class omits the
+    // "stream" key (data is ready). Strides and version=3 are provided by DeviceArrayF32Py.
     Ok(DeviceArrayF32Py { inner })
 }
 
@@ -1621,7 +1658,7 @@ pub fn ehlers_itrend_cuda_many_series_one_param_dev_py(
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-
+    // CAI v3 note: producing stream is synchronized in the wrapper; "stream" key omitted.
     Ok(DeviceArrayF32Py { inner })
 }
 
@@ -1769,6 +1806,51 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_ehlers_itrend_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a non-trivial input series (trend + sinusoid)
+        let n = 256usize;
+        let data: Vec<f64> = (0..n)
+            .map(|i| (i as f64) * 0.01 + ((i as f64) * 0.1).sin())
+            .collect();
+
+        let input = EhlersITrendInput::from_slice(&data, EhlersITrendParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = ehlers_itrend(&input)?.values;
+
+        // Into-API writes into provided buffer
+        let mut out = vec![0.0; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            ehlers_itrend_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native symbol is not present; fall back to slice variant
+            ehlers_itrend_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: NaN == NaN, else exact or tight epsilon
+        fn equal(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || a == b || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..n {
+            assert!(
+                equal(baseline[i], out[i]),
+                "Mismatch at {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_itrend_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

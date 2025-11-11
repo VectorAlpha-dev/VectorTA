@@ -26,6 +26,7 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Keep TILE in sync with kTile() in the CUDA kernels.
@@ -72,22 +73,23 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaEpmaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("arithmetic overflow in size computation: {context}")]
+    SizeOverflow { context: &'static str },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaEpmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaEpmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaEpmaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaEpmaError {}
 
 pub struct CudaEpma {
     module: Module,
@@ -103,10 +105,9 @@ pub struct CudaEpma {
 
 impl CudaEpma {
     pub fn new(device_id: usize) -> Result<Self, CudaEpmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/epma_kernel.ptx"));
         // Prefer context-derived target and most optimized JIT level.
@@ -117,16 +118,14 @@ impl CudaEpma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaEpmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -165,9 +164,7 @@ impl CudaEpma {
 
     /// Expose synchronize for benches/tests that pre-stage device buffers.
     pub fn synchronize(&self) -> Result<(), CudaEpmaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaEpmaError::from)
     }
 
     fn mem_check_enabled() -> bool {
@@ -177,8 +174,17 @@ impl CudaEpma {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+
+    #[inline]
+    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaEpmaError> {
+        if !Self::mem_check_enabled() { return Ok(()); }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaEpmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes });
+            }
+        }
+        Ok(())
     }
 
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -241,13 +247,9 @@ impl CudaEpma {
 
     fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
         let (start, end, step) = axis;
-        if step == 0 || start == end {
-            vec![start]
-        } else if start <= end {
-            (start..=end).step_by(step).collect()
-        } else {
-            vec![start]
-        }
+        if step == 0 { return vec![start]; }
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        (lo..=hi).step_by(step).collect()
     }
 
     fn expand_range(range: &EpmaBatchRange) -> Vec<EpmaParams> {
@@ -339,7 +341,7 @@ impl CudaEpma {
         let func = self
             .module
             .get_function("epma_batch_f32")
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEpmaError::MissingKernelSymbol { name: "epma_batch_f32" })?;
 
         // Chunk over grid.y to respect device limit and offset params/output pointers per chunk.
         for (start_combo, len_combo) in Self::grid_y_chunks(n_combos) {
@@ -371,7 +373,7 @@ impl CudaEpma {
                 // No dynamic shared memory in kernels now.
                 self.stream
                     .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+                    .map_err(CudaEpmaError::from)?;
             }
         }
         unsafe {
@@ -380,6 +382,15 @@ impl CudaEpma {
         }
         self.maybe_log_batch_debug();
         Ok(())
+    }
+
+    #[inline]
+    fn checked_mul_usize(a: usize, b: usize, context: &'static str) -> Result<usize, CudaEpmaError> {
+        a.checked_mul(b).ok_or(CudaEpmaError::SizeOverflow { context })
+    }
+    #[inline]
+    fn checked_add_usize(a: usize, b: usize, context: &'static str) -> Result<usize, CudaEpmaError> {
+        a.checked_add(b).ok_or(CudaEpmaError::SizeOverflow { context })
     }
 
     fn run_batch_kernel(
@@ -398,28 +409,26 @@ impl CudaEpma {
             offsets_i32[idx] = prm.offset.unwrap() as i32;
         }
 
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let offsets_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + offsets_bytes + out_bytes;
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let prices_bytes = Self::checked_mul_usize(series_len, sz_f32, "prices_bytes")?;
+        let periods_bytes = Self::checked_mul_usize(n_combos, sz_i32, "periods_bytes")?;
+        let offsets_bytes = Self::checked_mul_usize(n_combos, sz_i32, "offsets_bytes")?;
+        let out_elems = Self::checked_mul_usize(n_combos, series_len, "out_elems")?;
+        let out_bytes = Self::checked_mul_usize(out_elems, sz_f32, "out_bytes")?;
+        let required = Self::checked_add_usize(
+            Self::checked_add_usize(
+                Self::checked_add_usize(prices_bytes, periods_bytes, "bytes_sum_0")?,
+                offsets_bytes, "bytes_sum_1"
+            )?, out_bytes, "bytes_sum_2"
+        )?;
         let headroom = 64 * 1024 * 1024; // 64 MB safety margin (align with ALMA)
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaEpmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
-        let d_offsets = DeviceBuffer::from_slice(&offsets_i32)
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let d_offsets = DeviceBuffer::from_slice(&offsets_i32)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -432,9 +441,7 @@ impl CudaEpma {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -469,9 +476,7 @@ impl CudaEpma {
             )));
         }
         let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len, max_period)?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))
+        arr.buf.copy_to(out).map_err(CudaEpmaError::from)
     }
 
     /// Batch into pinned host memory (optional fast path).
@@ -505,20 +510,17 @@ impl CudaEpma {
 
         // Allocate device buffers
         let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+            .map_err(CudaEpmaError::from)?;
         let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
-        let d_offsets = DeviceBuffer::from_slice(&offsets_i32)
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+            .map_err(CudaEpmaError::from)?;
+        let d_offsets = DeviceBuffer::from_slice(&offsets_i32).map_err(CudaEpmaError::from)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }.map_err(CudaEpmaError::from)?;
 
         // Async H->D copy from pinned host
         unsafe {
             d_prices
                 .async_copy_from(data_pinned.as_slice(), &self.stream)
-                .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+                .map_err(CudaEpmaError::from)?;
         }
 
         // Launch kernel (shared mem = 0 inside launch) then async D->H to pinned host
@@ -536,13 +538,11 @@ impl CudaEpma {
         unsafe {
             d_out
                 .async_copy_to(out_pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+                .map_err(CudaEpmaError::from)?;
         }
 
         // Wait for kernel + copies to finish
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaEpmaError::from)
     }
 
     pub fn epma_batch_device(
@@ -665,7 +665,7 @@ impl CudaEpma {
         let func = self
             .module
             .get_function("epma_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEpmaError::MissingKernelSymbol { name: "epma_many_series_one_param_time_major_f32" })?;
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -687,7 +687,7 @@ impl CudaEpma {
             // No dynamic shared memory in kernels now.
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+                .map_err(CudaEpmaError::from)?;
         }
         unsafe {
             let this = self as *const _ as *mut CudaEpma;
@@ -706,25 +706,23 @@ impl CudaEpma {
         period: usize,
         offset: usize,
     ) -> Result<DeviceArrayF32, CudaEpmaError> {
-        let total = cols * rows;
-        let prices_bytes = total * std::mem::size_of::<f32>();
-        let first_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = total * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_bytes + out_bytes;
+        let total = Self::checked_mul_usize(cols, rows, "tm_total")?;
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let prices_bytes = Self::checked_mul_usize(total, sz_f32, "tm_prices_bytes")?;
+        let first_bytes = Self::checked_mul_usize(cols, sz_i32, "tm_first_bytes")?;
+        let out_bytes = Self::checked_mul_usize(total, sz_f32, "tm_out_bytes")?;
+        let required = Self::checked_add_usize(
+            Self::checked_add_usize(prices_bytes, first_bytes, "tm_bytes_sum0")?,
+            out_bytes,
+            "tm_bytes_sum1",
+        )?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaEpmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(first_valids)
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first_valids = DeviceBuffer::from_slice(first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
         self.launch_many_series_kernel(
             &d_prices,
@@ -736,9 +734,7 @@ impl CudaEpma {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -776,9 +772,7 @@ impl CudaEpma {
         }
         let arr =
             self.epma_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, params)?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaEpmaError::Cuda(e.to_string()))
+        arr.buf.copy_to(out).map_err(CudaEpmaError::from)
     }
 
     pub fn epma_many_series_one_param_time_major_device(
@@ -811,6 +805,25 @@ impl CudaEpma {
             d_first_valids,
             d_out,
         )
+    }
+}
+
+// ----- Optional CUDA Array Interface (v3) helper for DeviceArrayF32 -----
+// Stream semantics: producing stream is synchronized before returning, so
+// CAI `stream` may be omitted per v3 spec.
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl super::alma_wrapper::DeviceArrayF32 {
+    pub fn cai_v3_dict<'py>(&self, py: pyo3::Python<'py>) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        let ptr = self.buf.as_device_ptr().as_raw() as usize;
+        let row_stride = self.cols.checked_mul(std::mem::size_of::<f32>()).unwrap_or(0);
+        let col_stride = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("strides", (row_stride as isize, col_stride as isize))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("data", (ptr, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
     }
 }
 

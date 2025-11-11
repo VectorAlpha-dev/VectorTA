@@ -191,8 +191,14 @@ pub enum HighPassError {
         "highpass: Invalid alpha calculation. cos_val is too close to zero: cos_val = {cos_val}"
     )]
     InvalidAlpha { cos_val: f64 },
-    #[error("highpass: Invalid kernel type for batch operation")]
-    InvalidKernel,
+    #[error("highpass: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("highpass: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("highpass: Invalid kernel type for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("highpass: dimensions too large to allocate: rows = {rows}, cols = {cols}")]
+    DimensionsTooLarge { rows: usize, cols: usize },
 }
 
 #[inline]
@@ -202,6 +208,18 @@ pub fn highpass(input: &HighPassInput) -> Result<HighPassOutput, HighPassError> 
 
 #[inline]
 fn highpass_into_internal(input: &HighPassInput, out: &mut [f64]) -> Result<(), HighPassError> {
+    highpass_with_kernel_into(input, Kernel::Auto, out)
+}
+
+/// Write High-Pass outputs into a caller-provided buffer without allocating.
+///
+/// - Preserves the indicator’s warmup semantics (High-Pass computes from the first
+///   valid sample; no NaN warmup prefix is used).
+/// - The `out` slice length must exactly match the input length.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn highpass_into(input: &HighPassInput, out: &mut [f64]) -> Result<(), HighPassError> {
     highpass_with_kernel_into(input, Kernel::Auto, out)
 }
 
@@ -284,9 +302,9 @@ fn highpass_with_kernel_into(
 
     // Ensure output buffer is the correct size
     if out.len() != data.len() {
-        return Err(HighPassError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
+        return Err(HighPassError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
 
@@ -630,7 +648,13 @@ fn expand_grid(r: &HighPassBatchRange) -> Vec<HighPassParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            (start..=end).step_by(step).collect()
+        } else {
+            let mut v: Vec<usize> = (end..=start).step_by(step).collect();
+            v.reverse();
+            v
+        }
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -650,7 +674,7 @@ pub fn highpass_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => return Err(HighPassError::InvalidKernel),
+        _ => return Err(HighPassError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -691,14 +715,20 @@ fn highpass_batch_inner(
     let cols = data.len();
 
     if combos.is_empty() {
-        return Err(HighPassError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(HighPassError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
     if data.is_empty() {
         return Err(HighPassError::EmptyInputData);
     }
+
+    // checked rows*cols to prevent overflow before allocations
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(HighPassError::DimensionsTooLarge { rows, cols })?;
 
     // Find first valid value
     let first = data
@@ -825,6 +855,47 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     use proptest::prelude::*;
     use std::error::Error;
+
+    #[test]
+    fn test_highpass_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare non-trivial synthetic data (length 512)
+        let n = 512usize;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64;
+            let v = (t * 0.07).sin() + (t * 0.013).cos() + 0.001 * t; // mix of signals
+            data.push(v);
+        }
+
+        // Default params (period=48)
+        let input = HighPassInput::from_slice(&data, HighPassParams::default());
+
+        // Baseline via Vec-returning API
+        let base = highpass(&input)?.values;
+
+        // Preallocate output and compute via into API
+        let mut out = vec![0.0f64; n];
+        super::highpass_into(&input, &mut out)?;
+
+        assert_eq!(base.len(), out.len());
+
+        // Equality check: exact for finite values; treat NaN==NaN if any
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for (i, (&a, &b)) in base.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "mismatch at {}: api={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_highpass_partial_params(
         test_name: &str,
@@ -1498,6 +1569,17 @@ fn highpass_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<HighPassParams>, HighPassError> {
     let combos = expand_grid(sweep);
+    let rows = combos.len();
+    let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(HighPassError::DimensionsTooLarge { rows, cols })?;
+    if out.len() != expected {
+        return Err(HighPassError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
     let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
     // Validate alpha for all parameter combinations
@@ -1823,9 +1905,9 @@ pub fn highpass_into_slice(
     }
 
     if dst.len() != data.len() {
-        return Err(HighPassError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(HighPassError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 

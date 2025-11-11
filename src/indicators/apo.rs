@@ -302,6 +302,32 @@ pub fn apo_with_kernel(input: &ApoInput, kernel: Kernel) -> Result<ApoOutput, Ap
     Ok(ApoOutput { values: out })
 }
 
+/// Writes APO values into a caller-provided output slice without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (prefix filled
+///   with a quiet-NaN pattern).
+/// - The `out` length must match the input length.
+#[cfg(not(feature = "wasm"))]
+pub fn apo_into(input: &ApoInput, out: &mut [f64]) -> Result<(), ApoError> {
+    let (data, first, short, long, len, chosen) = apo_prepare(input, Kernel::Auto)?;
+    if out.len() != len {
+        return Err(ApoError::MismatchedOutputLen {
+            expected: len,
+            got: out.len(),
+        });
+    }
+
+    // Prefill NaN warmup prefix using the same quiet-NaN pattern as allocations
+    if first > 0 {
+        for v in &mut out[..first] {
+            *v = f64::from_bits(0x7ff8_0000_0000_0000);
+        }
+    }
+
+    apo_compute_into(data, first, short, long, chosen, out);
+    Ok(())
+}
+
 // --- Scalar Kernel
 
 #[inline(always)]
@@ -1386,6 +1412,48 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_apo_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a small but non-trivial input with a NaN warmup prefix
+        let mut data: Vec<f64> = Vec::with_capacity(256);
+        for _ in 0..5 {
+            data.push(f64::NAN);
+        }
+        for i in 0..251 {
+            // Mix of linear trend and mild oscillation
+            let x = i as f64;
+            data.push(100.0 + 0.1 * x + (x * 0.05).sin());
+        }
+
+        let input = ApoInput::from_slice(&data, ApoParams::default());
+
+        // Baseline via existing Vec-returning API
+        let baseline = apo(&input)?.values;
+
+        // Preallocate output and call the new into API
+        let mut out = vec![0.0; data.len()];
+        apo_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Equality helper: NaN == NaN or exact equality; allow tiny epsilon fallback
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for (i, (a, b)) in baseline.iter().copied().zip(out.iter().copied()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "mismatch at index {}: api={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
+    }
 
     fn check_apo_partial_params(
         test_name: &str,
