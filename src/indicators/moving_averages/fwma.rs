@@ -283,6 +283,14 @@ pub enum FwmaError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("fwma: Fibonacci sum is zero. Cannot normalize weights.")]
     ZeroFibonacciSum,
+    #[error("fwma: Output buffer length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("fwma: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("fwma: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("fwma: arithmetic overflow while computing {context}")]
+    ArithmeticOverflow { context: &'static str },
 }
 
 #[inline]
@@ -407,10 +415,7 @@ pub fn fwma_into_slice(dst: &mut [f64], input: &FwmaInput, kern: Kernel) -> Resu
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(FwmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
+        return Err(FwmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
     // Prefill warmup region with the same quiet-NaN pattern as alloc_with_nan_prefix
@@ -435,10 +440,7 @@ pub fn fwma_into(input: &FwmaInput, out: &mut [f64]) -> Result<(), FwmaError> {
     let (data, fib, period, first, chosen) = fwma_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(FwmaError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
-        });
+        return Err(FwmaError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
     // Prefill warmup region with identical quiet-NaN pattern used by Vec-returning API
@@ -1008,11 +1010,8 @@ pub fn fwma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(FwmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+        other => {
+            return Err(FwmaError::InvalidKernelForBatch(other));
         }
     };
     let simd = match kernel {
@@ -1053,7 +1052,8 @@ fn expand_grid(r: &FwmaBatchRange) -> Vec<FwmaParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        (lo..=hi).step_by(step).collect()
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -1116,6 +1116,13 @@ fn fwma_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+
+    // rows * cols overflow guard (before allocation)
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(FwmaError::ArithmeticOverflow {
+            context: "rows*cols in fwma_batch_inner",
+        })?;
 
     // Use zero-copy allocation
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1184,7 +1191,12 @@ fn fwma_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    let cap = rows * max_p;
+    // rows * max_p overflow guard
+    let cap = rows
+        .checked_mul(max_p)
+        .ok_or(FwmaError::ArithmeticOverflow {
+            context: "rows*max_p in fwma_batch_inner_into",
+        })?;
     let mut aligned = AlignedVec::with_capacity(cap);
     let flat_fib = aligned.as_mut_slice();
 
@@ -2476,7 +2488,8 @@ pub fn fwma_batch_metadata_js(
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        (lo..=hi).step_by(step).collect()
     }
 
     let periods = axis_usize((period_start, period_end, period_step));
@@ -2619,7 +2632,12 @@ pub fn fwma_batch_into(
         let rows = combos.len();
         let cols = len;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        // rows * cols overflow guard
+        let total = rows
+            .checked_mul(cols)
+            .ok_or(JsValue::from_str("fwma_batch_into: rows*cols overflow"))?;
+
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         // Initialize warmup NaNs per row (mirror other APIs)
         let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);

@@ -295,6 +295,15 @@ pub enum DmaError {
 
     #[error("dma: Invalid Hull MA type: {value}. Must be 'WMA' or 'EMA'.")]
     InvalidHullMAType { value: String },
+
+    #[error("dma: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("dma: Invalid range expansion: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("dma: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline(always)]
@@ -336,9 +345,9 @@ pub fn dma_into(input: &DmaInput, out: &mut [f64]) -> Result<(), DmaError> {
         dma_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(DmaError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
+        return Err(DmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
 
@@ -2180,7 +2189,13 @@ fn expand_grid_dma(r: &DmaBatchRange) -> Vec<DmaParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return (start..=end).step_by(step).collect();
+        }
+        // reversed bounds allowed: produce decreasing sequence
+        let mut v: Vec<usize> = (end..=start).step_by(step).collect();
+        v.reverse();
+        v
     }
 
     let hull_lengths = axis_usize(r.hull_length);
@@ -2236,8 +2251,20 @@ fn dma_batch_inner(
         return Err(DmaError::EmptyInputData);
     }
     if rows == 0 {
-        return Err(DmaError::EmptyInputData);
+        return Err(DmaError::InvalidRange {
+            start: sweep.hull_length.0,
+            end: sweep.hull_length.1,
+            step: sweep.hull_length.2,
+        });
     }
+    // checked multiplication for allocation size
+    let _cap = rows
+        .checked_mul(cols)
+        .ok_or(DmaError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
@@ -2286,12 +2313,9 @@ pub fn dma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(DmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        } // ALMA parity
+        other => {
+            return Err(DmaError::InvalidKernelForBatch(other))
+        }
     };
     // map batch→SIMD like ALMA
     let simd = match kernel {
@@ -2313,9 +2337,10 @@ fn dma_batch_inner_into(
 ) -> Result<Vec<DmaParams>, DmaError> {
     let combos = expand_grid_dma(sweep);
     if combos.is_empty() {
-        return Err(DmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(DmaError::InvalidRange {
+            start: sweep.hull_length.0,
+            end: sweep.hull_length.1,
+            step: sweep.hull_length.2,
         });
     }
 
@@ -2490,11 +2515,8 @@ pub fn dma_batch_py<'py>(
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
                 Kernel::ScalarBatch => Kernel::Scalar,
-                _ => {
-                    return Err(DmaError::InvalidPeriod {
-                        period: 0,
-                        data_len: 0,
-                    })
+                other => {
+                    return Err(DmaError::InvalidKernelForBatch(other))
                 }
             };
             dma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)

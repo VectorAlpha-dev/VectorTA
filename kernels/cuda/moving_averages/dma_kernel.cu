@@ -38,19 +38,29 @@ float dma_quantized_best_gain(float x,
                               float ec_prev,
                               float alpha_e,
                               int   ema_gain_limit) {
-    // pred(g) = ec_prev + alpha_e*( (e0_prev + g*(x-ec_prev)) - ec_prev )
-    // Minimize |x - pred(g)| -> solve for zero crossing, then quantize.
-    const float base  = fmaf(alpha_e, e0_prev - ec_prev, ec_prev);
-    const float denom = alpha_e * (x - ec_prev);
-    const float step  = 0.1f;
-    const float gmax  = (float)ema_gain_limit * step;
+    // CPU-equivalent two-candidate compare with deterministic tie-break
+    // g in {0, 0.1, ..., ema_gain_limit*0.1}; tie -> lower gridpoint
+    const float one_minus_alpha_e = 1.0f - alpha_e;
+    const float base  = fmaf(alpha_e, e0_prev, one_minus_alpha_e * ec_prev);
+    const float t     = alpha_e * (x - ec_prev);
+    const float r     = x - base;
 
-    if (fabsf(denom) < 1e-20f) return 0.0f;
+    const float EPS = 1e-20f;
+    if (fabsf(t) <= EPS) return 0.0f;
 
-    float g_est = (x - base) / denom;
-    float g = nearbyintf(g_est / step) * step;  // round to nearest 0.1
-    g = fminf(gmax, fmaxf(0.0f, g));
-    return g;
+    const float step = 0.1f;
+    const int   limit = ema_gain_limit; // number of 0.1 steps
+    float target = (r / t) / step;      // equals (r/t) * 10
+
+    int i0 = (int)floorf(target);
+    if (i0 < 0) i0 = 0; else if (i0 > limit) i0 = limit;
+    int i1 = (i0 < limit) ? (i0 + 1) : i0;
+
+    const float g0 = i0 * step;
+    const float g1 = i1 * step;
+    const float e0 = fabsf(r - t * g0);
+    const float e1 = fabsf(r - t * g1);
+    return (e0 <= e1) ? g0 : g1;
 }
 
 // Compute the updated ec value using the quantized optimal gain.

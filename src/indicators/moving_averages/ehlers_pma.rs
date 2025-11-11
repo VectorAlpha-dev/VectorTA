@@ -223,6 +223,15 @@ pub enum EhlersPmaError {
 
     #[error("ehlers_pma: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
+
+    #[error("ehlers_pma: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("ehlers_pma: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("ehlers_pma: invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 /// Computes the Ehlers Predictive Moving Average with automatic kernel selection.
@@ -501,9 +510,15 @@ pub fn ehlers_pma_into_flat_with_kernel(
 
     let rows = 2usize;
     let cols = len;
-    if out.len() != rows * cols {
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(EhlersPmaError::InvalidPeriod {
+            period: rows.saturating_mul(cols),
+            data_len: out.len(),
+        })?;
+    if out.len() != expected {
         return Err(EhlersPmaError::InvalidPeriod {
-            period: rows * cols,
+            period: expected,
             data_len: out.len(),
         });
     }
@@ -1120,6 +1135,24 @@ pub fn ehlers_pma_batch_py<'py>(
     ehlers_pma_flat_py(py, data, kernel)
 }
 
+// Robust usize range expansion for batch-style sweeps.
+// step == 0 => singleton; reversed bounds allowed (inclusive count).
+#[inline]
+fn usize_range_len(range: (usize, usize, usize)) -> Result<usize, EhlersPmaError> {
+    let (start, end, step) = range;
+    if step == 0 {
+        return Ok(1);
+    }
+    let lo = start.min(end);
+    let hi = start.max(end);
+    let span = hi.saturating_sub(lo);
+    let n = span / step + 1;
+    if n == 0 {
+        return Err(EhlersPmaError::InvalidRange { start, end, step });
+    }
+    Ok(n)
+}
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ehlers_pma_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range=(0,0,0), offset_range=(0.0,0.0,0.0), sigma_range=(0.0,0.0,0.0), device_id=0))]
@@ -1138,16 +1171,8 @@ pub fn ehlers_pma_cuda_batch_dev_py(
     }
 
     let slice_in = data_f32.as_slice()?;
-    let combos = if period_range.2 == 0 || period_range.0 == period_range.1 {
-        1
-    } else if period_range.1 < period_range.0 {
-        0
-    } else {
-        ((period_range.1 - period_range.0) / period_range.2).saturating_add(1)
-    };
-    if combos == 0 {
-        return Err(PyValueError::new_err("invalid period sweep for ehlers_pma"));
-    }
+    let combos = usize_range_len(period_range)
+        .map_err(|_| PyValueError::new_err("invalid period sweep for ehlers_pma"))?;
 
     let sweep = EhlersPmaBatchRange { combos };
     let pair = py.allow_threads(|| {

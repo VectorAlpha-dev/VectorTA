@@ -1,6 +1,9 @@
 // CUDA kernels for Fibonacci Weighted Moving Average (FWMA).
 // Optimized for ADA+ (RTX 4090) and newer SMs by tiling the time dimension
 // (batch path) and coalescing across series (time-major path).
+// NOTE: Host-side wrapper checks for these exact symbol names:
+//  - "fwma_batch_f32"
+//  - "fwma_multi_series_one_param_f32"
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
