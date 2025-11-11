@@ -22,24 +22,22 @@ use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
 use std::ffi::c_void;
 use std::fmt;
+use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaEhmaError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Out of memory on device: required={required} bytes (including headroom={headroom}), free={free} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Launch configuration too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
 }
-
-impl fmt::Display for CudaEhmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaEhmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaEhmaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaEhmaError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
@@ -106,10 +104,9 @@ pub struct CudaEhma {
 
 impl CudaEhma {
     pub fn new(device_id: usize) -> Result<Self, CudaEhmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehma_kernel.ptx"));
         // Prefer O2 and target-from-context for stability across drivers
@@ -117,11 +114,8 @@ impl CudaEhma {
             cust::module::ModuleJitOption::DetermineTargetFromContext,
             cust::module::ModuleJitOption::OptLevel(cust::module::OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, jit_opts).or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         // Best-effort: reserve a portion of L2 for persisting cache if supported
         Self::reserve_l2_persisting_quota_once(device_id as u32);
@@ -217,6 +211,30 @@ impl CudaEhma {
     #[inline]
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
+    }
+
+    #[inline]
+    fn bytes_for<T>(elems: usize) -> Result<usize, CudaEhmaError> {
+        elems
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| CudaEhmaError::InvalidInput("byte size overflow".into()))
+    }
+
+    #[inline]
+    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaEhmaError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            let need = required_bytes.saturating_add(headroom_bytes);
+            if need <= free {
+                Ok(())
+            } else {
+                Err(CudaEhmaError::OutOfMemory { required: need, free, headroom: headroom_bytes })
+            }
+        } else {
+            Ok(())
+        }
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
@@ -558,7 +576,7 @@ impl CudaEhma {
         let mut func = self
             .module
             .get_function("ehma_batch_f32")
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEhmaError::MissingKernelSymbol { name: "ehma_batch_f32" })?;
 
         const BLOCK_X: u32 = 256;
         let grid_x = ((series_len as u32) + BLOCK_X - 1) / BLOCK_X;
@@ -588,9 +606,7 @@ impl CudaEhma {
                     &mut max_period_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, shared_bytes, args)
-                    .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, shared_bytes, args)?;
             }
         }
 
@@ -633,7 +649,7 @@ impl CudaEhma {
         let mut func = self
             .module
             .get_function("ehma_multi_series_one_param_f32")
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEhmaError::MissingKernelSymbol { name: "ehma_multi_series_one_param_f32" })?;
 
         const BLOCK_X: u32 = 256;
         let grid_x = ((series_len as u32) + BLOCK_X - 1) / BLOCK_X;
@@ -659,9 +675,7 @@ impl CudaEhma {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, shared_bytes, args)?;
         }
 
         // Introspection/log
@@ -689,7 +703,7 @@ impl CudaEhma {
         let mut func = self
             .module
             .get_function(fname)
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEhmaError::MissingKernelSymbol { name: fname })?;
         let grid_x = ((series_len as u32) + tx - 1) / tx;
         let grid_y = ((num_series as u32) + ty - 1) / ty;
         let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
@@ -719,9 +733,7 @@ impl CudaEhma {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, shared_bytes, args)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaEhma)).last_many =
@@ -755,21 +767,24 @@ impl CudaEhma {
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        // VRAM preflight (prices + weights_flat + out)
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let weights_bytes = n_combos * max_period * std::mem::size_of::<f32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + weights_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaEhmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        // VRAM preflight (prices + weights_flat + out) with checked arithmetic
+        let prices_bytes = Self::bytes_for::<f32>(series_len)?;
+        let weights_elems = n_combos
+            .checked_mul(max_period)
+            .ok_or_else(|| CudaEhmaError::InvalidInput("weights elems overflow".into()))?;
+        let weights_bytes = Self::bytes_for::<f32>(weights_elems)?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaEhmaError::InvalidInput("output elems overflow".into()))?;
+        let out_bytes = Self::bytes_for::<f32>(out_elems)?;
+        let required = prices_bytes
+            .checked_add(weights_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaEhmaError::InvalidInput("total bytes overflow".into()))?;
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         // Upload prices once
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
 
         // Build per-combo weights (pre-normalized) and periods; warms for plain fallback
         let mut periods_i32 = vec![0i32; n_combos];
@@ -783,17 +798,13 @@ impl CudaEhma {
             let base = i * max_period;
             weights_flat[base..base + p].copy_from_slice(&w);
         }
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let d_warms = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let d_weights = unsafe { DeviceBuffer::from_slice_async(&weights_flat, &self.stream) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
+        let d_warms = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream) }?;
+        let d_weights = unsafe { DeviceBuffer::from_slice_async(&weights_flat, &self.stream) }?;
 
         // Output
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
-                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
         // Hint L2 persistence for the prices region (best-effort)
         self.hint_stream_access_policy_window(
@@ -874,9 +885,7 @@ impl CudaEhma {
             )?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -958,9 +967,7 @@ impl CudaEhma {
                         &mut fv_i as *mut _ as *mut c_void,
                         &mut out_raw as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, shared_bytes, args)
-                        .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+                    self.stream.launch(&func, grid, block, shared_bytes, args)?;
                 }
             }
             unsafe {
@@ -973,9 +980,7 @@ impl CudaEhma {
                 d_prices, &d_periods, &d_warms, series_len, n_combos, max_period, &mut d_out,
             )?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -1019,33 +1024,22 @@ impl CudaEhma {
             warms_i32.push(warm as i32);
         }
 
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let d_warms = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
+        let d_warms = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
-                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
 
         self.launch_batch_kernel_plain(
             &d_prices, &d_periods, &d_warms, series_len, n_combos, max_period, &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out.len()) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out.len()) }?;
         unsafe {
-            d_out
-                .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            d_out.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         out.copy_from_slice(pinned.as_slice());
 
         Ok(combos)
@@ -1087,32 +1081,28 @@ impl CudaEhma {
         let (first_valids, period, weights) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM preflight
-        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
-        let weights_bytes = period * std::mem::size_of::<f32>();
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
-        let required = prices_bytes + weights_bytes + out_bytes;
-        let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaEhmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        // VRAM preflight with checked arithmetic
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaEhmaError::InvalidInput("tm elems overflow".into()))?;
+        let prices_bytes = Self::bytes_for::<f32>(elems)?;
+        let weights_bytes = Self::bytes_for::<f32>(period)?;
+        let out_bytes = Self::bytes_for::<f32>(elems)?;
+        let required = prices_bytes
+            .checked_add(weights_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaEhmaError::InvalidInput("total bytes overflow".into()))?;
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
-        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)?;
         // Hint L2 persistence for time-major prices if supported
         self.hint_stream_access_policy_window(
             d_prices_tm.as_device_ptr().as_raw(),
             cols * rows * std::mem::size_of::<f32>(),
         );
-        let d_weights =
-            DeviceBuffer::from_slice(&weights).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_weights = DeviceBuffer::from_slice(&weights)?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         // Select kernel
         match self.policy.many_series {
@@ -1219,14 +1209,10 @@ impl CudaEhma {
         let (first_valids, period, weights) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let d_weights =
-            DeviceBuffer::from_slice(&weights).map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_weights = DeviceBuffer::from_slice(&weights)?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
 
         match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => {
@@ -1302,21 +1288,14 @@ impl CudaEhma {
                 )?;
             }
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         // Pinned D2H for determinism and throughput
-        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out_tm.len()) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out_tm.len()) }?;
         unsafe {
-            d_out_tm
-                .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            d_out_tm.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         out_tm.copy_from_slice(pinned.as_slice());
 
         Ok(())

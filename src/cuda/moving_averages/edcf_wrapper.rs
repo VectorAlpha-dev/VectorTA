@@ -5,6 +5,7 @@ use crate::indicators::moving_averages::edcf::{EdcfBatchRange, EdcfParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
+use cust::error::CudaError;
 use cust::launch;
 use cust::memory::AsyncCopyDestination;
 use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer, LockedBuffer};
@@ -14,24 +15,24 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaEdcfError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Out of memory on device: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Launch configuration too large for device: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaEdcfError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaEdcfError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaEdcfError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-
-impl std::error::Error for CudaEdcfError {}
 
 /// Policy for the batch (one-series × many-params) path.
 #[derive(Clone, Copy, Debug)]
@@ -97,11 +98,10 @@ pub struct CudaEdcf {
 
 impl CudaEdcf {
     pub fn new(device_id: usize) -> Result<Self, CudaEdcfError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
 
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/edcf_kernel.ptx"));
         let jit_opts = &[
@@ -115,12 +115,11 @@ impl CudaEdcf {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaEdcfError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -158,9 +157,7 @@ impl CudaEdcf {
     }
 
     pub fn synchronize(&self) -> Result<(), CudaEdcfError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaEdcfError::Cuda)
     }
 
     #[inline]
@@ -277,7 +274,7 @@ impl CudaEdcf {
             let func = self
                 .module
                 .get_function("edcf_compute_dist_f32")
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaEdcfError::MissingKernelSymbol { name: "edcf_compute_dist_f32" })?;
             return self.launch_compute_dist(&func, d_prices, len, period, first_valid, d_dist);
         }
 
@@ -296,7 +293,7 @@ impl CudaEdcf {
         let func = self
             .module
             .get_function(fname)
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEdcfError::MissingKernelSymbol { name: fname })?;
 
         let outputs_per_block = tile;
         let mut grid_x = ((len as u32) + outputs_per_block - 1) / outputs_per_block;
@@ -321,8 +318,7 @@ impl CudaEdcf {
                     (first_valid as i32),
                     d_dist.as_device_ptr()
                 )
-            )
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+            )?;
         }
         Ok(())
     }
@@ -338,6 +334,20 @@ impl CudaEdcf {
     #[inline]
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
+    }
+
+    #[inline]
+    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaEdcfError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            let need = required_bytes.saturating_add(headroom_bytes);
+            if need > free {
+                return Err(CudaEdcfError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes });
+            }
+        }
+        Ok(())
     }
 
     #[inline]
@@ -364,27 +374,28 @@ impl CudaEdcf {
     ) -> Result<DeviceArrayF32, CudaEdcfError> {
         let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
-        // VRAM check: input + output + scratch dist
-        let in_bytes = series_len * std::mem::size_of::<f32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let scratch_bytes = series_len * std::mem::size_of::<f32>();
-        let required = in_bytes + out_bytes + scratch_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaEdcfError::Cuda(format!(
-                "insufficient VRAM: need ~{} MiB",
-                (required + (1 << 20) - 1) >> 20
-            )));
-        }
+        // VRAM check: input + output + scratch dist (checked arithmetic)
+        let sz = std::mem::size_of::<f32>();
+        let in_bytes = series_len
+            .checked_mul(sz)
+            .ok_or_else(|| CudaEdcfError::InvalidInput("input byte size overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaEdcfError::InvalidInput("output elem count overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(sz)
+            .ok_or_else(|| CudaEdcfError::InvalidInput("output byte size overflow".into()))?;
+        let scratch_bytes = series_len
+            .checked_mul(sz)
+            .ok_or_else(|| CudaEdcfError::InvalidInput("scratch byte size overflow".into()))?;
+        let required = in_bytes.saturating_add(out_bytes).saturating_add(scratch_bytes);
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
         // H2D async copy for prices (pinned path improves throughput)
-        let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_f32, &self.stream)
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?
-        };
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len)? };
+        let mut d_dist: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len)? };
 
         self.edcf_batch_device_impl(
             &d_prices,
@@ -419,14 +430,9 @@ impl CudaEdcf {
                 expected
             )));
         }
-        let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_f32, &self.stream)
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected)? };
+        let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len)? };
 
         self.edcf_batch_device_impl(
             &d_prices,
@@ -439,14 +445,8 @@ impl CudaEdcf {
         self.synchronize()?;
 
         // Copy back via pinned buffer to reduce D2H overhead on large outputs
-        let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(expected).map_err(|e| CudaEdcfError::Cuda(e.to_string()))?
-        };
-        unsafe {
-            d_out
-                .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        }
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected)? };
+        unsafe { d_out.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
         self.synchronize()?;
         out.copy_from_slice(pinned.as_slice());
 
@@ -469,12 +469,9 @@ impl CudaEdcf {
                 expected
             )));
         }
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected)? };
+        let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len)? };
 
         self.edcf_batch_device_impl(
             &d_prices,
@@ -486,11 +483,7 @@ impl CudaEdcf {
         )?;
         self.synchronize()?;
 
-        unsafe {
-            d_out
-                .async_copy_to(out_pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        }
+        unsafe { d_out.async_copy_to(out_pinned.as_mut_slice(), &self.stream)?; }
         self.synchronize()?;
         Ok((combos.len(), series_len, combos))
     }
@@ -549,10 +542,8 @@ impl CudaEdcf {
         }
         let n_combos = combos.len();
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len)? };
+        let mut d_dist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len)? };
         self.edcf_batch_device_impl(
             d_prices,
             &combos,
@@ -663,7 +654,7 @@ impl CudaEdcf {
                 let func = self
                     .module
                     .get_function(func_name)
-                    .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+                    .map_err(|_| CudaEdcfError::MissingKernelSymbol { name: func_name })?;
 
                 // Introspection
                 unsafe {
@@ -692,14 +683,13 @@ impl CudaEdcf {
                             (first_valid as i32),
                             row_ptr
                         )
-                    )
-                    .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+                    )?;
                 }
             } else {
                 let apply_fn = self
                     .module
                     .get_function("edcf_apply_weights_f32")
-                    .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+                    .map_err(|_| CudaEdcfError::MissingKernelSymbol { name: "edcf_apply_weights_f32" })?;
 
                 // Introspection
                 let block_x = match self.policy.batch {
@@ -760,9 +750,7 @@ impl CudaEdcf {
                 &mut first_i as *mut _ as *mut c_void,
                 &mut dist_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(func, grid, block, 0, args)
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?
+            self.stream.launch(func, grid, block, 0, args)?
         }
         Ok(())
     }
@@ -803,9 +791,7 @@ impl CudaEdcf {
                 &mut first_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(func, grid, block, 0, args)
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?
+            self.stream.launch(func, grid, block, 0, args)?
         }
         Ok(())
     }
@@ -932,20 +918,18 @@ impl CudaEdcf {
             }
         }
 
-        // VRAM check
-        let bytes = prices_tm_f32.len() * 4 + prices_tm_f32.len() * 4 + cols * 4;
-        if !Self::will_fit(bytes, 64 * 1024 * 1024) {
-            return Err(CudaEdcfError::Cuda(
-                "insufficient VRAM for many-series".into(),
-            ));
-        }
+        // VRAM check (checked arithmetic)
+        let bytes = prices_tm_f32
+            .len()
+            .checked_mul(4)
+            .and_then(|b| b.checked_add(prices_tm_f32.len().checked_mul(4)?))
+            .and_then(|b| b.checked_add(cols.checked_mul(4)?))
+            .ok_or_else(|| CudaEdcfError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit_checked(bytes, 64 * 1024 * 1024)?;
 
-        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream)? };
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows)? };
 
         // Kernel selection
         let try_2d = |tx: u32, ty: u32| -> Result<bool, CudaEdcfError> {
@@ -978,8 +962,7 @@ impl CudaEdcf {
                         (rows as i32),
                         d_out_tm.as_device_ptr()
                     )
-                )
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+                )?;
             }
             unsafe {
                 let this = self as *const _ as *mut CudaEdcf;
@@ -1011,7 +994,7 @@ impl CudaEdcf {
             let func = self
                 .module
                 .get_function("edcf_many_series_one_param_f32")
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaEdcfError::MissingKernelSymbol { name: "edcf_many_series_one_param_f32" })?;
             let block_x = match self.policy.many_series {
                 ManySeriesKernelPolicy::OneD { block_x } => block_x,
                 _ => 128,
@@ -1030,8 +1013,7 @@ impl CudaEdcf {
                         (rows as i32),
                         d_out_tm.as_device_ptr()
                     )
-                )
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+                )?;
             }
             unsafe {
                 let this = self as *const _ as *mut CudaEdcf;
@@ -1090,8 +1072,7 @@ impl CudaEdcf {
             unsafe {
                 launch!(func<<<grid, block, shared_bytes, stream>>>(
                     d_prices_tm.as_device_ptr(), d_first_valids.as_device_ptr(), (period as i32), (cols as i32), (rows as i32), d_out_tm.as_device_ptr()
-                ))
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+                ))?;
             }
             Ok(true)
         };
@@ -1109,7 +1090,7 @@ impl CudaEdcf {
             let func = self
                 .module
                 .get_function("edcf_many_series_one_param_f32")
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaEdcfError::MissingKernelSymbol { name: "edcf_many_series_one_param_f32" })?;
             let grid: GridSize = (cols as u32, 1, 1).into();
             let block: BlockSize = (128, 1, 1).into();
             let shared_bytes = (2 * period * std::mem::size_of::<f32>()) as u32;
@@ -1117,8 +1098,7 @@ impl CudaEdcf {
             unsafe {
                 launch!(func<<<grid, block, shared_bytes, stream>>>(
                     d_prices_tm.as_device_ptr(), d_first_valids.as_device_ptr(), (period as i32), (cols as i32), (rows as i32), d_out_tm.as_device_ptr()
-                ))
-                .map_err(|e| CudaEdcfError::Cuda(e.to_string()))?;
+                ))?;
             }
         }
         self.synchronize()

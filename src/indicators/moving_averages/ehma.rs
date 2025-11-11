@@ -228,6 +228,18 @@ pub enum EhmaError {
 
     #[error("ehma: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+
+    #[error("ehma: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("ehma: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("ehma: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("ehma: size overflow while computing {what}")]
+    SizeOverflow { what: &'static str },
 }
 
 // ==================== CORE COMPUTATION FUNCTIONS ====================
@@ -327,10 +339,7 @@ pub fn ehma_into_slice(dst: &mut [f64], input: &EhmaInput, kern: Kernel) -> Resu
     let (data, weights, period, first, inv_coef, chosen) = ehma_prepare(input, kern)?;
 
     if dst.len() != data.len() {
-        return Err(EhmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
+        return Err(EhmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
     ehma_compute_into(data, &weights, period, first, inv_coef, chosen, dst);
@@ -354,10 +363,7 @@ pub fn ehma_into(input: &EhmaInput, out: &mut [f64]) -> Result<(), EhmaError> {
     let (data, weights, period, first, inv_coef, chosen) = ehma_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(EhmaError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
-        });
+        return Err(EhmaError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
     // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
@@ -852,15 +858,22 @@ impl EhmaBatchOutput {
 #[inline(always)]
 pub fn expand_grid(r: &EhmaBatchRange) -> Vec<EhmaParams> {
     let (start, end, step) = r.period;
-    let periods = if step == 0 || start == end {
-        vec![start]
-    } else {
-        (start..=end).step_by(step).collect()
-    };
-    periods
-        .into_iter()
-        .map(|p| EhmaParams { period: Some(p) })
-        .collect()
+    // Zero step => singleton; allow reversed bounds (ascending output)
+    if step == 0 {
+        return vec![EhmaParams { period: Some(start) }];
+    }
+    let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+    let mut out = Vec::new();
+    let mut p = lo;
+    loop {
+        out.push(EhmaParams { period: Some(p) });
+        if p == hi { break; }
+        match p.checked_add(step) {
+            Some(next) if next > p && next <= hi => { p = next; }
+            _ => { break; } // guard against overflow or non-progress
+        }
+    }
+    out
 }
 
 #[inline(always)]
@@ -891,12 +904,7 @@ pub fn ehma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(EhmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(EhmaError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -925,10 +933,8 @@ fn ehma_batch_inner(
 ) -> Result<EhmaBatchOutput, EhmaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EhmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s,e,t) = sweep.period;
+        return Err(EhmaError::InvalidRange { start: s, end: e, step: t });
     }
 
     let cols = data.len();
@@ -948,8 +954,12 @@ fn ehma_batch_inner(
         });
     }
 
-    // allocate rows*cols without filling; then set NaN prefixes per row
-    let mut buf_mu = make_uninit_matrix(combos.len(), cols);
+    // Guard rows*cols against overflow, then allocate rows*cols
+    let rows = combos.len();
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(EhmaError::SizeOverflow { what: "rows*cols" })?;
+    let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1019,19 +1029,17 @@ pub fn ehma_batch_inner_into(
 ) -> Result<Vec<EhmaParams>, EhmaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EhmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s,e,t) = sweep.period;
+        return Err(EhmaError::InvalidRange { start: s, end: e, step: t });
     }
 
     let cols = data.len();
     let rows = combos.len();
-    if out.len() != rows * cols {
-        return Err(EhmaError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(EhmaError::SizeOverflow { what: "rows*cols" })?;
+    if out.len() != expected {
+        return Err(EhmaError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     let first = data
@@ -1300,6 +1308,8 @@ pub fn ehma_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
+    // CAI v3 note: producing stream is synchronized before returning the device array,
+    // so DeviceArrayF32Py.__cuda_array_interface__ should omit the "stream" key.
     Ok(DeviceArrayF32Py { inner })
 }
 
@@ -1331,6 +1341,7 @@ pub fn ehma_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
+    // CAI v3 note: producing stream is synchronized before returning the device array.
     Ok(DeviceArrayF32Py { inner })
 }
 

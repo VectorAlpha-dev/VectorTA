@@ -234,12 +234,18 @@ impl ZscoreBuilder {
 
 #[derive(Debug, Error)]
 pub enum ZscoreError {
+    #[error("zscore: Input data slice is empty.")]
+    EmptyInputData,
     #[error("zscore: All values are NaN.")]
     AllValuesNaN,
     #[error("zscore: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("zscore: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("zscore: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("zscore: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("zscore: DevError {0}")]
     DevError(#[from] DevError),
     #[error("zscore: MaError {0}")]
@@ -925,12 +931,7 @@ pub fn zscore_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(ZscoreError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
-        }
+        other => return Err(ZscoreError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -974,7 +975,8 @@ fn expand_grid(r: &ZscoreBatchRange) -> Vec<ZscoreParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        (lo..=hi).step_by(step).collect()
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
@@ -982,9 +984,16 @@ fn expand_grid(r: &ZscoreBatchRange) -> Vec<ZscoreParams> {
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if step > 0.0 {
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += step;
+            }
+        } else {
+            while x >= end - 1e-12 {
+                v.push(x);
+                x += step; // negative step
+            }
         }
         v
     }
@@ -2263,9 +2272,9 @@ pub fn zscore_into_slice(
     let data: &[f64] = input.as_ref();
 
     if dst.len() != data.len() {
-        return Err(ZscoreError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(ZscoreError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 

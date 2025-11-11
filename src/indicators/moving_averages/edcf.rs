@@ -153,6 +153,8 @@ impl<'a> EdcfInput<'a> {
 pub enum EdcfError {
     #[error("edcf: No data provided to EDCF filter.")]
     NoData,
+    #[error("edcf: Empty input data.")]
+    EmptyInputData,
     #[error("edcf: All values are NaN.")]
     AllValuesNaN,
     #[error("edcf: Invalid period: period = {period}, data length = {data_len}")]
@@ -163,6 +165,12 @@ pub enum EdcfError {
     OutputLenMismatch { expected: usize, got: usize },
     #[error("edcf: Invalid kernel specified")]
     InvalidKernel,
+    #[error("edcf: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("edcf: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("edcf: size overflow during allocation ({op})")]
+    SizeOverflow { op: &'static str },
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -234,7 +242,7 @@ fn edcf_prepare<'a>(
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(EdcfError::NoData);
+        return Err(EdcfError::EmptyInputData);
     }
     let first = data
         .iter()
@@ -905,7 +913,7 @@ pub fn edcf_batch_with_kernel(
     k: Kernel,
 ) -> Result<EdcfBatchOutput, EdcfError> {
     if data.is_empty() {
-        return Err(EdcfError::NoData);
+        return Err(EdcfError::EmptyInputData);
     }
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
@@ -950,11 +958,14 @@ impl EdcfBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &EdcfBatchRange) -> Vec<EdcfParams> {
-    let (start, end, step) = r.period;
+    let (mut start, mut end, step) = r.period;
 
-    // Build the list of periods
+    // Normalize reversed bounds and treat zero step or equal bounds as singleton.
+    if start > end {
+        core::mem::swap(&mut start, &mut end);
+    }
     let periods: Vec<usize> = if step == 0 || start == end {
-        vec![start] // static single value
+        vec![start]
     } else {
         (start..=end).step_by(step).collect()
     };
@@ -992,19 +1003,25 @@ fn edcf_batch_inner(
     parallel: bool,
 ) -> Result<EdcfBatchOutput, EdcfError> {
     if data.is_empty() {
-        return Err(EdcfError::NoData);
+        return Err(EdcfError::EmptyInputData);
     }
 
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EdcfError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(EdcfError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
     let rows = combos.len();
     let cols = data.len();
+
+    // Checked sizing before allocating rows*cols matrix
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(EdcfError::SizeOverflow { op: "rows*cols" })?;
 
     // Use zero-copy allocation pattern from alma.rs
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1053,13 +1070,14 @@ fn edcf_batch_inner_into(
 ) -> Result<Vec<EdcfParams>, EdcfError> {
     // ─────────────────── guards unchanged ───────────────────
     if data.is_empty() {
-        return Err(EdcfError::NoData);
+        return Err(EdcfError::EmptyInputData);
     }
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EdcfError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(EdcfError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 

@@ -29,8 +29,9 @@
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaJma;
+// JMA-specific Python device handle (with CAI v3)
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::jma_wrapper::DeviceArrayF32Jma;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -216,14 +217,24 @@ impl JmaBuilder {
 pub enum JmaError {
     #[error("jma: All values are NaN.")]
     AllValuesNaN,
+    #[error("jma: Empty input data.")]
+    EmptyInputData,
     #[error("jma: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("jma: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("jma: Invalid phase: {phase}")]
     InvalidPhase { phase: f64 },
-    #[error("jma: Invalid output buffer size: expected = {expected}, actual = {actual}")]
-    InvalidOutputBuffer { expected: usize, actual: usize },
+    #[error("jma: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("jma: Invalid range (usize): start={start}, end={end}, step={step}")]
+    InvalidRangeUsize { start: usize, end: usize, step: usize },
+    #[error("jma: Invalid range (f64): start={start}, end={end}, step={step}")]
+    InvalidRangeF64 { start: f64, end: f64, step: f64 },
+    #[error("jma: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("jma: Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -238,10 +249,7 @@ pub fn jma_with_kernel(input: &JmaInput, kernel: Kernel) -> Result<JmaOutput, Jm
     };
     let len = data.len();
     if len == 0 {
-        return Err(JmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(JmaError::EmptyInputData);
     }
     let first = data
         .iter()
@@ -306,16 +314,13 @@ pub fn jma_with_kernel_into(
 
     // Ensure output buffer is the correct size
     if out.len() != len {
-        return Err(JmaError::InvalidOutputBuffer {
+        return Err(JmaError::OutputLengthMismatch {
             expected: len,
-            actual: out.len(),
+            got: out.len(),
         });
     }
     if len == 0 {
-        return Err(JmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(JmaError::EmptyInputData);
     }
 
     let first = data
@@ -921,12 +926,7 @@ pub fn jma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(JmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(JmaError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -967,17 +967,47 @@ fn expand_grid(r: &JmaBatchRange) -> Vec<JmaParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut v = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                match x.checked_add(step) {
+                    Some(n) => x = n,
+                    None => break,
+                }
+            }
+        } else {
+            let mut x = start;
+            while x >= end {
+                v.push(x);
+                if x < end + step {
+                    break;
+                }
+                x -= step;
+            }
+        }
+        v
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+        const EPS: f64 = 1e-12;
+        if step.abs() < EPS || (start - end).abs() < EPS {
             return vec![start];
         }
+        let s = step.abs();
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start < end {
+            let mut x = start;
+            while x <= end + EPS {
+                v.push(x);
+                x += s;
+            }
+        } else {
+            let mut x = start;
+            while x >= end - EPS {
+                v.push(x);
+                x -= s;
+            }
         }
         v
     }
@@ -985,7 +1015,24 @@ fn expand_grid(r: &JmaBatchRange) -> Vec<JmaParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step as usize).collect()
+        let mut v = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                x = x.saturating_add(step);
+                if x == *v.last().unwrap() { break; }
+            }
+        } else {
+            let mut x = start;
+            while x >= end {
+                v.push(x);
+                if x < end + step { break; }
+                x = x.saturating_sub(step);
+                if x == *v.last().unwrap() { break; }
+            }
+        }
+        v
     }
     let periods = axis_usize(r.period);
     let phases = axis_f64(r.phase);
@@ -1032,14 +1079,11 @@ fn jma_batch_inner(
 ) -> Result<JmaBatchOutput, JmaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(JmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(JmaError::InvalidInput("no parameter combinations".into()));
     }
     let cols = data.len();
     if cols == 0 {
-        return Err(JmaError::AllValuesNaN);
+        return Err(JmaError::EmptyInputData);
     }
     let first = data
         .iter()
@@ -1057,6 +1101,10 @@ fn jma_batch_inner(
     // JMA has no additional warmup beyond `first`
     let warm: Vec<usize> = vec![first; rows];
 
+    // Guard rows * cols for overflow prior to allocation
+    let _cap = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JmaError::InvalidInput("rows * cols overflow".into()))?;
     let mut raw = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut raw, cols, &warm);
 
@@ -1130,14 +1178,11 @@ fn jma_batch_inner_into(
 ) -> Result<(Vec<JmaParams>, usize, usize), JmaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(JmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(JmaError::InvalidInput("no parameter combinations".into()));
     }
     let cols = data.len();
     if cols == 0 {
-        return Err(JmaError::AllValuesNaN);
+        return Err(JmaError::EmptyInputData);
     }
     let first = data
         .iter()
@@ -1153,10 +1198,13 @@ fn jma_batch_inner_into(
     let rows = combos.len();
 
     // Ensure output buffer is the correct size
-    if out.len() != rows * cols {
-        return Err(JmaError::InvalidOutputBuffer {
-            expected: rows * cols,
-            actual: out.len(),
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JmaError::InvalidInput("rows * cols overflow".into()))?;
+    if out.len() != expected {
+        return Err(JmaError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
         });
     }
 
@@ -2312,7 +2360,7 @@ pub fn jma_cuda_batch_dev_py(
     phase_range: (f64, f64, f64),
     power_range: (u32, u32, u32),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<JmaDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2330,7 +2378,7 @@ pub fn jma_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(JmaDeviceArrayF32Py { inner })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2343,7 +2391,7 @@ pub fn jma_cuda_many_series_one_param_dev_py(
     phase: f64,
     power: u32,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<JmaDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2367,7 +2415,47 @@ pub fn jma_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(JmaDeviceArrayF32Py { inner })
+}
+
+// JMA-specific CUDA Array Interface v3 + DLPack stubs
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct JmaDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32Jma,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl JmaDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producing stream is synchronized before return; omit "stream" per CAI v3 spec.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA
+        (2, self.inner.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(&self, _py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "__dlpack__ not implemented yet",
+        ))
+    }
 }
 
 #[cfg(feature = "python")]
@@ -2412,9 +2500,9 @@ pub fn jma_into_slice(dst: &mut [f64], input: &JmaInput, kern: Kernel) -> Result
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(JmaError::InvalidOutputBuffer {
+        return Err(JmaError::OutputLengthMismatch {
             expected: data.len(),
-            actual: dst.len(),
+            got: dst.len(),
         });
     }
 

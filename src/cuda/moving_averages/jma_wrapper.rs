@@ -13,6 +13,7 @@
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
+use std::sync::Arc;
 use crate::indicators::moving_averages::jma::{expand_grid_jma, JmaBatchRange, JmaParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -25,23 +26,27 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaJmaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buffer device {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaJmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaJmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaJmaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CudaJmaError {}
 
 // -------- Kernel policy + introspection (for parity with ALMA) --------
 
@@ -96,7 +101,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaJma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaJmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -105,13 +110,32 @@ pub struct CudaJma {
     debug_many_logged: bool,
 }
 
+/// VRAM-backed array handle for JMA that carries a context guard
+/// VRAM-backed array handle for JMA that carries a context guard
+pub struct DeviceArrayF32Jma {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+impl DeviceArrayF32Jma {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
+}
+
 impl CudaJma {
     pub fn new(device_id: usize) -> Result<Self, CudaJmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
 
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/jma_kernel.ptx"));
         let jit_opts = &[
@@ -121,16 +145,14 @@ impl CudaJma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaJmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -165,9 +187,7 @@ impl CudaJma {
 
     /// Expose synchronize for benches/tests
     pub fn synchronize(&self) -> Result<(), CudaJmaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaJmaError::from)
     }
 
     // --- Heuristics and helpers -------------------------------------------------
@@ -236,7 +256,7 @@ impl CudaJma {
         &self,
         prices: &[f32],
         sweep: &JmaBatchRange,
-    ) -> Result<DeviceArrayF32, CudaJmaError> {
+    ) -> Result<DeviceArrayF32Jma, CudaJmaError> {
         let inputs = Self::prepare_batch_inputs(prices, sweep)?;
         self.run_batch_kernel(prices, &inputs)
     }
@@ -258,9 +278,7 @@ impl CudaJma {
         }
 
         let arr = self.run_batch_kernel(prices, &inputs)?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+        arr.buf.copy_to(out)?;
         Ok((arr.rows, arr.cols, inputs.combos))
     }
 
@@ -305,7 +323,7 @@ impl CudaJma {
         cols: usize,
         rows: usize,
         params: &JmaParams,
-    ) -> Result<DeviceArrayF32, CudaJmaError> {
+    ) -> Result<DeviceArrayF32Jma, CudaJmaError> {
         let prepared = Self::prepare_many_series_inputs(prices_tm_f32, cols, rows, params)?;
         let consts = Self::compute_params_consts(params)?;
         self.run_many_series_kernel(prices_tm_f32, cols, rows, &prepared, &consts)
@@ -377,7 +395,7 @@ impl CudaJma {
         &self,
         prices: &[f32],
         inputs: &BatchInputs,
-    ) -> Result<DeviceArrayF32, CudaJmaError> {
+    ) -> Result<DeviceArrayF32Jma, CudaJmaError> {
         let n_combos = inputs.combos.len();
         let series_len = inputs.series_len;
 
@@ -434,15 +452,9 @@ impl CudaJma {
             )?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaJmaError::from)?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: series_len,
-        })
+        Ok(DeviceArrayF32Jma { buf: d_out, rows: n_combos, cols: series_len, ctx: self._context.clone(), device_id: self.device_id })
     }
 
     fn run_many_series_kernel(
@@ -452,7 +464,7 @@ impl CudaJma {
         rows: usize,
         prepared: &ManySeriesInputs,
         consts: &JmaConsts,
-    ) -> Result<DeviceArrayF32, CudaJmaError> {
+    ) -> Result<DeviceArrayF32Jma, CudaJmaError> {
         let num_series = cols;
         let series_len = rows;
 
@@ -463,19 +475,15 @@ impl CudaJma {
         let headroom = 32 * 1024 * 1024; // 32 MB safety margin
 
         if !Self::will_fit(required, headroom) {
-            return Err(CudaJmaError::InvalidInput(
-                "insufficient device memory for JMA many-series launch".into(),
-            ));
+            let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
+            return Err(CudaJmaError::OutOfMemory { required, free, headroom });
         }
 
-        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }?;
         let d_first_valids =
-            unsafe { DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream) }
-                .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream) }?;
         let mut d_out_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(prices_tm_f32.len(), &self.stream) }
-                .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(prices_tm_f32.len(), &self.stream) }?;
 
         // Selection/introspection (plain 1D mapping)
         let block_x = self.resolve_many_block_x(num_series);
@@ -497,15 +505,9 @@ impl CudaJma {
             block_x,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out_tm,
-            rows: series_len,
-            cols: num_series,
-        })
+        Ok(DeviceArrayF32Jma { buf: d_out_tm, rows: series_len, cols: num_series, ctx: self._context.clone(), device_id: self.device_id })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -553,11 +555,15 @@ impl CudaJma {
         let func = self
             .module
             .get_function("jma_batch_f32")
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaJmaError::MissingKernelSymbol { name: "jma_batch_f32" })?;
 
         let grid_x = Self::ceil_div_u32(len_combos, block_x);
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        if block_x > 1024 || grid_x == 0 {
+            return Err(CudaJmaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -580,9 +586,7 @@ impl CudaJma {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -603,11 +607,15 @@ impl CudaJma {
         let func = self
             .module
             .get_function("jma_many_series_one_param_f32")
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaJmaError::MissingKernelSymbol { name: "jma_many_series_one_param_f32" })?;
 
         let grid_x = Self::ceil_div_u32(num_series, block_x);
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        if block_x > 1024 || grid_x == 0 {
+            return Err(CudaJmaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -628,9 +636,7 @@ impl CudaJma {
                 &mut first_valids_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }

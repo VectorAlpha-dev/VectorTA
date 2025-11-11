@@ -26,26 +26,28 @@ use cust::sys as cu;
 use std::env;
 use std::ffi::{c_void, CStr};
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const COEFF_STRIDE: usize = 5; // coefficient slots per combo (max poles = 4)
 
-#[derive(Debug)]
+use thiserror::Error;
+
+#[derive(Debug, Error)]
 pub enum CudaGaussianError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaGaussianError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaGaussianError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaGaussianError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CudaGaussianError {}
 
 // -------- Kernel selection policy (mirror ALMA style; single plain path used) --------
 
@@ -91,7 +93,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaGaussian {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaGaussianPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -102,11 +104,10 @@ pub struct CudaGaussian {
 
 impl CudaGaussian {
     pub fn new(device_id: usize) -> Result<Self, CudaGaussianError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
 
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/gaussian_kernel.ptx"));
         let jit_opts = &[
@@ -116,17 +117,14 @@ impl CudaGaussian {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -162,11 +160,11 @@ impl CudaGaussian {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
-    pub fn synchronize(&self) -> Result<(), CudaGaussianError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))
-    }
+    pub fn synchronize(&self) -> Result<(), CudaGaussianError> { self.stream.synchronize()?; Ok(()) }
+
+    pub fn stream_handle(&self) -> usize { self.stream.as_inner() as usize }
+    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     pub fn gaussian_batch_dev(
         &self,
@@ -196,18 +194,9 @@ impl CudaGaussian {
         let arr = self.run_batch_kernel(prices, &inputs)?;
 
         // Use pinned host memory + async copy for better D2H throughput.
-        let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(arr.len())
-                .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?
-        };
-        unsafe {
-            arr.buf
-                .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
-        }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(arr.len())? };
+        unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
+        self.stream.synchronize()?;
         out.copy_from_slice(pinned.as_slice());
         let BatchInputs { combos, .. } = inputs;
         Ok((arr.rows, arr.cols, combos))
@@ -327,30 +316,26 @@ impl CudaGaussian {
         inputs: &BatchInputs,
     ) -> Result<DeviceArrayF32, CudaGaussianError> {
         let n_combos = inputs.combos.len();
-        let price_bytes = prices.len() * std::mem::size_of::<f32>();
-        let period_bytes = inputs.periods.len() * std::mem::size_of::<i32>();
-        let pole_bytes = inputs.poles.len() * std::mem::size_of::<i32>();
-        let coeff_bytes = inputs.coeffs.len() * std::mem::size_of::<f32>();
-        let out_bytes = n_combos * inputs.series_len * std::mem::size_of::<f32>();
-        let required = price_bytes + period_bytes + pole_bytes + coeff_bytes + out_bytes;
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let price_bytes = prices.len().checked_mul(sz_f32).ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
+        let period_bytes = inputs.periods.len().checked_mul(sz_i32).ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
+        let pole_bytes = inputs.poles.len().checked_mul(sz_i32).ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
+        let coeff_bytes = inputs.coeffs.len().checked_mul(sz_f32).ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
+        let out_elems = inputs.series_len.checked_mul(n_combos).ok_or_else(|| CudaGaussianError::InvalidInput("elem count overflow".into()))?;
+        let out_bytes = out_elems.checked_mul(sz_f32).ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
+        let required = price_bytes
+            .checked_add(period_bytes).and_then(|v| v.checked_add(pole_bytes))
+            .and_then(|v| v.checked_add(coeff_bytes)).and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // 64 MiB safety margin
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaGaussianError::InvalidInput(
-                "insufficient free device memory for Gaussian batch kernel".into(),
-            ));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices).map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&inputs.periods)
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
-        let d_poles = DeviceBuffer::from_slice(&inputs.poles)
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
-        let d_coeffs = DeviceBuffer::from_slice(&inputs.coeffs)
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(inputs.series_len * n_combos) }
-                .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices)?;
+        let d_periods = DeviceBuffer::from_slice(&inputs.periods)?;
+        let d_poles = DeviceBuffer::from_slice(&inputs.poles)?;
+        let d_coeffs = DeviceBuffer::from_slice(&inputs.coeffs)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -446,16 +431,13 @@ impl CudaGaussian {
         let mut func = self
             .module
             .get_function("gaussian_batch_f32")
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaGaussianError::MissingKernelSymbol { name: "gaussian_batch_f32" })?;
 
         // Prefer L1 (harmless hint on arch where fixed)
-        func.set_cache_config(CacheConfig::PreferL1)
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        func.set_cache_config(CacheConfig::PreferL1)?;
 
         // Ask CUDA for an occupancy-guided block size suggestion.
-        let (_min_grid, suggested_block) = func
-            .suggested_launch_configuration(0, BlockSize::xy(1024, 1))
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        let (_min_grid, suggested_block) = func.suggested_launch_configuration(0, BlockSize::xy(1024, 1))?;
 
         // Allow explicit policy override (benches); else use suggestion.
         let block_x = match self.policy.batch {
@@ -497,9 +479,7 @@ impl CudaGaussian {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -518,11 +498,10 @@ impl CudaGaussian {
         let mut func = self
             .module
             .get_function("gaussian_many_series_one_param_f32")
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaGaussianError::MissingKernelSymbol { name: "gaussian_many_series_one_param_f32" })?;
 
         // Hint: prefer L1
-        func.set_cache_config(CacheConfig::PreferL1)
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+        func.set_cache_config(CacheConfig::PreferL1)?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
@@ -557,9 +536,7 @@ impl CudaGaussian {
                 &mut first_valids_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -715,14 +692,21 @@ impl CudaGaussian {
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaGaussianError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            let need = required_bytes
+                .checked_add(headroom_bytes)
+                .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
+            if need <= free {
+                Ok(())
+            } else {
+                Err(CudaGaussianError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+            }
         } else {
-            true
+            Ok(())
         }
     }
 
@@ -886,11 +870,9 @@ fn compute_gaussian_coeffs(
 
 fn expand_grid(range: &GaussianBatchRange) -> Vec<GaussianParams> {
     fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
-        }
+        if step == 0 || start == end { return vec![start]; }
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        (lo..=hi).step_by(step).collect()
     }
 
     let periods = axis(range.period);
@@ -905,6 +887,59 @@ fn expand_grid(range: &GaussianBatchRange) -> Vec<GaussianParams> {
         }
     }
     combos
+}
+
+// -------------------- Python: CUDA Array Interface v3 + DLPack stubs ----------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::prelude::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::types::{PyDict, PyTuple};
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32")]
+pub struct DeviceArrayF32Py {
+    pub inner: DeviceArrayF32,
+    stream_handle: usize,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        let itemsize = std::mem::size_of::<f32>();
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        d.set_item(
+            "data",
+            PyTuple::new(
+                py,
+                &[(self.inner.buf.as_device_ptr().as_raw() as usize).into_py(py), false.into_py(py)],
+            ),
+        )?;
+        d.set_item("version", 3)?;
+        if self.stream_handle != 0 {
+            d.set_item("stream", self.stream_handle)?;
+        }
+        Ok(d.into())
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+
+    fn __dlpack__<'py>(&self, _py: Python<'py>, _stream: Option<usize>) -> PyResult<PyObject> {
+        Err(pyo3::exceptions::PyNotImplementedError::new_err("__dlpack__ not implemented yet for Gaussian"))
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl DeviceArrayF32Py {
+    pub fn new_from_rust(inner: DeviceArrayF32, stream_handle: usize, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self { inner, stream_handle, _ctx_guard: ctx_guard, _device_id: device_id }
+    }
 }
 
 #[cfg(test)]

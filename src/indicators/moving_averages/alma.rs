@@ -44,13 +44,17 @@ impl DeviceArrayF32Py {
         let d = PyDict::new(py);
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
+        // Explicit strides for row-major FP32: (row stride in bytes, item stride in bytes)
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Expose default stream to help consumers (e.g., CuPy) pick a valid device context
-        // without guessing. Using 0 denotes the legacy default stream.
-        d.set_item("stream", 0usize)?;
-        // Provide a stream hint for consumers like CuPy. Using legacy default stream (1)
-        // is broadly compatible and avoids some runtime setDevice quirks on certain setups.
-        d.set_item("stream", 1i64)?;
+        // Stream is omitted because producing kernels synchronize before returning
+        // the VRAM handle; consumers need no additional synchronization per CAI v3.
         d.set_item("version", 3)?;
         Ok(d)
     }

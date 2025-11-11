@@ -1,5 +1,7 @@
 //! # Gaussian Filter
 //!
+//! Decision log: SIMD enabled for batch tiling; single‑series keeps scalar/FMA path. CUDA wrapper present; Python VRAM handle returns include CAI v3 metadata. No numerical changes; only error/interop hardening.
+//!
 //! A parametric smoothing technique that approximates a Gaussian response using
 //! a cascade of discrete poles. Its parameters (`period`, `poles`) control the
 //! filter's length and the number of cascaded stages that shape the overall
@@ -25,7 +27,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaGaussian;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::gaussian_wrapper::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -241,6 +243,14 @@ pub enum GaussianError {
     DegeneratePeriod { period: usize },
     #[error("gaussian: Period of 1 causes degenerate filter (alpha=0). This produces constant zero output. Use period >= 2.")]
     PeriodOneDegenerate,
+    #[error("gaussian: output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("gaussian: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("gaussian: invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("gaussian: size overflow (rows={rows}, cols={cols})")]
+    SizeOverflow { rows: usize, cols: usize },
 }
 
 #[inline]
@@ -845,25 +855,28 @@ impl GaussianBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &GaussianBatchRange) -> Vec<GaussianParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &GaussianBatchRange) -> Result<Vec<GaussianParams>, GaussianError> {
+    #[inline(always)]
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, GaussianError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let v: Vec<usize> = (lo..=hi).step_by(step).collect();
+        if v.is_empty() {
+            return Err(GaussianError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let poles = axis_usize(r.poles);
-    let mut out = Vec::with_capacity(periods.len() * poles.len());
+    let periods = axis_usize(r.period)?;
+    let poles = axis_usize(r.poles)?;
+    let mut out = Vec::with_capacity(periods.len().saturating_mul(poles.len()));
     for &p in &periods {
         for &k in &poles {
-            out.push(GaussianParams {
-                period: Some(p),
-                poles: Some(k),
-            });
+            out.push(GaussianParams { period: Some(p), poles: Some(k) });
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn gaussian_batch_with_kernel(
@@ -874,7 +887,7 @@ pub fn gaussian_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(GaussianError::NoData),
+        other => return Err(GaussianError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -915,10 +928,7 @@ pub fn gaussian_into_slice(
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(GaussianError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
+        return Err(GaussianError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
     gaussian_with_kernel_into(input, kern, dst)
@@ -934,10 +944,7 @@ pub fn gaussian_into_slice(
 pub fn gaussian_into(input: &GaussianInput, out: &mut [f64]) -> Result<(), GaussianError> {
     let data = input.as_ref();
     if out.len() != data.len() {
-        return Err(GaussianError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
-        });
+        return Err(GaussianError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
     // Use the module's dispatcher with Kernel::Auto to preserve selection semantics.
     gaussian_with_kernel_into(input, Kernel::Auto, out)
@@ -1280,12 +1287,16 @@ fn gaussian_batch_inner(
     // ------------------------------------------------------------
     // 0.  Expand grid  +  warm-up lengths
     // ----------------------------------------------------------
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() || data.is_empty() {
         return Err(GaussianError::NoData);
     }
     let cols = data.len();
     let rows = combos.len();
+    // Guard against potential overflow in downstream allocations
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(GaussianError::SizeOverflow { rows, cols })?;
 
     let first_valid = data
         .iter()
@@ -2613,18 +2624,17 @@ fn gaussian_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<GaussianParams>, GaussianError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() || data.is_empty() {
         return Err(GaussianError::NoData);
     }
     let cols = data.len();
     let rows = combos.len();
-
-    if out.len() != rows * cols {
-        return Err(GaussianError::InvalidPeriod {
-            period: 0,
-            data_len: out.len(),
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(GaussianError::SizeOverflow { rows, cols })?;
+    if out.len() != expected {
+        return Err(GaussianError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     let first_valid = data
@@ -2796,7 +2806,7 @@ pub fn gaussian_batch_py<'py>(
         poles: poles_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2858,19 +2868,18 @@ pub fn gaussian_cuda_batch_dev_py(
     }
 
     let slice = data_f32.as_slice()?;
-    let sweep = GaussianBatchRange {
-        period: period_range,
-        poles: poles_range,
-    };
+    let sweep = GaussianBatchRange { period: period_range, poles: poles_range };
 
-    let inner = py.allow_threads(|| {
-        let cuda =
-            CudaGaussian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.gaussian_batch_dev(slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    // Create CUDA wrapper outside allow_threads so we can capture its context/stream
+    let cuda = CudaGaussian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let stream = cuda.stream_handle();
+    let dev_id = cuda.device_id();
+    let ctx_guard = cuda.context_arc();
+    let inner = py
+        .allow_threads(|| cuda.gaussian_batch_dev(slice, &sweep))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, stream, ctx_guard, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2899,14 +2908,15 @@ pub fn gaussian_cuda_many_series_one_param_dev_py(
         poles: Some(poles),
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda =
-            CudaGaussian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.gaussian_many_series_one_param_time_major_dev(flat, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let cuda = CudaGaussian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let stream = cuda.stream_handle();
+    let dev_id = cuda.device_id();
+    let ctx_guard = cuda.context_arc();
+    let inner = py
+        .allow_threads(|| cuda.gaussian_many_series_one_param_time_major_dev(flat, cols, rows, &params))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, stream, ctx_guard, dev_id))
 }
 
 #[cfg(feature = "wasm")]
@@ -3052,7 +3062,7 @@ pub fn gaussian_batch_metadata_js(
         poles: (poles_start, poles_end, poles_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let metadata: Vec<f64> = combos
         .iter()
         .flat_map(|combo| {
@@ -3134,7 +3144,7 @@ pub fn gaussian_batch_into(
             poles: (poles_start, poles_end, poles_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
