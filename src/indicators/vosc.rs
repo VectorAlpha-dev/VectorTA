@@ -1789,6 +1789,45 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_vosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use existing CSV candles and default VOSC params (volume source)
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let volume = candles
+            .select_candle_field("volume")
+            .expect("Failed to extract volume data");
+
+        let input = VoscInput::with_default_candles(&candles);
+
+        // Baseline via allocating API
+        let baseline = vosc(&input)?.values;
+
+        // Compute via no-allocation API
+        let mut out = vec![0.0f64; volume.len()];
+        vosc_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || (a - b).abs() <= 1e-12
+        }
+
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "VOSC parity mismatch at index {}: api={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 }
 
 // ================================================================================================
@@ -2074,6 +2113,17 @@ pub fn vosc_into_slice(dst: &mut [f64], input: &VoscInput, kern: Kernel) -> Resu
     }
 
     Ok(())
+}
+
+/// Write VOSC (Volume Oscillator) values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - `out.len()` must equal the input length; returns an error on mismatch.
+/// - Uses the module's kernel auto-selection (Auto short-circuits to Scalar for parity).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn vosc_into(input: &VoscInput, out: &mut [f64]) -> Result<(), VoscError> {
+    vosc_into_slice(out, input, Kernel::Auto)
 }
 
 #[cfg(feature = "wasm")]

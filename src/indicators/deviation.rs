@@ -395,6 +395,33 @@ pub fn deviation_with_kernel(
     Ok(DeviationOutput { values: out })
 }
 
+/// Compute Deviation into a caller-provided buffer (no allocations).
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (quiet-NaN prefix).
+/// - `out.len()` must equal the input length; returns an error on mismatch.
+#[cfg(not(feature = "wasm"))]
+pub fn deviation_into(input: &DeviationInput, out: &mut [f64]) -> Result<(), DeviationError> {
+    let (data, period, devtype, first, chosen) = deviation_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(DeviationError::CalculationError(format!(
+            "Output buffer length mismatch: expected {}, got {}",
+            data.len(),
+            out.len()
+        )));
+    }
+
+    // Prefill warmup region with the same quiet-NaN used by alloc_with_nan_prefix
+    let warm = first + period - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let pre = warm.min(out.len());
+    for v in &mut out[..pre] {
+        *v = qnan;
+    }
+
+    deviation_compute_into(data, period, devtype, first, chosen, out)
+}
+
 // Replace your current deviation_into_slice with this.
 pub fn deviation_into_slice(
     dst: &mut [f64],
@@ -2467,6 +2494,58 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use std::error::Error;
+
+    #[test]
+    fn test_deviation_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a non-trivial input with initial NaNs to exercise warmup handling
+        let len = 256;
+        let mut data = Vec::with_capacity(len);
+        for i in 0..len {
+            let x = (i as f64 * 0.1).sin() * 10.0 + (i % 7) as f64;
+            data.push(x);
+        }
+        // Introduce NaNs at the start to ensure warmup prefix > 0
+        if len >= 2 {
+            data[0] = f64::NAN;
+            data[1] = f64::NAN;
+        }
+
+        let input = DeviationInput::from_slice(&data, DeviationParams::default());
+
+        // Baseline Vec-returning API
+        let baseline = deviation(&input)?.values;
+
+        // New no-allocation API
+        let mut into_out = vec![0.0; len];
+        #[cfg(not(feature = "wasm"))]
+        {
+            deviation_into(&input, &mut into_out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm feature builds, deviation_into is provided via wasm-bindgen with a different signature.
+            // This parity test targets the native API; skip under wasm feature.
+            return Ok(());
+        }
+
+        // Helper: treat NaN == NaN; otherwise require tight equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        assert_eq!(baseline.len(), into_out.len());
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline[i], into_out[i]),
+                "mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                into_out[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_deviation_partial_params(
         test: &str,

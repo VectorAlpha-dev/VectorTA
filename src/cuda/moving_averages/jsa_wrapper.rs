@@ -23,6 +23,7 @@ use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffe
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::error::CudaError;
 use std::convert::TryFrom;
 use std::ffi::c_void;
 use std::fmt;
@@ -84,8 +85,18 @@ pub enum ManySeriesKernelSelected {
 
 #[derive(Debug)]
 pub enum CudaJsaError {
-    Cuda(String),
+    Cuda(CudaError),
     InvalidInput(String),
+    NotImplemented,
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    MissingKernelSymbol { name: &'static str },
+    InvalidPolicy(&'static str),
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    DeviceMismatch { buf: u32, current: u32 },
+}
+
+impl From<CudaError> for CudaJsaError {
+    fn from(e: CudaError) -> Self { CudaJsaError::Cuda(e) }
 }
 
 impl fmt::Display for CudaJsaError {
@@ -93,6 +104,24 @@ impl fmt::Display for CudaJsaError {
         match self {
             CudaJsaError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaJsaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
+            CudaJsaError::NotImplemented => write!(f, "Not implemented"),
+            CudaJsaError::OutOfMemory { required, free, headroom } => write!(
+                f,
+                "insufficient device memory: required={} free={} headroom={}",
+                required, free, headroom
+            ),
+            CudaJsaError::MissingKernelSymbol { name } => write!(f, "missing kernel symbol: {}", name),
+            CudaJsaError::InvalidPolicy(p) => write!(f, "invalid policy: {}", p),
+            CudaJsaError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+                f,
+                "launch config exceeds device limits: grid=({}, {}, {}), block=({}, {}, {})",
+                gx, gy, gz, bx, by, bz
+            ),
+            CudaJsaError::DeviceMismatch { buf, current } => write!(
+                f,
+                "device mismatch: buffer on device {} but current is {}",
+                buf, current
+            ),
         }
     }
 }
@@ -129,10 +158,9 @@ struct PreparedJsaManySeries {
 
 impl CudaJsa {
     pub fn new(device_id: usize) -> Result<Self, CudaJsaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/jsa_kernel.ptx"));
         // Adopt ALMA's robust JIT loading strategy. Prefer O4, then relax.
@@ -144,18 +172,13 @@ impl CudaJsa {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaJsaError::Cuda(e.to_string()))?
-                }
+                Err(_) => { Module::from_ptx(ptx, &[])? }
             },
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         // Query device limit (portable grid chunking)
-        let max_grid_x = device
-            .get_attribute(DeviceAttribute::MaxGridDimX)
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))? as usize;
+        let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as usize;
 
         Ok(Self {
             module,
@@ -194,9 +217,7 @@ impl CudaJsa {
     }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaJsaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaJsaError::from)
     }
 
     // ---------- VRAM helpers ----------
@@ -335,24 +356,18 @@ impl CudaJsa {
         let required = prices_bytes + periods_bytes + warm_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaJsaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
+            return Err(CudaJsaError::OutOfMemory { required, free, headroom });
         }
 
         // Async allocations and copies on NON_BLOCKING stream; sync at method end.
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
         let d_periods =
-            unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }?;
         let d_warm =
-            unsafe { DeviceBuffer::from_slice_async(&prepared.warm_indices, &self.stream) }
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&prepared.warm_indices, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(prepared.series_len * n_combos, &self.stream)
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(prepared.series_len * n_combos, &self.stream)?
         };
 
         // Best-effort L2 persisting hint for shared prices vector
@@ -369,9 +384,7 @@ impl CudaJsa {
         )?;
 
         // Maintain synchronous semantics at API boundary
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaJsaError::from)?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -447,10 +460,7 @@ impl CudaJsa {
             ));
         }
         let handle = self.jsa_batch_dev(data_f32, sweep)?;
-        handle
-            .buf
-            .copy_to(out_flat)
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))
+        handle.buf.copy_to(out_flat).map_err(CudaJsaError::from)
     }
 
     pub fn jsa_many_series_one_param_time_major_dev(
@@ -476,25 +486,19 @@ impl CudaJsa {
             .saturating_add(idx_bytes);
         let headroom = 64 * 1024 * 1024; // 64MB
         if !Self::will_fit(required, headroom) {
-            return Err(CudaJsaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
+            return Err(CudaJsaError::OutOfMemory { required, free, headroom });
         }
 
-        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
         // Hint: persist the input price window in L2 when supported (default on)
         self.try_enable_persisting_l2(d_prices_tm.as_device_ptr().as_raw() as u64, input_bytes);
         let d_first =
-            unsafe { DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream) }
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream) }?;
         let d_warm =
-            unsafe { DeviceBuffer::from_slice_async(&prepared.warm_indices, &self.stream) }
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::from_slice_async(&prepared.warm_indices, &self.stream) }?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)?
         };
 
         self.launch_many_series_kernel(
@@ -508,9 +512,7 @@ impl CudaJsa {
         )?;
 
         // Maintain synchronous semantics before handing back the buffer
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaJsaError::from)?;
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
@@ -580,10 +582,7 @@ impl CudaJsa {
             series_len,
             params,
         )?;
-        handle
-            .buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))
+        handle.buf.copy_to(out_tm).map_err(CudaJsaError::from)
     }
 
     /// Return the batch sweep into pinned (page-locked) host memory for faster D2H.
@@ -593,18 +592,13 @@ impl CudaJsa {
         sweep: &JsaBatchRange,
     ) -> Result<LockedBuffer<f32>, CudaJsaError> {
         let dev = self.jsa_batch_dev(data_f32, sweep)?;
-        let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(dev.rows * dev.cols)
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?
-        };
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(dev.rows * dev.cols)? };
         unsafe {
             dev.buf
                 .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+                .map_err(CudaJsaError::from)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaJsaError::from)?;
         Ok(pinned)
     }
 
@@ -622,18 +616,13 @@ impl CudaJsa {
             series_len,
             params,
         )?;
-        let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(num_series * series_len)
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?
-        };
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(num_series * series_len)? };
         unsafe {
             dev.buf
                 .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+                .map_err(CudaJsaError::from)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaJsaError::from)?;
         Ok(pinned)
     }
 
@@ -651,10 +640,10 @@ impl CudaJsa {
         let func = self
             .module
             .get_function("jsa_batch_f32")
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaJsaError::MissingKernelSymbol { name: "jsa_batch_f32" })?;
         let (suggested_block_x, _min_grid) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+            .map_err(CudaJsaError::from)?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
             _ => suggested_block_x.max(128).min(1024),
@@ -682,7 +671,7 @@ impl CudaJsa {
                 ];
                 self.stream
                     .launch(&func, grid, block, 0, &mut args)
-                    .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+                    .map_err(CudaJsaError::from)?;
             }
         }
 
@@ -693,9 +682,7 @@ impl CudaJsa {
         }
         self.maybe_log_batch_debug();
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaJsaError::from)
     }
 
     fn launch_many_series_kernel(
@@ -726,16 +713,20 @@ impl CudaJsa {
         let func = self
             .module
             .get_function("jsa_many_series_one_param_f32")
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaJsaError::MissingKernelSymbol { name: "jsa_many_series_one_param_f32" })?;
         let (suggested_block_x, _min_grid) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+            .map_err(CudaJsaError::from)?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
             _ => suggested_block_x.max(128).min(1024),
         };
         let block: BlockSize = (block_x, 1, 1).into();
-        let grid: GridSize = (num_series as u32, 1, 1).into();
+        let grid_x_u32 = num_series as u32;
+        if (num_series as usize) > self.max_grid_x {
+            return Err(CudaJsaError::LaunchConfigTooLarge { gx: grid_x_u32, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
+        let grid: GridSize = (grid_x_u32, 1, 1).into();
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -754,9 +745,7 @@ impl CudaJsa {
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaJsaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args).map_err(CudaJsaError::from)?;
         }
         unsafe {
             let this = self as *const _ as *mut CudaJsa;
@@ -764,9 +753,7 @@ impl CudaJsa {
         }
         self.maybe_log_many_debug();
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaJsaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaJsaError::from)
     }
 
     fn prepare_batch_inputs(
@@ -911,25 +898,24 @@ pub mod benches {
 
 fn expand_periods(range: &JsaBatchRange) -> Vec<JsaParams> {
     let (start, end, step) = range.period;
-    if start > end {
-        return Vec::new();
-    }
     if step == 0 || start == end {
-        return vec![JsaParams {
-            period: Some(start),
-        }];
+        return vec![JsaParams { period: Some(start) }];
     }
-
     let mut out = Vec::new();
-    let mut value = start;
-    while value <= end {
-        out.push(JsaParams {
-            period: Some(value),
-        });
-        value = value.saturating_add(step);
-        if step == 0 {
-            break;
+    if start < end {
+        let mut v = start;
+        while v <= end {
+            out.push(JsaParams { period: Some(v) });
+            match v.checked_add(step) { Some(n) => v = n, None => break }
+        }
+    } else {
+        let mut v = start;
+        while v >= end {
+            out.push(JsaParams { period: Some(v) });
+            if v < end + step { break; }
+            v -= step;
+            if v == usize::MAX { break; }
         }
     }
-    out
+    if out.is_empty() { vec![JsaParams { period: Some(start) }] } else { out }
 }

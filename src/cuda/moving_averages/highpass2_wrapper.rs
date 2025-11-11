@@ -24,23 +24,24 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
+use cust::error::CudaError;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaHighPass2Error {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Out of device memory (required={required}B, free={free}B, headroom={headroom}B)")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaHighPass2Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaHighPass2Error::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaHighPass2Error::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CudaHighPass2Error {}
 
 // -------- Kernel policy + introspection (ALMA parity adapted to recurrence) --------
 
@@ -125,10 +126,9 @@ pub struct HighPass2BatchDeviceParams {
 
 impl CudaHighPass2 {
     pub fn new(device_id: usize) -> Result<Self, CudaHighPass2Error> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/highpass2_kernel.ptx"));
         let jit_opts = &[
@@ -138,12 +138,10 @@ impl CudaHighPass2 {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
@@ -154,8 +152,7 @@ impl CudaHighPass2 {
         if let Ok(mut f) = module.get_function("highpass2_many_series_one_param_f32") {
             let _ = f.set_cache_config(CacheConfig::PreferL1);
         }
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -190,11 +187,7 @@ impl CudaHighPass2 {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
-    pub fn synchronize(&self) -> Result<(), CudaHighPass2Error> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))
-    }
+    pub fn synchronize(&self) -> Result<(), CudaHighPass2Error> { self.stream.synchronize().map_err(Into::into) }
 
     #[inline]
     fn calc_launch_1d(
@@ -230,19 +223,16 @@ impl CudaHighPass2 {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
+    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaHighPass2Error> {
+        if !Self::mem_check_enabled() { return Ok(()); }
         if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
-        }
+            let need = required_bytes
+                .checked_add(headroom_bytes)
+                .ok_or(CudaHighPass2Error::OutOfMemory { required: usize::MAX, free, headroom: headroom_bytes })?;
+            if need <= free { Ok(()) } else { Err(CudaHighPass2Error::OutOfMemory { required: need, free, headroom: headroom_bytes }) }
+        } else { Ok(()) }
     }
 
     #[inline]
@@ -295,31 +285,15 @@ impl CudaHighPass2 {
         let params_bytes = n_combos * (std::mem::size_of::<i32>() + 4 * std::mem::size_of::<f32>());
         let out_bytes = n_combos * prepared.series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + params_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaHighPass2Error::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let d_periods =
-            unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let d_c = unsafe { DeviceBuffer::from_slice_async(&prepared.c_vals, &self.stream) }
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let d_cm2 = unsafe { DeviceBuffer::from_slice_async(&prepared.cm2_vals, &self.stream) }
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let d_two = unsafe { DeviceBuffer::from_slice_async(&prepared.two_1m_vals, &self.stream) }
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let d_neg =
-            unsafe { DeviceBuffer::from_slice_async(&prepared.neg_oma_sq_vals, &self.stream) }
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(prepared.series_len * n_combos, &self.stream)
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?
-        };
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }?;
+        let d_c       = unsafe { DeviceBuffer::from_slice_async(&prepared.c_vals, &self.stream) }?;
+        let d_cm2     = unsafe { DeviceBuffer::from_slice_async(&prepared.cm2_vals, &self.stream) }?;
+        let d_two     = unsafe { DeviceBuffer::from_slice_async(&prepared.two_1m_vals, &self.stream) }?;
+        let d_neg     = unsafe { DeviceBuffer::from_slice_async(&prepared.neg_oma_sq_vals, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(prepared.series_len * n_combos, &self.stream) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -334,6 +308,8 @@ impl CudaHighPass2 {
             &mut d_out,
         )?;
 
+        // Synchronize so returned handle is immediately consumable (CAI stream omitted)
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -421,19 +397,9 @@ impl CudaHighPass2 {
         }
         let handle = self.highpass2_batch_dev(data_f32, sweep)?;
         // Use pinned host memory for faster D2H, then copy into out slice
-        let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(handle.len())
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?
-        };
-        unsafe {
-            handle
-                .buf
-                .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(handle.len())? };
+        unsafe { handle.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
+        self.stream.synchronize()?;
         out_flat.copy_from_slice(pinned.as_slice());
         Ok(())
     }
@@ -453,21 +419,11 @@ impl CudaHighPass2 {
         let out_bytes = in_bytes;
         let param_bytes = num_series * std::mem::size_of::<i32>();
         let required = in_bytes + out_bytes + param_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaHighPass2Error::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&prepared.first_valids)
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?
-        };
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
+        let d_first = DeviceBuffer::from_slice(&prepared.first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream) }?;
 
         self.launch_many_series_kernel(
             &d_prices,
@@ -482,6 +438,8 @@ impl CudaHighPass2 {
             &mut d_out,
         )?;
 
+        // Sync to make returned buffer immediately consumable
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: series_len,
@@ -557,19 +515,9 @@ impl CudaHighPass2 {
             series_len,
             params,
         )?;
-        let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(handle.len())
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?
-        };
-        unsafe {
-            handle
-                .buf
-                .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(handle.len())? };
+        unsafe { handle.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
+        self.stream.synchronize()?;
         out_tm.copy_from_slice(pinned.as_slice());
         Ok(())
     }
@@ -591,7 +539,7 @@ impl CudaHighPass2 {
         let func = self
             .module
             .get_function("highpass2_batch_f32")
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
+            .map_err(|_| CudaHighPass2Error::MissingKernelSymbol { name: "highpass2_batch_f32" })?;
 
         let (block, grid) = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => {
@@ -625,9 +573,7 @@ impl CudaHighPass2 {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
         unsafe {
             let bx = match self.policy.batch {
@@ -658,7 +604,7 @@ impl CudaHighPass2 {
         let func = self
             .module
             .get_function("highpass2_many_series_one_param_f32")
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
+            .map_err(|_| CudaHighPass2Error::MissingKernelSymbol { name: "highpass2_many_series_one_param_f32" })?;
 
         let (block, grid) = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => {
@@ -692,9 +638,7 @@ impl CudaHighPass2 {
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
         unsafe {
             let bx = match self.policy.many_series {
@@ -719,18 +663,11 @@ impl CudaHighPass2 {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n = prepared.combos.len();
 
-        let d_periods =
-            unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let d_c = unsafe { DeviceBuffer::from_slice_async(&prepared.c_vals, &self.stream) }
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let d_cm2 = unsafe { DeviceBuffer::from_slice_async(&prepared.cm2_vals, &self.stream) }
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let d_two = unsafe { DeviceBuffer::from_slice_async(&prepared.two_1m_vals, &self.stream) }
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        let d_neg =
-            unsafe { DeviceBuffer::from_slice_async(&prepared.neg_oma_sq_vals, &self.stream) }
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }?;
+        let d_c       = unsafe { DeviceBuffer::from_slice_async(&prepared.c_vals, &self.stream) }?;
+        let d_cm2     = unsafe { DeviceBuffer::from_slice_async(&prepared.cm2_vals, &self.stream) }?;
+        let d_two     = unsafe { DeviceBuffer::from_slice_async(&prepared.two_1m_vals, &self.stream) }?;
+        let d_neg     = unsafe { DeviceBuffer::from_slice_async(&prepared.neg_oma_sq_vals, &self.stream) }?;
 
         Ok(HighPass2BatchDeviceParams {
             n_combos: n,
@@ -750,10 +687,7 @@ impl CudaHighPass2 {
         d_prices: &DeviceBuffer<f32>,
         params: &HighPass2BatchDeviceParams,
     ) -> Result<DeviceArrayF32, CudaHighPass2Error> {
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(params.series_len * params.n_combos, &self.stream)
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?
-        };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(params.series_len * params.n_combos, &self.stream) }?;
         self.launch_batch_kernel(
             d_prices,
             &params.d_periods,
@@ -786,18 +720,9 @@ impl CudaHighPass2 {
             ));
         }
         let arr = self.highpass2_batch_with_params_dev(d_prices, params)?;
-        let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(arr.len())
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?
-        };
-        unsafe {
-            arr.buf
-                .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(arr.len())? };
+        unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
+        self.stream.synchronize()?;
         out_flat.copy_from_slice(pinned.as_slice());
         Ok(())
     }
@@ -815,23 +740,11 @@ impl CudaHighPass2 {
             prepared.combos.len() * (std::mem::size_of::<i32>() + 4 * std::mem::size_of::<f32>());
         let out_bytes = prepared.series_len * prepared.combos.len() * std::mem::size_of::<f32>();
         let required = prices_bytes + params_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaHighPass2Error::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         // H2D from pinned source
-        let mut d_prices: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(prepared.series_len, &self.stream)
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?
-        };
-        unsafe {
-            d_prices
-                .async_copy_from(data_pinned.as_slice(), &self.stream)
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        }
+        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(prepared.series_len, &self.stream) }?;
+        unsafe { d_prices.async_copy_from(data_pinned.as_slice(), &self.stream)?; }
 
         let params_dev = self.upload_batch_params(data_pinned.as_slice(), sweep)?;
         self.highpass2_batch_with_params_dev(&d_prices, &params_dev)
@@ -857,14 +770,8 @@ impl CudaHighPass2 {
             series_len,
             params,
         )?;
-        unsafe {
-            arr.buf
-                .async_copy_to(out_tm_pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
-        }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHighPass2Error::Cuda(e.to_string()))?;
+        unsafe { arr.buf.async_copy_to(out_tm_pinned.as_mut_slice(), &self.stream)?; }
+        self.stream.synchronize()?;
         Ok(())
     }
 

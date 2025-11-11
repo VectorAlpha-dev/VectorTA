@@ -7,6 +7,14 @@
 // block-wide barriers. The warmup loop uses Welford’s update form with FMA and
 // single-precision division to tighten the instruction mix while preserving
 // numerical behavior.
+//
+// NOTE: Kernel symbol names are part of the wrapper contract. The Rust wrapper
+// resolves the following symbols and will return a readable MissingKernelSymbol
+// error if one is absent:
+//   - "ema_batch_f32"
+//   - "ema_many_series_one_param_f32"
+//   - "ema_many_series_one_param_f32_coalesced" (optional fast path)
+// Keep names stable unless coordinated with the wrapper.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH

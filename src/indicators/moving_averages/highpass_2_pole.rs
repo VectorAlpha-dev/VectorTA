@@ -265,6 +265,14 @@ pub enum HighPass2Error {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("highpass_2_pole: Output buffer length mismatch: out_len = {out_len}, expected = {expected}")]
     OutputLengthMismatch { out_len: usize, expected: usize },
+    #[error("highpass_2_pole: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("highpass_2_pole: Invalid usize range: start={start}, end={end}, step={step}")]
+    InvalidRangeUsize { start: usize, end: usize, step: usize },
+    #[error("highpass_2_pole: Invalid f64 range: start={start}, end={end}, step={step}")]
+    InvalidRangeF64 { start: f64, end: f64, step: f64 },
+    #[error("highpass_2_pole: size overflow while computing {what}")]
+    SizeOverflow { what: &'static str },
 }
 
 /// Computes a two-pole high-pass filter using the best available kernel.
@@ -339,7 +347,11 @@ fn highpass_2_pole_with_kernel_into(
     // Only fill [0..first) with NaN, not the entire warmup range
     // The kernel will seed from first and compute the rest
     if first > 0 {
-        out[..first].fill(f64::NAN);
+        // Match alloc_with_nan_prefix quiet-NaN pattern for parity
+        let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+        for v in &mut out[..first] {
+            *v = qnan;
+        }
     }
 
     unsafe {
@@ -823,12 +835,7 @@ pub fn highpass_2_pole_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(HighPass2Error::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(HighPass2Error::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -862,37 +869,57 @@ impl HighPass2BatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &HighPass2BatchRange) -> Vec<HighPass2Params> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &HighPass2BatchRange) -> Result<Vec<HighPass2Params>, HighPass2Error> {
+    #[inline(always)]
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, HighPass2Error> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let v: Vec<usize> = (lo..=hi).step_by(step).collect();
+        if v.is_empty() {
+            return Err(HighPass2Error::InvalidRangeUsize { start, end, step });
+        }
+        Ok(v)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+    #[inline(always)]
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, HighPass2Error> {
+        const EPS: f64 = 1e-12;
+        if step.abs() < EPS || (start - end).abs() < EPS {
+            return Ok(vec![start]);
         }
+        let step_eff = if start <= end { step.abs() } else { -step.abs() };
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if step_eff > 0.0 {
+            while x <= end + EPS {
+                v.push(x);
+                x += step_eff;
+            }
+        } else {
+            while x >= end - EPS {
+                v.push(x);
+                x += step_eff;
+            }
         }
-        v
+        if v.is_empty() {
+            return Err(HighPass2Error::InvalidRangeF64 { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let ks = axis_f64(r.k);
-    let mut out = Vec::with_capacity(periods.len() * ks.len());
+    let periods = axis_usize(r.period)?;
+    let ks = axis_f64(r.k)?;
+    let combos_len = periods
+        .len()
+        .checked_mul(ks.len())
+        .ok_or(HighPass2Error::SizeOverflow { what: "parameter grid" })?;
+    let mut out = Vec::with_capacity(combos_len);
     for &p in &periods {
         for &k in &ks {
-            out.push(HighPass2Params {
-                period: Some(p),
-                k: Some(k),
-            });
+            out.push(HighPass2Params { period: Some(p), k: Some(k) });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -920,7 +947,7 @@ fn highpass_2_pole_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<HighPass2BatchOutput, HighPass2Error> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(HighPass2Error::InvalidPeriod {
             period: 0,
@@ -940,6 +967,10 @@ fn highpass_2_pole_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    // Guard potential overflow for downstream allocations and length math
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(HighPass2Error::SizeOverflow { what: "batch output elements" })?;
 
     // per-row warmups: first + period - 1
     let warm: Vec<usize> = combos
@@ -1153,6 +1184,44 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use paste::paste;
+
+    #[test]
+    fn test_highpass_2_pole_into_matches_api() {
+        // Build a small but non-trivial slice with a NaN prefix
+        let len = 256usize;
+        let mut data = vec![0.0f64; len];
+        // Leading NaNs to exercise warmup handling
+        data[0] = f64::NAN;
+        data[1] = f64::NAN;
+        data[2] = f64::NAN;
+        for i in 3..len {
+            let x = i as f64;
+            data[i] = (x * 0.01).sin() + (x * 0.02).cos() + ((i % 7) as f64) * 0.1;
+        }
+
+        let input = HighPass2Input::from_slice(&data, HighPass2Params::default());
+
+        let baseline = highpass_2_pole(&input).expect("baseline API should succeed");
+        assert_eq!(baseline.values.len(), len);
+
+        let mut out = vec![0.0f64; len];
+        highpass_2_pole_into(&input, &mut out).expect("into API should succeed");
+        assert_eq!(out.len(), len);
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline.values[i], out[i]),
+                "mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline.values[i],
+                out[i]
+            );
+        }
+    }
 
     fn check_highpass2_partial_params(
         test_name: &str,
@@ -1982,7 +2051,7 @@ fn highpass_2_pole_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<HighPass2Params>, HighPass2Error> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(HighPass2Error::InvalidPeriod {
             period: 0,
@@ -2002,6 +2071,12 @@ fn highpass_2_pole_batch_inner_into(
     }
     let rows = combos.len();
     let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(HighPass2Error::SizeOverflow { what: "batch output elements" })?;
+    if out.len() != expected {
+        return Err(HighPass2Error::OutputLengthMismatch { out_len: out.len(), expected });
+    }
 
     // per-row warmups: first + period - 1
     let warm: Vec<usize> = combos
@@ -2104,7 +2179,8 @@ pub fn highpass_2_pole_batch_py<'py>(
         k: k_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2403,8 +2479,9 @@ pub fn highpass_2_pole_batch_into(
             k: (k_start, k_end, k_step),
         };
 
-        let combos = expand_grid(&sweep);
-        let rows = combos.len();
+    let combos = expand_grid(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let rows = combos.len();
         let cols = len;
 
         if rows * cols == 0 {

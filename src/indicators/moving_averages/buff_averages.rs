@@ -264,6 +264,18 @@ pub enum BuffAveragesError {
 
     #[error("buff_averages: Volume data is required for this indicator")]
     MissingVolumeData,
+
+    #[error("buff_averages: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("buff_averages: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("buff_averages: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("buff_averages: size overflow for rows = {rows}, cols = {cols}")]
+    SizeOverflow { rows: usize, cols: usize },
 }
 
 // ==================== CORE COMPUTATION FUNCTIONS ====================
@@ -304,6 +316,55 @@ pub fn buff_averages_with_kernel(
     })
 }
 
+/// Writes Buff Averages outputs into caller-provided buffers without allocating.
+///
+/// - Preserves the exact NaN warmup prefix semantics as the Vec API
+///   (prefix length = `first_valid + slow_period - 1`).
+/// - Both `fast_out` and `slow_out` must have length equal to `input` length.
+///
+/// Returns `Ok(())` on success or the module's existing error on validation failure.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn buff_averages_into(
+    input: &BuffAveragesInput,
+    fast_out: &mut [f64],
+    slow_out: &mut [f64],
+) -> Result<(), BuffAveragesError> {
+    let (price, volume, fast_period, slow_period, first, chosen) =
+        buff_averages_prepare(input, Kernel::Auto)?;
+
+    if fast_out.len() != price.len() || slow_out.len() != price.len() {
+        return Err(BuffAveragesError::OutputLengthMismatch {
+            expected: price.len(),
+            got: core::cmp::min(fast_out.len(), slow_out.len()),
+        });
+    }
+
+    // Prefill warmup prefixes with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warm = first + slow_period - 1;
+    let nan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let warmup_len = warm.min(price.len());
+    for v in &mut fast_out[..warmup_len] {
+        *v = nan;
+    }
+    for v in &mut slow_out[..warmup_len] {
+        *v = nan;
+    }
+
+    buff_averages_compute_into(
+        price,
+        volume,
+        fast_period,
+        slow_period,
+        first,
+        chosen,
+        fast_out,
+        slow_out,
+    );
+
+    Ok(())
+}
+
 /// Zero-allocation version for performance-critical paths
 #[inline]
 pub fn buff_averages_into_slices(
@@ -315,9 +376,9 @@ pub fn buff_averages_into_slices(
     let (price, volume, fast_p, slow_p, first, chosen) = buff_averages_prepare(input, kern)?;
 
     if fast_dst.len() != price.len() || slow_dst.len() != price.len() {
-        return Err(BuffAveragesError::InvalidPeriod {
-            period: price.len(),
-            data_len: price.len(),
+        return Err(BuffAveragesError::OutputLengthMismatch {
+            expected: price.len(),
+            got: core::cmp::min(fast_dst.len(), slow_dst.len()),
         });
     }
 
@@ -1439,13 +1500,14 @@ impl BuffAveragesBatchBuilder {
     }
 }
 
-/// Helper to expand parameter grid
+/// Helper to expand parameter grid (robust to zero step and reversed bounds)
 fn expand_grid_ba(r: &BuffAveragesBatchRange) -> Vec<(usize, usize)> {
     fn axis((a, b, s): (usize, usize, usize)) -> Vec<usize> {
         if s == 0 || a == b {
             return vec![a];
         }
-        (a..=b).step_by(s).collect()
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        (lo..=hi).step_by(s).collect()
     }
 
     let fasts = axis(r.fast_period);
@@ -1486,9 +1548,11 @@ fn buff_averages_batch_inner_into_parallel(
 ) -> Result<Vec<(usize, usize)>, BuffAveragesError> {
     let combos = expand_grid_ba(sweep);
     if combos.is_empty() {
-        return Err(BuffAveragesError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        let (fs, fe, fp) = sweep.fast_period;
+        return Err(BuffAveragesError::InvalidRange {
+            start: fs.min(fe),
+            end: fs.max(fe),
+            step: fp,
         });
     }
 
@@ -1514,8 +1578,16 @@ fn buff_averages_batch_inner_into_parallel(
 
     let rows = combos.len();
     let cols = price.len();
-    assert_eq!(fast_out.len(), rows * cols);
-    assert_eq!(slow_out.len(), rows * cols);
+    if rows.checked_mul(cols).is_none() {
+        return Err(BuffAveragesError::SizeOverflow { rows, cols });
+    }
+    let expected = rows * cols;
+    if fast_out.len() != expected || slow_out.len() != expected {
+        return Err(BuffAveragesError::OutputLengthMismatch {
+            expected,
+            got: core::cmp::min(fast_out.len(), slow_out.len()),
+        });
+    }
 
     // SAFETY: re-interpret as MaybeUninit to use init_matrix_prefixes
     let fast_mu = unsafe {
@@ -1534,6 +1606,12 @@ fn buff_averages_batch_inner_into_parallel(
     let warms: Vec<usize> = combos.iter().map(|&(_, slow)| first + slow - 1).collect();
     init_matrix_prefixes(fast_mu, cols, &warms);
     init_matrix_prefixes(slow_mu, cols, &warms);
+
+    // Reject non-batch kernels explicitly
+    match kern {
+        Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => {}
+        other => return Err(BuffAveragesError::InvalidKernelForBatch(other)),
+    }
 
     let simd = match match kern {
         Kernel::Auto => detect_best_batch_kernel(),
@@ -1746,9 +1824,11 @@ fn buff_averages_batch_inner(
         .ok_or(BuffAveragesError::AllValuesNaN)?;
     let combos = expand_grid_ba(sweep);
     if combos.is_empty() {
-        return Err(BuffAveragesError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        let (fs, fe, fp) = sweep.fast_period;
+        return Err(BuffAveragesError::InvalidRange {
+            start: fs.min(fe),
+            end: fs.max(fe),
+            step: fp,
         });
     }
     let max_slow = combos.iter().map(|&(_, s)| s).max().unwrap();
@@ -1761,6 +1841,9 @@ fn buff_averages_batch_inner(
 
     let rows = combos.len();
     let cols = price.len();
+    if rows.checked_mul(cols).is_none() {
+        return Err(BuffAveragesError::SizeOverflow { rows, cols });
+    }
 
     // 2 matrices, uninitialized, zero-copy
     let mut fast_mu = make_uninit_matrix(rows, cols);
@@ -3108,5 +3191,48 @@ mod tests {
             // Should either succeed or fail gracefully
             let _ = buff_averages(&input);
         }
+    }
+
+    #[test]
+    fn test_buff_averages_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a moderate-size input with distinct price and volume
+        let len = 256usize;
+        let price: Vec<f64> = (0..len).map(|i| (i as f64) * 1.5 + 10.0).collect();
+        let volume: Vec<f64> = (0..len).map(|i| (i as f64) * 2.0 + 100.0).collect();
+
+        let params = BuffAveragesParams::default();
+        let input = BuffAveragesInput::from_slices(&price, &volume, params);
+
+        // Baseline via Vec-returning API
+        let base = buff_averages(&input)?;
+
+        // Preallocate outputs and compute via into API
+        let mut out_fast = vec![0.0; len];
+        let mut out_slow = vec![0.0; len];
+        super::buff_averages_into(&input, &mut out_fast, &mut out_slow)?;
+
+        fn eq_nan_or_close(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        assert_eq!(base.fast_buff.len(), out_fast.len());
+        assert_eq!(base.slow_buff.len(), out_slow.len());
+        for i in 0..len {
+            assert!(
+                eq_nan_or_close(base.fast_buff[i], out_fast[i]),
+                "fast mismatch at {}: {} vs {}",
+                i,
+                base.fast_buff[i],
+                out_fast[i]
+            );
+            assert!(
+                eq_nan_or_close(base.slow_buff[i], out_slow[i]),
+                "slow mismatch at {}: {} vs {}",
+                i,
+                base.slow_buff[i],
+                out_slow[i]
+            );
+        }
+        Ok(())
     }
 }

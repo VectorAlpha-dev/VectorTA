@@ -425,6 +425,66 @@ pub fn emd_with_kernel(input: &EmdInput, kernel: Kernel) -> Result<EmdOutput, Em
     })
 }
 
+/// Compute EMD into caller-provided buffers (no allocations).
+/// Preserves NaN warmups exactly like the Vec-returning API and writes results in-place.
+/// All output slices must have length equal to the input length.
+#[cfg(not(feature = "wasm"))]
+pub fn emd_into(
+    input: &EmdInput,
+    upperband_out: &mut [f64],
+    middleband_out: &mut [f64],
+    lowerband_out: &mut [f64],
+) -> Result<(), EmdError> {
+    let (high, low, period, delta, fraction, first, chosen) = emd_prepare(input, Kernel::Auto)?;
+
+    if upperband_out.len() != high.len()
+        || middleband_out.len() != high.len()
+        || lowerband_out.len() != high.len()
+    {
+        return Err(EmdError::InvalidInputLength {
+            expected: high.len(),
+            actual: upperband_out
+                .len()
+                .min(middleband_out.len())
+                .min(lowerband_out.len()),
+        });
+    }
+
+    // Prefill warmup prefixes with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let up_low_warm = first + 50 - 1;
+    let mid_warm = first + 2 * period - 1;
+
+    let end_u = up_low_warm.min(upperband_out.len());
+    for v in &mut upperband_out[..end_u] {
+        *v = qnan;
+    }
+    let end_l = up_low_warm.min(lowerband_out.len());
+    for v in &mut lowerband_out[..end_l] {
+        *v = qnan;
+    }
+    let end_m = mid_warm.min(middleband_out.len());
+    for v in &mut middleband_out[..end_m] {
+        *v = qnan;
+    }
+
+    // Compute into provided buffers using the selected kernel
+    emd_compute_into(
+        high,
+        low,
+        period,
+        delta,
+        fraction,
+        first,
+        chosen,
+        upperband_out,
+        middleband_out,
+        lowerband_out,
+    );
+
+    Ok(())
+}
+
 #[inline]
 pub unsafe fn emd_scalar_into(
     high: &[f64],
@@ -1596,6 +1656,69 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    #[cfg(not(feature = "wasm"))]
+    fn test_emd_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial OHLC-like input
+        let n = 256usize; // >= max(50, 2*default_period)
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        for i in 0..n {
+            let base = 100.0 + (i as f64 * 0.01)
+                + (2.0 * std::f64::consts::PI * (i as f64) / 17.0).sin() * 3.0
+                + (2.0 * std::f64::consts::PI * (i as f64) / 49.0).cos() * 2.0;
+            high.push(base + 1.25);
+            low.push(base - 1.10);
+        }
+
+        // Default params (period=20, delta=0.5, fraction=0.1)
+        let params = EmdParams::default();
+        let input = EmdInput::from_slices(&high, &low, &[], &[], params);
+
+        // Baseline via Vec-returning API
+        let baseline = emd(&input)?;
+
+        // Preallocate output buffers and compute via into()
+        let mut ub = vec![0.0; n];
+        let mut mb = vec![0.0; n];
+        let mut lb = vec![0.0; n];
+        emd_into(&input, &mut ub, &mut mb, &mut lb)?;
+
+        // Helper: NaN-equal comparator
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        // Length and element-wise equality (NaN == NaN)
+        assert_eq!(baseline.upperband.len(), ub.len());
+        assert_eq!(baseline.middleband.len(), mb.len());
+        assert_eq!(baseline.lowerband.len(), lb.len());
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline.upperband[i], ub[i]),
+                "upperband mismatch at {}: {:?} vs {:?}",
+                i,
+                baseline.upperband[i],
+                ub[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.middleband[i], mb[i]),
+                "middleband mismatch at {}: {:?} vs {:?}",
+                i,
+                baseline.middleband[i],
+                mb[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.lowerband[i], lb[i]),
+                "lowerband mismatch at {}: {:?} vs {:?}",
+                i,
+                baseline.lowerband[i],
+                lb[i]
+            );
+        }
+        Ok(())
+    }
 
     fn check_emd_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

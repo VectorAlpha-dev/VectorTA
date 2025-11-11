@@ -258,6 +258,28 @@ pub fn kaufmanstop_with_kernel(
     input: &KaufmanstopInput,
     kernel: Kernel,
 ) -> Result<KaufmanstopOutput, KaufmanstopError> {
+    let (high, low, period, first_valid_idx, _mult, _direction, _ma_type) =
+        kaufmanstop_prepare(input)?;
+
+    // Allocate with the same NaN warmup behavior
+    let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + period - 1);
+    // Compute into the provided buffer
+    kaufmanstop_compute_into(input, kernel, &mut out)?;
+    Ok(KaufmanstopOutput { values: out })
+}
+
+#[inline(always)]
+fn kaufmanstop_prepare<'a>(
+    input: &'a KaufmanstopInput,
+) -> Result<(
+    &'a [f64],
+    &'a [f64],
+    usize,        // period
+    usize,        // first_valid_idx
+    f64,          // mult
+    &'a str,      // direction
+    &'a str,      // ma_type
+), KaufmanstopError> {
     let (high, low) = match &input.data {
         KaufmanstopData::Candles { candles } => {
             let high = candles
@@ -305,11 +327,27 @@ pub fn kaufmanstop_with_kernel(
         });
     }
 
-    // Use alloc_with_nan_prefix instead of vec![f64::NAN; ...]
-    let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + period - 1);
+    Ok((high, low, period, first_valid_idx, mult, direction, ma_type))
+}
+
+#[inline(always)]
+fn kaufmanstop_compute_into(
+    input: &KaufmanstopInput,
+    kernel: Kernel,
+    out: &mut [f64],
+) -> Result<(), KaufmanstopError> {
+    let (high, low, period, first_valid_idx, mult, direction, ma_type) =
+        kaufmanstop_prepare(input)?;
+
+    if out.len() != high.len() {
+        return Err(KaufmanstopError::InvalidPeriod {
+            period: out.len(),
+            data_len: high.len(),
+        });
+    }
 
     // Dispatch to classic kernels for common MA types
-    if ma_type == "sma" || ma_type == "SMA" {
+    if ma_type.eq_ignore_ascii_case("sma") {
         unsafe {
             kaufmanstop_scalar_classic_sma(
                 high,
@@ -318,11 +356,11 @@ pub fn kaufmanstop_with_kernel(
                 first_valid_idx,
                 mult,
                 direction,
-                &mut out,
+                out,
             )?;
         }
-        return Ok(KaufmanstopOutput { values: out });
-    } else if ma_type == "ema" || ma_type == "EMA" {
+        return Ok(());
+    } else if ma_type.eq_ignore_ascii_case("ema") {
         unsafe {
             kaufmanstop_scalar_classic_ema(
                 high,
@@ -331,14 +369,13 @@ pub fn kaufmanstop_with_kernel(
                 first_valid_idx,
                 mult,
                 direction,
-                &mut out,
+                out,
             )?;
         }
-        return Ok(KaufmanstopOutput { values: out });
+        return Ok(());
     }
 
-    // Original implementation (fallback for other MA types)
-    // Use helper function to allocate with NaN prefix
+    // Fallback implementation for other MA types
     let mut hl_diff = alloc_with_nan_prefix(high.len(), first_valid_idx);
     for i in first_valid_idx..high.len() {
         if high[i].is_nan() || low[i].is_nan() {
@@ -367,7 +404,7 @@ pub fn kaufmanstop_with_kernel(
                 first_valid_idx,
                 mult,
                 direction,
-                &mut out,
+                out,
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => kaufmanstop_avx2(
@@ -378,7 +415,7 @@ pub fn kaufmanstop_with_kernel(
                 first_valid_idx,
                 mult,
                 direction,
-                &mut out,
+                out,
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => kaufmanstop_avx512(
@@ -389,12 +426,42 @@ pub fn kaufmanstop_with_kernel(
                 first_valid_idx,
                 mult,
                 direction,
-                &mut out,
+                out,
             ),
             _ => unreachable!(),
         }
     }
-    Ok(KaufmanstopOutput { values: out })
+    Ok(())
+}
+
+/// Writes Kaufmanstop outputs into the provided buffer without allocations.
+///
+/// - Preserves NaN warmups exactly like the Vec API (prefix length = first_valid + period - 1).
+/// - The `out` slice length must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn kaufmanstop_into(
+    input: &KaufmanstopInput,
+    out: &mut [f64],
+) -> Result<(), KaufmanstopError> {
+    let (high, _low, period, first_valid_idx, _mult, _direction, _ma_type) =
+        kaufmanstop_prepare(input)?;
+    if out.len() != high.len() {
+        return Err(KaufmanstopError::InvalidPeriod {
+            period: out.len(),
+            data_len: high.len(),
+        });
+    }
+
+    // Prefill NaN warmup prefix using the same quiet-NaN pattern
+    let warmup = first_valid_idx + period - 1;
+    let warm = warmup.min(out.len());
+    for v in &mut out[..warm] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Compute into the provided buffer (writes tail values)
+    kaufmanstop_compute_into(input, Kernel::Auto, out)
 }
 
 #[inline]
@@ -3152,6 +3219,57 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_kaufmanstop_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial OHLC dataset (with NaN prefix)
+        const N: usize = 256;
+        let mut ts: Vec<i64> = (0..N as i64).collect();
+        let mut open = vec![0.0; N];
+        let mut close = vec![0.0; N];
+        let mut high = vec![f64::NAN; N];
+        let mut low = vec![f64::NAN; N];
+        let mut vol = vec![0.0; N];
+
+        for i in 3..N {
+            // Base price with mild trend + oscillation
+            let base = 1000.0 + (i as f64) * 0.5 + ((i as f64) * 0.1).sin() * 2.0;
+            high[i] = base + 5.0;
+            low[i] = base - 5.0;
+            open[i] = base - 1.0;
+            close[i] = base + 1.0;
+            vol[i] = 100.0 + (i as f64) * 0.01;
+        }
+
+        let candles = Candles::new(ts, open, high.clone(), low.clone(), close, vol);
+        let input = KaufmanstopInput::with_default_candles(&candles);
+
+        // Baseline via existing Vec-returning API
+        let baseline = kaufmanstop(&input)?;
+
+        // Preallocate output for into API
+        let mut out = vec![0.0; N];
+        kaufmanstop_into(&input, &mut out)?;
+
+        assert_eq!(baseline.values.len(), out.len());
+
+        // Helper: exact equality or both NaN
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..N {
+            assert!(
+                eq_or_both_nan(baseline.values[i], out[i]),
+                "Mismatch at index {}: api={} into={}",
+                i,
+                baseline.values[i],
+                out[i]
+            );
+        }
 
         Ok(())
     }

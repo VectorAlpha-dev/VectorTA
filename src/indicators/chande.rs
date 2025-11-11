@@ -332,6 +332,16 @@ pub fn chande_with_kernel(
     Ok(ChandeOutput { values: out })
 }
 
+/// Writes Chande Exits values into a caller-provided output slice without allocating.
+///
+/// - Preserves NaN warmup semantics identical to the Vec-returning API.
+/// - `out.len()` must equal the input length; otherwise an error is returned.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn chande_into(input: &ChandeInput, out: &mut [f64]) -> Result<(), ChandeError> {
+    chande_into_slice(out, input, Kernel::Auto)
+}
+
 /// Helper function to compute chande directly into a pre-allocated slice
 #[inline]
 pub fn chande_compute_into(
@@ -1419,6 +1429,47 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_chande_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Prepare input from candles (non-trivial series)
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = ChandeInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = chande(&input)?;
+
+        // Preallocate output and compute via into-API
+        let mut out = vec![0.0f64; candles.close.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            chande_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, call the internal slice variant directly
+            chande_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.values.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline.values[i], out[i]),
+                "Mismatch at index {}: got {}, expected {}",
+                i,
+                out[i],
+                baseline.values[i]
+            );
+        }
+        Ok(())
+    }
 
     fn check_chande_partial_params(
         test_name: &str,

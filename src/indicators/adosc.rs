@@ -358,6 +358,16 @@ pub fn adosc_with_kernel(input: &AdoscInput, kernel: Kernel) -> Result<AdoscOutp
     }
 }
 
+/// Writes ADOSC values into a caller-provided output slice without allocating.
+///
+/// - Preserves ADOSC semantics: no warmup prefix (index 0 is a valid 0.0 value).
+/// - `out.len()` must exactly equal the input length; otherwise returns `AdoscError::InvalidLength`.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn adosc_into(input: &AdoscInput, out: &mut [f64]) -> Result<(), AdoscError> {
+    adosc_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline(always)]
 pub unsafe fn adosc_scalar(
     high: &[f64],
@@ -1857,6 +1867,60 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_adosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Construct a deterministic OHLCV series with realistic constraints: high >= close >= low
+        let len = 512usize;
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        let mut close = Vec::with_capacity(len);
+        let mut volume = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let base = 100.0 + (i as f64) * 0.05 + ((i % 13) as f64) * 0.01;
+            let spread = 0.5 + ((i % 7) as f64) * 0.03; // 0.5..0.68
+            let lo = base - spread;
+            let hi = base + spread;
+            // place close between low and high using a bounded fraction
+            let frac = ((i % 97) as f64) / 96.0; // [0,1]
+            let cl = lo + (hi - lo) * frac;
+            let vol = 1_000.0 + ((i * 37) % 10_000) as f64;
+
+            low.push(lo);
+            high.push(hi);
+            close.push(cl);
+            volume.push(vol);
+        }
+
+        let input = AdoscInput::from_slices(&high, &low, &close, &volume, AdoscParams::default());
+
+        // Baseline via existing Vec-returning API
+        let baseline = adosc(&input)?.values;
+
+        // Preallocate and compute via new no-allocation API
+        let mut out = vec![0.0; len];
+        adosc_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || (a - b).abs() <= 1e-12
+        }
+
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "ADOSC parity mismatch at index {}: api={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Write ADOSC directly to output slice - no allocations

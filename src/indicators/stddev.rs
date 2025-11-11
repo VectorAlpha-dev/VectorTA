@@ -365,6 +365,19 @@ pub fn stddev_into_slice(
     Ok(())
 }
 
+/// Write STDDEV into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API does.
+/// - The output slice length must equal the input length.
+/// - Selects `Kernel::Auto` at runtime (same as `stddev()`).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn stddev_into(input: &StdDevInput, out: &mut [f64]) -> Result<(), StdDevError> {
+    // Delegate to the existing no-allocation entry which validates lengths,
+    // computes identical warmup, and dispatches to the selected kernel.
+    stddev_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out: &mut [f64]) {
     // Rolling O(1) update of sum and sum of squares.
@@ -1798,6 +1811,48 @@ mod tests {
                 !second_result.values[i].is_nan(),
                 "STDDEV slice reinput: Expected no NaN after index 19, but found NaN at index {}",
                 i
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_stddev_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use existing CSV data to match other tests and exercise realistic paths.
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = StdDevInput::from_candles(&candles, "close", StdDevParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = stddev(&input)?.values;
+
+        // Preallocate output buffer and run the into variant
+        let mut out = vec![0.0; baseline.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            stddev_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, the native symbol is not present; use the slice variant.
+            stddev_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper to treat NaN == NaN, otherwise require exact equality (or tight epsilon)
+        let eq_or_both_nan = |a: f64, b: f64| -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        };
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "Mismatch at index {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
             );
         }
         Ok(())

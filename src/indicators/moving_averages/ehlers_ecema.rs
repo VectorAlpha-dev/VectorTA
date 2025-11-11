@@ -273,6 +273,18 @@ pub enum EhlersEcemaError {
 
     #[error("ehlers_ecema: EMA calculation failed: {0}")]
     EmaError(String),
+
+    #[error("ehlers_ecema: Output slice length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("ehlers_ecema: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("ehlers_ecema: non-batch kernel passed to batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("ehlers_ecema: size computation overflow during allocation ({what})")]
+    SizeOverflow { what: &'static str },
 }
 
 // ==================== PINE-STYLE EMA CALCULATION ====================
@@ -499,9 +511,9 @@ pub fn ehlers_ecema_into_slice(
 ) -> Result<(), EhlersEcemaError> {
     let (data, length, gain_limit, first, alpha, beta, chosen) = ehlers_ecema_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(EhlersEcemaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(EhlersEcemaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
     let pine_compatible = input.get_pine_compatible();
@@ -554,6 +566,17 @@ pub fn ehlers_ecema_into_slice(
         dst,
     );
     Ok(())
+}
+
+/// Writes EC-EMA values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly as the allocating API.
+/// - The output slice length must match the input length.
+/// - Uses `Kernel::Auto` for runtime dispatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn ehlers_ecema_into(input: &EhlersEcemaInput, out: &mut [f64]) -> Result<(), EhlersEcemaError> {
+    ehlers_ecema_into_slice(out, input, Kernel::Auto)
 }
 
 #[inline(always)]
@@ -849,12 +872,7 @@ pub fn ehlers_ecema_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(EhlersEcemaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(EhlersEcemaError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -870,16 +888,17 @@ pub fn ehlers_ecema_batch_with_kernel(
 #[inline(always)]
 fn expand_grid(r: &EhlersEcemaBatchRange) -> Vec<EhlersEcemaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
+        if step == 0 || start == end { return vec![start]; }
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        (lo..=hi).step_by(step).collect()
     }
 
     let lengths = axis_usize(r.length);
     let gain_limits = axis_usize(r.gain_limit);
 
-    let mut out = Vec::with_capacity(lengths.len() * gain_limits.len());
+    // Pre-allocate with checked arithmetic
+    let cap = lengths.len().checked_mul(gain_limits.len()).unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
     for &l in &lengths {
         for &g in &gain_limits {
             out.push(EhlersEcemaParams {
@@ -908,10 +927,15 @@ fn ehlers_ecema_batch_inner(
         // Match alma.rs behavior
         return Err(EhlersEcemaError::AllValuesNaN);
     }
+    // Guard rows * cols for buffer sizing
+    if rows.checked_mul(cols).is_none() {
+        return Err(EhlersEcemaError::SizeOverflow { what: "rows*cols" });
+    }
     if combos.is_empty() {
-        return Err(EhlersEcemaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(EhlersEcemaError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
         });
     }
 
@@ -978,9 +1002,10 @@ fn ehlers_ecema_batch_inner_into(
 
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EhlersEcemaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(EhlersEcemaError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
         });
     }
 
@@ -2497,4 +2522,55 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_ehlers_ecema_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input (with NaN warmup and varying values)
+        let len = 256usize;
+        let mut data = vec![0.0f64; len];
+        // introduce a few NaNs at the start to exercise warmup handling
+        for i in 0..3 { data[i] = f64::NAN; }
+        for i in 3..len {
+            let x = i as f64;
+            data[i] = 1000.0 + (x * 0.1).sin() * 5.0 + x * 0.05;
+        }
+
+        let params = EhlersEcemaParams::default();
+        let input = EhlersEcemaInput::from_slice(&data, params);
+
+        // Baseline via allocating API
+        let baseline = ehlers_ecema(&input)?.values;
+
+        // Preallocate output and compute via into API
+        let mut out = vec![0.0f64; len];
+        // Note: native into is cfg(not(wasm)); for wasm builds this test is skipped
+        #[cfg(not(feature = "wasm"))]
+        {
+            ehlers_ecema_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, fall back to into_slice with Auto to keep parity
+            ehlers_ecema_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: NaN == NaN, else exact or tight epsilon
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "mismatch at idx {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 }

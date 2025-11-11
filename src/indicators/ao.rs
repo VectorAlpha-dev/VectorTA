@@ -220,6 +220,45 @@ pub fn ao(input: &AoInput) -> Result<AoOutput, AoError> {
     ao_with_kernel(input, Kernel::Auto)
 }
 
+/// Compute Awesome Oscillator (AO) into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like `ao()` (quiet NaN prefix using the same pattern as
+///   `alloc_with_nan_prefix`).
+/// - The output slice length must equal the input length; returns `AoError::OutputLenMismatch`
+///   on mismatch.
+#[cfg(not(feature = "wasm"))]
+pub fn ao_into(input: &AoInput, out: &mut [f64]) -> Result<(), AoError> {
+    let (data, short, long, first, len) = ao_prepare(input)?;
+    if out.len() != len {
+        return Err(AoError::OutputLenMismatch {
+            expected: len,
+            got: out.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    let warmup_end = first + long - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..warmup_end.min(len)] {
+        *v = qnan;
+    }
+
+    // Dispatch with Kernel::Auto selection
+    let chosen = detect_best_kernel();
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => ao_scalar(data, short, long, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => ao_avx2(data, short, long, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => ao_avx512(data, short, long, first, out),
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
 #[inline]
 pub fn ao_into_slice(dst: &mut [f64], input: &AoInput, kern: Kernel) -> Result<(), AoError> {
     let (data, short, long, first, len) = ao_prepare(input)?;
@@ -1053,6 +1092,44 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use paste::paste;
+
+    #[test]
+    fn test_ao_into_matches_api() {
+        // Prepare a small but non-trivial input (length 256)
+        let len = 256;
+        let mut data = Vec::with_capacity(len);
+        for i in 0..len {
+            // Mildly varying series to exercise the rolling sums
+            let x = i as f64;
+            data.push((x * 0.01).mul_add(1.0, (x * 0.0314159).sin()));
+        }
+
+        let input = AoInput::from_slice(&data, AoParams::default());
+
+        // Baseline via Vec-returning API
+        let base = ao(&input).expect("ao() should succeed");
+
+        // Preallocate output and compute via into-API
+        let mut out = vec![0.0f64; len];
+        ao_into(&input, &mut out).expect("ao_into() should succeed");
+
+        assert_eq!(base.values.len(), out.len());
+
+        // Helper: treat NaN == NaN as equal
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(base.values[i], out[i]),
+                "Mismatch at index {}: got {}, expected {}",
+                i,
+                out[i],
+                base.values[i]
+            );
+        }
+    }
 
     fn check_ao_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

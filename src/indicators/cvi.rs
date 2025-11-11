@@ -252,6 +252,19 @@ pub fn cvi_with_kernel(input: &CviInput, kernel: Kernel) -> Result<CviOutput, Cv
     Ok(CviOutput { values: cvi_values })
 }
 
+/// Write Chaikin's Volatility (CVI) into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup semantics identical to the Vec-returning API.
+/// - `out.len()` must equal the input length; values before the first valid index and
+///   required warmup are filled with NaN, and the remainder contains CVI outputs.
+/// - Uses the module's default kernel selection (Auto short-circuits to Scalar for parity).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn cvi_into(input: &CviInput, out: &mut [f64]) -> Result<(), CviError> {
+    // Match cvi_with_kernel's Auto -> Scalar short-circuit to keep exact parity.
+    cvi_into_slice(out, input, Kernel::Scalar)
+}
+
 #[inline]
 pub fn cvi_scalar(
     high: &[f64],
@@ -1570,6 +1583,59 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    #[cfg(not(feature = "wasm"))]
+    fn test_cvi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Construct a small but non-trivial input with a NaN prefix and varying ranges
+        let len = 256usize;
+        let mut high = vec![0.0f64; len];
+        let mut low = vec![0.0f64; len];
+
+        // NaN warmup prefix
+        high[0] = f64::NAN;
+        low[0] = f64::NAN;
+        high[1] = f64::NAN;
+        low[1] = f64::NAN;
+        high[2] = f64::NAN;
+        low[2] = f64::NAN;
+
+        for i in 3..len {
+            let i_f = i as f64;
+            let base = 100.0 + 0.1 * i_f;
+            // add small, varying wiggles
+            high[i] = base + (i % 7) as f64 * 0.03;
+            let spread = 1.0 + (i % 5) as f64 * 0.2;
+            low[i] = high[i] - spread.max(0.001);
+        }
+
+        let input = CviInput::from_slices(&high, &low, CviParams::default());
+
+        // Baseline via allocating API
+        let baseline = cvi(&input)?.values;
+
+        // Into API writes in-place with identical warmup semantics
+        let mut into_out = vec![0.0f64; len];
+        cvi_into(&input, &mut into_out)?;
+
+        assert_eq!(baseline.len(), into_out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for (i, (&a, &b)) in baseline.iter().zip(into_out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "mismatch at {}: baseline={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {

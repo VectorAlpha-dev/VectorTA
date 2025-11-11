@@ -346,6 +346,17 @@ pub fn ott_with_kernel(input: &OttInput, kernel: Kernel) -> Result<OttOutput, Ot
     Ok(OttOutput { values: out })
 }
 
+/// Write OTT into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup semantics exactly as the Vec-returning API.
+/// - `out.len()` must equal the input length; returns the module's existing error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn ott_into(input: &OttInput, out: &mut [f64]) -> Result<(), OttError> {
+    // Delegate to the zero-allocation internal path with Kernel::Auto.
+    ott_into_slice(out, input, Kernel::Auto)
+}
+
 /// Zero-allocation version for WASM and performance-critical paths
 #[inline]
 pub fn ott_into_slice(dst: &mut [f64], input: &OttInput, kern: Kernel) -> Result<(), OttError> {
@@ -2729,4 +2740,54 @@ mod tests {
     }
 
     gen_batch_tests!(check_batch_helpers_and_row_lookup);
+}
+
+// Parity test for zero-allocation API
+#[cfg(test)]
+#[test]
+fn test_ott_into_matches_api() {
+    // Prepare a small but non-trivial input slice.
+    let n = 256usize;
+    let mut data = Vec::with_capacity(n);
+    for i in 0..n {
+        // Smoothly varying sequence with some curvature.
+        let x = i as f64;
+        data.push((x * 0.1).sin() * 100.0 + x * 0.05);
+    }
+
+    let input = OttInput::from_slice(&data, OttParams::default());
+
+    // Baseline via Vec-returning API
+    let baseline = ott(&input).expect("baseline ott() failed");
+
+    // Zero-allocation into-preallocated buffer
+    let mut into_out = vec![0.0; data.len()];
+    // Guarded function exists for native targets only; tests do not enable wasm.
+    #[cfg(not(feature = "wasm"))]
+    {
+        ott_into(&input, &mut into_out).expect("ott_into failed");
+    }
+    #[cfg(feature = "wasm")]
+    {
+        // In wasm builds the native ott_into symbol is not available.
+        // Use the internal slice variant to validate parity instead.
+        ott_into_slice(&mut into_out, &input, Kernel::Scalar).expect("ott_into_slice failed");
+    }
+
+    assert_eq!(baseline.values.len(), into_out.len());
+
+    // Helper: NaN equals NaN, otherwise exact equality (fall back to tight epsilon if needed).
+    fn eq_or_both_nan(a: f64, b: f64) -> bool {
+        (a.is_nan() && b.is_nan()) || a == b || (a - b).abs() <= 1e-12
+    }
+
+    for (i, (&a, &b)) in baseline.values.iter().zip(into_out.iter()).enumerate() {
+        assert!(
+            eq_or_both_nan(a, b),
+            "parity mismatch at {}: vec_api={} vs into_api={}",
+            i,
+            a,
+            b
+        );
+    }
 }

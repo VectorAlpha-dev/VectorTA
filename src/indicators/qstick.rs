@@ -258,6 +258,91 @@ pub fn qstick_with_kernel(
     Ok(QstickOutput { values: out })
 }
 
+/// Write Qstick values into the provided output buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (alloc_with_nan_prefix):
+///   fills the warmup prefix with quiet-NaNs and writes the first finite value at index
+///   `first_valid + period - 1`.
+/// - The output slice length must equal the input length (min of open/close lengths for slices).
+/// - Uses `Kernel::Auto` to dispatch to the best available compute path.
+#[cfg(not(feature = "wasm"))]
+pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickError> {
+    let (open, close) = match &input.data {
+        QstickData::Candles {
+            candles,
+            open_source,
+            close_source,
+        } => {
+            let open = source_type(candles, open_source);
+            let close = source_type(candles, close_source);
+            (open, close)
+        }
+        QstickData::Slices { open, close } => (*open, *close),
+    };
+
+    let len = open.len().min(close.len());
+    let period = input.get_period();
+
+    // Length/period validation mirrors the Vec API and `qstick_into_slice` behavior
+    if len == 0 || period == 0 || period > len {
+        return Err(QstickError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if out.len() != len {
+        return Err(QstickError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+
+    // Find first valid index where both open and close are finite
+    let mut first = 0usize;
+    for i in 0..len {
+        if !open[i].is_nan() && !close[i].is_nan() {
+            first = i;
+            break;
+        }
+        if i == len - 1 {
+            return Err(QstickError::AllValuesNaN);
+        }
+    }
+
+    if (len - first) < period {
+        return Err(QstickError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+
+    // Warmup prefix: identical to alloc_with_nan_prefix (quiet NaN payload)
+    let warm = first + period - 1;
+    let warm = warm.min(len);
+    for v in &mut out[..warm] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Dispatch to the best compute kernel
+    let chosen = match Kernel::Auto {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => qstick_scalar(open, close, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => qstick_avx2(open, close, period, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => qstick_avx512(open, close, period, first, out),
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
 #[inline]
 pub fn qstick_scalar(
     open: &[f64],
@@ -1171,6 +1256,30 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[test]
+    fn test_qstick_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the repo CSV data to mirror other qstick tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let params = QstickParams { period: Some(5) }; // default behavior
+        let input = QstickInput::from_candles(&candles, "open", "close", params);
+
+        // Baseline via existing Vec-returning API
+        let baseline = qstick(&input)?.values;
+
+        // New into API writes in-place
+        let mut into_out = vec![0.0; baseline.len()];
+        #[cfg(not(feature = "wasm"))]
+        qstick_into(&input, &mut into_out)?;
+
+        assert_eq!(baseline.len(), into_out.len());
+        for (a, b) in baseline.iter().zip(into_out.iter()) {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(equal, "qstick_into mismatch: a={}, b={}", a, b);
+        }
+        Ok(())
+    }
     fn check_qstick_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

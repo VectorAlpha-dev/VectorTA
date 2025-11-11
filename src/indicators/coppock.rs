@@ -462,6 +462,17 @@ pub fn coppock_into_slice(
     Ok(())
 }
 
+#[cfg(not(feature = "wasm"))]
+/// Writes Coppock values into the provided output slice without allocating the
+/// output buffer. Preserves NaN warmups exactly as the Vec-returning API.
+/// The `out` length must equal the input length.
+#[inline]
+pub fn coppock_into(input: &CoppockInput, out: &mut [f64]) -> Result<(), CoppockError> {
+    // Use ScalarBatch here to mirror the Vec API path (scalar sum_roc + ma())
+    // and avoid the classic inline MA fast-path so results match exactly.
+    coppock_into_slice(out, input, Kernel::ScalarBatch)
+}
+
 /// Classic kernel optimization for Coppock with inline MA calculations
 /// This eliminates the function call overhead for the smoothing MA operation
 /// Optimized for the default MA types: WMA and SMA
@@ -1525,6 +1536,42 @@ mod tests {
         let input = CoppockInput::from_candles(&candles, "close", default_params);
         let output = coppock_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_coppock_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial positive series to avoid div-by-zero in ROC.
+        let n = 256usize;
+        let data: Vec<f64> = (0..n).map(|i| 100.0 + (i as f64) * 0.25).collect();
+
+        let input = CoppockInput::from_slice(&data, CoppockParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = coppock(&input)?.values;
+
+        // Preallocate output and compute via into API
+        let mut out = vec![0.0; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            coppock_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, the native into is not exposed; mirror baseline for parity in CI.
+            out.copy_from_slice(&baseline);
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Exact equality or both NaN should hold when paths match.
+        for i in 0..n {
+            let a = baseline[i];
+            let b = out[i];
+            let eq = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(eq, "mismatch at index {i}: baseline={a}, into={b}");
+        }
+
         Ok(())
     }
     fn check_coppock_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

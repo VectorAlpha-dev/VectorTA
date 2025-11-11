@@ -272,6 +272,38 @@ pub fn sama_with_kernel(input: &SamaInput, kernel: Kernel) -> Result<SamaOutput,
     Ok(SamaOutput { values: out })
 }
 
+/// Compute SAMA directly into a caller-provided buffer without allocations.
+///
+/// - Preserves the module's warmup semantics: fills the NaN prefix up to the
+///   first finite input value using the same quiet-NaN pattern as `alloc_with_nan_prefix`.
+/// - Writes results in-place for the remaining entries via the selected kernel (Auto).
+/// - `out.len()` must equal the input length; returns the existing length/period error on mismatch.
+#[cfg(not(feature = "wasm"))]
+pub fn sama_into(input: &SamaInput, out: &mut [f64]) -> Result<(), SamaError> {
+    let (data, length, maj_length, min_length, first, chosen) =
+        sama_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(SamaError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by Vec API
+    let warm = first.min(out.len());
+    for i in 0..warm {
+        out[i] = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Compute writes values from `first` onward
+    sama_compute_into(
+        data, length, maj_length, min_length, first, chosen, out,
+    );
+
+    Ok(())
+}
+
 #[inline(always)]
 pub fn sama_into_slice(dst: &mut [f64], input: &SamaInput, kern: Kernel) -> Result<(), SamaError> {
     let (data, length, maj_length, min_length, first, chosen) = sama_prepare(input, kern)?;
@@ -1572,6 +1604,43 @@ mod tests {
             "[{}] SAMA should produce valid values",
             test_name
         );
+
+        Ok(())
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_sama_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a non-trivial input with a small NaN prefix and varying values
+        let mut data = Vec::with_capacity(256);
+        for _ in 0..5 {
+            data.push(f64::NAN);
+        }
+        for i in 0..251 {
+            // Mix of periodic and slowly varying components
+            let x = (i as f64).sin() * 0.12345 + 50.0 + ((i % 11) as f64) * 0.001;
+            data.push(x);
+        }
+
+        let input = SamaInput::from_slice(&data, SamaParams::default());
+        let baseline = sama(&input)?.values;
+
+        let mut out = vec![0.0; data.len()];
+        sama_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || (a - b).abs() <= 1e-12
+        }
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "mismatch at index {}: api={} into={}",
+                i,
+                a,
+                b
+            );
+        }
 
         Ok(())
     }

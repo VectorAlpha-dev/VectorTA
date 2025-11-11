@@ -194,6 +194,14 @@ pub enum EmaError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("ema: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("ema: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("ema: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("ema: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("ema: arithmetic overflow while computing {context}")]
+    ArithmeticOverflow { context: &'static str },
 }
 
 #[inline]
@@ -284,6 +292,37 @@ pub fn ema_with_kernel(input: &EmaInput, kernel: Kernel) -> Result<EmaOutput, Em
     Ok(EmaOutput { values: out })
 }
 
+/// Compute EMA directly into a caller-provided buffer without allocations.
+///
+/// - Preserves the module's warmup semantics: fills the NaN prefix up to the
+///   first finite input value using the same quiet-NaN pattern as `alloc_with_nan_prefix`.
+/// - Writes results in-place for the remaining entries via the selected kernel (Auto).
+/// - `out.len()` must equal the input length; returns the existing length/period error on mismatch.
+#[cfg(not(feature = "wasm"))]
+pub fn ema_into(input: &EmaInput, out: &mut [f64]) -> Result<(), EmaError> {
+    let (data, period, first, alpha, beta, chosen) = ema_prepare(input, Kernel::Auto)?;
+
+    // Enforce output length parity with input
+    if out.len() != data.len() {
+        return Err(EmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by Vec API
+    // alloc_with_nan_prefix writes 0x7ff8_0000_0000_0000 for warmups.
+    let warm = first.min(out.len());
+    for i in 0..warm {
+        out[i] = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Compute EMA values into the provided buffer
+    ema_compute_into(data, period, first, alpha, beta, chosen, out);
+
+    Ok(())
+}
+
 #[inline(always)]
 fn is_finite_fast(x: f64) -> bool {
     // True for finite values; false for ±Inf/NaN
@@ -299,9 +338,9 @@ pub fn ema_into_slice(dst: &mut [f64], input: &EmaInput, kern: Kernel) -> Result
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(EmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(EmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -570,12 +609,7 @@ pub fn ema_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(EmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(EmaError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
@@ -612,10 +646,12 @@ impl EmaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &EmaBatchRange) -> Vec<EmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // Zero step or equal bounds => singleton (stable semantics for existing tests)
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        (lo..=hi).step_by(step).collect()
     }
 
     let periods = axis_usize(r.period);
@@ -665,6 +701,10 @@ fn ema_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(EmaError::AllValuesNaN)?;
 
+    // checked rows * cols prior to allocating
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(EmaError::ArithmeticOverflow { context: "rows*cols" })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     // warm prefix per row = first (EMA defines from first onward)
@@ -834,6 +874,41 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use proptest::prelude::*;
+    
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_ema_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a non-trivial input with a small NaN prefix and varying values
+        let mut data = Vec::with_capacity(256);
+        for _ in 0..5 {
+            data.push(f64::NAN);
+        }
+        for i in 0..251 {
+            let x = (i as f64).sin() * 3.14159 + 100.0 + ((i % 7) as f64) * 0.01;
+            data.push(x);
+        }
+
+        let input = EmaInput::from_slice(&data, EmaParams::default());
+        let baseline = ema(&input)?.values;
+
+        let mut out = vec![0.0; data.len()];
+        ema_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || (a - b).abs() <= 1e-12
+        }
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "mismatch at index {}: api={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
+    }
 
     fn check_ema_partial_params(
         test_name: &str,
@@ -2023,11 +2098,13 @@ pub fn ema_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
-        let rows = combos.len();
-        let cols = len;
-
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+    let combos = expand_grid(&sweep);
+    let rows = combos.len();
+    let cols = len;
+        let elems = rows
+            .checked_mul(cols)
+            .ok_or(JsValue::from_str("overflow rows*cols"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, elems);
 
         // Initialize NaN prefixes before computation
         let first = data

@@ -892,6 +892,21 @@ pub fn pma_into_slice(
     Ok(())
 }
 
+/// Compute PMA into caller-provided output buffers without allocating.
+///
+/// - Preserves the module's NaN warmups exactly (prefix NaNs for both series).
+/// - `predict_out.len()` and `trigger_out.len()` must equal `input` length.
+/// - Uses `Kernel::Auto` for dispatch and writes results directly into the slices.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn pma_into(
+    input: &PmaInput,
+    predict_out: &mut [f64],
+    trigger_out: &mut [f64],
+) -> Result<(), PmaError> {
+    pma_into_slice(predict_out, trigger_out, input, Kernel::Auto)
+}
+
 //--------------------------
 // WASM Bindings
 //--------------------------
@@ -1897,4 +1912,51 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_pma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use existing CSV candles to match repository testing conventions
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = PmaInput::with_default_candles(&candles);
+
+        // Baseline via existing Vec-returning API
+        let base = pma_with_kernel(&input, Kernel::Auto)?;
+
+        // Preallocate outputs and compute via into API
+        let n = candles.close.len();
+        let mut out_predict = vec![0.0; n];
+        let mut out_trigger = vec![0.0; n];
+
+        #[cfg(not(feature = "wasm"))]
+        {
+            pma_into(&input, &mut out_predict, &mut out_trigger)?;
+        }
+
+        // Length parity
+        assert_eq!(base.predict.len(), out_predict.len());
+        assert_eq!(base.trigger.len(), out_trigger.len());
+
+        // Helper: equality with NaN == NaN and tight epsilon for finite values
+        fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan_eps(base.predict[i], out_predict[i]),
+                "predict mismatch at {i}: api={}, into={}",
+                base.predict[i],
+                out_predict[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(base.trigger[i], out_trigger[i]),
+                "trigger mismatch at {i}: api={}, into={}",
+                base.trigger[i],
+                out_trigger[i]
+            );
+        }
+
+        Ok(())
+    }
 }

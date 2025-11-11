@@ -350,6 +350,40 @@ pub fn ultosc_with_kernel(
     Ok(UltOscOutput { values: out })
 }
 
+/// Compute Ultimate Oscillator into a caller-provided buffer (no allocations).
+///
+/// - Preserves NaN warmup prefix exactly like the Vec-returning API
+///   (quiet NaNs via `0x7ff8_0000_0000_0000`).
+/// - `out.len()` must equal the input length, otherwise returns this module's
+///   existing error variant.
+#[cfg(not(feature = "wasm"))]
+pub fn ultosc_into(input: &UltOscInput, out: &mut [f64]) -> Result<(), UltOscError> {
+    let ((high, low, close), p1, p2, p3, first_valid, start_idx, chosen) =
+        ultosc_prepare(input, Kernel::Auto)?;
+
+    if out.len() != high.len() {
+        // Reuse the module's length/period error for mismatches, mirroring `ultosc_into_slice`.
+        return Err(UltOscError::InvalidPeriods {
+            p1: out.len(),
+            p2: high.len(),
+            p3: 0,
+            data_len: high.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by `alloc_with_nan_prefix`.
+    let warm = start_idx.min(out.len());
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..warm] {
+        *v = qnan;
+    }
+
+    // Compute the remainder directly into the destination buffer.
+    ultosc_compute_into(high, low, close, p1, p2, p3, first_valid, chosen, out);
+
+    Ok(())
+}
+
 #[inline]
 fn ultosc_compute_into(
     high: &[f64],
@@ -1816,6 +1850,51 @@ mod tests {
 
     gen_batch_tests!(check_ultosc_batch_default);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_ultosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use the existing CSV candles to mirror other tests.
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = UltOscInput::from_candles(
+            &candles,
+            "high",
+            "low",
+            "close",
+            UltOscParams::default(),
+        );
+
+        let baseline = ultosc(&input)?;
+
+        let mut out = vec![0.0; candles.close.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            ultosc_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // Fallback to the slice helper on WASM to keep test compiling under wasm target
+            ultosc_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.values.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline.values[i], out[i]),
+                "Mismatch at index {}: baseline={} out={}",
+                i,
+                baseline.values[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 }
 
 // ============================================================================

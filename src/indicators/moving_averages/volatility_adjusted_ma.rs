@@ -498,6 +498,16 @@ pub fn vama_with_kernel(input: &VamaInput, kernel: Kernel) -> Result<VamaOutput,
     Ok(VamaOutput { values: out })
 }
 
+/// Compute VAMA directly into a caller-provided buffer without allocations.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API (same prefix behavior).
+/// - Writes results into `out` using `Kernel::Auto` dispatch.
+/// - `out.len()` must equal the input length; returns the module's length/period error on mismatch.
+#[cfg(not(feature = "wasm"))]
+pub fn vama_into(input: &VamaInput, out: &mut [f64]) -> Result<(), VamaError> {
+    vama_into_slice(out, input, Kernel::Auto)
+}
+
 /// Zero-copy into-slice with warmup NaNs written, no final copying
 #[inline]
 pub fn vama_into_slice(dst: &mut [f64], input: &VamaInput, kern: Kernel) -> Result<(), VamaError> {
@@ -1804,6 +1814,46 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use std::error::Error;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_vama_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with a NaN prefix and varying values
+        let mut data = Vec::with_capacity(256);
+        for _ in 0..5 { data.push(f64::NAN); }
+        for i in 0..251 {
+            let x = (i as f64).sin() * 2.5 + 100.0 + ((i % 9) as f64) * 0.001;
+            data.push(x);
+        }
+
+        // Default params per module
+        let input = VamaInput::from_slice(&data, VamaParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = vama(&input)?.values;
+
+        // Preallocated output and no-alloc API
+        let mut out = vec![0.0; data.len()];
+        vama_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || (a - b).abs() <= 1e-12
+        }
+
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "VAMA into parity mismatch at index {}: api={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 
     // ==================== TEST MACROS ====================
     /// Macro to generate tests for all supported kernels

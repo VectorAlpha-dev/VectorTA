@@ -427,6 +427,59 @@ pub fn safezonestop_into_slice(
     Ok(())
 }
 
+/// Compute SafeZoneStop into a caller-provided buffer (no allocations).
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - Output slice length must equal input length.
+/// - Writes results into `out` and returns `Ok(())` on success.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn safezonestop_into(
+    input: &SafeZoneStopInput,
+    out: &mut [f64],
+// keep error type and behavior identical to existing APIs
+) -> Result<(), SafeZoneStopError> {
+    // Validate lengths early and prefill warmup NaNs to mirror alloc_with_nan_prefix
+    let (high, low, direction) = match &input.data {
+        SafeZoneStopData::Candles { candles, direction } => (
+            source_type(candles, "high"),
+            source_type(candles, "low"),
+            *direction,
+        ),
+        SafeZoneStopData::Slices { high, low, direction } => (*high, *low, *direction),
+    };
+
+    if high.len() != low.len() || out.len() != high.len() {
+        return Err(SafeZoneStopError::MismatchedLengths);
+    }
+
+    let len = high.len();
+    let period = input.get_period();
+    let max_lookback = input.get_max_lookback();
+    if period == 0 || period > len {
+        return Err(SafeZoneStopError::InvalidPeriod { period, data_len: len });
+    }
+    if direction != "long" && direction != "short" {
+        return Err(SafeZoneStopError::InvalidDirection);
+    }
+
+    let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
+    let needed = (period + 1).max(max_lookback);
+    if len - first < needed {
+        return Err(SafeZoneStopError::NotEnoughValidData { needed, valid: len - first });
+    }
+
+    // Prefill warmup region with quiet-NaN like alloc_with_nan_prefix
+    let warm = warm_len(first, period, max_lookback).min(out.len());
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..warm] {
+        *v = qnan;
+    }
+
+    // Dispatch with Kernel::Auto and write into caller buffer
+    safezonestop_into_slice(out, input, Kernel::Auto)
+}
+
 pub unsafe fn safezonestop_scalar(
     high: &[f64],
     low: &[f64],
@@ -2511,6 +2564,48 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_safezonestop_tests!(check_safezonestop_property);
 
+    #[test]
+    fn test_safezonestop_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the existing CSV input data for parity
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = SafeZoneStopInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = safezonestop(&input)?.values;
+
+        // Into-API preallocated buffer
+        let mut out = vec![0.0f64; candles.close.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            safezonestop_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // wasm builds expose only the JS-ABI function; skip here
+            return Ok(());
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..baseline.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "divergence at index {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
+
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2718,6 +2813,8 @@ impl SafeZoneStopStreamPy {
     fn update(&mut self, high: f64, low: f64) -> Option<f64> {
         self.stream.update(high, low)
     }
+
+    
 }
 
 #[cfg(feature = "python")]

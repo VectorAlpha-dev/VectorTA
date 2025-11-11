@@ -259,6 +259,16 @@ pub fn srwma_with_kernel(input: &SrwmaInput, kernel: Kernel) -> Result<SrwmaOutp
     Ok(SrwmaOutput { values: out })
 }
 
+/// Compute SRWMA into a caller-provided output buffer without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (`srwma`/`srwma_with_kernel`).
+/// - The `out` slice length must equal the input length; returns an error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn srwma_into(input: &SrwmaInput, out: &mut [f64]) -> Result<(), SrwmaError> {
+    srwma_into_slice(out, input, Kernel::Auto)
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn srwma_avx512(
@@ -1665,6 +1675,43 @@ mod tests {
                 )*
             }
         }
+    }
+    
+    #[test]
+    fn test_srwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a small but non-trivial input with an NaN prefix
+        let mut data: Vec<f64> = vec![f64::NAN; 5];
+        for i in 0..251usize {
+            let x = (i as f64).sin() * 0.5 + (i as f64) * 0.01;
+            data.push(x);
+        }
+
+        let input = SrwmaInput::from_slice(&data, SrwmaParams::default());
+
+        // Baseline using Vec-returning API
+        let baseline = srwma(&input)?.values;
+
+        // Preallocated output
+        let mut out = vec![0.0; data.len()];
+
+        // Native into-API
+        #[cfg(not(feature = "wasm"))]
+        {
+            srwma_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, fall back to slice variant to validate parity
+            srwma_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        for (a, b) in baseline.iter().zip(out.iter()) {
+            let equal = (a.is_nan() && b.is_nan()) || (*a == *b) || ((*a - *b).abs() <= 1e-12);
+            assert!(equal, "srwma_into parity mismatch: base={} out={}", a, b);
+        }
+
+        Ok(())
     }
     // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]

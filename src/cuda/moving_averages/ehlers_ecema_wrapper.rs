@@ -13,7 +13,7 @@
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::ehlers_ecema::{EhlersEcemaBatchRange, EhlersEcemaParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{CopyDestination, DeviceBuffer};
 // PATCH 1: imports for pinned/async transfers and mem info
@@ -25,24 +25,26 @@ use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use thiserror::Error;
+use cust::error::CudaError;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaEhlersEcemaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("device out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("launch config too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("size computation overflow: {context}")]
+    SizeOverflow { context: &'static str },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaEhlersEcemaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaEhlersEcemaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaEhlersEcemaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaEhlersEcemaError {}
 
 /// Kernel selection policy, mirroring the ALMA interface for consistency.
 #[derive(Clone, Copy, Debug)]
@@ -111,21 +113,19 @@ pub struct CudaEhlersEcema {
 
 impl CudaEhlersEcema {
     pub fn new(device_id: usize) -> Result<Self, CudaEhlersEcemaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
-        let context =
-            Context::new(device).map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_ecema_kernel.ptx"));
-        // PATCH 2: Harden JIT policy. Default to O4 with optional env overrides.
+        // PATCH 2: Harden JIT policy. Default to O2 with optional env overrides.
         let opt_level = match Self::env_u32("ECEMA_JIT_OLEVEL") {
             Some(0) => OptLevel::O0,
             Some(1) => OptLevel::O1,
             Some(2) => OptLevel::O2,
             Some(3) => OptLevel::O3,
-            Some(_) => OptLevel::O4,
-            None => OptLevel::O4,
+            Some(_) => OptLevel::O2,
+            None => OptLevel::O2,
         };
         let mut jit_opts: Vec<ModuleJitOption> = vec![
             ModuleJitOption::DetermineTargetFromContext,
@@ -134,21 +134,10 @@ impl CudaEhlersEcema {
         if let Some(maxr) = Self::env_u32("ECEMA_MAX_REGS") {
             jit_opts.push(ModuleJitOption::MaxRegisters(maxr));
         }
-        let module = match Module::from_ptx(ptx, &jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                // Retry with progressively simpler JIT options to improve robustness across drivers.
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?
-                }
-            }
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, &jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -260,6 +249,85 @@ impl CudaEhlersEcema {
         }
     }
 
+    #[inline]
+    fn will_fit_checked(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaEhlersEcemaError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            let needed = required_bytes
+                .checked_add(headroom_bytes)
+                .ok_or(CudaEhlersEcemaError::SizeOverflow {
+                    context: "required+headroom",
+                })?;
+            if needed <= free {
+                Ok(())
+            } else {
+                Err(CudaEhlersEcemaError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn bytes_for<T>(n: usize, context: &'static str) -> Result<usize, CudaEhlersEcemaError> {
+        n.checked_mul(std::mem::size_of::<T>())
+            .ok_or(CudaEhlersEcemaError::SizeOverflow { context })
+    }
+
+    #[inline]
+    fn add_bytes(a: usize, b: usize, context: &'static str) -> Result<usize, CudaEhlersEcemaError> {
+        a.checked_add(b)
+            .ok_or(CudaEhlersEcemaError::SizeOverflow { context })
+    }
+
+    #[inline]
+    fn ensure_launch_fits(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaEhlersEcemaError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaEhlersEcemaError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
+    }
+
     fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
         let (start, end, step) = axis;
         if step == 0 || start == end {
@@ -267,7 +335,7 @@ impl CudaEhlersEcema {
         } else if start <= end {
             (start..=end).step_by(step).collect()
         } else {
-            vec![start]
+            (end..=start).step_by(step).collect()
         }
     }
 
@@ -364,10 +432,11 @@ impl CudaEhlersEcema {
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
+        self.ensure_launch_fits(n_combos as u32, 1, 1, block_x, 1, 1)?;
         let func = self
             .module
             .get_function("ehlers_ecema_batch_f32")
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEhlersEcemaError::MissingKernelSymbol { name: "ehlers_ecema_batch_f32" })?;
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -390,9 +459,7 @@ impl CudaEhlersEcema {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         unsafe {
             let this = self as *const _ as *mut CudaEhlersEcema;
@@ -425,10 +492,11 @@ impl CudaEhlersEcema {
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
+        self.ensure_launch_fits(grid_x, 1, 1, block_x, 1, 1)?;
         let func = self
             .module
             .get_function("ehlers_ecema_batch_thread_per_combo_f32")
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaEhlersEcemaError::MissingKernelSymbol { name: "ehlers_ecema_batch_thread_per_combo_f32" })?;
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -451,9 +519,7 @@ impl CudaEhlersEcema {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
         }
         unsafe {
             let this = self as *const _ as *mut CudaEhlersEcema;
@@ -471,23 +537,31 @@ impl CudaEhlersEcema {
         series_len: usize,
     ) -> Result<DeviceArrayF32, CudaEhlersEcemaError> {
         let n_combos = combos.len();
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let lengths_bytes = n_combos * std::mem::size_of::<i32>();
-        let gains_bytes = n_combos * std::mem::size_of::<i32>();
-        let flags_bytes = n_combos * std::mem::size_of::<u8>() * 2;
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + lengths_bytes + gains_bytes + flags_bytes + out_bytes;
+        let prices_bytes = Self::bytes_for::<f32>(series_len, "prices")?;
+        let lengths_bytes = Self::bytes_for::<i32>(n_combos, "lengths")?;
+        let gains_bytes = Self::bytes_for::<i32>(n_combos, "gain_limits")?;
+        let flags_count = n_combos
+            .checked_mul(2)
+            .ok_or(CudaEhlersEcemaError::SizeOverflow { context: "flags*2" })?;
+        let flags_bytes = Self::bytes_for::<u8>(flags_count, "flags")?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or(CudaEhlersEcemaError::SizeOverflow { context: "combos*series_len" })?;
+        let out_bytes = Self::bytes_for::<f32>(out_elems, "out")?;
+        let required = Self::add_bytes(
+            Self::add_bytes(
+                Self::add_bytes(Self::add_bytes(prices_bytes, lengths_bytes, "a+b")?, gains_bytes, "a+b+c")?,
+                flags_bytes,
+                "a+b+c+d",
+            )?,
+            out_bytes,
+            "total",
+        )?;
         let headroom = 64 * 1024 * 1024; // 64MB safety margin (align with ALMA)
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaEhlersEcemaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit_checked(required, headroom)?;
         // PATCH 4A: async allocations + optional pinned host staging for input
         let mut d_prices: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(series_len, &self.stream) }
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(series_len, &self.stream) }?;
         let lengths_i32: Vec<i32> = combos.iter().map(|p| p.length.unwrap() as i32).collect();
         let gain_i32: Vec<i32> = combos
             .iter()
@@ -514,29 +588,20 @@ impl CudaEhlersEcema {
             })
             .collect();
 
-        let d_lengths = DeviceBuffer::from_slice(&lengths_i32)
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
-        let d_gains = DeviceBuffer::from_slice(&gain_i32)
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
-        let d_pine = DeviceBuffer::from_slice(&pine_flags)
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
-        let d_confirmed = DeviceBuffer::from_slice(&confirmed_flags)
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32)?;
+        let d_gains = DeviceBuffer::from_slice(&gain_i32)?;
+        let d_pine = DeviceBuffer::from_slice(&pine_flags)?;
+        let d_confirmed = DeviceBuffer::from_slice(&confirmed_flags)?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
 
         // Input copy: pinned path by default to enable true async HtoD
         let use_pinned = Self::env_bool("ECEMA_PINNED").unwrap_or(true);
         if use_pinned {
-            let h_prices = LockedBuffer::from_slice(data_f32)
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
-            unsafe { d_prices.async_copy_from(&h_prices, &self.stream) }
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+            let h_prices = LockedBuffer::from_slice(data_f32)?;
+            unsafe { d_prices.async_copy_from(&h_prices, &self.stream) }?;
         } else {
-            d_prices
-                .copy_from(data_f32)
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+            d_prices.copy_from(data_f32)?;
         }
 
         // Select kernel according to policy. Default to thread-per-combo when available.
@@ -586,9 +651,7 @@ impl CudaEhlersEcema {
             )?
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -631,13 +694,9 @@ impl CudaEhlersEcema {
         }
         let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len)?;
         // PATCH 5: async D→H into pinned buffer, then host copy
-        let mut h_out = unsafe { LockedBuffer::<f32>::uninitialized(expected) }
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
-        unsafe { arr.buf.as_slice().async_copy_to(&mut h_out, &self.stream) }
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        let mut h_out = unsafe { LockedBuffer::<f32>::uninitialized(expected) }?;
+        unsafe { arr.buf.as_slice().async_copy_to(&mut h_out, &self.stream) }?;
+        self.stream.synchronize()?;
         out.copy_from_slice(h_out.as_slice());
         Ok((arr.rows, arr.cols, combos))
     }
@@ -806,7 +865,7 @@ impl CudaEhlersEcema {
                     let func = self
                         .module
                         .get_function(func_name)
-                        .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                        .map_err(|_| CudaEhlersEcemaError::MissingKernelSymbol { name: func_name })?;
                     unsafe {
                         let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                         let mut cols_i = cols as i32;
@@ -828,9 +887,7 @@ impl CudaEhlersEcema {
                             &mut first_ptr as *mut _ as *mut c_void,
                             &mut out_ptr as *mut _ as *mut c_void,
                         ];
-                        self.stream
-                            .launch(&func, grid, block, 0, args)
-                            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                        self.stream.launch(&func, grid, block, 0, args)?;
                     }
                     unsafe {
                         let this = self as *const _ as *mut CudaEhlersEcema;
@@ -859,7 +916,7 @@ impl CudaEhlersEcema {
                 let func = self
                     .module
                     .get_function(func_name)
-                    .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                    .map_err(|_| CudaEhlersEcemaError::MissingKernelSymbol { name: func_name })?;
                 unsafe {
                     let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                     let mut cols_i = cols as i32;
@@ -881,9 +938,7 @@ impl CudaEhlersEcema {
                         &mut first_ptr as *mut _ as *mut c_void,
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, 0, args)
-                        .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                    self.stream.launch(&func, grid, block, 0, args)?;
                 }
                 unsafe {
                     let this = self as *const _ as *mut CudaEhlersEcema;
@@ -920,7 +975,7 @@ impl CudaEhlersEcema {
                 let func = self
                     .module
                     .get_function(func_name)
-                    .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                    .map_err(|_| CudaEhlersEcemaError::MissingKernelSymbol { name: func_name })?;
                 unsafe {
                     let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                     let mut cols_i = cols as i32;
@@ -942,9 +997,7 @@ impl CudaEhlersEcema {
                         &mut first_ptr as *mut _ as *mut c_void,
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&func, grid, block, 0, args)
-                        .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                    self.stream.launch(&func, grid, block, 0, args)?;
                 }
                 unsafe {
                     let this = self as *const _ as *mut CudaEhlersEcema;
@@ -1068,13 +1121,9 @@ impl CudaEhlersEcema {
         )?;
         // PATCH 6B: async D→H to pinned, then host copy
         let expected = cols * rows;
-        let mut h_out = unsafe { LockedBuffer::<f32>::uninitialized(expected) }
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
-        unsafe { arr.buf.as_slice().async_copy_to(&mut h_out, &self.stream) }
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+        let mut h_out = unsafe { LockedBuffer::<f32>::uninitialized(expected) }?;
+        unsafe { arr.buf.as_slice().async_copy_to(&mut h_out, &self.stream) }?;
+        self.stream.synchronize()?;
         out.copy_from_slice(h_out.as_slice());
         Ok(())
     }
@@ -1107,6 +1156,13 @@ impl CudaEhlersEcema {
             d_first_valids,
             d_out,
         )
+    }
+
+    /// Expose raw producing stream pointer for CAI v3 interop (Python bindings).
+    #[inline]
+    pub fn producer_stream_raw(&self) -> u64 {
+        let raw: cu::CUstream = unsafe { *self.stream.as_inner() };
+        (raw as usize) as u64
     }
 }
 
