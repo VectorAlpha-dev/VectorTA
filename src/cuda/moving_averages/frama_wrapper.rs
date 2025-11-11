@@ -631,7 +631,7 @@ impl CudaFrama {
             )));
         }
         let dev = self.run_batch_kernel(high, low, close, &combos, first_valid, len)?;
-        dev.buf.copy_to(out).map_err(Into::into)?;
+        dev.buf.copy_to(out)?;
         Ok((dev.rows, dev.cols, combos))
     }
 
@@ -665,9 +665,9 @@ impl CudaFrama {
         let mut d_close = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
 
         unsafe {
-            d_high.async_copy_from(high_locked.as_slice(), &self.stream).map_err(Into::into)?;
-            d_low.async_copy_from(low_locked.as_slice(), &self.stream).map_err(Into::into)?;
-            d_close.async_copy_from(close_locked.as_slice(), &self.stream).map_err(Into::into)?;
+            d_high.async_copy_from(high_locked.as_slice(), &self.stream)?;
+            d_low.async_copy_from(low_locked.as_slice(), &self.stream)?;
+            d_close.async_copy_from(close_locked.as_slice(), &self.stream)?;
         }
 
         let windows: Vec<i32> = combos.iter().map(|c| c.window.unwrap() as i32).collect();
@@ -693,9 +693,9 @@ impl CudaFrama {
         )?;
 
         unsafe {
-            d_out.async_copy_to(out_locked.as_mut_slice(), &self.stream).map_err(Into::into)?;
+            d_out.async_copy_to(out_locked.as_mut_slice(), &self.stream)?;
         }
-        self.stream.synchronize().map_err(Into::into)?;
+        self.stream.synchronize()?;
 
         Ok((combos.len(), len, combos))
     }

@@ -1035,23 +1035,23 @@ impl CudaEhlersEcema {
         // PATCH 6A: async allocations + optional pinned host input
         let mut d_prices: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e))?;
         let d_first_valids = DeviceBuffer::from_slice(first_valids)
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaEhlersEcemaError::Cuda(e))?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e))?;
 
         let use_pinned = Self::env_bool("ECEMA_PINNED").unwrap_or(true);
         if use_pinned {
             let h_prices = LockedBuffer::from_slice(data_tm_f32)
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e))?;
             unsafe { d_prices.async_copy_from(&h_prices, &self.stream) }
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e))?;
         } else {
             d_prices
                 .copy_from(data_tm_f32)
-                .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaEhlersEcemaError::Cuda(e))?;
         }
 
         self.launch_many_series_kernel(
@@ -1068,7 +1068,7 @@ impl CudaEhlersEcema {
 
         self.stream
             .synchronize()
-            .map_err(|e| CudaEhlersEcemaError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaEhlersEcemaError::Cuda(e))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -1161,7 +1161,7 @@ impl CudaEhlersEcema {
     /// Expose raw producing stream pointer for CAI v3 interop (Python bindings).
     #[inline]
     pub fn producer_stream_raw(&self) -> u64 {
-        let raw: cu::CUstream = unsafe { *self.stream.as_inner() };
+        let raw: cu::CUstream = self.stream.as_inner();
         (raw as usize) as u64
     }
 }

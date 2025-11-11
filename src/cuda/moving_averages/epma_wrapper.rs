@@ -11,6 +11,8 @@
 //! - "epma_many_series_one_param_time_major_f32"       // many-series × one-param (time-major)
 
 #![cfg(feature = "cuda")]
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::types::PyDictMethods;
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::epma::{EpmaBatchRange, EpmaParams};

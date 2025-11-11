@@ -267,7 +267,7 @@ impl CudaGaussian {
         let arr = self.run_many_series_kernel(prices_tm, cols, rows, params, &prepared)?;
         arr.buf
             .copy_to(out_tm)
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaGaussianError::Cuda(e))?;
         Ok(())
     }
 
@@ -369,20 +369,17 @@ impl CudaGaussian {
         let out_bytes = price_bytes;
         let required = price_bytes + coeff_bytes + fv_bytes + out_bytes;
         let headroom = 32 * 1024 * 1024; // lighter workload, smaller margin
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaGaussianError::InvalidInput(
-                "insufficient free device memory for Gaussian many-series kernel".into(),
-            ));
-        }
+        // VRAM guard with headroom
+        Self::will_fit_checked(required, headroom)?;
 
         let d_prices_tm = DeviceBuffer::from_slice(prices_tm)
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaGaussianError::Cuda(e))?;
         let d_coeffs = DeviceBuffer::from_slice(&prepared.coeffs)
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaGaussianError::Cuda(e))?;
         let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaGaussianError::Cuda(e))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(prices_tm.len()) }
-            .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaGaussianError::Cuda(e))?;
 
         let period = params.period.unwrap_or(14);
         let poles = params.poles.unwrap_or(4);
@@ -396,7 +393,7 @@ impl CudaGaussian {
                 coeff64[i] = prepared.coeffs[i] as f64;
             }
             sym.copy_from(&coeff64)
-                .map_err(|e| CudaGaussianError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaGaussianError::Cuda(e))?;
         }
 
         self.launch_many_series_kernel(
@@ -893,6 +890,8 @@ fn expand_grid(range: &GaussianBatchRange) -> Vec<GaussianParams> {
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::types::PyDictMethods;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::types::{PyDict, PyTuple};
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -914,13 +913,8 @@ impl DeviceArrayF32Py {
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
-        d.set_item(
-            "data",
-            PyTuple::new(
-                py,
-                &[(self.inner.buf.as_device_ptr().as_raw() as usize).into_py(py), false.into_py(py)],
-            ),
-        )?;
+        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
         if self.stream_handle != 0 {
             d.set_item("stream", self.stream_handle)?;

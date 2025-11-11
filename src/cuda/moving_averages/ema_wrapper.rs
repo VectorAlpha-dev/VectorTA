@@ -24,7 +24,7 @@ use thiserror::Error;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
-use thiserror::Error;
+// remove duplicate import
 
 #[derive(Debug, Error)]
 pub enum CudaEmaError {
@@ -44,7 +44,7 @@ pub enum CudaEmaError {
     NotImplemented,
 }
 
-impl std::error::Error for CudaEmaError {}
+// `thiserror::Error` derive already provides `std::error::Error` impl.
 
 // -------- Kernel selection policy (explicit for tests; Auto for production) --------
 
@@ -752,19 +752,19 @@ impl CudaEma {
         if !Self::mem_check_enabled() {
             return Ok(());
         }
-        if let Ok((free, _total)) = mem_get_info() {
-            let need = required_bytes
-                .checked_add(headroom_bytes)
-                .ok_or(CudaEmaError::ArithmeticOverflow("required+headroom"))?;
-            if need <= free {
-                Ok(())
-            } else {
-                Err(CudaEmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+        match mem_get_info() {
+            Ok((free, _total)) => {
+                let need = required_bytes
+                    .checked_add(headroom_bytes)
+                    .ok_or(CudaEmaError::ArithmeticOverflow("required+headroom"))?;
+                if need <= free {
+                    Ok(())
+                } else {
+                    Err(CudaEmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                }
             }
-        } else {
-            Ok(())
+            Err(_) => Ok(()),
         }
-        Ok(())
     }
 
     #[inline]

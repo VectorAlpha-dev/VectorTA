@@ -708,7 +708,7 @@ impl CudaLinreg {
         self.stream.synchronize()?;
         dev.buf
             .copy_to(out_tm)
-            .map_err(|e| CudaLinregError::Cuda(e.to_string()))
+            .map_err(|e| CudaLinregError::Cuda(e))
     }
 
     // Compute a right-sized grid for grid-stride 1D kernels

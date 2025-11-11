@@ -655,7 +655,7 @@ impl CudaHma {
                 let st: cu::CUstream = self.stream.as_inner();
                 let res = cu::cuMemsetD32Async(ptr, 0x7FFF_FFFFu32, n32, st);
                 if res != cu::CUresult::CUDA_SUCCESS {
-                    return Err(CudaHmaError::Cuda(format!(
+                    return Err(CudaHmaError::InvalidInput(format!(
                         "cuMemsetD32Async failed: {:?}",
                         res
                     )));

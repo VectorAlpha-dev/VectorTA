@@ -350,7 +350,7 @@ impl CudaJma {
         let arr = self.run_many_series_kernel(prices_tm_f32, cols, rows, &prepared, &consts)?;
         arr.buf
             .copy_to(out_tm)
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaJmaError::Cuda(e))?;
         Ok(())
     }
 
@@ -415,18 +415,18 @@ impl CudaJma {
 
         // Async allocations/copies (reduce host stalls)
         let d_prices = unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaJmaError::Cuda(e))?;
         let d_alphas = unsafe { DeviceBuffer::from_slice_async(&inputs.alphas, &self.stream) }
-            .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaJmaError::Cuda(e))?;
         let d_one_minus_betas =
             unsafe { DeviceBuffer::from_slice_async(&inputs.one_minus_betas, &self.stream) }
-                .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaJmaError::Cuda(e))?;
         let d_phase_ratios =
             unsafe { DeviceBuffer::from_slice_async(&inputs.phase_ratios, &self.stream) }
-                .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaJmaError::Cuda(e))?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(series_len * n_combos, &self.stream) }
-                .map_err(|e| CudaJmaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaJmaError::Cuda(e))?;
 
         // Select block size and record selection
         let block_x = self.resolve_batch_block_x(n_combos);

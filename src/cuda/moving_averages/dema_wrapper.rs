@@ -218,11 +218,8 @@ impl CudaDema {
         let periods_bytes = periods.len() * std::mem::size_of::<i32>();
         let out_bytes = series_len * periods.len() * std::mem::size_of::<f32>();
         let required = prices_bytes + periods_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaDemaError::InvalidInput(
-                "insufficient device memory for DEMA many-series".into(),
-            ));
-        }
+        // VRAM guard with ~64MB headroom (mirrors ALMA wrapper semantics)
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
         let d_periods = DeviceBuffer::from_slice(&periods)?;
@@ -488,13 +485,9 @@ impl CudaDema {
             elems * 2 * std::mem::size_of::<f32>() + num_series * std::mem::size_of::<i32>();
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
-        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(elems).map_err(|e| CudaDemaError::Cuda(e.to_string()))?
-        };
+        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -576,10 +569,7 @@ impl CudaDema {
             series_len,
             params,
         )?;
-        handle
-            .buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaDemaError::Cuda(e.to_string()))
+        handle.buf.copy_to(out_tm).map_err(Into::into)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -734,7 +724,7 @@ fn memset_f32_qnan_async(
         let res = cu::cuMemsetD32Async(ptr, QNAN_BITS, n, st);
         match res {
             cu::CUresult::CUDA_SUCCESS => Ok(()),
-            e => Err(CudaDemaError::Cuda(format!(
+            e => Err(CudaDemaError::InvalidInput(format!(
                 "cuMemsetD32Async failed: {:?}",
                 e
             ))),

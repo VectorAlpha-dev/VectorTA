@@ -159,7 +159,7 @@ impl CudaEhma {
     pub fn synchronize(&self) -> Result<(), CudaEhmaError> {
         self.stream
             .synchronize()
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))
+            .map_err(|e| CudaEhmaError::Cuda(e))
     }
 
     #[inline]
@@ -864,7 +864,7 @@ impl CudaEhma {
                         ];
                         self.stream
                             .launch(&func, grid, block, shared_bytes, args)
-                            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+                            .map_err(|e| CudaEhmaError::Cuda(e))?;
                     }
                 }
                 // Introspection
@@ -917,14 +917,14 @@ impl CudaEhma {
             weights_flat[base..base + p].copy_from_slice(&w);
         }
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaEhmaError::Cuda(e))?;
         let d_warms = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaEhmaError::Cuda(e))?;
         let d_weights = unsafe { DeviceBuffer::from_slice_async(&weights_flat, &self.stream) }
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaEhmaError::Cuda(e))?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
-                .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaEhmaError::Cuda(e))?;
         // Hint L2 persistence for the prices region (best-effort)
         self.hint_stream_access_policy_window(
             d_prices.as_device_ptr().as_raw(),
@@ -1182,7 +1182,7 @@ impl CudaEhma {
         }
         self.stream
             .synchronize()
-            .map_err(|e| CudaEhmaError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaEhmaError::Cuda(e))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,

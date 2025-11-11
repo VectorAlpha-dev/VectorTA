@@ -395,32 +395,9 @@ pub fn deviation_with_kernel(
     Ok(DeviationOutput { values: out })
 }
 
-/// Compute Deviation into a caller-provided buffer (no allocations).
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API (quiet-NaN prefix).
-/// - `out.len()` must equal the input length; returns an error on mismatch.
-#[cfg(not(feature = "wasm"))]
-pub fn deviation_into(input: &DeviationInput, out: &mut [f64]) -> Result<(), DeviationError> {
-    let (data, period, devtype, first, chosen) = deviation_prepare(input, Kernel::Auto)?;
-
-    if out.len() != data.len() {
-        return Err(DeviationError::CalculationError(format!(
-            "Output buffer length mismatch: expected {}, got {}",
-            data.len(),
-            out.len()
-        )));
-    }
-
-    // Prefill warmup region with the same quiet-NaN used by alloc_with_nan_prefix
-    let warm = first + period - 1;
-    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
-    let pre = warm.min(out.len());
-    for v in &mut out[..pre] {
-        *v = qnan;
-    }
-
-    deviation_compute_into(data, period, devtype, first, chosen, out)
-}
+// Removed duplicate `deviation_into` definition.
+// The public `deviation_into` is already provided above and forwards to
+// `deviation_into_slice(..., Kernel::Auto)` to avoid code duplication.
 
 // Replace your current deviation_into_slice with this.
 pub fn deviation_into_slice(
