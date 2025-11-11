@@ -296,6 +296,20 @@ pub fn percentile_nearest_rank_with_kernel(
     Ok(PercentileNearestRankOutput { values: out })
 }
 
+/// Writes results into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - `out.len()` must equal the input data length; returns the module's
+///   existing error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn percentile_nearest_rank_into(
+    input: &PercentileNearestRankInput,
+    out: &mut [f64],
+) -> Result<(), PercentileNearestRankError> {
+    percentile_nearest_rank_into_slice(out, input, Kernel::Auto)
+}
+
 /// Parity with `alma_into_slice`
 #[inline]
 pub fn percentile_nearest_rank_into_slice(
@@ -1751,6 +1765,35 @@ mod tests {
         check_pnr_streaming,
         check_pnr_no_poison
     );
+
+    #[test]
+    fn test_percentile_nearest_rank_into_matches_api() {
+        // Small but non-trivial input with some NaNs in the prefix
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..253 {
+            data.push((i as f64) * 0.5 + ((i % 7) as f64) * 0.1);
+        }
+
+        let params = PercentileNearestRankParams {
+            length: Some(15),
+            percentage: Some(50.0),
+        };
+        let input = PercentileNearestRankInput::from_slice(&data, params);
+
+        // Baseline via Vec-returning API
+        let base = percentile_nearest_rank(&input).expect("baseline ok").values;
+
+        // Into API writes into caller-provided slice
+        let mut out = vec![0.0; data.len()];
+        let _ = percentile_nearest_rank_into(&input, &mut out).expect("into ok");
+
+        assert_eq!(base.len(), out.len());
+        for (i, (&a, &b)) in base.iter().zip(out.iter()).enumerate() {
+            let eq = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(eq, "mismatch at {}: base={} out={}", i, a, b);
+        }
+    }
 
     // Batch testing functions
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

@@ -255,12 +255,13 @@ pub fn minmax_into_slice(
         });
     }
 
-    // only warm prefix
+    // only warm prefix — use the same quiet-NaN pattern as Vec APIs
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for i in 0..first_valid_idx {
-        is_min_dst[i] = f64::NAN;
-        is_max_dst[i] = f64::NAN;
-        last_min_dst[i] = f64::NAN;
-        last_max_dst[i] = f64::NAN;
+        is_min_dst[i] = qnan;
+        is_max_dst[i] = qnan;
+        last_min_dst[i] = qnan;
+        last_max_dst[i] = qnan;
     }
 
     let chosen = match kern {
@@ -316,6 +317,29 @@ pub fn minmax_into_slice(
     }
 
     Ok(())
+}
+
+/// Write MinMax results into caller-provided buffers without allocations.
+///
+/// Preserves the exact NaN warmup prefix semantics (quiet-NaN pattern) and requires
+/// all output slice lengths to equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn minmax_into(
+    input: &MinmaxInput,
+    out_is_min: &mut [f64],
+    out_is_max: &mut [f64],
+    out_last_min: &mut [f64],
+    out_last_max: &mut [f64],
+) -> Result<(), MinmaxError> {
+    minmax_into_slice(
+        out_is_min,
+        out_is_max,
+        out_last_min,
+        out_last_max,
+        input,
+        Kernel::Auto,
+    )
 }
 
 pub fn minmax_with_kernel(
@@ -2502,6 +2526,91 @@ mod tests {
         let row = output.is_min_for(&def).expect("default row missing");
         assert_eq!(row.len(), c.close.len());
         Ok(())
+    }
+
+    #[test]
+    fn test_minmax_into_matches_api() {
+        // Construct a non-trivial synthetic series with a NaN warmup prefix and clear extrema
+        let mut high = Vec::with_capacity(256);
+        let mut low = Vec::with_capacity(256);
+
+        // Warmup NaNs
+        for _ in 0..5 {
+            high.push(f64::NAN);
+            low.push(f64::NAN);
+        }
+        // Rising then falling pattern on highs; inverse on lows to create extrema
+        for i in 0..200usize {
+            let t = i as f64;
+            high.push(100.0 + (t / 5.0).sin() * 10.0 + (t / 7.0).cos() * 3.0);
+            low.push( 90.0 - (t / 6.0).sin() *  9.0 - (t / 8.0).cos() * 2.0);
+        }
+        // Tail section with some flats and small noise
+        for j in 0..51usize {
+            let t = j as f64;
+            high.push(105.0 + (t * 0.01).sin());
+            low.push( 95.0 - (t * 0.01).cos());
+        }
+
+        let params = MinmaxParams::default();
+        let input = MinmaxInput::from_slices(&high, &low, params);
+
+        // Baseline via Vec-returning API
+        let baseline = minmax(&input).expect("baseline minmax() should succeed");
+
+        // Preallocate outputs and call the new into API
+        let n = high.len();
+        let mut is_min = vec![0.0; n];
+        let mut is_max = vec![0.0; n];
+        let mut last_min = vec![0.0; n];
+        let mut last_max = vec![0.0; n];
+
+        // Ensure the native into is available (non-wasm builds)
+        #[cfg(not(feature = "wasm"))]
+        {
+            minmax_into(&input, &mut is_min, &mut is_max, &mut last_min, &mut last_max)
+                .expect("minmax_into should succeed");
+
+            assert_eq!(is_min.len(), baseline.is_min.len());
+            assert_eq!(is_max.len(), baseline.is_max.len());
+            assert_eq!(last_min.len(), baseline.last_min.len());
+            assert_eq!(last_max.len(), baseline.last_max.len());
+
+            fn eq_or_both_nan(a: f64, b: f64) -> bool {
+                (a.is_nan() && b.is_nan()) || (a == b)
+            }
+
+            for i in 0..n {
+                assert!(
+                    eq_or_both_nan(is_min[i], baseline.is_min[i]),
+                    "is_min mismatch at {}: {:?} vs {:?}",
+                    i,
+                    is_min[i],
+                    baseline.is_min[i]
+                );
+                assert!(
+                    eq_or_both_nan(is_max[i], baseline.is_max[i]),
+                    "is_max mismatch at {}: {:?} vs {:?}",
+                    i,
+                    is_max[i],
+                    baseline.is_max[i]
+                );
+                assert!(
+                    eq_or_both_nan(last_min[i], baseline.last_min[i]),
+                    "last_min mismatch at {}: {:?} vs {:?}",
+                    i,
+                    last_min[i],
+                    baseline.last_min[i]
+                );
+                assert!(
+                    eq_or_both_nan(last_max[i], baseline.last_max[i]),
+                    "last_max mismatch at {}: {:?} vs {:?}",
+                    i,
+                    last_max[i],
+                    baseline.last_max[i]
+                );
+            }
+        }
     }
 
     #[cfg(debug_assertions)]

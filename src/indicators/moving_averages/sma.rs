@@ -202,6 +202,37 @@ pub fn sma_with_kernel(input: &SmaInput, kernel: Kernel) -> Result<SmaOutput, Sm
     Ok(SmaOutput { values: out })
 }
 
+/// Compute SMA into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup prefix exactly like the Vec-returning API
+///   (uses the same quiet-NaN pattern).
+/// - The output slice length must match the input length.
+///
+/// This native function is hidden when the `wasm` feature is enabled to avoid
+/// colliding with the wasm-bindgen export of the same name.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn sma_into(input: &SmaInput, out: &mut [f64]) -> Result<(), SmaError> {
+    let (data, period, first, chosen) = sma_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(SmaError::OutputLenMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the exact NaN pattern used by alloc_with_nan_prefix
+    let warm = (first + period - 1).min(out.len());
+    for v in &mut out[..warm] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Write results directly into caller buffer
+    sma_compute_into(data, period, first, chosen, out);
+    Ok(())
+}
+
 /// Write SMA directly to output slice - zero allocation pattern for WASM
 /// The output slice must be the same length as the input data.
 #[inline]
@@ -1472,6 +1503,44 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_sma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Small but non-trivial input with leading NaNs and varying values
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..253u32 {
+            let v = ((i % 17) as f64) * 1.2345 + (i as f64).sin() * 0.001;
+            data.push(v);
+        }
+
+        let params = SmaParams::default();
+        let input = SmaInput::from_slice(&data, params);
+
+        // Baseline via existing Vec-returning API
+        let base = sma_with_kernel(&input, Kernel::Auto)?.values;
+
+        // Preallocate output and use the new into API
+        let mut out = vec![0.0; data.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            sma_into(&input, &mut out)?;
+        }
+
+        // Length parity
+        assert_eq!(base.len(), out.len());
+
+        // Equality check: exact for finite; treat NaN==NaN as equal
+        for (i, (a, b)) in base.iter().zip(out.iter()).enumerate() {
+            let ok = if a.is_nan() && b.is_nan() {
+                true
+            } else {
+                (a - b).abs() <= 1e-12
+            };
+            assert!(ok, "Mismatch at index {}: base={} vs into={}", i, a, b);
+        }
+        Ok(())
+    }
     fn check_sma_partial_params(
         test_name: &str,
         kernel: Kernel,

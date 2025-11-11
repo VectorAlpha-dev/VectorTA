@@ -198,6 +198,17 @@ pub fn er(input: &ErInput) -> Result<ErOutput, ErError> {
     er_with_kernel(input, Kernel::Auto)
 }
 
+/// Write ER values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup prefix exactly as the Vec-returning API.
+/// - `out.len()` must equal the input length; otherwise returns `OutputLenMismatch`.
+/// - Uses `Kernel::Auto` for runtime selection (same as `er()`), and writes results in-place.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn er_into(input: &ErInput, out: &mut [f64]) -> Result<(), ErError> {
+    er_into_slice(out, input, Kernel::Auto)
+}
+
 pub fn er_with_kernel(input: &ErInput, kernel: Kernel) -> Result<ErOutput, ErError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
@@ -1358,6 +1369,51 @@ mod tests {
         let output = er_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_er_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct input with a small NaN prefix and non-trivial values afterward
+        let n = 256usize;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            if i < 3 {
+                data.push(f64::NAN);
+            } else {
+                let x = i as f64;
+                data.push((x * 0.01).sin() * (x * 0.02).cos() + 0.001 * x);
+            }
+        }
+
+        let input = ErInput::from_slice(&data, ErParams::default());
+
+        // Baseline via Vec-returning API
+        let base = er(&input)?.values;
+
+        // Preallocate output and call the new into API
+        let mut out = vec![0.0; n];
+        // Guarded in the module for wasm; native path is available here
+        #[cfg(not(feature = "wasm"))]
+        {
+            er_into(&input, &mut out)?;
+        }
+
+        assert_eq!(base.len(), out.len());
+
+        fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan_eps(base[i], out[i]),
+                "mismatch at {}: base={:?}, into={:?}",
+                i,
+                base[i],
+                out[i]
+            );
+        }
         Ok(())
     }
 

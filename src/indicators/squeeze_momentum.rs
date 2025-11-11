@@ -352,6 +352,28 @@ pub fn squeeze_momentum_with_kernel(
     })
 }
 
+/// Write Squeeze Momentum outputs into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API.
+/// - All output slice lengths must match the input length.
+/// - Uses `Kernel::Auto` for kernel selection (short-circuits to scalar here).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn squeeze_momentum_into(
+    input: &SqueezeMomentumInput,
+    out_squeeze: &mut [f64],
+    out_momentum: &mut [f64],
+    out_momentum_signal: &mut [f64],
+) -> Result<(), SqueezeMomentumError> {
+    squeeze_momentum_into_slices(
+        out_squeeze,
+        out_momentum,
+        out_momentum_signal,
+        input,
+        Kernel::Auto,
+    )
+}
+
 // --- Batch Parameter Sweep Support ---
 
 #[derive(Clone, Debug)]
@@ -2485,6 +2507,64 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_squeeze_momentum_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use existing CSV candles (same as other tests in this module)
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = SqueezeMomentumInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = squeeze_momentum(&input)?;
+        let n = baseline.momentum.len();
+
+        // Preallocate outputs and use the new into API
+        let mut out_sq = vec![0.0; n];
+        let mut out_mo = vec![0.0; n];
+        let mut out_si = vec![0.0; n];
+        #[cfg(not(feature = "wasm"))]
+        squeeze_momentum_into(&input, &mut out_sq, &mut out_mo, &mut out_si)?;
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native into is not available; fall back to slices helper for parity.
+            squeeze_momentum_into_slices(&mut out_sq, &mut out_mo, &mut out_si, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.squeeze.len(), n);
+        assert_eq!(baseline.momentum.len(), n);
+        assert_eq!(baseline.momentum_signal.len(), n);
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(baseline.squeeze[i], out_sq[i]),
+                "squeeze mismatch at {}: {} vs {}",
+                i,
+                baseline.squeeze[i],
+                out_sq[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.momentum[i], out_mo[i]),
+                "momentum mismatch at {}: {} vs {}",
+                i,
+                baseline.momentum[i],
+                out_mo[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.momentum_signal[i], out_si[i]),
+                "signal mismatch at {}: {} vs {}",
+                i,
+                baseline.momentum_signal[i],
+                out_si[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_smi_partial_params(
         test_name: &str,

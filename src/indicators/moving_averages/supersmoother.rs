@@ -322,6 +322,84 @@ pub fn supersmoother_into_slice(
     Ok(())
 }
 
+/// SuperSmoother zero-allocation API: writes results into the caller-provided buffer.
+///
+/// - Preserves NaN warmups exactly like `supersmoother()` (quiet-NaN prefix up to first + period - 1).
+/// - The output slice length must equal the input length.
+/// - Returns `Ok(())` on success, or the same errors as the Vec-returning API on failure.
+#[inline]
+pub fn supersmoother_compute_into(
+    input: &SuperSmootherInput,
+    kernel: Kernel,
+    out: &mut [f64],
+) -> Result<(), SuperSmootherError> {
+    let data: &[f64] = input.as_ref();
+    if data.is_empty() {
+        return Err(SuperSmootherError::EmptyData);
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(SuperSmootherError::AllValuesNaN)?;
+
+    let len = data.len();
+    let period = input.get_period();
+
+    if period == 0 || period > len {
+        return Err(SuperSmootherError::InvalidPeriod { period, data_len: len });
+    }
+    if (len - first) < period {
+        return Err(SuperSmootherError::NotEnoughValidData { needed: period, valid: len - first });
+    }
+    if out.len() != len {
+        // Mirror existing pattern for length mismatch by reusing InvalidPeriod
+        return Err(SuperSmootherError::InvalidPeriod { period: out.len(), data_len: len });
+    }
+
+    // Match with_kernel dispatch semantics
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    // Prefill warmup prefix with the module's quiet-NaN pattern (matches alloc_with_nan_prefix)
+    let warm = first + period - 1;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..warm] {
+        *v = qnan;
+    }
+
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                supersmoother_row_scalar(data, first, period, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                supersmoother_row_avx2(data, first, period, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                supersmoother_row_avx512(data, first, period, out)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
+/// Native zero-copy API for SuperSmoother that writes into caller-provided buffer.
+///
+/// Preserves NaN warmups and requires `out.len() == input.len()`. Uses `Kernel::Auto`
+/// for dispatch and mirrors `supersmoother()` behavior. Guarded to avoid wasm symbol clash.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn supersmoother_into(input: &SuperSmootherInput, out: &mut [f64]) -> Result<(), SuperSmootherError> {
+    supersmoother_compute_into(input, Kernel::Auto, out)
+}
+
 #[inline]
 pub unsafe fn supersmoother_scalar(
     data: &[f64],
@@ -1569,6 +1647,48 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_supersmoother_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input slice
+        let len = 512usize;
+        let mut data = vec![0.0f64; len];
+        for i in 0..len {
+            let x = i as f64;
+            // mix slow/fast components with a mild trend
+            data[i] = (x * 0.01).sin() * 2.0 + (x * 0.2).cos() * 0.5 + 0.001 * x;
+        }
+
+        let input = SuperSmootherInput::from_slice(&data, SuperSmootherParams::default());
+
+        // Baseline via existing Vec-returning API
+        let baseline = supersmoother(&input)?.values;
+
+        // Preallocate output and compute via zero-allocation API
+        let mut out = vec![0.0f64; len];
+        #[cfg(not(feature = "wasm"))]
+        {
+            supersmoother_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, exercise the compute_into path directly to validate parity
+            supersmoother_compute_into(&input, Kernel::Auto, &mut out)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: NaN == NaN, otherwise exact or tight epsilon for finite values
+        fn equal(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for (i, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(equal(*a, *b), "mismatch at idx {}: {} vs {}", i, a, b);
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "python")]

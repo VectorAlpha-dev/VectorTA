@@ -3202,6 +3202,93 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_dvdiqqe_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a small but non-trivial synthetic candle set
+        let len = 256usize;
+        let mut ts = Vec::with_capacity(len);
+        let mut open = Vec::with_capacity(len);
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        let mut close = Vec::with_capacity(len);
+        let mut volume = Vec::with_capacity(len);
+
+        // Create gently varying data with some structure
+        for i in 0..len {
+            ts.push(i as i64);
+            let base = 100.0 + (i as f64) * 0.1;
+            let noise = ((i * 17) % 13) as f64 * 0.01;
+            let o = base + noise;
+            let c = base + (noise * 1.5) - 0.03;
+            let h = o.max(c) + 0.5;
+            let l = o.min(c) - 0.5;
+            open.push(o);
+            high.push(h);
+            low.push(l);
+            close.push(c);
+            volume.push(1000.0 + ((i * 37) % 23) as f64);
+        }
+
+        let candles = Candles::new(ts, open, high, low, close.clone(), volume);
+        let input = DvdiqqeInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = dvdiqqe(&input)?;
+
+        // Preallocate outputs and compute via in-place API
+        let mut dvdi = vec![0.0; len];
+        let mut fast = vec![0.0; len];
+        let mut slow = vec![0.0; len];
+        let mut center = vec![0.0; len];
+
+        dvdiqqe_into(&input, &mut dvdi, &mut fast, &mut slow, &mut center)?;
+
+        // Length parity
+        assert_eq!(baseline.dvdi.len(), len);
+        assert_eq!(baseline.fast_tl.len(), len);
+        assert_eq!(baseline.slow_tl.len(), len);
+        assert_eq!(baseline.center_line.len(), len);
+
+        // Value parity: treat NaN == NaN as equal; otherwise require exact equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline.dvdi[i], dvdi[i]),
+                "dvdi mismatch at {}: api={} into={}",
+                i,
+                baseline.dvdi[i],
+                dvdi[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.fast_tl[i], fast[i]),
+                "fast_tl mismatch at {}: api={} into={}",
+                i,
+                baseline.fast_tl[i],
+                fast[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.slow_tl[i], slow[i]),
+                "slow_tl mismatch at {}: api={} into={}",
+                i,
+                baseline.slow_tl[i],
+                slow[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.center_line[i], center[i]),
+                "center_line mismatch at {}: api={} into={}",
+                i,
+                baseline.center_line[i],
+                center[i]
+            );
+        }
+
+        Ok(())
+    }
+
     // ==================== COMPREHENSIVE TEST FUNCTIONS ====================
 
     fn check_dvdiqqe_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {

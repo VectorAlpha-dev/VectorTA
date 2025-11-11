@@ -186,6 +186,18 @@ pub enum HmaError {
     #[error("hma: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
 
+    #[error("hma: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("hma: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("hma: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("hma: arithmetic overflow when computing {what}")]
+    ArithmeticOverflow { what: &'static str },
+
     #[error("hma: Cannot calculate half of period: period = {period}")]
     ZeroHalf { period: usize },
 
@@ -199,6 +211,16 @@ pub enum HmaError {
 #[inline]
 pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
     hma_with_kernel(input, Kernel::Auto)
+}
+
+/// Writes HMA results into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup semantics identical to the Vec-returning API.
+/// - The output slice length must equal the input length.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+pub fn hma_into(input: &HmaInput, out: &mut [f64]) -> Result<(), HmaError> {
+    hma_into_internal(input, out)
 }
 
 #[inline]
@@ -269,10 +291,7 @@ fn hma_with_kernel_into(input: &HmaInput, kernel: Kernel, out: &mut [f64]) -> Re
         return Err(HmaError::NoData);
     }
     if out.len() != len {
-        return Err(HmaError::InvalidPeriod {
-            period: out.len(),
-            data_len: len,
-        });
+        return Err(HmaError::OutputLengthMismatch { expected: len, got: out.len() });
     }
 
     let first = data
@@ -946,12 +965,7 @@ pub fn hma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(HmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
-        }
+        other => return Err(HmaError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -987,10 +1001,22 @@ impl HmaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &HmaBatchRange) -> Vec<HmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // zero step or identical bounds => singleton
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        // normalize possibly reversed bounds
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let mut v = Vec::new();
+        let mut x = lo;
+        while x <= hi {
+            v.push(x);
+            match x.checked_add(step) {
+                Some(nx) => x = nx,
+                None => break, // stop on overflow – values accumulated so far are valid
+            }
+        }
+        v
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -1027,10 +1053,8 @@ fn hma_batch_inner(
 ) -> Result<HmaBatchOutput, HmaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(HmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, t) = sweep.period;
+        return Err(HmaError::InvalidRange { start: s, end: e, step: t });
     }
     let first = data
         .iter()
@@ -1102,6 +1126,9 @@ fn hma_batch_inner(
     // finalize like ALMA
     let rows = combos.len();
     let cols = data.len();
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(HmaError::ArithmeticOverflow { what: "rows*cols" })?;
 
     let mut guard = core::mem::ManuallyDrop::new(raw);
     let values: Vec<f64> = unsafe {
@@ -1130,10 +1157,8 @@ fn hma_batch_inner_into(
 ) -> Result<(Vec<HmaParams>, usize, usize), HmaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(HmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, t) = sweep.period;
+        return Err(HmaError::InvalidRange { start: s, end: e, step: t });
     }
     let first = data
         .iter()
@@ -1150,11 +1175,11 @@ fn hma_batch_inner_into(
     let cols = data.len();
 
     // Ensure output buffer is the correct size
-    if out.len() != rows * cols {
-        return Err(HmaError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(HmaError::ArithmeticOverflow { what: "rows*cols" })?;
+    if out.len() != expected {
+        return Err(HmaError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     // one warm-prefix per row so batch + streaming agree
@@ -1350,15 +1375,23 @@ pub fn hma_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos, stream_u64) = py.allow_threads(|| {
         let cuda = CudaHma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.hma_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let res = cuda
+            .hma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((res.0, res.1, cuda.stream_handle_u64()))
     })?;
 
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
+    // CUDA Array Interface v3 helper metadata for consumers; no sync performed here.
+    dict.set_item("cai_version", 3u64)?;
+    dict.set_item("cai_typestr", "<f4")?; // little-endian f32
+    dict.set_item("cai_shape", (inner.rows as u64, inner.cols as u64))?;
+    dict.set_item("cai_strides_bytes", ((inner.cols as u64) * 4u64, 4u64))?;
+    dict.set_item("stream", stream_u64)?; // non-zero CUstream per CAI v3
 
     Ok((DeviceArrayF32Py { inner }, dict))
 }
@@ -1431,10 +1464,7 @@ pub fn hma_into_slice(dst: &mut [f64], input: &HmaInput, kern: Kernel) -> Result
     let data: &[f64] = input.as_ref();
 
     if dst.len() != data.len() {
-        return Err(HmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
+        return Err(HmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
     hma_with_kernel_into(input, kern, dst)
@@ -1691,6 +1721,34 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use proptest::prelude::*;
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_hma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare non-trivial input data (deterministic, finite values)
+        let data: Vec<f64> = (0..512)
+            .map(|i| ((i as f64).sin() * 123.456789) + (i as f64) * 0.25)
+            .collect();
+
+        // Default params match existing tests (period defaults to 5)
+        let input = HmaInput::from_slice(&data, HmaParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = hma(&input)?.values;
+
+        // Preallocate output and call the new into API
+        let mut out = vec![0.0; data.len()];
+        hma_into(&input, &mut out)?;
+
+        // Parity check: exact equality for finite values; NaN == NaN
+        assert_eq!(baseline.len(), out.len());
+        for (a, b) in baseline.iter().zip(out.iter()) {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(equal, "Mismatch: a={:?}, b={:?}", a, b);
+        }
+
+        Ok(())
+    }
 
     fn check_hma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

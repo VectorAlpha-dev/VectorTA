@@ -296,9 +296,38 @@ pub fn correl_hl_into_slice(
     correl_hl_compute_into(high, low, period, first, chosen, dst);
     let warm = first + period - 1;
     for v in &mut dst[..warm] {
-        *v = f64::NAN;
+        // Preserve the quiet-NaN warmup semantics used by alloc_with_nan_prefix
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
     Ok(())
+}
+
+/// Compute CORREL_HL directly into a caller-provided buffer (no allocations).
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (quiet-NaN prefix).
+/// - `out.len()` must equal the input length; returns `OutputLengthMismatch` otherwise.
+/// - Uses `Kernel::Auto` to select the best kernel at runtime.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn correl_hl_into(out: &mut [f64], input: &CorrelHlInput) -> Result<(), CorrelHlError> {
+    // Reuse the existing prepare logic to derive warmup and kernel selection
+    let (high, _low, period, first, _chosen) = correl_hl_prepare(input, Kernel::Auto)?;
+    if out.len() != high.len() {
+        return Err(CorrelHlError::OutputLengthMismatch {
+            dst: out.len(),
+            src: high.len(),
+        });
+    }
+
+    // Prefill warmup prefix to match alloc_with_nan_prefix semantics
+    let warm = first + period - 1;
+    let warm_cap = warm.min(out.len());
+    for v in &mut out[..warm_cap] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Delegate to the existing no-allocation kernel dispatcher
+    correl_hl_into_slice(out, input, Kernel::Auto)
 }
 
 #[inline]
@@ -1660,6 +1689,68 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[test]
+    fn test_correl_hl_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build synthetic candles (length ~256) with realistic OHLC relationships
+        let n = 256usize;
+        let mut ts = Vec::with_capacity(n);
+        let mut open = Vec::with_capacity(n);
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        let mut vol = Vec::with_capacity(n);
+
+        let mut cur = 100.0f64;
+        for i in 0..n {
+            // simple random-walk-like series with bounded spreads
+            let step = ((i as f64).sin() * 0.5) + 0.1;
+            let o = cur;
+            let c = cur + step;
+            let (lo, hi) = if c >= o {
+                (o - 0.3, c + 0.4)
+            } else {
+                (c - 0.3, o + 0.4)
+            };
+            ts.push(i as i64);
+            open.push(o);
+            close.push(c);
+            high.push(hi);
+            low.push(lo);
+            vol.push(1000.0 + (i % 10) as f64);
+            cur = c;
+        }
+
+        let candles = crate::utilities::data_loader::Candles::new(
+            ts, open, high.clone(), low.clone(), close, vol,
+        );
+
+        // Default params match existing tests
+        let input = CorrelHlInput::from_candles(&candles, CorrelHlParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = correl_hl(&input)?;
+
+        // Preallocate output and compute via no-allocation API
+        let mut out = vec![0.0f64; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            correl_hl_into(&mut out, &input)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native symbol is not present; use into_slice with Auto
+            correl_hl_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.values.len(), out.len());
+        for (a, b) in baseline.values.iter().zip(out.iter()) {
+            let equal = (a.is_nan() && b.is_nan()) || (*a == *b) || ((*a - *b).abs() <= 1e-12);
+            assert!(equal, "Mismatch: baseline={} into={}", a, b);
+        }
+
+        Ok(())
+    }
 
     fn check_correl_hl_partial_params(
         test_name: &str,

@@ -464,6 +464,27 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
     Ok(())
 }
 
+/// Writes CHOP values into a caller-provided output slice without allocating.
+///
+/// - Preserves this module's NaN warmup semantics (prefix up to `first + period - 1`).
+/// - `out.len()` must equal the input length; returns the module's length error on mismatch.
+/// - Uses kernel auto-detection (same path as `chop()`), delegating to the existing compute kernels.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn chop_into(input: &ChopInput, out: &mut [f64]) -> Result<(), ChopError> {
+    // Validate output length matches input length early to avoid UB in kernels
+    let len = match &input.data {
+        ChopData::Candles(c) => c.close.len(),
+        ChopData::Slice { close, .. } => close.len(),
+    };
+    if out.len() != len {
+        return Err(ChopError::UnderlyingFunctionFailed(
+            "mismatched output length".to_string(),
+        ));
+    }
+    chop_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 pub unsafe fn chop_scalar(
     high: &[f64],
@@ -1238,6 +1259,56 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use std::error::Error;
+
+    #[test]
+    fn test_chop_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Synthetic but non-trivial OHLC data with varying spread
+        let n = 256usize;
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64;
+            let base = 100.0 + (t * 0.07).sin() * 2.0 + (t * 0.013).cos();
+            let h0 = base + 1.0 + 0.15 * (t * 0.31).sin();
+            let l0 = base - 1.0 - 0.12 * (t * 0.23).cos();
+            let (lo, hi) = if l0 <= h0 { (l0, h0) } else { (h0, l0) };
+            let mut c0 = 0.5 * (lo + hi) + 0.2 * (t * 0.17).sin();
+            if c0 < lo { c0 = lo; }
+            if c0 > hi { c0 = hi; }
+            high.push(hi);
+            low.push(lo);
+            close.push(c0);
+        }
+
+        let input = ChopInput::from_slices(&high, &low, &close, ChopParams::default());
+
+        // Baseline via existing Vec-returning API
+        let baseline = chop(&input)?.values;
+
+        // Into-API writes into caller-provided buffer
+        let mut out = vec![0.0; n];
+        #[cfg(not(feature = "wasm"))]
+        {
+            chop_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, fall back to the kernel-parameter version to validate parity
+            chop_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            if a.is_nan() || b.is_nan() {
+                assert!(a.is_nan() && b.is_nan(), "NaN mismatch at index {}", i);
+            } else {
+                assert!((a - b).abs() <= 1e-12, "Value mismatch at index {}: {} vs {}", i, a, b);
+            }
+        }
+        Ok(())
+    }
     fn check_chop_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

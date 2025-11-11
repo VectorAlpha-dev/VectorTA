@@ -256,6 +256,89 @@ pub fn stochf(input: &StochfInput) -> Result<StochfOutput, StochfError> {
     stochf_with_kernel(input, Kernel::Auto)
 }
 
+/// Write StochF outputs into caller-provided buffers without allocations.
+///
+/// Preserves NaN warmups exactly like the Vec-returning API: the first
+/// `first_valid + fastk - 1` values of %K and the first
+/// `first_valid + fastk + fastd - 2` values of %D are prefilled with
+/// quiet-NaNs. All slice lengths must equal the input length.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn stochf_into(
+    input: &StochfInput,
+    out_k: &mut [f64],
+    out_d: &mut [f64],
+    
+) -> Result<(), StochfError> {
+    // Resolve input slices
+    let (high, low, close) = match &input.data {
+        StochfData::Candles { candles } => {
+            let high = candles
+                .select_candle_field("high")
+                .map_err(|_| StochfError::EmptyData)?;
+            let low = candles
+                .select_candle_field("low")
+                .map_err(|_| StochfError::EmptyData)?;
+            let close = candles
+                .select_candle_field("close")
+                .map_err(|_| StochfError::EmptyData)?;
+            (high, low, close)
+        }
+        StochfData::Slices { high, low, close } => (*high, *low, *close),
+    };
+
+    if high.is_empty() || low.is_empty() || close.is_empty() {
+        return Err(StochfError::EmptyData);
+    }
+    let len = high.len();
+    if low.len() != len || close.len() != len {
+        return Err(StochfError::EmptyData);
+    }
+    if out_k.len() != len || out_d.len() != len {
+        return Err(StochfError::InvalidOutputSize {
+            expected: len,
+            k_got: out_k.len(),
+            d_got: out_d.len(),
+        });
+    }
+
+    let fastk = input.get_fastk_period();
+    let fastd = input.get_fastd_period();
+    let _matype = input.get_fastd_matype();
+    if fastk == 0 || fastd == 0 || fastk > len || fastd > len {
+        return Err(StochfError::InvalidPeriod {
+            fastk,
+            fastd,
+            data_len: len,
+        });
+    }
+
+    // First valid non-NaN tuple
+    let first = (0..len)
+        .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
+        .ok_or(StochfError::AllValuesNaN)?;
+    if (len - first) < fastk {
+        return Err(StochfError::NotEnoughValidData {
+            needed: fastk,
+            valid: len - first,
+        });
+    }
+
+    // Prefill NaN warmups to match Vec API semantics
+    let k_warm = first + fastk - 1;
+    let d_warm = first + fastk + fastd - 2;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out_k[..k_warm.min(len)] {
+        *v = qnan;
+    }
+    for v in &mut out_d[..d_warm.min(len)] {
+        *v = qnan;
+    }
+
+    // Dispatch into the existing compute-into path using Kernel::Auto
+    stochf_into_slice(out_k, out_d, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn stochf_into_slice(
     dst_k: &mut [f64],
@@ -3268,6 +3351,45 @@ mod tests {
 
         // Should succeed
         assert!(result.is_ok());
+    }
+
+    // Parity test: into() vs Vec API
+    #[test]
+    fn test_stochf_into_matches_api() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("failed to read csv");
+        let input = StochfInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let base = stochf(&input).expect("baseline stochf failed");
+
+        // Into API with preallocated outputs
+        let len = candles.close.len();
+        let mut k_out = vec![0.0f64; len];
+        let mut d_out = vec![0.0f64; len];
+        stochf_into(&input, &mut k_out, &mut d_out).expect("stochf_into failed");
+
+        assert_eq!(base.k.len(), k_out.len());
+        assert_eq!(base.d.len(), d_out.len());
+
+        fn eq_or_nan(a: f64, b: f64) -> bool { (a.is_nan() && b.is_nan()) || (a == b) }
+
+        for i in 0..len {
+            assert!(
+                eq_or_nan(base.k[i], k_out[i]),
+                "K mismatch at {}: base={:?} into={:?}",
+                i,
+                base.k[i],
+                k_out[i]
+            );
+            assert!(
+                eq_or_nan(base.d[i], d_out[i]),
+                "D mismatch at {}: base={:?} into={:?}",
+                i,
+                base.d[i],
+                d_out[i]
+            );
+        }
     }
 
     gen_batch_tests!(check_batch_default_row);

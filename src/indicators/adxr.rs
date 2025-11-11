@@ -348,6 +348,18 @@ pub fn adxr_into_slice(dst: &mut [f64], input: &AdxrInput, kern: Kernel) -> Resu
     Ok(())
 }
 
+/// ADXR into (no allocations): writes results into a caller-provided buffer.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (`adxr`) does.
+/// - The output slice length must equal the input length; otherwise returns
+///   `AdxrError::OutputLengthMismatch`.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn adxr_into(input: &AdxrInput, out: &mut [f64]) -> Result<(), AdxrError> {
+    adxr_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn adxr_scalar(
     high: &[f64],
@@ -2115,6 +2127,47 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_adxr_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Small but non-trivial synthetic HLC series
+        let len = 256usize;
+        let mut high = vec![0.0f64; len];
+        let mut low = vec![0.0f64; len];
+        let mut close = vec![0.0f64; len];
+        for i in 0..len {
+            // Trend + oscillation; ensure high >= close >= low
+            let base = 100.0 + (i as f64) * 0.1 + (i as f64 * 0.07).sin();
+            low[i] = base - 1.0;
+            close[i] = base - 0.3;
+            high[i] = base + 0.8;
+        }
+
+        let input = AdxrInput::from_slices(&high, &low, &close, AdxrParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = adxr(&input)?.values;
+
+        // Preallocate output and compute via into API
+        let mut out = vec![0.0f64; len];
+        #[cfg(not(feature = "wasm"))]
+        {
+            adxr_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, call the slice version directly for parity check
+            adxr_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        for (a, b) in baseline.iter().zip(out.iter()) {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(equal, "Mismatch: baseline={} out={}", a, b);
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "python")]

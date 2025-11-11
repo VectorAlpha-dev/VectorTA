@@ -785,7 +785,12 @@ pub fn ttm_squeeze_into_slices(
     Ok(())
 }
 
-/// Convenience wrapper for ttm_squeeze_into_slices
+/// Compute TTM Squeeze into caller-provided buffers (no allocations).
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - Both `dst_momentum` and `dst_squeeze` must have length equal to the input length.
+/// - Pass `Kernel::Auto` for automatic kernel selection (recommended); other kernels
+///   follow the module’s dispatch rules.
 #[inline]
 pub fn ttm_squeeze_into(
     dst_momentum: &mut [f64],
@@ -3116,4 +3121,51 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep_count);
+
+    #[inline]
+    fn eq_or_both_nan_eps(a: f64, b: f64, eps: f64) -> bool {
+        (a.is_nan() && b.is_nan()) || (a - b).abs() <= eps
+    }
+
+    #[test]
+    fn test_ttm_squeeze_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the existing repository CSV to mirror other tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = TtmSqueezeInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = ttm_squeeze(&input)?;
+
+        // Preallocate outputs and invoke the zero-allocation API
+        let len = candles.close.len();
+        let mut mom_out = vec![0.0f64; len];
+        let mut sqz_out = vec![0.0f64; len];
+        ttm_squeeze_into(&mut mom_out, &mut sqz_out, &input, Kernel::Auto)?;
+
+        // Length parity
+        assert_eq!(baseline.momentum.len(), len);
+        assert_eq!(baseline.squeeze.len(), len);
+
+        // Value-by-value parity (NaN == NaN; tight epsilon for finite values)
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan_eps(baseline.momentum[i], mom_out[i], 1e-7),
+                "Momentum mismatch at {}: baseline={} into={}",
+                i,
+                baseline.momentum[i],
+                mom_out[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(baseline.squeeze[i], sqz_out[i], 1e-7),
+                "Squeeze mismatch at {}: baseline={} into={}",
+                i,
+                baseline.squeeze[i],
+                sqz_out[i]
+            );
+        }
+
+        Ok(())
+    }
 }

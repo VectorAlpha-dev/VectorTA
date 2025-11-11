@@ -196,6 +196,14 @@ pub enum DemaError {
     NotEnoughData { needed: usize, valid: usize },
     #[error("dema: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("dema: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("dema: invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("dema: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("dema: size overflow when computing {context}")]
+    SizeOverflow { context: &'static str },
 }
 
 #[inline]
@@ -279,6 +287,18 @@ pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput,
     Ok(DemaOutput { values: out })
 }
 
+/// Writes DEMA values into a caller-provided output buffer without allocating.
+///
+/// - Preserves the same NaN warmup prefix as `dema()` (up to `first + period - 1`).
+/// - The output slice length must equal the input length; returns the module's
+///   existing error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn dema_into(input: &DemaInput, out: &mut [f64]) -> Result<(), DemaError> {
+    // Delegate to the internal zero-copy helper with Kernel::Auto
+    dema_into_slice(out, input, Kernel::Auto)
+}
+
 /// Write DEMA values directly to output slice - no allocations.
 /// This is the core helper for WASM optimizations.
 /// The output slice must be the same length as the input data.
@@ -288,9 +308,9 @@ pub fn dema_into_slice(dst: &mut [f64], input: &DemaInput, kern: Kernel) -> Resu
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(DemaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(DemaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -850,10 +870,25 @@ impl DemaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &DemaBatchRange) -> Vec<DemaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // Zero step or equal bounds -> singleton
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        // Support reversed bounds without changing public API
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let mut out = Vec::new();
+        let mut v = lo;
+        while v <= hi {
+            out.push(v);
+            match v.checked_add(step) {
+                Some(n) if n != v => v = n,
+                _ => break,
+            }
+        }
+        if out.is_empty() {
+            out.push(start);
+        }
+        out
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -892,12 +927,7 @@ fn dema_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(DemaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(DemaError::InvalidKernelForBatch(other)),
     };
     // Keep parity and performance policy consistent with single-path:
     // - AVX512: use AVX512 (wins consistently)
@@ -923,6 +953,10 @@ fn dema_batch_inner(
     let combos = expand_grid(sweep);
     let cols = data.len();
     let rows = combos.len();
+    // Checked arithmetic to avoid overflow before allocation
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(DemaError::SizeOverflow { context: "rows*cols for batch buffer" })?;
 
     if cols == 0 {
         return Err(DemaError::EmptyInputData);
@@ -1012,11 +1046,11 @@ fn dema_batch_inner_into(
     let cols = data.len();
 
     // Verify output buffer size
-    if out.len() != rows * cols {
-        return Err(DemaError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(DemaError::SizeOverflow { context: "rows*cols when validating output buffer" })?;
+    if out.len() != expected {
+        return Err(DemaError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     // ── 3. per-row kernel closure; dst is &mut [f64] ─────
@@ -1647,6 +1681,39 @@ mod tests {
         check_dema_no_poison,
         check_dema_warmup_nan_preservation
     );
+
+    #[test]
+    fn test_dema_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = DemaInput::with_default_candles(&candles);
+        let baseline = dema(&input)?.values;
+
+        let mut out = vec![0.0; candles.close.len()];
+
+        // Use native into when available; fallback to internal helper under wasm
+        #[cfg(not(feature = "wasm"))]
+        {
+            dema_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            dema_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(out.len(), baseline.len());
+        for i in 0..out.len() {
+            let a = out[i];
+            let b = baseline[i];
+            if a.is_nan() || b.is_nan() {
+                assert!(a.is_nan() && b.is_nan(), "NaN mismatch at index {}", i);
+            } else {
+                assert!(a == b, "Value mismatch at index {}: {} != {}", i, a, b);
+            }
+        }
+        Ok(())
+    }
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);

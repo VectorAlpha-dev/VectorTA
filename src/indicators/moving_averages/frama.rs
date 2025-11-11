@@ -268,6 +268,21 @@ pub enum FramaError {
     InvalidWindow { window: usize, data_len: usize },
     #[error("frama: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    /// Output slice length mismatched the input length.
+    #[error("frama: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    /// Invalid parameter range for batch sweeps.
+    #[error("frama: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    /// Batch API was called with a non-batch kernel.
+    #[error("frama: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    /// Domain parameter validation for smoothing constants.
+    #[error("frama: Invalid smoothing constants: sc={sc}, fc={fc}")]
+    InvalidSmoothing { sc: usize, fc: usize },
+    /// Checked arithmetic failed (capacity/bytes overflow).
+    #[error("frama: arithmetic overflow while computing {context}")]
+    ArithmeticOverflow { context: &'static str },
 }
 
 #[inline]
@@ -307,6 +322,9 @@ fn frama_prepare<'a>(
     let window = input.get_window();
     let sc = input.get_sc();
     let fc = input.get_fc();
+    if sc == 0 || fc == 0 {
+        return Err(FramaError::InvalidSmoothing { sc, fc });
+    }
     let first = (0..len)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or(FramaError::AllValuesNaN)?;
@@ -401,6 +419,22 @@ pub fn frama_with_kernel(input: &FramaInput, kernel: Kernel) -> Result<FramaOutp
     )?;
     Ok(FramaOutput { values: out })
 }
+
+/// Write FRAMA values into a caller-provided output buffer without allocating.
+///
+/// - Preserves the same NaN warmup prefix as `frama()` (indices before the first
+///   valid output remain NaN; the seed at the first valid index is finite).
+/// - The output slice length must equal the input length; returns the module's
+///   existing window/length error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn frama_into(input: &FramaInput, out: &mut [f64]) -> Result<(), FramaError> {
+    // Delegate to the internal helper with Kernel::Auto
+    frama_into_slice(out, input, Kernel::Auto)
+}
+
+// Note: `frama_into_slice` is already provided later in this module (WASM section)
+// and is used here to avoid duplication.
 
 #[derive(Copy, Clone)]
 struct MonoDeque<const CAP: usize> {
@@ -1150,15 +1184,36 @@ impl FramaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &FramaBatchRange) -> Vec<FramaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // Zero step → singleton; equal bounds → singleton.
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        // Support reversed bounds by scanning [min..=max] and reversing if needed.
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let mut v = Vec::new();
+        let mut x = lo;
+        loop {
+            v.push(x);
+            match x.checked_add(step) {
+                Some(nx) if nx <= hi => x = nx,
+                _ => break,
+            }
+        }
+        if start > end {
+            v.reverse();
+        }
+        v
     }
     let windows = axis_usize(r.window);
     let scs = axis_usize(r.sc);
     let fcs = axis_usize(r.fc);
-    let mut out = Vec::with_capacity(windows.len() * scs.len() * fcs.len());
+    // Pre-allocate with checked capacity (fallback to 0 if overflow).
+    let cap = windows
+        .len()
+        .checked_mul(scs.len())
+        .and_then(|x| x.checked_mul(fcs.len()))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
     for &w in &windows {
         for &s in &scs {
             for &f in &fcs {
@@ -1183,12 +1238,7 @@ pub fn frama_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(FramaError::InvalidWindow {
-                window: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(FramaError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1245,6 +1295,10 @@ fn frama_batch_inner(
 
     let rows = combos.len();
     let cols = close.len();
+    // Checked arithmetic guard for rows*cols matrix size.
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(FramaError::ArithmeticOverflow { context: "rows*cols" })?;
 
     // Use zero-copy allocation pattern like alma.rs
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -2499,6 +2553,39 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_frama_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = FramaInput::with_default_candles(&candles);
+        let baseline = frama(&input)?.values;
+
+        let mut out = vec![0.0; candles.close.len()];
+
+        // Use native into when available; fallback to internal helper under wasm
+        #[cfg(not(feature = "wasm"))]
+        {
+            frama_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            frama_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(out.len(), baseline.len());
+        for i in 0..out.len() {
+            let a = out[i];
+            let b = baseline[i];
+            if a.is_nan() || b.is_nan() {
+                assert!(a.is_nan() && b.is_nan(), "NaN mismatch at index {}", i);
+            } else {
+                assert!(a == b, "Value mismatch at index {}: {} != {}", i, a, b);
+            }
+        }
+        Ok(())
+    }
 }
 
 // Python bindings
@@ -2804,10 +2891,7 @@ pub fn frama_into_slice(
 
     // Verify output buffer size matches input
     if dst.len() != len {
-        return Err(FramaError::InvalidWindow {
-            window: dst.len(),
-            data_len: len,
-        });
+        return Err(FramaError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
     // evenized warm prefix like ALMA

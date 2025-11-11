@@ -2463,6 +2463,63 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     use crate::utilities::enums::Kernel;
 
+    // Simple helper for parity asserts with NaN-aware equality.
+    #[inline]
+    fn eq_or_both_nan_eps(a: f64, b: f64, eps: f64) -> bool {
+        (a.is_nan() && b.is_nan()) || (a - b).abs() <= eps
+    }
+
+    #[test]
+    fn test_macd_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Construct a non-trivial input (smooth trend + oscillation)
+        let len = 512usize;
+        let mut data = Vec::with_capacity(len);
+        for i in 0..len {
+            let t = i as f64;
+            data.push(0.01 * t + (t * 0.07).sin());
+        }
+
+        // Default MACD params (fast=12, slow=26, signal=9, EMA)
+        let params = MacdParams::default();
+        let input = MacdInput::from_slice(&data, params);
+
+        // Baseline via existing Vec-returning API
+        let baseline = macd(&input)?;
+
+        // Preallocate output buffers and call into-API
+        let mut macd_out = vec![0.0f64; len];
+        let mut signal_out = vec![0.0f64; len];
+        let mut hist_out = vec![0.0f64; len];
+        #[cfg(not(feature = "wasm"))]
+        macd_into(&input, &mut macd_out, &mut signal_out, &mut hist_out)?;
+
+        // Lengths must match
+        assert_eq!(baseline.macd.len(), len);
+        assert_eq!(baseline.signal.len(), len);
+        assert_eq!(baseline.hist.len(), len);
+
+        // Value-by-value parity, treating NaN == NaN as equal; tight epsilon for finite
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan_eps(baseline.macd[i], macd_out[i], 1e-12),
+                "MACD mismatch at index {}: baseline={} into={}",
+                i, baseline.macd[i], macd_out[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(baseline.signal[i], signal_out[i], 1e-12),
+                "Signal mismatch at index {}: baseline={} into={}",
+                i, baseline.signal[i], signal_out[i]
+            );
+            assert!(
+                eq_or_both_nan_eps(baseline.hist[i], hist_out[i], 1e-12),
+                "Hist mismatch at index {}: baseline={} into={}",
+                i, baseline.hist[i], hist_out[i]
+            );
+        }
+
+        Ok(())
+    }
+
     fn check_macd_partial_params(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";

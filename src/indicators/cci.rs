@@ -322,6 +322,17 @@ pub fn cci_into_slice(dst: &mut [f64], input: &CciInput, kern: Kernel) -> Result
     Ok(())
 }
 
+/// Writes CCI values into a caller-provided output slice without allocating.
+///
+/// - Preserves the module's NaN warmup semantics (prefix up to `first + period - 1`).
+/// - `out.len()` must equal `input` length; returns the module's length error on mismatch.
+/// - Uses kernel auto-detection (same path as `cci()`), delegating to the existing compute kernels.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn cci_into(input: &CciInput, out: &mut [f64]) -> Result<(), CciError> {
+    cci_into_slice(out, input, Kernel::Auto)
+}
+
 // ---- Scalar + AVX2/AVX512 ----
 
 /// Optimized safe scalar implementation.
@@ -1887,6 +1898,45 @@ mod tests {
 
     #[cfg(feature = "proptest")]
     generate_all_cci_tests!(check_cci_property);
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_cci_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with an initial NaN prefix.
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..253usize {
+            let x = (i as f64 * 0.037).sin() * 5.0 + 100.0 + (i % 7) as f64 * 0.1;
+            data.push(x);
+        }
+
+        let input = CciInput::from_slice(&data, CciParams::default());
+
+        // Baseline via existing Vec-returning API.
+        let baseline = cci(&input)?.values;
+
+        // Preallocate output; function will write warmups as NaN.
+        let mut out = vec![0.0; data.len()];
+        cci_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for (i, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_nan(*a, *b),
+                "cci_into mismatch at idx {}: baseline={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);

@@ -808,6 +808,36 @@ pub fn net_myrsi_into_slice(
     Ok(())
 }
 
+/// Write NET-MyRSI values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup prefix exactly as the Vec-returning API.
+/// - `out.len()` must equal the input length; otherwise returns the module's length/period error.
+/// - Uses `Kernel::Auto` for runtime selection and writes results in-place.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn net_myrsi_into(input: &NetMyrsiInput, out: &mut [f64]) -> Result<(), NetMyrsiError> {
+    let (data, period, first, chosen) = net_myrsi_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        // Mirror existing length-mismatch handling used by into-slice helpers in this crate
+        return Err(NetMyrsiError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern as alloc_with_nan_prefix
+    let warm = first + period - 1;
+    let warm = warm.min(out.len());
+    for v in &mut out[..warm] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Compute into caller buffer using the selected kernel
+    net_myrsi_compute_into(data, period, first, out, chosen);
+    Ok(())
+}
+
 // ==================== STREAMING SUPPORT ====================
 #[derive(Debug, Clone)]
 pub struct NetMyrsiStream {
@@ -1946,4 +1976,50 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_net_myrsi_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with an initial NaN prefix
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..(256 - 3) {
+            let x = i as f64;
+            data.push((x.sin() + (0.1 * x).cos()) * 10.0);
+        }
+
+        let input = NetMyrsiInput::from_slice(&data, NetMyrsiParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = net_myrsi(&input)?.values;
+
+        // Preallocated output buffer
+        let mut out = vec![0.0; data.len()];
+
+        // Use native into API when available; fallback to into_slice under wasm builds
+        #[cfg(not(feature = "wasm"))]
+        {
+            net_myrsi_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            net_myrsi_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "value mismatch at {}: baseline={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
+    }
 }

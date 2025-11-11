@@ -1120,6 +1120,23 @@ pub fn gatorosc_into_slice(
     Ok(())
 }
 
+/// Writes Gator Oscillator results into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - All output slices must have the same length as the input series.
+/// - Equivalent to calling `gatorosc_with_kernel(input, Kernel::Auto)` and copying results.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn gatorosc_into(
+    input: &GatorOscInput,
+    upper: &mut [f64],
+    lower: &mut [f64],
+    upper_change: &mut [f64],
+    lower_change: &mut [f64],
+) -> Result<(), GatorOscError> {
+    gatorosc_into_slice(upper, lower, upper_change, lower_change, input, Kernel::Auto)
+}
+
 // --- Streaming kernel (O(1) per update) -------------------------------------
 
 #[derive(Debug, Clone)]
@@ -2565,6 +2582,79 @@ mod tests {
         let input = GatorOscInput::from_candles(&candles, "close", default_params);
         let output = gatorosc_with_kernel(&input, kernel)?;
         assert_eq!(output.upper.len(), candles.close.len());
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(not(feature = "wasm"))]
+    fn test_gatorosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a small but non-trivial input (with a few NaNs at the front)
+        let len = 256;
+        let mut data = vec![0.0_f64; len];
+        for i in 0..len {
+            data[i] = (i as f64).sin() * 10.0 + ((i % 7) as f64) * 0.25;
+        }
+        // Introduce some NaNs at the start to exercise warmup handling with first-valid > 0
+        if len >= 3 {
+            data[0] = f64::NAN;
+            data[1] = f64::NAN;
+            data[2] = f64::NAN;
+        }
+
+        let input = GatorOscInput::from_slice(&data, GatorOscParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = gatorosc(&input)?;
+
+        // Preallocate destination buffers
+        let mut up = vec![0.0; len];
+        let mut lo = vec![0.0; len];
+        let mut upc = vec![0.0; len];
+        let mut loc = vec![0.0; len];
+
+        // Zero-allocation into API
+        gatorosc_into(&input, &mut up, &mut lo, &mut upc, &mut loc)?;
+
+        assert_eq!(baseline.upper.len(), len);
+        assert_eq!(baseline.lower.len(), len);
+        assert_eq!(baseline.upper_change.len(), len);
+        assert_eq!(baseline.lower_change.len(), len);
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline.upper[i], up[i]),
+                "upper mismatch at {}: {:?} vs {:?}",
+                i,
+                baseline.upper[i],
+                up[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.lower[i], lo[i]),
+                "lower mismatch at {}: {:?} vs {:?}",
+                i,
+                baseline.lower[i],
+                lo[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.upper_change[i], upc[i]),
+                "upper_change mismatch at {}: {:?} vs {:?}",
+                i,
+                baseline.upper_change[i],
+                upc[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.lower_change[i], loc[i]),
+                "lower_change mismatch at {}: {:?} vs {:?}",
+                i,
+                baseline.lower_change[i],
+                loc[i]
+            );
+        }
+
         Ok(())
     }
 

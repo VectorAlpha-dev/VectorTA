@@ -236,6 +236,18 @@ pub fn wclprice_with_kernel(
     Ok(WclpriceOutput { values: out })
 }
 
+#[cfg(not(feature = "wasm"))]
+#[inline]
+/// Writes Weighted Close Price (WCLPRICE) values into the provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API (prefix through the first valid
+///   index is filled with NaN).
+/// - The output slice length must equal the effective input length
+///   (`min(high.len(), low.len(), close.len())`).
+pub fn wclprice_into(input: &WclpriceInput, out: &mut [f64]) -> Result<(), WclpriceError> {
+    wclprice_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline]
 pub fn wclprice_into_slice(
     dst: &mut [f64],
@@ -1126,6 +1138,37 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[test]
+    fn test_wclprice_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the existing repository CSV so inputs match other tests
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file)?;
+
+        let input = WclpriceInput::from_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let WclpriceOutput { values: expected } = wclprice(&input)?;
+
+        // Preallocate output and call the new into API
+        let mut out = vec![0.0f64; expected.len()];
+        wclprice_into(&input, &mut out)?;
+
+        assert_eq!(out.len(), expected.len());
+        for i in 0..expected.len() {
+            let a = expected[i];
+            let b = out[i];
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(
+                equal,
+                "mismatch at {}: expected={}, got={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
+    }
 
     fn check_wclprice_slices(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);

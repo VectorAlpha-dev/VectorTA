@@ -264,6 +264,78 @@ pub fn linearreg_intercept_with_kernel(
     Ok(LinearRegInterceptOutput { values: out })
 }
 
+/// Writes results into a caller-provided slice without allocating.
+///
+/// - Preserves the quiet-NaN warmup prefix exactly like the Vec-returning API.
+/// - `dst.len()` must equal the input length; otherwise returns `OutputLengthMismatch`.
+/// - Uses `Kernel::Auto` (short-circuited to Scalar for this indicator).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn linearreg_intercept_into(
+    input: &LinearRegInterceptInput,
+    dst: &mut [f64],
+) -> Result<(), LinearRegInterceptError> {
+    let data: &[f64] = input.as_ref();
+
+    if data.is_empty() {
+        return Err(LinearRegInterceptError::InputDataSliceEmpty);
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(LinearRegInterceptError::AllValuesNaN)?;
+    let len = data.len();
+    let period = input.get_period();
+
+    if period == 0 || period > len {
+        return Err(LinearRegInterceptError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if (len - first) < period {
+        return Err(LinearRegInterceptError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
+    }
+
+    if dst.len() != data.len() {
+        return Err(LinearRegInterceptError::OutputLengthMismatch {
+            dst: dst.len(),
+            src: data.len(),
+        });
+    }
+
+    // Prefill warmup with the same quiet-NaN bit pattern used by alloc_with_nan_prefix.
+    let warmup_end = first + period - 1;
+    for v in &mut dst[..warmup_end] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // SIMD underperforms here; keep Scalar for Auto. Explicit SIMD would be honored
+    // if we exposed a kernel parameter, but this API mirrors the default behavior.
+    let chosen = Kernel::Scalar;
+
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                linearreg_intercept_scalar(data, period, first, dst)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => linearreg_intercept_avx2(data, period, first, dst),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                linearreg_intercept_avx512(data, period, first, dst)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
 /// Write directly to output slice - no allocations (WASM helper)
 #[inline]
 pub fn linearreg_intercept_into_slice(
@@ -1576,6 +1648,60 @@ mod tests {
 
     #[cfg(feature = "proptest")]
     generate_all_linreg_tests!(check_linearreg_intercept_property);
+
+    #[test]
+    fn test_linearreg_intercept_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with a NaN warmup prefix
+        let len = 256usize;
+        let mut data = Vec::with_capacity(len);
+        for i in 0..len {
+            if i < 10 {
+                data.push(f64::NAN);
+            } else {
+                let x = i as f64;
+                data.push((0.1 * x).sin() * 3.0 + 0.05 * x + 2.0);
+            }
+        }
+
+        let input = LinearRegInterceptInput::from_slice(&data, LinearRegInterceptParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = linearreg_intercept(&input)?.values;
+
+        // Preallocated output for into()
+        let mut out = vec![0.0; data.len()];
+        #[allow(unused_variables)]
+        {
+            // Native into API is not built under wasm
+            #[cfg(not(feature = "wasm"))]
+            {
+                linearreg_intercept_into(&input, &mut out)?;
+            }
+            #[cfg(feature = "wasm")]
+            {
+                // On wasm builds, ensure the helper path stays in sync
+                linearreg_intercept_into_slice(&mut out, &input, Kernel::Auto)?;
+            }
+        }
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan_eps(baseline[i], out[i]),
+                "mismatch at index {}: baseline={} out={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);

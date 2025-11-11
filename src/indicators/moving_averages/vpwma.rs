@@ -321,6 +321,19 @@ pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutp
 
     Ok(VpwmaOutput { values: out })
 }
+
+/// Compute VPWMA directly into a caller-provided buffer (no per-call allocations).
+///
+/// - Preserves the indicator's NaN warmup prefix exactly as the Vec-returning API
+///   (first valid index + `period - 1`).
+/// - The output slice length must equal the input length.
+/// - Dispatches with `Kernel::Auto` like `vpwma()`.
+#[cfg(not(feature = "wasm"))]
+pub fn vpwma_into(input: &VpwmaInput, out: &mut [f64]) -> Result<(), VpwmaError> {
+    // Reuse the module's zero-allocation compute path which also handles
+    // validation, warmup calculation, NaN prefix fill, and kernel dispatch.
+    vpwma_into_slice(out, input, Kernel::Auto)
+}
 #[inline]
 pub fn vpwma_scalar(
     data: &[f64],
@@ -1654,6 +1667,44 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_vpwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Small but non-trivial input with leading NaNs and varying values
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..253u32 {
+            let v = ((i % 19) as f64) * 0.9876 + (i as f64).cos() * 0.00123;
+            data.push(v);
+        }
+
+        let params = VpwmaParams::default();
+        let input = VpwmaInput::from_slice(&data, params);
+
+        // Baseline via existing Vec-returning API
+        let base = vpwma_with_kernel(&input, Kernel::Auto)?.values;
+
+        // Preallocate output and use the new into API
+        let mut out = vec![0.0; data.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            vpwma_into(&input, &mut out)?;
+        }
+
+        // Length parity
+        assert_eq!(base.len(), out.len());
+
+        // Equality: treat NaN==NaN equal; else exact (or tight epsilon)
+        for (i, (a, b)) in base.iter().zip(out.iter()).enumerate() {
+            let ok = if a.is_nan() && b.is_nan() {
+                true
+            } else {
+                (a - b).abs() <= 1e-12
+            };
+            assert!(ok, "Mismatch at index {}: base={} vs into={}", i, a, b);
+        }
+        Ok(())
+    }
 
     fn check_vpwma_partial_params(
         test_name: &str,
