@@ -13,6 +13,7 @@ use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::dema::{DemaBatchRange, DemaParams};
 use cust::context::Context;
 use cust::device::Device;
+use cust::device::DeviceAttribute;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -22,23 +23,23 @@ use cust::sys as cu;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaDemaError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaDemaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaDemaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaDemaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CudaDemaError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
@@ -105,10 +106,9 @@ pub struct CudaDema {
 
 impl CudaDema {
     pub fn new(device_id: usize) -> Result<Self, CudaDemaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/dema_kernel.ptx"));
         let jit_opts = &[
@@ -117,10 +117,9 @@ impl CudaDema {
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => Module::from_ptx(ptx, &[]).map_err(|e| CudaDemaError::Cuda(e.to_string()))?,
+            Err(_) => Module::from_ptx(ptx, &[])?
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -137,9 +136,8 @@ impl CudaDema {
 
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaDemaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDemaError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     pub fn new_with_policy(
@@ -222,17 +220,14 @@ impl CudaDema {
         let required = prices_bytes + periods_bytes + out_bytes;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             return Err(CudaDemaError::InvalidInput(
-                "insufficient device memory for DEMA batch".into(),
+                "insufficient device memory for DEMA many-series".into(),
             ));
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
-        let d_periods =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(series_len * combos.len())
-                .map_err(|e| CudaDemaError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(series_len * combos.len())?
         };
 
         self.launch_batch_kernel(
@@ -318,17 +313,11 @@ impl CudaDema {
         let periods_bytes = periods.len() * std::mem::size_of::<i32>();
         let out_bytes = series_len * periods.len() * std::mem::size_of::<f32>();
         let required = periods_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaDemaError::InvalidInput(
-                "insufficient device memory for DEMA batch".into(),
-            ));
-        }
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
-        let d_periods =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(series_len * combos.len())
-                .map_err(|e| CudaDemaError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(series_len * combos.len())?
         };
 
         self.launch_batch_kernel(
@@ -362,10 +351,8 @@ impl CudaDema {
             ));
         }
         let handle = self.dema_batch_dev(data_f32, sweep)?;
-        handle
-            .buf
-            .copy_to(out_flat)
-            .map_err(|e| CudaDemaError::Cuda(e.to_string()))
+        handle.buf.copy_to(out_flat)?;
+        Ok(())
     }
 
     fn prepare_batch_inputs(
@@ -436,7 +423,7 @@ impl CudaDema {
         let func = self
             .module
             .get_function("dema_batch_f32")
-            .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaDemaError::MissingKernelSymbol { name: "dema_batch_f32" })?;
 
         // Single-threaded sequential recurrence per combo
         let mut block_x: u32 = 1;
@@ -449,8 +436,18 @@ impl CudaDema {
         }
         self.maybe_log_batch_debug();
 
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        let grid_x: u32 = n_combos as u32;
+        let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        // Optional host-side limits check
+        {
+            let dev = Device::get_device(self.device_id)?;
+            let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+            let max_tpb = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+            if grid_x == 0 || grid_x > max_grid_x || block_x == 0 || block_x > max_tpb {
+                return Err(CudaDemaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            }
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -467,9 +464,7 @@ impl CudaDema {
                 &mut n_combos_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         // No implicit sync; public API decides synchronization
@@ -491,11 +486,7 @@ impl CudaDema {
         let elems = num_series * series_len;
         let required =
             elems * 2 * std::mem::size_of::<f32>() + num_series * std::mem::size_of::<i32>();
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaDemaError::InvalidInput(
-                "insufficient device memory for DEMA many-series".into(),
-            ));
-        }
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
             .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
@@ -604,7 +595,7 @@ impl CudaDema {
         let func = self
             .module
             .get_function("dema_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaDemaError::MissingKernelSymbol { name: "dema_many_series_one_param_time_major_f32" })?;
 
         // Prefill output with qNaN (entire time-major buffer)
         memset_f32_qnan_async(&self.stream, d_out_tm)?;
@@ -627,6 +618,14 @@ impl CudaDema {
 
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        {
+            let dev = Device::get_device(self.device_id)?;
+            let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+            let max_tpb = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+            if grid_x == 0 || grid_x > max_grid_x || block_x == 0 || block_x > max_tpb {
+                return Err(CudaDemaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            }
+        }
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -643,9 +642,7 @@ impl CudaDema {
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaDemaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -659,13 +656,17 @@ impl CudaDema {
         }
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaDemaError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
-        mem_get_info()
-            .map(|(free, _)| required_bytes.saturating_add(headroom_bytes) <= free)
-            .unwrap_or(true)
+        let (free, _total) = mem_get_info()?;
+        let need = required_bytes.saturating_add(headroom_bytes);
+        if need <= free {
+            Ok(())
+        } else {
+            Err(CudaDemaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+        }
     }
 
     fn prepare_many_series_inputs(

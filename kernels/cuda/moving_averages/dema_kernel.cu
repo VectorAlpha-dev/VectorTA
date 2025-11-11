@@ -1,5 +1,9 @@
 // CUDA kernel for DEMA (Double Exponential Moving Average).
 //
+// Exported symbols expected by Rust wrapper:
+//   - "dema_batch_f32"
+//   - "dema_many_series_one_param_time_major_f32"
+//
 // Optimizations applied (drop-in, accuracy-preserving):
 // - Remove blanket NaN writes from kernels; optionally initialize only [0..warm-1]
 //   to NaN when host does not prefill (default enabled to preserve existing behavior).

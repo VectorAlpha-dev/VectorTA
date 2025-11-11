@@ -196,6 +196,14 @@ pub enum DemaError {
     NotEnoughData { needed: usize, valid: usize },
     #[error("dema: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("dema: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("dema: invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("dema: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("dema: size overflow when computing {context}")]
+    SizeOverflow { context: &'static str },
 }
 
 #[inline]
@@ -300,9 +308,9 @@ pub fn dema_into_slice(dst: &mut [f64], input: &DemaInput, kern: Kernel) -> Resu
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(DemaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(DemaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -862,10 +870,25 @@ impl DemaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &DemaBatchRange) -> Vec<DemaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // Zero step or equal bounds -> singleton
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        // Support reversed bounds without changing public API
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let mut out = Vec::new();
+        let mut v = lo;
+        while v <= hi {
+            out.push(v);
+            match v.checked_add(step) {
+                Some(n) if n != v => v = n,
+                _ => break,
+            }
+        }
+        if out.is_empty() {
+            out.push(start);
+        }
+        out
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -904,12 +927,7 @@ fn dema_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(DemaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(DemaError::InvalidKernelForBatch(other)),
     };
     // Keep parity and performance policy consistent with single-path:
     // - AVX512: use AVX512 (wins consistently)
@@ -935,6 +953,10 @@ fn dema_batch_inner(
     let combos = expand_grid(sweep);
     let cols = data.len();
     let rows = combos.len();
+    // Checked arithmetic to avoid overflow before allocation
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(DemaError::SizeOverflow { context: "rows*cols for batch buffer" })?;
 
     if cols == 0 {
         return Err(DemaError::EmptyInputData);
@@ -1024,11 +1046,11 @@ fn dema_batch_inner_into(
     let cols = data.len();
 
     // Verify output buffer size
-    if out.len() != rows * cols {
-        return Err(DemaError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(DemaError::SizeOverflow { context: "rows*cols when validating output buffer" })?;
+    if out.len() != expected {
+        return Err(DemaError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     // ── 3. per-row kernel closure; dst is &mut [f64] ─────

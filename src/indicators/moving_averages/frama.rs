@@ -268,6 +268,21 @@ pub enum FramaError {
     InvalidWindow { window: usize, data_len: usize },
     #[error("frama: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    /// Output slice length mismatched the input length.
+    #[error("frama: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    /// Invalid parameter range for batch sweeps.
+    #[error("frama: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    /// Batch API was called with a non-batch kernel.
+    #[error("frama: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    /// Domain parameter validation for smoothing constants.
+    #[error("frama: Invalid smoothing constants: sc={sc}, fc={fc}")]
+    InvalidSmoothing { sc: usize, fc: usize },
+    /// Checked arithmetic failed (capacity/bytes overflow).
+    #[error("frama: arithmetic overflow while computing {context}")]
+    ArithmeticOverflow { context: &'static str },
 }
 
 #[inline]
@@ -307,6 +322,9 @@ fn frama_prepare<'a>(
     let window = input.get_window();
     let sc = input.get_sc();
     let fc = input.get_fc();
+    if sc == 0 || fc == 0 {
+        return Err(FramaError::InvalidSmoothing { sc, fc });
+    }
     let first = (0..len)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or(FramaError::AllValuesNaN)?;
@@ -1166,15 +1184,36 @@ impl FramaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &FramaBatchRange) -> Vec<FramaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // Zero step → singleton; equal bounds → singleton.
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        // Support reversed bounds by scanning [min..=max] and reversing if needed.
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let mut v = Vec::new();
+        let mut x = lo;
+        loop {
+            v.push(x);
+            match x.checked_add(step) {
+                Some(nx) if nx <= hi => x = nx,
+                _ => break,
+            }
+        }
+        if start > end {
+            v.reverse();
+        }
+        v
     }
     let windows = axis_usize(r.window);
     let scs = axis_usize(r.sc);
     let fcs = axis_usize(r.fc);
-    let mut out = Vec::with_capacity(windows.len() * scs.len() * fcs.len());
+    // Pre-allocate with checked capacity (fallback to 0 if overflow).
+    let cap = windows
+        .len()
+        .checked_mul(scs.len())
+        .and_then(|x| x.checked_mul(fcs.len()))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
     for &w in &windows {
         for &s in &scs {
             for &f in &fcs {
@@ -1199,12 +1238,7 @@ pub fn frama_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(FramaError::InvalidWindow {
-                window: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(FramaError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1261,6 +1295,10 @@ fn frama_batch_inner(
 
     let rows = combos.len();
     let cols = close.len();
+    // Checked arithmetic guard for rows*cols matrix size.
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(FramaError::ArithmeticOverflow { context: "rows*cols" })?;
 
     // Use zero-copy allocation pattern like alma.rs
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -2853,10 +2891,7 @@ pub fn frama_into_slice(
 
     // Verify output buffer size matches input
     if dst.len() != len {
-        return Err(FramaError::InvalidWindow {
-            window: dst.len(),
-            data_len: len,
-        });
+        return Err(FramaError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
     // evenized warm prefix like ALMA

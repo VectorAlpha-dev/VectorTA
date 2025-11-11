@@ -8,6 +8,8 @@
 // - Use FMA for weighted-sum updates (accuracy + throughput)
 // - Optional: host-prefill output with NaNs to skip per-thread fill
 // - Optional: place per-thread sqrt(n) ring in dynamic shared memory
+//   (caller sets shared bytes = max_sqrt_len * blockDim.x * sizeof(float)).
+//   Keep device per-block shared memory limits in mind when tuning.
 //
 // Defaults:
 // Enable both fast paths by default so wrappers do not need per‑indicator

@@ -183,12 +183,22 @@ impl LinRegBuilder {
 
 #[derive(Debug, Error)]
 pub enum LinRegError {
+    #[error("linreg: No data provided.")]
+    EmptyInputData,
     #[error("linreg: All values are NaN.")]
     AllValuesNaN,
     #[error("linreg: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("linreg: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("linreg: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("linreg: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("linreg: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("linreg: arithmetic overflow when computing {what}")]
+    ArithmeticOverflow { what: &'static str },
 }
 
 // --- INDICATOR API ---
@@ -217,6 +227,9 @@ fn linreg_prepare<'a>(
     LinRegError,
 > {
     let data: &[f64] = input.as_ref();
+    if data.is_empty() {
+        return Err(LinRegError::EmptyInputData);
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -289,6 +302,9 @@ pub fn linreg_compute_into(
     out: &mut [f64],
 ) -> Result<(), LinRegError> {
     let data: &[f64] = input.as_ref();
+    if data.is_empty() {
+        return Err(LinRegError::EmptyInputData);
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -309,10 +325,7 @@ pub fn linreg_compute_into(
         });
     }
     if out.len() != len {
-        return Err(LinRegError::InvalidPeriod {
-            period: out.len(),
-            data_len: len,
-        });
+        return Err(LinRegError::OutputLengthMismatch { expected: len, got: out.len() });
     }
 
     let chosen = match kernel {
@@ -619,12 +632,7 @@ pub fn linreg_batch_with_kernel(
         // Row-specific SIMD not implemented; default to ScalarBatch for best results
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(LinRegError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
-        }
+        _ => return Err(LinRegError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -663,10 +671,8 @@ fn linreg_batch_inner(
     // ------------- 0. sanity checks -------------
     let combos = expand_grid_linreg(sweep);
     if combos.is_empty() {
-        return Err(LinRegError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, t) = sweep.period;
+        return Err(LinRegError::InvalidRange { start: s, end: e, step: t });
     }
     let first = data
         .iter()
@@ -683,6 +689,9 @@ fn linreg_batch_inner(
     // ------------- 1. matrix set-up -------------
     let rows = combos.len();
     let cols = data.len();
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(LinRegError::ArithmeticOverflow { what: "rows*cols" })?;
 
     // per-row prefix length that must stay NaN
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
@@ -752,10 +761,8 @@ pub fn linreg_batch_inner_into(
     // ------------- 0. prelim checks -------------
     let combos = expand_grid_linreg(sweep);
     if combos.is_empty() {
-        return Err(LinRegError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, t) = sweep.period;
+        return Err(LinRegError::InvalidRange { start: s, end: e, step: t });
     }
     let first = data
         .iter()
@@ -771,13 +778,12 @@ pub fn linreg_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(LinRegError::ArithmeticOverflow { what: "rows*cols" })?;
     // Validate output slice size
-    if out.len() != rows * cols {
-        return Err(LinRegError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
-        });
+    if out.len() != expected {
+        return Err(LinRegError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     // ------------- 1a. cast output slice to MaybeUninit -------------
@@ -977,7 +983,17 @@ pub fn expand_grid_linreg(r: &LinRegBatchRange) -> Vec<LinRegParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let mut v = Vec::new();
+        let mut x = lo;
+        while x <= hi {
+            v.push(x);
+            match x.checked_add(step) {
+                Some(nx) => x = nx,
+                None => break,
+            }
+        }
+        v
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -1778,15 +1794,23 @@ pub fn linreg_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos, stream_u64) = py.allow_threads(|| {
         let cuda = CudaLinreg::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.linreg_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let res = cuda
+            .linreg_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((res.0, res.1, cuda.stream_handle_u64()))
     })?;
 
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
+    // CUDA Array Interface v3 helper metadata for consumers; no sync performed here.
+    dict.set_item("cai_version", 3u64)?;
+    dict.set_item("cai_typestr", "<f4")?; // little-endian f32
+    dict.set_item("cai_shape", (inner.rows as u64, inner.cols as u64))?;
+    dict.set_item("cai_strides_bytes", ((inner.cols as u64) * 4u64, 4u64))?;
+    dict.set_item("stream", stream_u64)?; // non-zero CUstream per CAI v3
 
     Ok((DeviceArrayF32Py { inner }, dict))
 }
@@ -1860,10 +1884,7 @@ pub fn linreg_into_slice(
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(LinRegError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
+        return Err(LinRegError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
     // Use the existing compute_into function

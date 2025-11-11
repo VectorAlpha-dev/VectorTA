@@ -207,6 +207,14 @@ pub enum EhlersKamaError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("ehlers_kama: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("ehlers_kama: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("ehlers_kama: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("ehlers_kama: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("ehlers_kama: arithmetic overflow computing sizes/bytes")]
+    ArithmeticOverflow,
 }
 
 #[inline]
@@ -594,9 +602,9 @@ pub fn ehlers_kama_into_slice(
     let (data, period, first, chosen) = ehlers_kama_prepare(input, kern)?;
 
     if dst.len() != data.len() {
-        return Err(EhlersKamaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(EhlersKamaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -868,10 +876,28 @@ impl EhlersKamaBatchOutput {
 
 #[inline(always)]
 fn expand_periods((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+    // Zero step => static singleton; reversed bounds supported.
     if step == 0 || start == end {
         return vec![start];
     }
-    (start..=end).step_by(step).collect()
+    if start < end {
+        (start..=end).step_by(step).collect()
+    } else {
+        // descending with positive step
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            match cur.checked_sub(step) {
+                Some(next) => {
+                    if next < end { break; }
+                    cur = next;
+                }
+                None => break,
+            }
+        }
+        v
+    }
 }
 
 #[inline(always)]
@@ -900,12 +926,7 @@ pub fn ehlers_kama_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(EhlersKamaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(EhlersKamaError::InvalidKernelForBatch(other)),
     };
     // Map batch to compute kernel
     let simd = match kernel {
@@ -926,7 +947,7 @@ fn ehlers_kama_batch_inner(
 ) -> Result<EhlersKamaBatchOutput, EhlersKamaError> {
     let len = data.len();
     if len == 0 {
-        return Err(EhlersKamaError::AllValuesNaN);
+        return Err(EhlersKamaError::EmptyInputData);
     }
 
     let first = data
@@ -935,10 +956,8 @@ fn ehlers_kama_batch_inner(
         .ok_or(EhlersKamaError::AllValuesNaN)?;
     let periods = expand_periods(r.period);
     if periods.is_empty() {
-        return Err(EhlersKamaError::InvalidPeriod {
-            period: 0,
-            data_len: len,
-        });
+        let (s, e, st) = r.period;
+        return Err(EhlersKamaError::InvalidRange { start: s, end: e, step: st });
     }
 
     // Validate longest period
@@ -952,6 +971,9 @@ fn ehlers_kama_batch_inner(
 
     let rows = periods.len();
     let cols = len;
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(EhlersKamaError::ArithmeticOverflow)?;
 
     // allocate matrix uninitialized then prefix NaNs per-row
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1122,9 +1144,12 @@ pub fn ehlers_kama_batch_py<'py>(
     let periods = expand_periods(period_range);
     let rows = periods.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("arithmetic overflow"))?;
 
     // Create an uninitialized NumPy buffer (flat) and compute directly into it.
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     // Warm prefixes: initialize directly in the NumPy memory without extra buffers.
@@ -1378,10 +1403,15 @@ pub fn ehlers_kama_batch_into(
         let periods = expand_periods((period_start, period_end, period_step));
         let rows = periods.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("arithmetic overflow"))?;
 
         // treat caller memory as uninit for prefix init
-        let out_mu =
-            std::slice::from_raw_parts_mut(out_ptr as *mut std::mem::MaybeUninit<f64>, rows * cols);
+        let out_mu = std::slice::from_raw_parts_mut(
+            out_ptr as *mut std::mem::MaybeUninit<f64>,
+            total,
+        );
 
         // compute per-row warm prefixes once
         let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
@@ -1389,7 +1419,7 @@ pub fn ehlers_kama_batch_into(
         init_matrix_prefixes(out_mu, cols, &warm);
 
         // compute directly into caller memory
-        let out_f64 = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out_f64 = std::slice::from_raw_parts_mut(out_ptr, total);
         ehlers_kama_batch_inner_into(data, &periods, detect_best_kernel(), false, out_f64)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

@@ -15,6 +15,7 @@ use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::hma::{HmaBatchRange, HmaParams};
 use cust::context::Context;
 use cust::device::Device;
+use cust::device::DeviceAttribute;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -25,26 +26,26 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
 // Reuse ALMA/CWMA policy enums for a consistent public API.
 use super::cwma_wrapper::{BatchKernelPolicy, BatchThreadsPerOutput, ManySeriesKernelPolicy};
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaHmaError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Out of memory on device: required={required}B, free={free}B, headroom={headroom}B")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("arithmetic overflow when computing {what}")]
+    ArithmeticOverflow { what: &'static str },
 }
-
-impl fmt::Display for CudaHmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaHmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaHmaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaHmaError {}
 
 /// Selected kernel variants (introspection only)
 #[derive(Clone, Copy, Debug)]
@@ -93,10 +94,9 @@ impl CudaHma {
         true
     }
     pub fn new(device_id: usize) -> Result<Self, CudaHmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/hma_kernel.ptx"));
         let jit_opts = &[
@@ -106,16 +106,14 @@ impl CudaHma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaHmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -148,9 +146,7 @@ impl CudaHma {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaHmaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaHmaError::from)
     }
 
     #[inline]
@@ -207,15 +203,27 @@ impl CudaHma {
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaHmaError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
-        if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+        let (free, _total) = match Self::device_mem_info() {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        let need = required_bytes
+            .checked_add(headroom_bytes)
+            .ok_or(CudaHmaError::ArithmeticOverflow { what: "required_bytes + headroom_bytes" })?;
+        if need <= free {
+            Ok(())
         } else {
-            true
+            Err(CudaHmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
         }
+    }
+
+    /// Expose the producing stream handle for CUDA Array Interface (v3) interop.
+    pub fn stream_handle_u64(&self) -> u64 {
+        self.stream.as_inner() as u64
     }
 
     #[inline]
@@ -316,11 +324,20 @@ impl CudaHma {
         let func = self
             .module
             .get_function("hma_batch_f32")
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaHmaError::MissingKernelSymbol { name: "hma_batch_f32" })?;
 
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        // Light-weight guard using device limits
+        {
+            let dev = Device::get_device(self.device_id)?;
+            let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+            let max_tpb = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+            if grid_x == 0 || grid_x > max_grid_x || block_x == 0 || block_x > max_tpb {
+                return Err(CudaHmaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            }
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -343,9 +360,7 @@ impl CudaHma {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream
-                .launch(&func, grid, block, shared_bytes as u32, args)
-                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, shared_bytes as u32, args)?;
         }
 
         Ok(())
@@ -359,35 +374,42 @@ impl CudaHma {
         len: usize,
         max_sqrt_len: usize,
     ) -> Result<DeviceArrayF32, CudaHmaError> {
-        // VRAM estimate: prices + periods + ring + output (allocate ring to be robust
-        // to mismatched build macros; kernel may ignore it when using shared memory)
+        // VRAM estimate: prices + periods + ring + output (with overflow guards)
         let n = combos.len();
-        let prices_bytes = len * std::mem::size_of::<f32>();
-        let periods_bytes = n * std::mem::size_of::<i32>();
-        let ring_bytes = n * max_sqrt_len * std::mem::size_of::<f32>();
-        let out_bytes = n * len * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + ring_bytes + out_bytes;
+        let sz_f32 = std::mem::size_of::<f32>();
+        let prices_bytes = len
+            .checked_mul(sz_f32)
+            .ok_or(CudaHmaError::ArithmeticOverflow { what: "len * sizeof(f32)" })?;
+        let periods_bytes = n
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or(CudaHmaError::ArithmeticOverflow { what: "n * sizeof(i32)" })?;
+        let ring_elems = n
+            .checked_mul(max_sqrt_len)
+            .ok_or(CudaHmaError::ArithmeticOverflow { what: "n * max_sqrt_len" })?;
+        let ring_bytes = ring_elems
+            .checked_mul(sz_f32)
+            .ok_or(CudaHmaError::ArithmeticOverflow { what: "ring_elems * sizeof(f32)" })?;
+        let out_elems = n
+            .checked_mul(len)
+            .ok_or(CudaHmaError::ArithmeticOverflow { what: "n * len" })?;
+        let out_bytes = out_elems
+            .checked_mul(sz_f32)
+            .ok_or(CudaHmaError::ArithmeticOverflow { what: "out_elems * sizeof(f32)" })?;
+        let required = prices_bytes
+            .checked_add(periods_bytes).ok_or(CudaHmaError::ArithmeticOverflow { what: "prices+periods" })?
+            .checked_add(ring_bytes).ok_or(CudaHmaError::ArithmeticOverflow { what: "prev+ring" })?
+            .checked_add(out_bytes).ok_or(CudaHmaError::ArithmeticOverflow { what: "prev+out" })?;
         let headroom = 64 * 1024 * 1024; // 64MB
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaHmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
         // Async HtoD
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }?;
 
         let elems = n * len;
-        let mut d_ring: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n * max_sqrt_len) }
-                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        let mut d_ring: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(ring_elems) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         // Device NaN prefill if kernel assumes prefilled output
         if Self::assume_out_prefilled() {
@@ -397,10 +419,7 @@ impl CudaHma {
                 let st: cu::CUstream = self.stream.as_inner();
                 let res = cu::cuMemsetD32Async(ptr, 0x7FFF_FFFFu32, n32, st);
                 if res != cu::CUresult::CUDA_SUCCESS {
-                    return Err(CudaHmaError::Cuda(format!(
-                        "cuMemsetD32Async failed: {:?}",
-                        res
-                    )));
+                    return Err(CudaHmaError::Cuda(cust::error::CudaError::UnknownError));
                 }
             }
         }
@@ -481,28 +500,14 @@ impl CudaHma {
         // Async D2H with optional pinned staging for large outputs
         let n_elems = out.len();
         if n_elems >= (1 << 20) {
-            let mut pinned: LockedBuffer<f32> = unsafe {
-                LockedBuffer::uninitialized(n_elems)
-                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?
-            };
-            unsafe {
-                dev.buf
-                    .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
-            }
-            self.stream
-                .synchronize()
-                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            let mut pinned: LockedBuffer<f32> =
+                unsafe { LockedBuffer::uninitialized(n_elems)? };
+            unsafe { dev.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
+            self.stream.synchronize()?;
             out.copy_from_slice(pinned.as_slice());
         } else {
-            unsafe {
-                dev.buf
-                    .async_copy_to(out, &self.stream)
-                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
-            }
-            self.stream
-                .synchronize()
-                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            unsafe { dev.buf.async_copy_to(out, &self.stream)?; }
+            self.stream.synchronize()?;
         }
         Ok((combos.len(), len, combos))
     }
@@ -591,7 +596,7 @@ impl CudaHma {
         let func = self
             .module
             .get_function("hma_many_series_one_param_f32")
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaHmaError::MissingKernelSymbol { name: "hma_many_series_one_param_f32" })?;
 
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -618,9 +623,7 @@ impl CudaHma {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream
-                .launch(&func, grid, block, shared_bytes as u32, args)
-                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, shared_bytes as u32, args)?;
         }
 
         Ok(())
@@ -635,16 +638,15 @@ impl CudaHma {
         period: usize,
         sqrt_len: usize,
     ) -> Result<DeviceArrayF32, CudaHmaError> {
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
-        let d_first = unsafe { DeviceBuffer::from_slice_async(first_valids, &self.stream) }
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
+        let d_first = unsafe { DeviceBuffer::from_slice_async(first_valids, &self.stream) }?;
 
         let elems = cols * rows;
-        let mut d_ring: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * sqrt_len) }
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+        let ring_elems = cols
+            .checked_mul(sqrt_len)
+            .ok_or(CudaHmaError::ArithmeticOverflow { what: "cols * sqrt_len" })?;
+        let mut d_ring: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(ring_elems) }?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
         if Self::assume_out_prefilled() {
             unsafe {
@@ -740,28 +742,14 @@ impl CudaHma {
         // Async D2H with optional pinned staging
         let n_elems = out_tm.len();
         if n_elems >= (1 << 20) {
-            let mut pinned: LockedBuffer<f32> = unsafe {
-                LockedBuffer::uninitialized(n_elems)
-                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?
-            };
-            unsafe {
-                dev.buf
-                    .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
-            }
-            self.stream
-                .synchronize()
-                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            let mut pinned: LockedBuffer<f32> =
+                unsafe { LockedBuffer::uninitialized(n_elems)? };
+            unsafe { dev.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
+            self.stream.synchronize()?;
             out_tm.copy_from_slice(pinned.as_slice());
         } else {
-            unsafe {
-                dev.buf
-                    .async_copy_to(out_tm, &self.stream)
-                    .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
-            }
-            self.stream
-                .synchronize()
-                .map_err(|e| CudaHmaError::Cuda(e.to_string()))?;
+            unsafe { dev.buf.async_copy_to(out_tm, &self.stream)?; }
+            self.stream.synchronize()?;
         }
         Ok(())
     }
