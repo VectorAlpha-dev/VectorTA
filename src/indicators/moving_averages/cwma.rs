@@ -211,6 +211,14 @@ pub enum CwmaError {
         "cwma: Not enough valid data points to compute CWMA: needed = {needed}, valid = {valid}"
     )]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("cwma: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("cwma: invalid sweep range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("cwma: invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("cwma: size overflow while computing {ctx}")]
+    SizeOverflow { ctx: &'static str },
 }
 
 #[inline]
@@ -319,9 +327,9 @@ pub fn cwma_into_slice(dst: &mut [f64], input: &CwmaInput, kern: Kernel) -> Resu
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(CwmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(CwmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -1186,12 +1194,7 @@ pub fn cwma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(CwmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(CwmaError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -1235,7 +1238,8 @@ fn expand_grid(r: &CwmaBatchRange) -> Vec<CwmaParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        (lo..=hi).step_by(step).collect()
     }
 
     let periods = axis_usize(r.period);
@@ -1280,6 +1284,10 @@ fn cwma_batch_inner(
     let combos = expand_grid(sweep);
     let cols = data.len();
     let rows = combos.len();
+    // Guard rows * cols multiplication for overflow
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(CwmaError::SizeOverflow { ctx: "rows*cols" })?;
 
     if cols == 0 {
         return Err(CwmaError::EmptyInputData);
@@ -1368,9 +1376,20 @@ fn cwma_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(CwmaError::SizeOverflow { ctx: "rows*cols" })?;
+    if out.len() != expected {
+        return Err(CwmaError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
     let mut inv_norms = vec![0.0; rows];
 
-    let cap = rows * max_p;
+    let cap = rows
+        .checked_mul(max_p)
+        .ok_or(CwmaError::SizeOverflow { ctx: "rows*max_p" })?;
     let mut aligned = AlignedVec::with_capacity(cap);
     let flat_w = aligned.as_mut_slice();
 

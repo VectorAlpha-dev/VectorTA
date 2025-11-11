@@ -152,6 +152,13 @@ pub enum EpmaError {
 
     #[error("epma: Invalid kernel for batch operation: expected batch kernel, got {kernel:?}")]
     InvalidKernel { kernel: Kernel },
+
+    // Additional non-breaking coverage for batch/range and sizing guards
+    #[error("epma: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("epma: size overflow computing rows*cols: rows={rows}, cols={cols}")]
+    SizeOverflow { rows: usize, cols: usize },
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -934,11 +941,16 @@ impl EpmaBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &EpmaBatchRange) -> Vec<EpmaParams> {
+    // Robust axis expansion:
+    // - step == 0 => singleton
+    // - reversed bounds => expand over min..=max
+    // - keep behavior stable for normal inputs
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
+        if step == 0 {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        (lo..=hi).step_by(step).collect()
     }
     let periods = axis_usize(r.period);
     let offsets = axis_usize(r.offset);
@@ -1004,6 +1016,11 @@ fn epma_batch_inner(
     let combos = expand_grid(sweep);
     let rows = combos.len();
     let cols = data.len();
+
+    // Checked arithmetic guard (no behavior change unless overflow would occur)
+    let _total_cells = rows
+        .checked_mul(cols)
+        .ok_or(EpmaError::SizeOverflow { rows, cols })?;
 
     // Allocate uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);

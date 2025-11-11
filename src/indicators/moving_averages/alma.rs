@@ -42,15 +42,16 @@ impl DeviceArrayF32Py {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
+        // shape: (rows, cols)
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        // typestr: little-endian float32
         d.set_item("typestr", "<f4")?;
+        // data: (device_ptr as integer, read_only=false)
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Expose default stream to help consumers (e.g., CuPy) pick a valid device context
-        // without guessing. Using 0 denotes the legacy default stream.
-        d.set_item("stream", 0usize)?;
-        // Provide a stream hint for consumers like CuPy. Using legacy default stream (1)
-        // is broadly compatible and avoids some runtime setDevice quirks on certain setups.
-        d.set_item("stream", 1i64)?;
+        // explicit strides in BYTES for contiguous row-major
+        let item = std::mem::size_of::<f32>();
+        d.set_item("strides", (self.inner.cols * item, item))?;
+        // CAI version
         d.set_item("version", 3)?;
         Ok(d)
     }

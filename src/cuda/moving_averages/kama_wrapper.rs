@@ -20,25 +20,28 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaKamaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Out of memory: required={required}B free={free}B headroom={headroom}B")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Device mismatch: buffer device={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaKamaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaKamaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaKamaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaKamaError {}
 
 pub struct CudaKama {
     module: Module,
@@ -54,10 +57,9 @@ pub struct CudaKama {
 
 impl CudaKama {
     pub fn new(device_id: usize) -> Result<Self, CudaKamaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kama_kernel.ptx"));
         // Match ALMA loader behavior: prefer DetermineTargetFromContext + O2, fallback progressively.
@@ -68,16 +70,14 @@ impl CudaKama {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaKamaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -94,9 +94,7 @@ impl CudaKama {
 
     /// Expose synchronize for benches/tests that manage device buffers.
     pub fn synchronize(&self) -> Result<(), CudaKamaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
 
     fn mem_check_enabled() -> bool {
@@ -173,10 +171,22 @@ impl CudaKama {
 
     fn expand_periods(range: &KamaBatchRange) -> Vec<KamaParams> {
         let (start, end, step) = range.period;
-        let periods = if step == 0 || start == end {
+        let periods: Vec<usize> = if step == 0 || start == end {
             vec![start]
-        } else {
+        } else if start < end {
             (start..=end).step_by(step).collect::<Vec<_>>()
+        } else {
+            // reversed bounds supported by stepping down
+            let mut v = Vec::new();
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                match cur.checked_sub(step) {
+                    Some(next) if next >= end => cur = next,
+                    _ => break,
+                }
+            }
+            v
         };
         periods
             .into_iter()
@@ -241,7 +251,7 @@ impl CudaKama {
         let func = self
             .module
             .get_function("kama_batch_f32")
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaKamaError::MissingKernelSymbol { name: "kama_batch_f32" })?;
 
         // Record selection for introspection/debug
         unsafe {
@@ -275,9 +285,7 @@ impl CudaKama {
                     &mut first_valid_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
         }
         Ok(())
@@ -296,7 +304,7 @@ impl CudaKama {
         let func = self
             .module
             .get_function("kama_batch_prefix_f32")
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaKamaError::MissingKernelSymbol { name: "kama_batch_prefix_f32" })?;
 
         // Record selection for introspection/debug (same OneD shape)
         unsafe {
@@ -330,9 +338,7 @@ impl CudaKama {
                     &mut first_valid_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
         }
         Ok(())
@@ -353,9 +359,18 @@ impl CudaKama {
         max_period: usize,
     ) -> Result<DeviceArrayF32, CudaKamaError> {
         let n_combos = combos.len();
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaKamaError::InvalidInput("series_len byte size overflow".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaKamaError::InvalidInput("periods byte size overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaKamaError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaKamaError::InvalidInput("out byte size overflow".into()))?;
 
         let have_prefix_kernel = self.has_function("kama_batch_prefix_f32");
         let use_prefix =
@@ -367,23 +382,21 @@ impl CudaKama {
         } else {
             0
         };
-        let required = prices_bytes + periods_bytes + out_bytes + prefix_bytes;
+        let required = prices_bytes
+            .checked_add(periods_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .and_then(|x| x.checked_add(prefix_bytes))
+            .ok_or_else(|| CudaKamaError::InvalidInput("aggregate byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // 64MB cushion (match ALMA default)
         if !Self::will_fit(required, headroom) {
-            return Err(CudaKamaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            let (free, _total) = mem_get_info().unwrap_or((0, 0));
+            return Err(CudaKamaError::OutOfMemory { required, free, headroom });
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
         let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         if use_prefix {
             // Host-precompute Σ|Δp| prefix (NaN-insensitive accumulation) only when beneficial.
@@ -404,8 +417,7 @@ impl CudaKama {
             }
             // pad last element to length = series_len + 1
             prefix.push(acc);
-            let d_prefix = DeviceBuffer::from_slice(&prefix)
-                .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+            let d_prefix = DeviceBuffer::from_slice(&prefix)?;
             self.launch_batch_kernel_with_prefix(
                 &d_prices,
                 &d_prefix,
@@ -426,9 +438,7 @@ impl CudaKama {
             )?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -471,9 +481,7 @@ impl CudaKama {
             )));
         }
         let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len, max_period)?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+        arr.buf.copy_to(out)?;
         Ok((arr.rows, arr.cols, combos))
     }
 
@@ -572,7 +580,7 @@ impl CudaKama {
         let func = self
             .module
             .get_function("kama_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaKamaError::MissingKernelSymbol { name: "kama_many_series_one_param_time_major_f32" })?;
 
         // Introspection
         unsafe {
@@ -596,9 +604,7 @@ impl CudaKama {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -611,30 +617,35 @@ impl CudaKama {
         first_valids: &[i32],
         period: usize,
     ) -> Result<DeviceArrayF32, CudaKamaError> {
-        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
-        let first_valid_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_valid_bytes + out_bytes;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaKamaError::InvalidInput("cols*rows overflow".into()))?;
+        let prices_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaKamaError::InvalidInput("prices byte size overflow".into()))?;
+        let first_valid_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaKamaError::InvalidInput("first_valids byte size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaKamaError::InvalidInput("out byte size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(first_valid_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaKamaError::InvalidInput("aggregate byte size overflow".into()))?;
         let headroom = 16 * 1024 * 1024; // 16MB cushion
         if !Self::will_fit(required, headroom) {
-            return Err(CudaKamaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            let (free, _total) = mem_get_info().unwrap_or((0, 0));
+            return Err(CudaKamaError::OutOfMemory { required, free, headroom });
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(first_valids)
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first_valids = DeviceBuffer::from_slice(first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         self.launch_many_series_kernel(&d_prices, period, cols, rows, &d_first_valids, &mut d_out)?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -670,11 +681,8 @@ impl CudaKama {
                 cols * rows
             )));
         }
-        let arr =
-            self.kama_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, params)?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaKamaError::Cuda(e.to_string()))
+        let arr = self.kama_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, params)?;
+        arr.buf.copy_to(out).map_err(Into::into)
     }
 
     pub fn kama_many_series_one_param_time_major_device(
