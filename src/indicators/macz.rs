@@ -911,6 +911,16 @@ pub fn macz(input: &MaczInput) -> Result<MaczOutput, MaczError> {
     macz_with_kernel(input, Kernel::Auto)
 }
 
+/// Writes MAC-Z values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - The output slice length must equal the input length.
+/// - Uses `Kernel::Auto` for runtime selection (short-circuits to scalar here).
+#[cfg(not(feature = "wasm"))]
+pub fn macz_into(input: &MaczInput, out: &mut [f64]) -> Result<(), MaczError> {
+    macz_into_slice(out, input, Kernel::Auto)
+}
+
 /// Write MAC-Z values directly to a pre-allocated slice
 pub fn macz_into_slice(dst: &mut [f64], input: &MaczInput, kern: Kernel) -> Result<(), MaczError> {
     let (data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, warm_hist, chosen) =
@@ -3008,6 +3018,44 @@ mod tests {
     use std::error::Error;
 
     // ==================== TEST HELPER FUNCTIONS ====================
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_macz_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Small but non-trivial synthetic input
+        let n = 256usize;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f64 * 0.1;
+            data.push(50.0 + t.sin() * 5.0 + ((i % 7) as f64) * 0.01);
+        }
+
+        let input = MaczInput::from_slice(&data, MaczParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = macz(&input)?.values;
+
+        // Preallocated output; function will write NaN warmups
+        let mut out = vec![0.0; data.len()];
+        macz_into(&input, &mut out)?;
+
+        assert_eq!(out.len(), baseline.len());
+
+        // Equality with NaN==NaN and tight epsilon for finite values
+        let eq = |a: f64, b: f64| {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        };
+        for i in 0..out.len() {
+            assert!(
+                eq(out[i], baseline[i]),
+                "mismatch at {}: into={} api={}",
+                i,
+                out[i],
+                baseline[i]
+            );
+        }
+        Ok(())
+    }
 
     fn check_macz_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

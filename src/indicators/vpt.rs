@@ -702,6 +702,27 @@ pub fn vpt_expand_grid() -> Vec<VptParams> {
     vec![VptParams::default()]
 }
 
+/// Writes VPT into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec API (`vpt`/`vpt_with_kernel`).
+/// - `out` length must equal the input length; returns `InvalidLength` on mismatch.
+/// - Uses `Kernel::Auto` dispatch (same as the Vec-returning API) and writes results in-place.
+#[cfg(not(feature = "wasm"))]
+pub fn vpt_into(input: &VptInput, out: &mut [f64]) -> Result<(), VptError> {
+    let (price, volume) = match &input.data {
+        VptData::Candles { candles, source } => {
+            let price = source_type(candles, source);
+            let vol = candles
+                .select_candle_field("volume")
+                .map_err(|_| VptError::EmptyData)?;
+            (price, vol)
+        }
+        VptData::Slices { price, volume } => (*price, *volume),
+    };
+
+    vpt_into_slice(out, price, volume, Kernel::Auto)
+}
+
 /// Write VPT directly to output slice - no allocations
 pub fn vpt_into_slice(
     dst: &mut [f64],
@@ -1497,6 +1518,41 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[test]
+    fn test_vpt_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the existing CSV candles to match other tests in this module.
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = VptInput::from_candles(&candles, "close");
+
+        // Baseline via Vec-returning API with a fixed kernel to avoid tiny
+        // rounding diffs across different paths.
+        let baseline = vpt_with_kernel(&input, Kernel::Scalar)?;
+
+        // Preallocate output and compute via the new into API.
+        let mut out = vec![0.0f64; candles.close.len()];
+        #[cfg(not(feature = "wasm"))]
+        vpt_into(&input, &mut out)?;
+
+        assert_eq!(baseline.values.len(), out.len());
+
+        fn eq_or_both_nan_eps(a: f64, b: f64, eps: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= eps
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan_eps(baseline.values[i], out[i], 1e-12),
+                "Mismatch at index {}: baseline={} out={}",
+                i,
+                baseline.values[i],
+                out[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_vpt_basic_candles(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

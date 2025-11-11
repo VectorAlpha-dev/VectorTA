@@ -309,9 +309,36 @@ pub fn swma_into_slice(dst: &mut [f64], input: &SwmaInput, kern: Kernel) -> Resu
     // Fill warmup period with NaN
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
-        *v = f64::NAN;
+        // Use the same quiet-NaN pattern as alloc_with_nan_prefix for parity
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
+    Ok(())
+}
+
+/// Native zero-allocation API: writes SWMA output into `out`, preserving NaN warmups.
+///
+/// - Length of `out` must equal input length; returns the module's `InvalidPeriod` on mismatch.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn swma_into(input: &SwmaInput, out: &mut [f64]) -> Result<(), SwmaError> {
+    let (data, weights, period, first, chosen) = swma_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(SwmaError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup region with identical quiet-NaN pattern used by Vec-returning API
+    let warm = (first + period - 1).min(out.len());
+    for v in &mut out[..warm] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    swma_compute_into(data, &weights, period, first, chosen, out);
     Ok(())
 }
 
@@ -1878,6 +1905,44 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+
+    // Parity test: native into API matches Vec-returning API, including NaN warmups.
+    #[test]
+    fn test_swma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let input = SwmaInput::with_default_candles(&candles);
+        let baseline = swma(&input)?.values;
+
+        let mut out = vec![0.0f64; baseline.len()];
+
+        #[cfg(not(feature = "wasm"))]
+        {
+            swma_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In WASM builds, the native name is taken by the bindgen export; use slice variant.
+            swma_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(out.len(), baseline.len());
+
+        // NaN-aware equality: treat NaN == NaN as equal; otherwise require exact match.
+        for (i, (&a, &b)) in out.iter().zip(baseline.iter()).enumerate() {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b);
+            assert!(
+                equal,
+                "into parity mismatch at idx {}: got {}, expected {}",
+                i,
+                a,
+                b
+            );
+        }
+
         Ok(())
     }
 

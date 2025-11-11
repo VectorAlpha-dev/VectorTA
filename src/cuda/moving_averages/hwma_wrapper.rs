@@ -24,23 +24,23 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaHwmaError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Out of memory on device (required={required} bytes, free={free} bytes, headroom={headroom} bytes)")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Launch configuration too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaHwmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaHwmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaHwmaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaHwmaError {}
 
 // -------- Kernel policy + introspection (subset for recurrence) --------
 
@@ -93,10 +93,9 @@ pub struct CudaHwma {
 
 impl CudaHwma {
     pub fn new(device_id: usize) -> Result<Self, CudaHwmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/hwma_kernel.ptx"));
         // Prefer DetermineTargetFromContext + O2 for stability; fall back to simpler modes.
@@ -108,13 +107,10 @@ impl CudaHwma {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
-                }
+                Err(_) => { Module::from_ptx(ptx, &[])? }
             },
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -150,9 +146,7 @@ impl CudaHwma {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaHwmaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHwmaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(|e| CudaHwmaError::Cuda(e))
     }
 
     // -------- Host↔Device helpers (pinned+async by default) --------
@@ -166,37 +160,34 @@ impl CudaHwma {
 
     fn h2d_f32(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaHwmaError> {
         if Self::env_flag("HWMA_PINNED", true) {
-            let host =
-                LockedBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            let host = LockedBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e))?;
             let dev = unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
-                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaHwmaError::Cuda(e))?;
             Ok(dev)
         } else {
-            DeviceBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))
+            DeviceBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e))
         }
     }
 
     fn h2d_i32(&self, src: &[i32]) -> Result<DeviceBuffer<i32>, CudaHwmaError> {
         if Self::env_flag("HWMA_PINNED", true) {
-            let host =
-                LockedBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            let host = LockedBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e))?;
             let dev = unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
-                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaHwmaError::Cuda(e))?;
             Ok(dev)
         } else {
-            DeviceBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))
+            DeviceBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e))
         }
     }
 
     fn h2d_f64(&self, src: &[f64]) -> Result<DeviceBuffer<f64>, CudaHwmaError> {
         if Self::env_flag("HWMA_PINNED", true) {
-            let host =
-                LockedBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            let host = LockedBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e))?;
             let dev = unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
-                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaHwmaError::Cuda(e))?;
             Ok(dev)
         } else {
-            DeviceBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e.to_string()))
+            DeviceBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e))
         }
     }
 
@@ -213,14 +204,18 @@ impl CudaHwma {
         mem_get_info().ok()
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaHwmaError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaHwmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+            }
         } else {
-            true
+            Ok(())
         }
     }
 
@@ -332,7 +327,7 @@ impl CudaHwma {
         let func = self
             .module
             .get_function("hwma_batch_f32")
-            .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaHwmaError::MissingKernelSymbol { name: "hwma_batch_f32" })?;
 
         // Occupancy-guided block size with optional env override
         let block_x = match self.policy.batch {
@@ -377,9 +372,7 @@ impl CudaHwma {
                 &mut n_combos_i as *mut _ as *mut std::ffi::c_void,
                 &mut out_ptr as *mut _ as *mut std::ffi::c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -422,12 +415,7 @@ impl CudaHwma {
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + params_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaHwmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
         // Promote prices to f64 to reduce accumulation error vs CPU f64 baseline
         let prices_f64: Vec<f64> = data_f32.iter().map(|&x| x as f64).collect();
@@ -442,33 +430,25 @@ impl CudaHwma {
             ncs.push(prm.nc.unwrap_or(0.1));
         }
         let d_nas = if Self::env_flag("HWMA_PINNED", true) {
-            let host =
-                LockedBuffer::from_slice(&nas).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
-            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
-                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+            let host = LockedBuffer::from_slice(&nas)?;
+            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }?
         } else {
-            DeviceBuffer::from_slice(&nas).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(&nas)?
         };
         let d_nbs = if Self::env_flag("HWMA_PINNED", true) {
-            let host =
-                LockedBuffer::from_slice(&nbs).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
-            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
-                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+            let host = LockedBuffer::from_slice(&nbs)?;
+            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }?
         } else {
-            DeviceBuffer::from_slice(&nbs).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(&nbs)?
         };
         let d_ncs = if Self::env_flag("HWMA_PINNED", true) {
-            let host =
-                LockedBuffer::from_slice(&ncs).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
-            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
-                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+            let host = LockedBuffer::from_slice(&ncs)?;
+            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }?
         } else {
-            DeviceBuffer::from_slice(&ncs).map_err(|e| CudaHwmaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(&ncs)?
         };
 
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
 
         // Single launch: grid-stride kernel covers all combos
         self.launch_batch_kernel(
@@ -481,9 +461,8 @@ impl CudaHwma {
             n_combos,
             &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+        // Producer stream is synchronized here; CAI v3 consumers may omit 'stream' key.
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -575,7 +554,7 @@ impl CudaHwma {
         let func = self
             .module
             .get_function("hwma_multi_series_one_param_f32")
-            .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaHwmaError::MissingKernelSymbol { name: "hwma_multi_series_one_param_f32" })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -622,9 +601,7 @@ impl CudaHwma {
                 &mut first_valids_ptr as *mut _ as *mut std::ffi::c_void,
                 &mut out_ptr as *mut _ as *mut std::ffi::c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -674,17 +651,11 @@ impl CudaHwma {
         let out_bytes = cols * rows * std::mem::size_of::<f32>();
         let required = prices_bytes + first_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaHwmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
         let d_prices_tm = self.h2d_f32(data_tm_f32)?;
         let d_first_valids = self.h2d_i32(&first_valids)?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -696,9 +667,8 @@ impl CudaHwma {
             &d_first_valids,
             &mut d_out_tm,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaHwmaError::Cuda(e.to_string()))?;
+        // Producer stream synchronized; CAI v3 'stream' key may be omitted.
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,

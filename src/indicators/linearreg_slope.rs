@@ -1331,6 +1331,20 @@ pub fn linearreg_slope_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsVal
     Ok(output)
 }
 
+/// Write linear regression slope values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmup semantics (prefix up to `first_valid + period - 1`).
+/// - `out.len()` must equal the input slice length.
+/// - Uses `Kernel::Auto` for runtime kernel selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn linearreg_slope_into(
+    input: &LinearRegSlopeInput,
+    out: &mut [f64],
+) -> Result<(), LinearRegSlopeError> {
+    linearreg_slope_into_slice(out, input, Kernel::Auto)
+}
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn linearreg_slope_into(
@@ -1759,6 +1773,46 @@ mod tests {
         check_linearreg_slope_nan_handling,
         check_linearreg_slope_no_poison
     );
+
+    #[cfg(not(feature = "wasm"))]
+    #[test]
+    fn test_linearreg_slope_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a non-trivial series with drift + waveform
+        let n = 512usize;
+        let mut data = vec![0.0f64; n];
+        for i in 0..n {
+            let t = i as f64;
+            data[i] = 1.0 + 0.01 * t + (t * 0.2).sin() * 0.5;
+        }
+
+        // Default params (period = 14)
+        let input = LinearRegSlopeInput::from_slice(&data, LinearRegSlopeParams::default());
+
+        // Baseline via Vec-returning API
+        let base = linearreg_slope(&input)?.values;
+
+        // Into API writes directly into caller buffer
+        let mut into_out = vec![0.0f64; n];
+        linearreg_slope_into(&input, &mut into_out)?;
+
+        #[inline]
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        assert_eq!(base.len(), into_out.len());
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(base[i], into_out[i]),
+                "linearreg_slope_into mismatch at {}: base={}, into={}",
+                i,
+                base[i],
+                into_out[i]
+            );
+        }
+
+        Ok(())
+    }
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);

@@ -351,6 +351,36 @@ pub fn pfe_with_kernel(input: &PfeInput, kernel: Kernel) -> Result<PfeOutput, Pf
     Ok(PfeOutput { values: out })
 }
 
+/// Write PFE values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups identical to the Vec-returning API
+///   (quiet NaNs for the first `first + period` slots).
+/// - The output slice length must equal the input data length.
+///
+/// Returns `Ok(())` on success or the module's error on invalid inputs.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn pfe_into(input: &PfeInput, out: &mut [f64]) -> Result<(), PfeError> {
+    let (data, period, smoothing, first, chosen) = pfe_prepare(input, Kernel::Auto)?;
+    if out.len() != data.len() {
+        return Err(PfeError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix with the same quiet-NaN pattern used by
+    // `alloc_with_nan_prefix` to ensure exact parity of warmups.
+    let warm = (first + period).min(out.len());
+    for v in &mut out[..warm] {
+        *v = f64::from_bits(0x7ff8_0000_0000_0000);
+    }
+
+    // Compute the indicator values into the provided buffer.
+    pfe_compute_into(data, period, smoothing, first, chosen, out);
+    Ok(())
+}
+
 #[inline]
 pub fn pfe_into_slice(dst: &mut [f64], input: &PfeInput, k: Kernel) -> Result<(), PfeError> {
     let (data, period, smoothing, first, chosen) = pfe_prepare(input, k)?;
@@ -1755,6 +1785,7 @@ mod tests {
             }
         }
 
+    
         assert_eq!(batch_output.len(), stream_values.len());
         for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
             if b.is_nan() && s.is_nan() {
@@ -1769,6 +1800,36 @@ mod tests {
                 b,
                 s,
                 diff
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_pfe_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let mut data = vec![0.0f64; 256];
+        for (i, v) in data.iter_mut().enumerate() {
+            let x = i as f64;
+            *v = 0.05 * x + (x * 0.1).sin() * 2.0 + (x * 0.03).cos();
+        }
+
+        let input = PfeInput::from_slice(&data, PfeParams::default());
+        let baseline = pfe(&input)?.values;
+
+        let mut into_out = vec![0.0f64; data.len()];
+        pfe_into(&input, &mut into_out)?;
+        assert_eq!(baseline.len(), into_out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+        for i in 0..baseline.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], into_out[i]),
+                "Mismatch at index {}: into={}, api={}",
+                i,
+                into_out[i],
+                baseline[i]
             );
         }
         Ok(())

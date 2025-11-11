@@ -87,6 +87,11 @@ pub enum CudaDmaError {
     Cuda(String),
     InvalidInput(String),
     NotImplemented,
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    MissingKernelSymbol { name: &'static str },
+    OutputLengthMismatch { expected: usize, got: usize },
+    InvalidPolicy(&'static str),
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
 }
 
 impl fmt::Display for CudaDmaError {
@@ -95,6 +100,23 @@ impl fmt::Display for CudaDmaError {
             CudaDmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaDmaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
             CudaDmaError::NotImplemented => write!(f, "CUDA DMA not implemented"),
+            CudaDmaError::OutOfMemory { required, free, headroom } => write!(
+                f,
+                "out of device memory: required={} free={} headroom={}",
+                required, free, headroom
+            ),
+            CudaDmaError::MissingKernelSymbol { name } => write!(f, "missing kernel symbol: {}", name),
+            CudaDmaError::OutputLengthMismatch { expected, got } => write!(
+                f,
+                "output slice length mismatch: expected={}, got={}",
+                expected, got
+            ),
+            CudaDmaError::InvalidPolicy(msg) => write!(f, "invalid policy: {}", msg),
+            CudaDmaError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+                f,
+                "launch config too large: grid=({}, {}, {}), block=({}, {}, {})",
+                gx, gy, gz, bx, by, bz
+            ),
         }
     }
 }
@@ -337,13 +359,15 @@ impl CudaDma {
         out: &mut [f32],
     ) -> Result<(usize, usize, Vec<DmaParams>), CudaDmaError> {
         let inputs = Self::prepare_batch_inputs(data_f32, sweep)?;
-        let expected = inputs.series_len * inputs.hull_lengths.len();
+        let expected = inputs
+            .series_len
+            .checked_mul(inputs.hull_lengths.len())
+            .ok_or_else(|| CudaDmaError::InvalidInput("rows*cols overflow".into()))?;
         if out.len() != expected {
-            return Err(CudaDmaError::InvalidInput(format!(
-                "out slice wrong length: got {}, expected {}",
-                out.len(),
-                expected
-            )));
+            return Err(CudaDmaError::OutputLengthMismatch {
+                expected,
+                got: out.len(),
+            });
         }
         let arr = self.run_batch_with_prices_host(data_f32, &inputs)?;
         unsafe { arr.buf.async_copy_to(out, &self.stream) }
@@ -474,11 +498,10 @@ impl CudaDma {
         out_tm: &mut [f32],
     ) -> Result<(), CudaDmaError> {
         if out_tm.len() != data_tm_f32.len() {
-            return Err(CudaDmaError::InvalidInput(format!(
-                "out slice wrong length: got {}, expected {}",
-                out_tm.len(),
-                data_tm_f32.len()
-            )));
+            return Err(CudaDmaError::OutputLengthMismatch {
+                expected: data_tm_f32.len(),
+                got: out_tm.len(),
+            });
         }
         let (first_valids, hull_length, ema_length, ema_gain_limit, hull_type, sqrt_len) =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
@@ -516,10 +539,12 @@ impl CudaDma {
         let hull_bytes = n_combos * std::mem::size_of::<i32>();
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
         let required = prices_bytes + 3 * hull_bytes + out_bytes + 64 * 1024 * 1024;
-        if !Self::will_fit(required, 0) {
-            return Err(CudaDmaError::InvalidInput(
-                "not enough device memory for DMA batch".into(),
-            ));
+        if Self::mem_check_enabled() {
+            if let Some((free, _)) = Self::device_mem_info() {
+                if required > free {
+                    return Err(CudaDmaError::OutOfMemory { required, free, headroom: 0 });
+                }
+            }
         }
 
         let d_prices = unsafe {
@@ -587,10 +612,12 @@ impl CudaDma {
         let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
         let param_bytes = 4 * n_combos * std::mem::size_of::<i32>();
         let required = out_bytes + param_bytes + 64 * 1024 * 1024;
-        if !Self::will_fit(required, 0) {
-            return Err(CudaDmaError::InvalidInput(
-                "not enough device memory for DMA batch (device prices)".into(),
-            ));
+        if Self::mem_check_enabled() {
+            if let Some((free, _)) = Self::device_mem_info() {
+                if required > free {
+                    return Err(CudaDmaError::OutOfMemory { required, free, headroom: 0 });
+                }
+            }
         }
         let mut hulls = Vec::with_capacity(n_combos);
         let mut emas = Vec::with_capacity(n_combos);
@@ -708,7 +735,7 @@ impl CudaDma {
             let func = self
                 .module
                 .get_function(func_name)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaDmaError::MissingKernelSymbol { name: func_name })?;
             let block: BlockSize = (tx, 1, 1).into();
             let mut shared_bytes = (max_sqrt_len * tx as usize * size_of::<f32>()) as u32;
             shared_bytes = (shared_bytes + 255) & !255;
@@ -757,7 +784,7 @@ impl CudaDma {
             let func = self
                 .module
                 .get_function("dma_batch_f32")
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaDmaError::MissingKernelSymbol { name: "dma_batch_f32" })?;
             let block_x = match self.policy.batch {
                 BatchKernelPolicy::Plain { block_x } => block_x,
                 _ => 1,
@@ -898,7 +925,7 @@ impl CudaDma {
             let func = self
                 .module
                 .get_function(func_name)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaDmaError::MissingKernelSymbol { name: func_name })?;
             let block: BlockSize = (1, ty, 1).into();
             let mut shared_bytes = (sqrt_len * ty as usize * size_of::<f32>()) as u32;
             shared_bytes = (shared_bytes + 255) & !255;
@@ -931,7 +958,7 @@ impl CudaDma {
             let func = self
                 .module
                 .get_function("dma_many_series_one_param_f32")
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaDmaError::MissingKernelSymbol { name: "dma_many_series_one_param_f32" })?;
             let block_x = match self.policy.many_series {
                 ManySeriesKernelPolicy::OneD { block_x } => block_x,
                 _ => 1,
@@ -1199,7 +1226,12 @@ fn axis_values((start, end, step): (usize, usize, usize)) -> Vec<usize> {
     if step == 0 || start == end {
         return vec![start];
     }
-    (start..=end).step_by(step).collect()
+    if start < end {
+        return (start..=end).step_by(step).collect();
+    }
+    let mut v: Vec<usize> = (end..=start).step_by(step).collect();
+    v.reverse();
+    v
 }
 
 fn expand_grid(range: &DmaBatchRange) -> Vec<DmaParams> {

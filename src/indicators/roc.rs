@@ -259,6 +259,17 @@ pub fn roc_with_kernel(input: &RocInput, kernel: Kernel) -> Result<RocOutput, Ro
     Ok(RocOutput { values: out })
 }
 
+/// Write ROC values into a caller-provided buffer without allocating.
+///
+/// - Preserves NaN warmups exactly like the Vec-returning API.
+/// - `out.len()` must equal the input length; otherwise returns `RocError::InvalidPeriod`.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn roc_into(input: &RocInput, out: &mut [f64]) -> Result<(), RocError> {
+    // Delegate to the existing into-slice helper with Kernel::Auto to preserve behavior.
+    roc_into_slice(out, input, Kernel::Auto)
+}
+
 // --- Indicator Functions ---
 
 #[inline(always)]
@@ -1244,6 +1255,38 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use paste::paste;
+
+    #[test]
+    fn test_roc_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the existing CSV dataset for parity with other ROC tests
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        let params = RocParams { period: Some(10) };
+        let input = RocInput::from_candles(&candles, "close", params);
+
+        // Baseline via Vec-returning API (Auto -> Scalar for ROC)
+        let baseline = roc(&input)?.values;
+
+        // Into-API output buffer
+        let mut out = vec![0.0; candles.close.len()];
+        roc_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        // NaN == NaN; otherwise exact equality (identical code path)
+        for (i, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
+            let equal = (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12);
+            assert!(
+                equal,
+                "roc_into parity mismatch at idx {}: api={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
+    }
 
     fn check_roc_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

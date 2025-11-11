@@ -285,6 +285,37 @@ pub fn pwma_with_kernel(input: &PwmaInput, kernel: Kernel) -> Result<PwmaOutput,
     Ok(PwmaOutput { values: out })
 }
 
+/// Computes PWMA into a caller-provided buffer without allocations.
+///
+/// - Preserves the NaN warmup prefix exactly like the Vec-returning API
+///   (uses the same quiet-NaN bit pattern as `alloc_with_nan_prefix`).
+/// - `out.len()` must equal the input length; returns `InvalidPeriod` on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline(always)]
+pub fn pwma_into(input: &PwmaInput, out: &mut [f64]) -> Result<(), PwmaError> {
+    let (data, weights, period, first, chosen) = pwma_prepare(input, Kernel::Auto)?;
+
+    if out.len() != data.len() {
+        return Err(PwmaError::InvalidPeriod {
+            period: out.len(),
+            data_len: data.len(),
+        });
+    }
+
+    // Prefill warmup prefix using the canonical quiet-NaN pattern.
+    let warmup_end = first + period - 1;
+    let end = warmup_end.min(out.len());
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..end] {
+        *v = qnan;
+    }
+
+    // Compute directly into the provided buffer
+    pwma_compute_into(data, &weights, period, first, chosen, out);
+
+    Ok(())
+}
+
 /// Computes PWMA directly into a provided output slice, avoiding allocation.
 /// The output slice must be the same length as the input data.
 #[inline]
@@ -1912,6 +1943,43 @@ mod tests {
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
+
+    #[test]
+    fn test_pwma_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Build a small but non-trivial input with a NaN prefix
+        let mut data = Vec::with_capacity(256);
+        data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
+        for i in 0..253usize {
+            // gentle trend + periodic component
+            let x = (i as f64 * 0.07).sin() * 2.5 + (i as f64) * 0.01 + 100.0;
+            data.push(x);
+        }
+
+        let input = PwmaInput::from_slice(&data, PwmaParams::default());
+
+        // Baseline via the Vec-returning API
+        let baseline = pwma(&input)?;
+
+        // Preallocate output buffer and compute via the new into API
+        let mut out = vec![0.0; data.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            pwma_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native pwma_into is not available; fall back to slice variant
+            pwma_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.values.len(), out.len());
+        // NaN-aware equality check (prefer exact equality for finite values)
+        for (a, b) in baseline.values.iter().copied().zip(out.iter().copied()) {
+            let both_nan = a.is_nan() && b.is_nan();
+            assert!(both_nan || a == b, "mismatch: got {b:?}, expected {a:?}");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "python")]

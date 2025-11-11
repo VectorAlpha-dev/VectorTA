@@ -1113,6 +1113,61 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     use paste::paste;
 
+    #[test]
+    fn test_ttm_trend_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Use the existing CSV candles to mirror other tests
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file)?;
+        let source = source_type(&candles, "hl2");
+        let close = source_type(&candles, "close");
+        let input = TtmTrendInput::from_slices(source, close, TtmTrendParams::default());
+
+        // Baseline via existing Vec-returning API
+        let baseline = ttm_trend(&input)?.values;
+
+        // Preallocate output and use the new into() API
+        let mut out = vec![0.0f64; close.len()];
+        #[cfg(not(feature = "wasm"))]
+        ttm_trend_into(&input, &mut out)?;
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds the native name is taken; fall back to the slice form
+            ttm_trend_into_slice_f64(&mut out, &input, Kernel::Auto)?;
+        }
+
+        // Compute warmup exactly as the API does
+        let (_s, _c, p, first, _k) = ttm_prepare(&input, Kernel::Auto)?;
+        let warmup_end = first + p - 1;
+
+        // Build expected f64 output from the boolean baseline, with NaN warmups
+        let mut expected = vec![0.0f64; out.len()];
+        for i in 0..out.len() {
+            if i < warmup_end {
+                expected[i] = f64::NAN;
+            } else {
+                expected[i] = if baseline[i] { 1.0 } else { 0.0 };
+            }
+        }
+
+        // Helper: treat NaN == NaN
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        assert_eq!(out.len(), expected.len());
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(out[i], expected[i]),
+                "Mismatch at index {}: out={:?}, expected={:?}",
+                i,
+                out[i],
+                expected[i]
+            );
+        }
+
+        Ok(())
+    }
+
     fn check_ttm_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1876,6 +1931,17 @@ pub fn ttm_trend_into_slice_f64(
     kern: Kernel,
 ) -> Result<(), TtmTrendError> {
     ttm_numeric_into_slice(dst, input, kern)
+}
+
+/// Write TTM Trend values into a caller-provided `out` buffer (no allocations).
+///
+/// - Preserves NaN warmups exactly like the Vec-returning APIs.
+/// - Uses `Kernel::Auto` dispatch to select the best available implementation.
+/// - `out.len()` must equal the effective input length (min(source.len(), close.len())).
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn ttm_trend_into(input: &TtmTrendInput, out: &mut [f64]) -> Result<(), TtmTrendError> {
+    ttm_trend_into_slice_f64(out, input, Kernel::Auto)
 }
 
 #[inline]

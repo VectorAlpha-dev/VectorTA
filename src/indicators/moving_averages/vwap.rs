@@ -427,6 +427,17 @@ pub fn vwap_into_slice(dst: &mut [f64], input: &VwapInput, kern: Kernel) -> Resu
     Ok(())
 }
 
+/// Writes VWAP values into a caller-provided slice without allocating.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API does.
+/// - The output slice length must equal the input length; returns an error on mismatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn vwap_into(input: &VwapInput, out: &mut [f64]) -> Result<(), VwapError> {
+    // Delegate to the existing compute-into function with automatic kernel selection.
+    vwap_into_slice(out, input, Kernel::Auto)
+}
+
 #[inline(always)]
 pub fn vwap_scalar(
     timestamps: &[i64],
@@ -1421,6 +1432,57 @@ mod tests {
         let input_default = VwapInput::from_candles(&candles, "hlc3", params_default);
         let output_default = vwap_with_kernel(&input_default, kernel)?;
         assert_eq!(output_default.values.len(), candles.close.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_vwap_into_matches_api() -> Result<(), Box<dyn Error>> {
+        // Prepare a non-trivial slice (~512 bars) from real data
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+
+        // Extract sources identical to the normal API path (timestamps, volume, hlc3)
+        let timestamps = candles.get_timestamp().map_err(|e| e.to_string())?;
+        let volumes = candles
+            .select_candle_field("volume")
+            .map_err(|e| e.to_string())?;
+        let prices = source_type(&candles, "hlc3");
+
+        // Pick the last 512 bars (or all if shorter)
+        let take = 512usize.min(prices.len());
+        let start = prices.len().saturating_sub(take);
+        let ts_slice = &timestamps[start..start + take];
+        let vol_slice = &volumes[start..start + take];
+        let price_slice = &prices[start..start + take];
+
+        // Build input with default params (anchor defaults to "1d")
+        let params = VwapParams { anchor: None };
+        let input = VwapInput::from_slice(ts_slice, vol_slice, price_slice, params);
+
+        // Baseline via existing Vec-returning API
+        let baseline = vwap(&input)?.values;
+
+        // Preallocate output buffer and compute via new into API
+        let mut out = vec![0.0; price_slice.len()];
+        vwap_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: NaN == NaN; otherwise exact or tight epsilon
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+
+        for i in 0..out.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], out[i]),
+                "Mismatch at {}: baseline={}, into={}",
+                i,
+                baseline[i],
+                out[i]
+            );
+        }
+
         Ok(())
     }
 

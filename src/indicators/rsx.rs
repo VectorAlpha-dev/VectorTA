@@ -292,6 +292,18 @@ pub fn rsx_into_slice(dst: &mut [f64], input: &RsxInput, kern: Kernel) -> Result
     Ok(())
 }
 
+/// Write RSX values into a caller-provided buffer without allocations.
+///
+/// - Preserves the module's NaN warmup behavior by pre-filling the warmup
+///   prefix in `out`.
+/// - `out.len()` must equal the input length; otherwise a size mismatch error
+///   is returned.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn rsx_into(input: &RsxInput, out: &mut [f64]) -> Result<(), RsxError> {
+    rsx_into_slice(out, input, Kernel::Auto)
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn rsx_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
@@ -935,6 +947,46 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+
+    #[test]
+    fn test_rsx_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Use existing CSV fixtures for parity, consistent with other RSX tests
+        let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file)?;
+
+        let input = RsxInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let RsxOutput { values: expected } = rsx(&input)?;
+
+        // Preallocate output buffer and compute via into() API
+        let mut out = vec![0.0; candles.close.len()];
+
+        #[cfg(not(feature = "wasm"))]
+        {
+            rsx_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // Fallback for wasm builds of tests to avoid symbol clash
+            rsx_into_slice(&mut out, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(expected.len(), out.len());
+
+        // Value parity: NaN == NaN; finite values equal (identical paths)
+        for i in 0..out.len() {
+            let a = expected[i];
+            let b = out[i];
+            if a.is_nan() || b.is_nan() {
+                assert!(a.is_nan() && b.is_nan(), "NaN mismatch at {i}: {a:?} vs {b:?}");
+            } else {
+                assert!(a == b, "Mismatch at {i}: {a} vs {b}");
+            }
+        }
+
+        Ok(())
+    }
 
     fn check_rsx_partial_params(
         test_name: &str,

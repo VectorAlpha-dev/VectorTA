@@ -1757,6 +1757,21 @@ pub fn eri_into_slice(
     Ok(())
 }
 
+/// Write ERI (bull and bear) directly into caller-provided output slices.
+///
+/// - Preserves the module's NaN warmup semantics (quiet-NaN prefix up to `first_valid + period - 1`).
+/// - `bull_out.len()` and `bear_out.len()` must equal the input length.
+/// - Uses `Kernel::Auto` dispatch for runtime selection.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn eri_into(
+    input: &EriInput,
+    bull_out: &mut [f64],
+    bear_out: &mut [f64],
+) -> Result<(), EriError> {
+    eri_into_slice(bull_out, bear_out, input, Kernel::Auto)
+}
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct EriResult {
@@ -2683,6 +2698,64 @@ mod tests {
                 "[{test}] default-row mismatch at idx {i}: {v} vs {expected:?}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_eri_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Prepare a small but non-trivial synthetic dataset
+        let len = 256usize;
+        let mut high = vec![0.0; len];
+        let mut low = vec![0.0; len];
+        let mut src = vec![0.0; len];
+        for i in 0..len {
+            let base = 100.0 + (i as f64) * 0.1;
+            src[i] = base;
+            high[i] = base + 1.0;
+            low[i] = base - 1.0;
+        }
+
+        let params = EriParams { period: Some(13), ma_type: Some("ema".to_string()) };
+        let input = EriInput::from_slices(&high, &low, &src, params);
+
+        // Baseline via Vec-returning API
+        let baseline = eri(&input)?;
+
+        // Preallocate outputs and call into API
+        let mut bull = vec![0.0; len];
+        let mut bear = vec![0.0; len];
+        #[cfg(not(feature = "wasm"))]
+        {
+            eri_into(&input, &mut bull, &mut bear)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // wasm build doesn't expose the native eri_into; use the slice variant for parity
+            eri_into_slice(&mut bull, &mut bear, &input, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.bull.len(), bull.len());
+        assert_eq!(baseline.bear.len(), bear.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
+        }
+
+        for i in 0..len {
+            assert!(
+                eq_or_both_nan(baseline.bull[i], bull[i]),
+                "bull mismatch at index {i}: baseline={} into={}",
+                baseline.bull[i],
+                bull[i]
+            );
+            assert!(
+                eq_or_both_nan(baseline.bear[i], bear[i]),
+                "bear mismatch at index {i}: baseline={} into={}",
+                baseline.bear[i],
+                bear[i]
+            );
+        }
+
         Ok(())
     }
 

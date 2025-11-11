@@ -276,6 +276,31 @@ pub fn nvi_with_kernel(input: &NviInput, kernel: Kernel) -> Result<NviOutput, Nv
     Ok(NviOutput { values: out })
 }
 
+/// Compute NVI directly into a caller-provided output slice.
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API.
+/// - `out.len()` must equal the input length (close/volume length).
+/// - Performs no heap allocation.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn nvi_into(input: &NviInput, out: &mut [f64]) -> Result<(), NviError> {
+    let (close, volume): (&[f64], &[f64]) = match &input.data {
+        NviData::Candles {
+            candles,
+            close_source,
+        } => {
+            let close = source_type(candles, close_source);
+            let volume = candles
+                .select_candle_field("volume")
+                .map_err(|_| NviError::EmptyData)?;
+            (close, volume)
+        }
+        NviData::Slices { close, volume } => (*close, *volume),
+    };
+
+    nvi_into_slice(out, close, volume, Kernel::Auto)
+}
+
 #[inline]
 pub fn nvi_into_slice(
     dst: &mut [f64],
@@ -1133,6 +1158,47 @@ mod tests {
 
     #[cfg(test)]
     generate_all_nvi_tests!(check_nvi_property);
+
+    #[test]
+    fn test_nvi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Construct small but non-trivial synthetic data with a NaN warmup
+        let len = 256usize;
+        let mut close = vec![f64::NAN; len];
+        let mut volume = vec![f64::NAN; len];
+
+        // First valid index at 5
+        for i in 5..len {
+            let t = (i - 5) as f64;
+            // Mildly trending + oscillating close
+            close[i] = 100.0 + 0.05 * t + (0.01 * t).sin();
+            // Volume wiggles to trigger both decreases and increases
+            volume[i] = 2000.0 + ((i as i64 % 7) as f64 - 3.0) * 40.0;
+        }
+
+        let input = NviInput::from_slices(&close, &volume, NviParams);
+
+        // Baseline via Vec-returning API
+        let baseline = nvi(&input)?.values;
+
+        // Into API writes directly without allocation
+        let mut out = vec![0.0; len];
+        #[cfg(not(feature = "wasm"))]
+        {
+            nvi_into(&input, &mut out)?;
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, emulate parity using the slice API used by the wasm entrypoint
+            nvi_into_slice(&mut out, &close, &volume, Kernel::Auto)?;
+        }
+
+        assert_eq!(baseline.len(), out.len());
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            let equal = (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12;
+            assert!(equal, "nvi_into parity mismatch at index {}: {} vs {}", i, a, b);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "python")]

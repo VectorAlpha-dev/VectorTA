@@ -88,6 +88,7 @@ use crate::indicators::zlema::{zlema, ZlemaData, ZlemaInput, ZlemaParams};
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use std::error::Error;
+use thiserror::Error;
 
 // Import _with_kernel functions
 use crate::indicators::alma::alma_with_kernel;
@@ -160,6 +161,22 @@ pub enum MaData<'a> {
         source: &'a str,
     },
     Slice(&'a [f64]),
+}
+
+/// Decision: MA dispatcher provides a uniform front-end over many indicators.
+/// No SIMD/CUDA here; delegates to per-indicator kernels. Adds typed errors
+/// while preserving existing public behavior/messages used by Python tests.
+
+#[derive(Debug, Error)]
+pub enum MaError {
+    #[error("Unknown moving average type: {ma_type}")]
+    UnknownType { ma_type: String },
+    #[error("{indicator} requires high/low data, use the indicator directly")]
+    RequiresHighLow { indicator: &'static str },
+    #[error("{indicator} requires volume data, use the indicator directly")]
+    RequiresVolume { indicator: &'static str },
+    #[error("{indicator} returns dual outputs, use the indicator directly")]
+    DualOutputNotSupported { indicator: &'static str },
 }
 
 #[inline]
@@ -1002,7 +1019,7 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
 
         "buff_averages" => {
             // BuffAverages requires volume data and returns dual outputs, not suitable for simple MA selector
-            return Err("buff_averages requires volume data, use the indicator directly".into());
+            return Err(MaError::RequiresVolume { indicator: "buff_averages" }.into());
         }
 
         "dma" => {
@@ -1070,7 +1087,7 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
 
         "ehlers_pma" => {
             // EhlersPma returns dual outputs (predict/trigger), not suitable for simple MA selector
-            return Err("ehlers_pma returns dual outputs, use the indicator directly".into());
+            return Err(MaError::DualOutputNotSupported { indicator: "ehlers_pma" }.into());
         }
 
         "ehma" => {
@@ -1096,7 +1113,7 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
 
         "frama" => {
             // Frama requires high/low data, not suitable for simple MA selector
-            return Err("frama requires high/low data, use the indicator directly".into());
+            return Err(MaError::RequiresHighLow { indicator: "frama" }.into());
         }
 
         "nama" => {
@@ -1143,12 +1160,12 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
 
         "tradjema" => {
             // TradjemaData requires high/low/close data, not suitable for simple MA selector
-            return Err("tradjema requires high/low/close data, use the indicator directly".into());
+            return Err(MaError::RequiresHighLow { indicator: "tradjema" }.into());
         }
 
         "uma" => {
             // UMA requires volume data, not suitable for simple MA selector
-            return Err("uma requires volume data, use the indicator directly".into());
+            return Err(MaError::RequiresVolume { indicator: "uma" }.into());
         }
 
         "volatility_adjusted_ma" => {
@@ -1174,13 +1191,17 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
 
         "volume_adjusted_ma" => {
             // VolumeAdjustedMa requires volume data, not suitable for simple MA selector
-            return Err(
-                "volume_adjusted_ma requires volume data, use the indicator directly".into(),
-            );
+            return Err(MaError::RequiresVolume {
+                indicator: "volume_adjusted_ma",
+            }
+            .into());
         }
 
         _ => {
-            return Err(format!("Unknown moving average type: {}", ma_type).into());
+            return Err(MaError::UnknownType {
+                ma_type: ma_type.to_string(),
+            }
+            .into());
         }
     }
 }
@@ -1918,7 +1939,7 @@ pub fn ma_with_kernel<'a>(
                     },
                 },
                 MaData::Slice(_) => {
-                    return Err("VPWMA requires candle data with volume".into());
+                    return Err(MaError::RequiresVolume { indicator: "vpwma" }.into());
                 }
             };
             let output = vpwma_with_kernel(&input, kernel)?;
@@ -1935,9 +1956,7 @@ pub fn ma_with_kernel<'a>(
                     params: VwapParams::default(),
                 },
                 MaData::Slice(_) => {
-                    return Err(
-                        "VWAP requires candle data with high, low, close, and volume".into(),
-                    );
+                    return Err(MaError::RequiresVolume { indicator: "vwap" }.into());
                 }
             };
             let output = vwap_with_kernel(&input, kernel)?;
@@ -1953,7 +1972,7 @@ pub fn ma_with_kernel<'a>(
                     },
                 },
                 MaData::Slice(_) => {
-                    return Err("VWMA requires candle data with volume".into());
+                    return Err(MaError::RequiresVolume { indicator: "vwma" }.into());
                 }
             };
             let output = vwma_with_kernel(&input, kernel)?;
@@ -1981,7 +2000,7 @@ pub fn ma_with_kernel<'a>(
 
         "buff_averages" => {
             // BuffAverages requires volume data and returns dual outputs, not suitable for simple MA selector
-            return Err("buff_averages requires volume data, use the indicator directly".into());
+            return Err(MaError::RequiresVolume { indicator: "buff_averages" }.into());
         }
 
         "dma" => {
@@ -2049,7 +2068,7 @@ pub fn ma_with_kernel<'a>(
 
         "ehlers_pma" => {
             // EhlersPma returns dual outputs (predict/trigger), not suitable for simple MA selector
-            return Err("ehlers_pma returns dual outputs, use the indicator directly".into());
+            return Err(MaError::DualOutputNotSupported { indicator: "ehlers_pma" }.into());
         }
 
         "ehma" => {
@@ -2075,7 +2094,7 @@ pub fn ma_with_kernel<'a>(
 
         "frama" => {
             // Frama requires high/low data, not suitable for simple MA selector
-            return Err("frama requires high/low data, use the indicator directly".into());
+            return Err(MaError::RequiresHighLow { indicator: "frama" }.into());
         }
 
         "nama" => {
@@ -2122,12 +2141,12 @@ pub fn ma_with_kernel<'a>(
 
         "tradjema" => {
             // TradjemaData requires high/low/close data, not suitable for simple MA selector
-            return Err("tradjema requires high/low/close data, use the indicator directly".into());
+            return Err(MaError::RequiresHighLow { indicator: "tradjema" }.into());
         }
 
         "uma" => {
             // UMA requires volume data, not suitable for simple MA selector
-            return Err("uma requires volume data, use the indicator directly".into());
+            return Err(MaError::RequiresVolume { indicator: "uma" }.into());
         }
 
         "volatility_adjusted_ma" => {
@@ -2153,13 +2172,17 @@ pub fn ma_with_kernel<'a>(
 
         "volume_adjusted_ma" => {
             // VolumeAdjustedMa requires volume data, not suitable for simple MA selector
-            return Err(
-                "volume_adjusted_ma requires volume data, use the indicator directly".into(),
-            );
+            return Err(MaError::RequiresVolume {
+                indicator: "volume_adjusted_ma",
+            }
+            .into());
         }
 
         _ => {
-            return Err(format!("Unknown moving average type: {}", ma_type).into());
+            return Err(MaError::UnknownType {
+                ma_type: ma_type.to_string(),
+            }
+            .into());
         }
     }
 }

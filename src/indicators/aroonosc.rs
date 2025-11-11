@@ -271,6 +271,43 @@ pub fn aroon_osc_with_kernel(
     Ok(AroonOscOutput { values: out })
 }
 
+/// Compute Aroon Oscillator into a caller-provided buffer (no allocations).
+///
+/// - Preserves the module's NaN warmup behavior by pre-filling the warmup
+///   prefix with a quiet-NaN (same pattern as `alloc_with_nan_prefix`).
+/// - `out.len()` must equal the input length; otherwise an error is returned.
+#[inline]
+pub fn aroon_osc_into(input: &AroonOscInput, out: &mut [f64]) -> Result<(), AroonOscError> {
+    let (high, low, length, first, chosen) = aroon_osc_prepare(input, Kernel::Auto)?;
+
+    if out.len() != high.len() {
+        return Err(AroonOscError::InvalidOutputLen {
+            expected: high.len(),
+            got: out.len(),
+        });
+    }
+
+    // Prefill warmup prefix to match Vec-returning API's quiet-NaN pattern
+    let warm = (first + length).min(out.len());
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    for v in &mut out[..warm] {
+        *v = qnan;
+    }
+
+    match chosen {
+        Kernel::Scalar | Kernel::ScalarBatch => {
+            aroon_osc_scalar_highlow_into(high, low, length, first, out)
+        }
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            aroon_osc_scalar_highlow_into(high, low, length, first, out)
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(())
+}
+
 #[inline]
 pub fn aroon_osc_scalar_highlow_into(
     high: &[f64],
@@ -1062,6 +1099,63 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
+    
+    #[test]
+    fn test_aroonosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Build a small but non-trivial synthetic candle set
+        let n = 256usize;
+        let timestamp: Vec<i64> = (0..n as i64).collect();
+        let mut open = Vec::with_capacity(n);
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut close = Vec::with_capacity(n);
+        let mut volume = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let ib = i as f64;
+            let base = 1000.0 + (ib * 0.05).sin() * 10.0 + (i % 7) as f64;
+            let spread = 5.0 + (i % 11) as f64 * 0.1;
+            let h = base + spread;
+            let l = base - spread;
+            let o = base;
+            let c = base + ((i % 3) as f64 - 1.0) * 0.5;
+            let v = 1000.0 + (i % 5) as f64 * 10.0;
+            open.push(o);
+            high.push(h);
+            low.push(l);
+            close.push(c);
+            volume.push(v);
+        }
+
+        let candles = Candles::new(timestamp, open, high.clone(), low.clone(), close, volume);
+        let input = AroonOscInput::with_default_candles(&candles);
+
+        // Baseline via Vec-returning API
+        let baseline = aroon_osc(&input)?.values;
+
+        // Into API writes into caller-provided buffer
+        let mut out = vec![0.0; n];
+        aroon_osc_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        // Helper: NaN == NaN; otherwise exact equality
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "Mismatch at index {}: baseline={}, into={}",
+                i,
+                a,
+                b
+            );
+        }
+
+        Ok(())
+    }
     fn check_aroonosc_partial_params(
         test_name: &str,
         kernel: Kernel,

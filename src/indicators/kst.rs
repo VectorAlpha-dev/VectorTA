@@ -726,6 +726,17 @@ pub fn kst_into_slice(
     Ok(())
 }
 
+/// Write KST outputs into caller-provided buffers without allocating.
+///
+/// - Preserves NaN warmup prefixes exactly like `kst()`/`kst_with_kernel()`.
+/// - `out_line.len()` and `out_signal.len()` must equal the input length.
+/// - Uses `Kernel::Auto` for internal dispatch.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn kst_into(input: &KstInput, out_line: &mut [f64], out_signal: &mut [f64]) -> Result<(), KstError> {
+    kst_into_slice(out_line, out_signal, input, Kernel::Auto)
+}
+
 // The old kst_scalar function has been removed as it's no longer needed
 // The functionality is now handled by kst_compute_into
 
@@ -2648,6 +2659,61 @@ mod tests {
         check_kst_nan_handling,
         check_kst_no_poison
     );
+
+    #[test]
+    fn test_kst_into_matches_api() {
+        // Build a positive, non-trivial synthetic series (avoid zeros to keep ROC well-defined)
+        let n = 512usize;
+        let mut data = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = 100.0 + (i as f64) * 0.1 + (i as f64).sin();
+            data.push(x);
+        }
+
+        let input = KstInput::from_slice(&data, KstParams::default());
+
+        // Baseline via Vec-returning API
+        let base = kst(&input).expect("kst baseline");
+
+        // Preallocate outputs and call into API
+        let mut out_line = vec![0.0; n];
+        let mut out_signal = vec![0.0; n];
+
+        // Native into API (Auto kernel)
+        #[cfg(not(feature = "wasm"))]
+        {
+            kst_into(&input, &mut out_line, &mut out_signal).expect("kst_into");
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, parity still holds using the slice variant
+            kst_into_slice(&mut out_line, &mut out_signal, &input, Kernel::Auto).expect("kst_into_slice");
+        }
+
+        assert_eq!(base.line.len(), n);
+        assert_eq!(base.signal.len(), n);
+        assert_eq!(out_line.len(), n);
+        assert_eq!(out_signal.len(), n);
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+
+        for i in 0..n {
+            assert!(
+                eq_or_both_nan(base.line[i], out_line[i]),
+                "line mismatch at {i}: {} vs {}",
+                base.line[i],
+                out_line[i]
+            );
+            assert!(
+                eq_or_both_nan(base.signal[i], out_signal[i]),
+                "signal mismatch at {i}: {} vs {}",
+                base.signal[i],
+                out_signal[i]
+            );
+        }
+    }
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);

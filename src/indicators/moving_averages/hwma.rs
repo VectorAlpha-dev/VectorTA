@@ -216,6 +216,20 @@ pub enum HwmaError {
     InvalidParams { na: f64, nb: f64, nc: f64 },
     #[error("hwma: Invalid output buffer size: expected = {expected}, actual = {actual}")]
     InvalidOutputBuffer { expected: usize, actual: usize },
+    #[error("hwma: invalid output length, expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("hwma: invalid batch range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+    #[error("hwma: invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("hwma: integer overflow during size computation: {0}")]
+    IntegerOverflow(&'static str),
+    #[error("hwma: invalid period {period} for data_len {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("hwma: not enough valid data: needed {needed}, valid {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("hwma: calculation received empty input data.")]
+    EmptyInputData,
 }
 
 #[inline]
@@ -273,12 +287,12 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
     Ok(HwmaOutput { values: out })
 }
 
-/// Computes HWMA into a pre-allocated output buffer.
+/// Computes HWMA into a pre-allocated output buffer (no allocations).
 ///
-/// # Zero-Copy Design
-/// This function follows a zero-copy philosophy for optimal performance.
-/// The output buffer must be pre-allocated by the caller and should already
-/// contain appropriate NaN values in the warmup period if needed.
+/// - Preserves the indicator's warmup behavior by pre-filling the warmup
+///   prefix with quiet-NaNs using the same pattern as `alloc_with_nan_prefix`.
+/// - Writes results in-place to the provided `out` slice. The output length
+///   must match the input length; otherwise an error is returned.
 ///
 /// # Arguments
 /// * `input` - The HWMA input containing data and parameters
@@ -286,7 +300,7 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
 ///
 /// # Returns
 /// * `Ok(())` if successful
-/// * `Err(HwmaError)` if the computation fails
+/// * `Err(HwmaError)` if validation fails
 #[inline]
 pub fn hwma_into(input: &HwmaInput, out: &mut [f64]) -> Result<(), HwmaError> {
     hwma_with_kernel_into(input, Kernel::Auto, out)
@@ -294,14 +308,10 @@ pub fn hwma_into(input: &HwmaInput, out: &mut [f64]) -> Result<(), HwmaError> {
 
 /// Computes HWMA into a pre-allocated output buffer with specified kernel.
 ///
-/// # Zero-Copy Design
-/// This function is designed for zero-copy operation and maximum performance.
-/// Unlike the allocating version, this function does NOT initialize the warmup
-/// period with NaN values. The caller is responsible for any necessary
-/// initialization of the output buffer.
-///
-/// This design choice eliminates redundant memory operations when the buffer
-/// is already properly initialized (e.g., from Python/WASM bindings).
+/// This function validates lengths, computes the warmup prefix exactly like the
+/// allocating API, pre-fills the warmup prefix with a quiet-NaN bit pattern,
+/// and then dispatches to the selected compute kernel to write the valid
+/// suffix into `out`.
 ///
 /// # Arguments
 /// * `input` - The HWMA input containing data and parameters
@@ -324,10 +334,7 @@ pub fn hwma_with_kernel_into(
 
     // Ensure output buffer is the correct size
     if out.len() != len {
-        return Err(HwmaError::InvalidOutputBuffer {
-            expected: len,
-            actual: out.len(),
-        });
+        return Err(HwmaError::OutputLengthMismatch { expected: len, got: out.len() });
     }
 
     let first = data
@@ -381,9 +388,11 @@ pub fn hwma_with_kernel_into(
         }
     }
 
-    // Match ALMA: write only the warmup prefix, no full-vector fill
+    // Match ALMA: write only the warmup prefix using the canonical quiet-NaN
+    // pattern used by `alloc_with_nan_prefix`.
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..first] {
-        *v = f64::NAN;
+        *v = qnan;
     }
 
     Ok(())
@@ -866,7 +875,14 @@ pub fn hwma_batch_with_kernel(
     sweep: &HwmaBatchRange,
     k: Kernel,
 ) -> Result<HwmaBatchOutput, HwmaError> {
-    // Map both batch and non-batch kernels to their regular SIMD equivalents
+    // Disallow explicit non-batch kernels at the batch API surface
+    match k {
+        Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
+            return Err(HwmaError::InvalidKernelForBatch(k));
+        }
+        _ => {}
+    }
+    // Map batch kernels to their regular SIMD equivalents
     let simd = match k {
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -907,35 +923,62 @@ impl HwmaBatchOutput {
 
 #[inline(always)]
 pub fn expand_grid(r: &HwmaBatchRange) -> Vec<HwmaParams> {
-    fn axis((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+    // Back-compat shim: use checked version; on error, fall back to a singleton
+    match expand_grid_checked(r) {
+        Ok(v) => v,
+        Err(_) => vec![HwmaParams { na: Some(r.na.0), nb: Some(r.nb.0), nc: Some(r.nc.0) }],
+    }
+}
+
+#[inline(always)]
+fn axis_f64_checked(t: (f64, f64, f64)) -> Result<Vec<f64>, HwmaError> {
+    let (start, end, step) = t;
+    let eps = 1e-12;
+    if step.abs() < eps || (start - end).abs() < eps {
+        return Ok(vec![start]);
+    }
+    let mut v = Vec::new();
+    if step > 0.0 {
+        if start > end + eps {
+            return Err(HwmaError::InvalidRange { start, end, step });
         }
-        let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
+        while x <= end + eps {
             v.push(x);
             x += step;
         }
-        v
+    } else {
+        if start < end - eps {
+            return Err(HwmaError::InvalidRange { start, end, step });
+        }
+        let mut x = start;
+        while x >= end - eps {
+            v.push(x);
+            x += step; // negative step
+        }
     }
-    let nas = axis(r.na);
-    let nbs = axis(r.nb);
-    let ncs = axis(r.nc);
+    Ok(v)
+}
 
-    let mut out = Vec::with_capacity(nas.len() * nbs.len() * ncs.len());
+#[inline(always)]
+fn expand_grid_checked(r: &HwmaBatchRange) -> Result<Vec<HwmaParams>, HwmaError> {
+    let nas = axis_f64_checked(r.na)?;
+    let nbs = axis_f64_checked(r.nb)?;
+    let ncs = axis_f64_checked(r.nc)?;
+    let cap = nas
+        .len()
+        .checked_mul(nbs.len())
+        .and_then(|x| x.checked_mul(ncs.len()))
+        .ok_or(HwmaError::IntegerOverflow("expand_grid capacity"))?;
+    let mut out = Vec::with_capacity(cap);
     for &a in &nas {
         for &b in &nbs {
             for &c in &ncs {
-                out.push(HwmaParams {
-                    na: Some(a),
-                    nb: Some(b),
-                    nc: Some(c),
-                });
+                out.push(HwmaParams { na: Some(a), nb: Some(b), nc: Some(c) });
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -963,7 +1006,7 @@ fn hwma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<HwmaBatchOutput, HwmaError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_checked(sweep)?;
     if combos.is_empty() {
         return Err(HwmaError::EmptyData);
     }
@@ -988,6 +1031,9 @@ fn hwma_batch_inner(
     }
     let rows = combos.len();
     let cols = len;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(HwmaError::IntegerOverflow("rows*cols"))?;
     let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
 
     // ----- 2. allocate rows×cols as MaybeUninit and write the NaN prefixes --------
@@ -997,7 +1043,7 @@ fn hwma_batch_inner(
     // Use ManuallyDrop pattern to maintain capacity (following alma.rs pattern)
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
+        core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, total)
     };
 
     // ----- 3. closure that fills one row ------------------------------------------
@@ -1045,7 +1091,7 @@ fn hwma_batch_inner(
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
-            buf_guard.len(),
+            total,
             buf_guard.capacity(),
         )
     };
@@ -1066,7 +1112,7 @@ fn hwma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<(Vec<HwmaParams>, usize, usize), HwmaError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_checked(sweep)?;
     if combos.is_empty() {
         return Err(HwmaError::EmptyData);
     }
@@ -1091,13 +1137,13 @@ fn hwma_batch_inner_into(
     }
     let rows = combos.len();
     let cols = len;
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(HwmaError::IntegerOverflow("rows*cols"))?;
 
     // Ensure output buffer is the correct size
-    if out.len() != rows * cols {
-        return Err(HwmaError::InvalidOutputBuffer {
-            expected: rows * cols,
-            actual: out.len(),
-        });
+    if out.len() != expected {
+        return Err(HwmaError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
@@ -2041,6 +2087,39 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
+
+    #[test]
+    fn test_hwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Small but non-trivial input with a NaN warmup prefix
+        let mut data = vec![f64::NAN; 7];
+        data.extend((0..256).map(|i| (i as f64).sin() * 10.0 + 100.0));
+
+        let params = HwmaParams::default();
+        let input = HwmaInput::from_slice(&data, params);
+
+        // Baseline via allocating API
+        let baseline = hwma(&input)?.values;
+
+        // Into path with preallocated buffer (contents will be overwritten)
+        let mut out = vec![0.0; data.len()];
+        hwma_into(&input, &mut out)?;
+
+        assert_eq!(baseline.len(), out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
+        for (i, (&a, &b)) in baseline.iter().zip(out.iter()).enumerate() {
+            assert!(
+                eq_or_both_nan(a, b),
+                "mismatch at idx {}: alloc={} into={}",
+                i,
+                a,
+                b
+            );
+        }
+        Ok(())
+    }
 
     fn check_hwma_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);

@@ -272,6 +272,81 @@ pub fn pvi_with_kernel(input: &PviInput, kernel: Kernel) -> Result<PviOutput, Pv
     Ok(PviOutput { values: out })
 }
 
+/// Compute PVI directly into a caller-provided output slice (no allocations).
+///
+/// - Preserves NaN warmups exactly as the Vec-returning API by pre-filling the
+///   warmup prefix with the same quiet-NaN pattern used by `alloc_with_nan_prefix`.
+/// - `out.len()` must equal the input length; otherwise a length error is returned.
+#[cfg(not(feature = "wasm"))]
+#[inline]
+pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
+    let (close, volume) = match &input.data {
+        PviData::Candles {
+            candles,
+            close_source,
+            volume_source,
+        } => {
+            let c = source_type(candles, close_source);
+            let v = source_type(candles, volume_source);
+            (c, v)
+        }
+        PviData::Slices { close, volume } => (*close, *volume),
+    };
+
+    if close.is_empty() || volume.is_empty() {
+        return Err(PviError::EmptyData);
+    }
+    if close.len() != volume.len() {
+        return Err(PviError::MismatchedLength);
+    }
+    if out.len() != close.len() {
+        // Reuse the module's length error on mismatch
+        return Err(PviError::MismatchedLength);
+    }
+
+    // Compute warmup (first-valid) identical to Vec API
+    let first_valid_idx = close
+        .iter()
+        .zip(volume.iter())
+        .position(|(&c, &v)| !c.is_nan() && !v.is_nan())
+        .ok_or(PviError::AllValuesNaN)?;
+    if (close.len() - first_valid_idx) < 2 {
+        return Err(PviError::NotEnoughValidData);
+    }
+
+    // Prefill warmup prefix to match alloc_with_nan_prefix's quiet-NaN
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let warm = first_valid_idx.min(out.len());
+    for v in &mut out[..warm] {
+        *v = qnan;
+    }
+
+    // Dispatch to the existing compute kernels
+    let chosen = match Kernel::Auto {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    let initial = input.get_initial_value();
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                pvi_scalar(close, volume, first_valid_idx, initial, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                pvi_avx2(close, volume, first_valid_idx, initial, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                pvi_avx512(close, volume, first_valid_idx, initial, out)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(())
+}
+
 #[inline]
 pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result<(), PviError> {
     let (close, volume) = match &input.data {
@@ -1283,6 +1358,45 @@ mod tests {
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
         Ok(()) // No-op in release builds
+    }
+
+    #[test]
+    fn test_pvi_into_matches_api() {
+        // Use the repository's existing CSV dataset for parity.
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("load candles");
+
+        let input = PviInput::from_candles(&candles, "close", "volume", PviParams::default());
+
+        // Baseline via Vec-returning API
+        let baseline = pvi(&input).expect("pvi baseline").values;
+
+        // No-allocation path
+        let mut into_out = vec![0.0f64; baseline.len()];
+        #[cfg(not(feature = "wasm"))]
+        {
+            pvi_into(&input, &mut into_out).expect("pvi_into");
+        }
+        #[cfg(feature = "wasm")]
+        {
+            // In wasm builds, use the existing helper to avoid symbol clashes
+            pvi_into_slice(&mut into_out, &input, Kernel::Auto).expect("pvi_into_slice");
+        }
+
+        assert_eq!(baseline.len(), into_out.len());
+
+        fn eq_or_both_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
+        }
+        for i in 0..baseline.len() {
+            assert!(
+                eq_or_both_nan(baseline[i], into_out[i]),
+                "Mismatch at index {}: got {}, expected {}",
+                i,
+                into_out[i],
+                baseline[i]
+            );
+        }
     }
 
     #[cfg(feature = "proptest")]

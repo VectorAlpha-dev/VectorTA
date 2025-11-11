@@ -1,5 +1,6 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 gitdir: /mnt/c/Rust Projects/my_project/.git/worktrees/my_project-bindings-1
 =======
 gitdir: /mnt/c/Rust Projects/my_project/.git/worktrees/my_project-bindings-2
@@ -7,3 +8,6 @@ gitdir: /mnt/c/Rust Projects/my_project/.git/worktrees/my_project-bindings-2
 =======
 gitdir: /mnt/c/Rust Projects/my_project/.git/worktrees/my_project-bindings-3
 >>>>>>> simd-3
+=======
+gitdir: /mnt/c/Rust Projects/my_project/.git/worktrees/my_project-bindings-4
+>>>>>>> simd-4
