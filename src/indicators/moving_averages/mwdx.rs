@@ -23,7 +23,7 @@
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaMwdx};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::mwdx_wrapper::DeviceArrayF32Mwdx;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -188,12 +188,27 @@ impl MwdxBuilder {
 pub enum MwdxError {
     #[error("mwdx: No input data was provided.")]
     EmptyData,
+    // Present for parity with project-wide error surface; not currently used
+    // in the scalar MWDX path because all-NaN inputs produce all-NaN outputs
+    // (behavior preserved to keep reference results unchanged).
+    #[allow(dead_code)]
+    #[error("mwdx: All values are NaN.")]
+    AllValuesNaN,
     #[error("mwdx: Factor must be greater than 0, got {factor}")]
     InvalidFactor { factor: f64 },
     #[error("mwdx: Factor leads to invalid denominator, factor: {factor}")]
     InvalidDenominator { factor: f64 },
-    #[error("mwdx: Invalid length - expected {expected}, got {actual}")]
-    InvalidLength { expected: usize, actual: usize },
+    #[error("mwdx: Invalid length - expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    // Exposed for consistency across indicators; MWDX has no explicit warmup
+    // but callers may use this in future range-checked contexts.
+    #[allow(dead_code)]
+    #[error("mwdx: Not enough valid data: needed {needed}, valid {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("mwdx: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+    #[error("mwdx: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -285,9 +300,9 @@ pub fn mwdx_into_slice(dst: &mut [f64], input: &MwdxInput, kern: Kernel) -> Resu
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(MwdxError::InvalidLength {
+        return Err(MwdxError::OutputLengthMismatch {
             expected: data.len(),
-            actual: dst.len(),
+            got: dst.len(),
         });
     }
 
@@ -384,7 +399,7 @@ pub fn mwdx_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(MwdxError::EmptyData),
+        other => return Err(MwdxError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -538,17 +553,28 @@ impl MwdxBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &MwdxBatchRange) -> Vec<MwdxParams> {
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+        // Zero step or identical bounds => static single value
+        if step == 0.0 || (start - end).abs() < 1e-12 {
             return vec![start];
         }
-        let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        let d = step.abs();
+        let mut vals = Vec::new();
+        if start <= end {
+            let mut x = start;
+            while x <= end + 1e-12 {
+                vals.push(x);
+                x += d;
+            }
+        } else {
+            let mut x = start;
+            while x + 1e-12 >= end {
+                vals.push(x);
+                x -= d;
+            }
         }
-        v
+        vals
     }
+
     let factors = axis_f64(r.factor);
     let mut out = Vec::with_capacity(factors.len());
     for &f in &factors {
@@ -585,7 +611,11 @@ fn mwdx_batch_inner(
 ) -> Result<MwdxBatchOutput, MwdxError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(MwdxError::EmptyData);
+        return Err(MwdxError::InvalidRange {
+            start: sweep.factor.0,
+            end: sweep.factor.1,
+            step: sweep.factor.2,
+        });
     }
     if data.is_empty() {
         return Err(MwdxError::EmptyData);
@@ -606,6 +636,13 @@ fn mwdx_batch_inner(
     let warm_prefixes = vec![first; rows]; // rows × constant
 
     // 2.  Allocate the big rows × cols matrix *uninitialised* …
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(MwdxError::InvalidRange {
+            start: sweep.factor.0,
+            end: sweep.factor.1,
+            step: sweep.factor.2,
+        })?;
     let mut raw = make_uninit_matrix(rows, cols);
 
     // … and paint the NaN prefixes so any untouched cells are well-defined.
@@ -690,7 +727,11 @@ fn mwdx_batch_inner_into(
 ) -> Result<Vec<MwdxParams>, MwdxError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(MwdxError::EmptyData);
+        return Err(MwdxError::InvalidRange {
+            start: sweep.factor.0,
+            end: sweep.factor.1,
+            step: sweep.factor.2,
+        });
     }
     if data.is_empty() {
         return Err(MwdxError::EmptyData);
@@ -710,6 +751,19 @@ fn mwdx_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(MwdxError::InvalidRange {
+            start: sweep.factor.0,
+            end: sweep.factor.1,
+            step: sweep.factor.2,
+        })?;
+    if out.len() != expected {
+        return Err(MwdxError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
     let first = data.iter().position(|x| !x.is_nan()).unwrap_or(cols);
     let warm_prefixes = vec![first; rows];
 
@@ -1706,6 +1760,125 @@ pub fn mwdx_batch_py<'py>(
     Ok(dict)
 }
 
+// -------------------- Python: CUDA Array Interface v3 + DLPack (MWDX) ----------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32MwdxPy {
+    pub(crate) inner: DeviceArrayF32Mwdx,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32MwdxPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: kernels synchronize before returning the handle (see wrapper)
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA per DLPack
+        (2, self.inner.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<cust::context::Context>,
+        }
+
+        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let name = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter { del(ptr); }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
+        let strides = Box::new([self.inner.cols as i64, 1i64]);
+        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+
+        let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self.inner.ctx.clone() });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2 /* kDLFloat */, bits: 32, lanes: 1 },
+                shape: guard_ref._shape.as_ptr() as *mut i64,
+                strides: guard_ref._strides.as_ptr() as *mut i64,
+                byte_offset: 0,
+            },
+            manager_ctx: guard_ptr as *mut c_void,
+            deleter: Some(managed_deleter),
+        });
+        let mt_raw = Box::into_raw(mt);
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(mt_raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor))
+        };
+        if capsule.is_null() {
+            unsafe { managed_deleter(mt_raw); }
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "mwdx_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, factor_range=(0.2, 0.2, 0.0), device_id=0))]
@@ -1714,15 +1887,13 @@ pub fn mwdx_cuda_batch_dev_py(
     data_f32: PyReadonlyArray1<'_, f32>,
     factor_range: (f64, f64, f64),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32MwdxPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
 
     let slice_in = data_f32.as_slice()?;
-    let sweep = MwdxBatchRange {
-        factor: factor_range,
-    };
+    let sweep = MwdxBatchRange { factor: factor_range };
 
     let inner = py.allow_threads(|| {
         let cuda = CudaMwdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1730,7 +1901,7 @@ pub fn mwdx_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32MwdxPy { inner })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1741,7 +1912,7 @@ pub fn mwdx_cuda_many_series_one_param_dev_py(
     data_tm_f32: PyReadonlyArray2<'_, f32>,
     factor: f64,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32MwdxPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1753,9 +1924,7 @@ pub fn mwdx_cuda_many_series_one_param_dev_py(
     }
     let series_len = shape[0];
     let num_series = shape[1];
-    let params = MwdxParams {
-        factor: Some(factor),
-    };
+    let params = MwdxParams { factor: Some(factor) };
 
     let inner = py.allow_threads(|| {
         let cuda = CudaMwdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1763,7 +1932,7 @@ pub fn mwdx_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32MwdxPy { inner })
 }
 
 #[cfg(feature = "wasm")]

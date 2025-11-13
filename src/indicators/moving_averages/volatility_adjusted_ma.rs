@@ -21,11 +21,14 @@
 //! - Batch: row-specific EMA precompute was evaluated; kept disabled by default — per-row parallelism
 //!          with per-row EMA was faster/more stable in benches. Revisit only with stronger evidence.
 //! - Memory: uses zero-copy helpers (alloc_with_nan_prefix); no O(N) temporaries beyond outputs.
+//! - Decision: Hardened errors and batch range expansion; into-slice length mismatch now returns
+//!   OutputLengthMismatch; CUDA wrapper returns typed errors and keeps a context guard in the
+//!   Python device handle. CAI v3 implemented; DLPack implemented for CUDA handles.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::vama_wrapper::DeviceArrayF32Vama;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
@@ -307,6 +310,15 @@ pub enum VamaError {
 
     #[error("vama: WMA calculation failed: {0}")]
     WmaError(String),
+
+    #[error("vama: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("vama: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("vama: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 // ==================== CORE COMPUTATION FUNCTIONS ====================
@@ -514,9 +526,9 @@ pub fn vama_into_slice(dst: &mut [f64], input: &VamaInput, kern: Kernel) -> Resu
     let (data, base_p, vol_p, smoothing, smooth_ty, smooth_p, first, chosen) =
         vama_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(VamaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(VamaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -998,16 +1010,45 @@ impl Default for VamaBatchRange {
 
 /// Expand parameter ranges to all combinations
 #[inline(always)]
-fn expand_grid_vama(r: &VamaBatchRange) -> Vec<VamaParams> {
-    fn axis((s, e, t): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_vama(r: &VamaBatchRange) -> Result<Vec<VamaParams>, VamaError> {
+    #[inline]
+    fn axis_usize((s, e, t): (usize, usize, usize)) -> Vec<usize> {
         if t == 0 || s == e {
             return vec![s];
         }
-        (s..=e).step_by(t).collect()
+        if s <= e {
+            // forward
+            return (s..=e).step_by(t).collect();
+        }
+        // reversed
+        let mut v = Vec::new();
+        let mut x = s;
+        while x >= e {
+            v.push(x);
+            let next = x.saturating_sub(t);
+            if next == x { break; }
+            x = next;
+        }
+        v
     }
-    let bs = axis(r.base_period);
-    let vs = axis(r.vol_period);
-    let mut out = Vec::with_capacity(bs.len() * vs.len());
+
+    let bs = axis_usize(r.base_period);
+    let vs = axis_usize(r.vol_period);
+    if bs.is_empty() {
+        return Err(VamaError::InvalidRange {
+            start: r.base_period.0,
+            end: r.base_period.1,
+            step: r.base_period.2,
+        });
+    }
+    if vs.is_empty() {
+        return Err(VamaError::InvalidRange {
+            start: r.vol_period.0,
+            end: r.vol_period.1,
+            step: r.vol_period.2,
+        });
+    }
+    let mut out = Vec::with_capacity(bs.len().saturating_mul(vs.len()));
     for &b in &bs {
         for &v in &vs {
             out.push(VamaParams {
@@ -1019,7 +1060,7 @@ fn expand_grid_vama(r: &VamaBatchRange) -> Vec<VamaParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 /// Batch processing output with flat matrix
@@ -1105,16 +1146,17 @@ fn vama_batch_inner(
     simd: Kernel,
     parallel: bool,
 ) -> Result<VamaBatchOutput, VamaError> {
-    let combos = expand_grid_vama(ranges);
+    let combos = expand_grid_vama(ranges)?;
     let cols = data.len();
     let rows = combos.len();
     if cols == 0 {
         return Err(VamaError::EmptyInputData);
     }
     if rows == 0 {
-        return Err(VamaError::InvalidPeriod {
-            period: 0,
-            data_len: cols,
+        return Err(VamaError::InvalidRange {
+            start: ranges.base_period.0,
+            end: ranges.base_period.1,
+            step: ranges.base_period.2,
         });
     }
 
@@ -1135,6 +1177,15 @@ fn vama_batch_inner(
             });
         }
     }
+
+    // checked rows*cols to avoid overflow
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(VamaError::InvalidRange {
+            start: ranges.base_period.0,
+            end: ranges.base_period.1,
+            step: ranges.base_period.2,
+        })?;
 
     // allocate without zeroing; write NaN prefixes only
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1334,13 +1385,7 @@ fn vama_batch_inner_into(
     out: &mut [f64],
     parallel: bool,
 ) -> Result<(), VamaError> {
-    let combos = expand_grid_vama(ranges);
-    if combos.is_empty() {
-        return Err(VamaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_vama(ranges)?;
 
     let cols = data.len();
     let first = data
@@ -1410,10 +1455,7 @@ pub fn vama_batch_with_kernel(
         Kernel::ScalarBatch => Kernel::ScalarBatch, // Explicitly handle ScalarBatch
         other if other.is_batch() => other,
         _ => {
-            return Err(VamaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(VamaError::InvalidKernelForBatch(k))
         }
     };
     // Map batch → non-batch SIMD for the inner
@@ -1517,7 +1559,8 @@ pub fn vama_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     // Pre-calculate combos and dimensions
-    let combos = expand_grid_vama(&ranges);
+    let combos = expand_grid_vama(&ranges)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -1578,7 +1621,7 @@ pub fn vama_cuda_batch_dev_py(
     base_period_range: (usize, usize, usize),
     vol_period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VamaDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaVama;
 
@@ -1598,7 +1641,7 @@ pub fn vama_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VamaDeviceArrayF32Py { inner })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1610,7 +1653,7 @@ pub fn vama_cuda_many_series_one_param_dev_py(
     base_period: usize,
     vol_period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VamaDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaVama;
     use numpy::PyUntypedArrayMethods;
@@ -1643,7 +1686,137 @@ pub fn vama_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VamaDeviceArrayF32Py { inner })
+}
+
+// VAMA-specific CUDA Array Interface v3 + DLPack stubs (context-guarded handle)
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct VamaDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32Vama,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl VamaDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producing stream is synchronized before return; omit "stream" per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.inner.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<cust::context::Context>,
+        }
+
+        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let name = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                    as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter { del(ptr); }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        // Build element-based shape/strides per DLPack
+        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
+        let strides = Box::new([self.inner.cols as i64, 1i64]);
+        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+
+        let guard = Box::new(DlpGuard {
+            _shape: shape,
+            _strides: strides,
+            _ctx: self.inner.ctx.clone(),
+        });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2 /* kDLFloat */, bits: 32, lanes: 1 },
+                shape: guard_ref._shape.as_ptr() as *mut i64,
+                strides: guard_ref._strides.as_ptr() as *mut i64,
+                byte_offset: 0,
+            },
+            manager_ctx: guard_ptr as *mut c_void,
+            deleter: Some(managed_deleter),
+        });
+        let mt_raw = Box::into_raw(mt);
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_raw as *mut c_void,
+                name.as_ptr() as *const _,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe { managed_deleter(mt_raw); }
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "failed to create DLPack capsule",
+            ));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 #[cfg(feature = "python")]

@@ -172,6 +172,12 @@ pub enum SrwmaError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("srwma: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("srwma: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("srwma: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("srwma: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -477,12 +483,7 @@ pub fn srwma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(SrwmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(SrwmaError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -576,10 +577,34 @@ impl SrwmaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &SrwmaBatchRange) -> Vec<SrwmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
+        if step == 0 {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        if start == end {
+            return vec![start];
+        }
+        let mut v = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                match x.checked_add(step) {
+                    Some(nx) if nx > x => x = nx,
+                    _ => break,
+                }
+            }
+        } else {
+            let mut x = start;
+            while x >= end {
+                v.push(x);
+                match x.checked_sub(step) {
+                    Some(nx) if nx < x => x = nx,
+                    _ => break,
+                }
+                if x == 0 { break; }
+            }
+        }
+        v
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -621,10 +646,8 @@ fn srwma_batch_inner(
 ) -> Result<SrwmaBatchOutput, SrwmaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(SrwmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, st) = sweep.period;
+        return Err(SrwmaError::InvalidRange { start: s, end: e, step: st });
     }
 
     let len = data.len();
@@ -653,7 +676,9 @@ fn srwma_batch_inner(
     }
 
     let mut inv_norms = vec![0.0; rows];
-    let cap = rows * max_wlen;
+    let cap = rows
+        .checked_mul(max_wlen)
+        .ok_or(SrwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
     let flat_slice = flat_w.as_mut_slice();
@@ -726,13 +751,7 @@ fn srwma_batch_inner(
 
     // ---------- 4. finished – convert to Vec<f64> ------------------------
     let mut guard = core::mem::ManuallyDrop::new(raw);
-    let values = unsafe {
-        Vec::from_raw_parts(
-            guard.as_mut_ptr() as *mut f64,
-            guard.len(),
-            guard.capacity(),
-        )
-    };
+    let values = unsafe { Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity()) };
 
     Ok(SrwmaBatchOutput {
         values,
@@ -752,10 +771,8 @@ pub fn srwma_batch_inner_into(
 ) -> Result<Vec<SrwmaParams>, SrwmaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(SrwmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, st) = sweep.period;
+        return Err(SrwmaError::InvalidRange { start: s, end: e, step: st });
     }
 
     let len = data.len();
@@ -807,6 +824,14 @@ pub fn srwma_batch_inner_into(
         .iter()
         .map(|c| first + c.period.unwrap() + 1)
         .collect();
+
+    // Validate provided output buffer size with checked arithmetic
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(SrwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    if out.len() != total {
+        return Err(SrwmaError::OutputLengthMismatch { expected: total, got: out.len() });
+    }
 
     // Cast `out` to MaybeUninit and initialize warm prefixes with NaN
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
@@ -2120,7 +2145,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaSrwma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::srwma_wrapper::DeviceArrayF32Srwma;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -2188,6 +2213,123 @@ pub fn srwma_py<'py>(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
+}
+
+// ---------------- Python device handle: CAI v3 + DLPack (SRWMA) -----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32SrwmaPy {
+    pub(crate) inner: DeviceArrayF32Srwma,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32SrwmaPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.inner.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<cust::context::Context>,
+        }
+
+        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let name = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                    as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter { del(ptr); }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
+        let strides = Box::new([self.inner.cols as i64, 1i64]);
+        let data_ptr = self.inner.device_ptr() as usize as *mut std::ffi::c_void;
+
+        let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self.inner.ctx.clone() });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: guard_ref._shape.as_ptr() as *mut i64,
+                strides: guard_ref._strides.as_ptr() as *mut i64,
+                byte_offset: 0,
+            },
+            manager_ctx: guard_ptr as *mut std::ffi::c_void,
+            deleter: Some(managed_deleter),
+        });
+        let mt_raw = Box::into_raw(mt);
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(mt_raw as *mut std::ffi::c_void, name.as_ptr() as *const _, Some(capsule_destructor))
+        };
+        if capsule.is_null() {
+            unsafe { managed_deleter(mt_raw); }
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 #[cfg(feature = "python")]
@@ -2303,7 +2445,7 @@ pub fn srwma_cuda_batch_dev_py(
     data_f32: PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32SrwmaPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2319,7 +2461,7 @@ pub fn srwma_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32SrwmaPy { inner })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2330,7 +2472,7 @@ pub fn srwma_cuda_many_series_one_param_dev_py(
     data_tm_f32: PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32SrwmaPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2352,7 +2494,7 @@ pub fn srwma_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32SrwmaPy { inner })
 }
 
 /// Helper function to compute SRWMA directly into output slice - zero allocations
@@ -2389,10 +2531,7 @@ pub fn srwma_into_slice(
     }
 
     if dst.len() != data.len() {
-        return Err(SrwmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
+        return Err(SrwmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
     // Find first valid (non-NaN) value

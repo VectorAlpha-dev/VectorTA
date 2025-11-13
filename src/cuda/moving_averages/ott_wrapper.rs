@@ -486,6 +486,7 @@ impl CudaOtt {
                 CudaKama::new(self.device_id as usize)
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
                     .kama_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, &p)
+                    .map(|h| super::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
             } else if ma_type.eq_ignore_ascii_case("VWMA") {
                 return Err(CudaOttError::Unsupported(

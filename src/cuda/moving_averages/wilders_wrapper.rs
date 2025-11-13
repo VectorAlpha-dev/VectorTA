@@ -6,7 +6,6 @@
 
 #![cfg(feature = "cuda")]
 
-use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::wilders::{WildersBatchRange, WildersParams};
 use cust::context::{CacheConfig, Context};
 use cust::device::Device;
@@ -15,33 +14,39 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use std::sync::Arc;
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaWildersError {
-    Cuda(String),
+    #[error("CUDA: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buffer device {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaWildersError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaWildersError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaWildersError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CudaWildersError {}
 
 pub struct CudaWilders {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
+    device_id: u32,
     policy: CudaWildersPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -67,35 +72,43 @@ struct PreparedWildersBatch {
     warm_indices: Vec<i32>,
 }
 
+/// VRAM-backed array handle for Wilders with context guard and device id
+pub struct DeviceArrayF32Wilders {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+impl DeviceArrayF32Wilders {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
+}
+
 impl CudaWilders {
     pub fn new(device_id: usize) -> Result<Self, CudaWildersError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
-        // CHANGE: PTX JIT at O4 (most optimized)
+        // PTX JIT with target-from-context, high opt with fallbacks
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/wilders_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O4),
+            ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaWildersError::Cuda(e.to_string()))?
-                }
-            },
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
             policy: CudaWildersPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -109,27 +122,52 @@ impl CudaWilders {
         &self,
         data_f32: &[f32],
         sweep: &WildersBatchRange,
-    ) -> Result<DeviceArrayF32, CudaWildersError> {
+    ) -> Result<DeviceArrayF32Wilders, CudaWildersError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.periods_i32.len();
 
-        // VRAM estimate (input + params + output) with headroom
-        let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
-        let params_bytes = (prepared.periods_i32.len() * std::mem::size_of::<i32>())
-            + (prepared.alphas_f32.len() * std::mem::size_of::<f32>())
-            + (prepared.warm_indices.len() * std::mem::size_of::<i32>());
-        let out_bytes = prepared.series_len * n_combos * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
+        // VRAM estimate (input + params + output) with headroom and overflow guards
+        let prices_bytes = prepared
+            .series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let params_bytes_periods = prepared
+            .periods_i32
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let params_bytes_alphas = prepared
+            .alphas_f32
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let params_bytes_warm = prepared
+            .warm_indices
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let params_bytes = params_bytes_periods
+            .checked_add(params_bytes_alphas)
+            .and_then(|x| x.checked_add(params_bytes_warm))
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let out_elems = prepared
+            .series_len
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // 64MB safety
         if !Self::will_fit(required, headroom) {
-            return Err(CudaWildersError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            let (free, _tot) = mem_get_info().unwrap_or((0, 0));
+            return Err(CudaWildersError::OutOfMemory { required, free, headroom });
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32).map_err(CudaWildersError::from)?;
         // CHANGE: cache parameter device buffers across identical sweeps
         let mut hasher = DefaultHasher::new();
         prepared.periods_i32.hash(&mut hasher);
@@ -151,12 +189,9 @@ impl CudaWilders {
                     (&cache.periods, &cache.alphas, &cache.warm)
                 }
                 _ => {
-                    let periods = DeviceBuffer::from_slice(&prepared.periods_i32)
-                        .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
-                    let alphas = DeviceBuffer::from_slice(&prepared.alphas_f32)
-                        .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
-                    let warm = DeviceBuffer::from_slice(&prepared.warm_indices)
-                        .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+                    let periods = DeviceBuffer::from_slice(&prepared.periods_i32).map_err(CudaWildersError::from)?;
+                    let alphas = DeviceBuffer::from_slice(&prepared.alphas_f32).map_err(CudaWildersError::from)?;
+                    let warm = DeviceBuffer::from_slice(&prepared.warm_indices).map_err(CudaWildersError::from)?;
                     (*(self as *const _ as *mut CudaWilders)).param_cache = Some(ParamCache {
                         hash: params_hash,
                         periods,
@@ -171,10 +206,11 @@ impl CudaWilders {
                 }
             }
         };
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(prepared.series_len * n_combos)
-                .map_err(|e| CudaWildersError::Cuda(e.to_string()))?
-        };
+        let total = prepared
+            .series_len
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total)? };
 
         self.launch_batch_kernel(
             &d_prices,
@@ -187,10 +223,15 @@ impl CudaWilders {
             &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 {
+        // Synchronize producing stream so __cuda_array_interface__ may omit 'stream'.
+        self.stream.synchronize()?;
+
+        Ok(DeviceArrayF32Wilders {
             buf: d_out,
             rows: n_combos,
             cols: prepared.series_len,
+            ctx: Arc::clone(&self._context),
+            device_id: self.device_id,
         })
     }
 
@@ -380,7 +421,7 @@ impl CudaWilders {
         let mut func = self
             .module
             .get_function("wilders_batch_f32")
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaWildersError::MissingKernelSymbol { name: "wilders_batch_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x_user = match self.policy.batch {
@@ -398,6 +439,17 @@ impl CudaWilders {
 
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_threads, 1, 1).into();
+        // Basic launch validation: threads per block <= 1024
+        if block_threads > 1024 {
+            return Err(CudaWildersError::LaunchConfigTooLarge {
+                gx: n_combos as u32,
+                gy: 1,
+                gz: 1,
+                bx: block_threads,
+                by: 1,
+                bz: 1,
+            });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -418,9 +470,7 @@ impl CudaWilders {
                 &mut n_combos_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -441,7 +491,7 @@ impl CudaWilders {
         let mut func = self
             .module
             .get_function("wilders_many_series_one_param_f32")
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaWildersError::MissingKernelSymbol { name: "wilders_many_series_one_param_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x_user = match self.policy.many_series {
@@ -485,9 +535,7 @@ impl CudaWilders {
                 &mut rows_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -499,29 +547,36 @@ impl CudaWilders {
         cols: usize,
         rows: usize,
         params: &WildersParams,
-    ) -> Result<DeviceArrayF32, CudaWildersError> {
+    ) -> Result<DeviceArrayF32Wilders, CudaWildersError> {
         let (first_valids, period, alpha) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         // VRAM estimate
-        let elems = cols * rows;
-        let in_bytes = elems * std::mem::size_of::<f32>();
-        let first_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = elems * std::mem::size_of::<f32>();
-        let required = in_bytes + first_bytes + out_bytes + (16 * 1024 * 1024);
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let in_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(first_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .and_then(|x| x.checked_add(16 * 1024 * 1024))
+            .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaWildersError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            let (free, _tot) = mem_get_info().unwrap_or((0, 0));
+            return Err(CudaWildersError::OutOfMemory { required, free, headroom: 64 * 1024 * 1024 });
         }
 
-        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(|e| CudaWildersError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32).map_err(CudaWildersError::from)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(CudaWildersError::from)?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -533,10 +588,15 @@ impl CudaWilders {
             &mut d_out_tm,
         )?;
 
-        Ok(DeviceArrayF32 {
+        // Synchronize producing stream so __cuda_array_interface__ may omit 'stream'.
+        self.stream.synchronize()?;
+
+        Ok(DeviceArrayF32Wilders {
             buf: d_out_tm,
             rows,
             cols,
+            ctx: Arc::clone(&self._context),
+            device_id: self.device_id,
         })
     }
 
@@ -649,19 +709,36 @@ pub mod benches {
 
 fn expand_periods(range: &WildersBatchRange) -> Vec<WildersParams> {
     let (start, end, step) = range.period;
+    // Zero step or identical bounds → static
     if step == 0 || start == end {
-        return vec![WildersParams {
-            period: Some(start),
-        }];
+        return vec![WildersParams { period: Some(start) }];
     }
 
     let mut out = Vec::new();
-    let mut value = start;
-    while value <= end {
-        out.push(WildersParams {
-            period: Some(value),
-        });
-        value = value.saturating_add(step);
+    if start < end {
+        let mut v = start;
+        while v <= end {
+            out.push(WildersParams { period: Some(v) });
+            match v.checked_add(step) {
+                Some(n) => v = n,
+                None => break,
+            }
+        }
+    } else {
+        let mut v = start;
+        loop {
+            if v < end {
+                break;
+            }
+            out.push(WildersParams { period: Some(v) });
+            if v < end + step {
+                break;
+            }
+            v = v.saturating_sub(step);
+            if v == 0 && end != 0 {
+                break;
+            }
+        }
     }
     out
 }

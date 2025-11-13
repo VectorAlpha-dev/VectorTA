@@ -24,7 +24,7 @@
 //! then updates with y = (x − y)·(1/period) + y via fused `mul_add`. Matches batch to within FP roundoff.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::wilders_wrapper::DeviceArrayF32Wilders;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -199,7 +199,13 @@ pub enum WildersError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("wilders: Output length mismatch: output = {output_len}, data = {data_len}")]
     OutputLengthMismatch { output_len: usize, data_len: usize },
+    #[error("wilders: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("wilders: Invalid kernel for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    // Back-compat: keep the old variant name to avoid breaking callers. New code should use InvalidKernelForBatch.
     #[error("wilders: Invalid kernel type for batch operation: {kernel}")]
+    #[allow(dead_code)]
     InvalidKernelType { kernel: String },
 }
 
@@ -842,9 +848,7 @@ pub fn wilders_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(WildersError::InvalidKernelType {
-                kernel: format!("{:?}", k),
-            })
+            return Err(WildersError::InvalidKernelForBatch(k))
         }
     };
     let simd = match kernel {
@@ -882,11 +886,41 @@ impl WildersBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &WildersBatchRange) -> Vec<WildersParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // Zero step or equal bounds → static value
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(n) => v = n,
+                    None => break, // overflow guard
+                }
+            }
+        } else {
+            // Reversed bounds: walk downward by `step`
+            let mut v = start;
+            loop {
+                if v < end {
+                    break;
+                }
+                out.push(v);
+                if v < end + step {
+                    break;
+                }
+                v = v.saturating_sub(step);
+                if v == 0 && end != 0 {
+                    // Prevent infinite loop on extreme underflow scenarios
+                    break;
+                }
+            }
+        }
+        out
     }
+
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
@@ -922,10 +956,8 @@ fn wilders_batch_inner(
 ) -> Result<WildersBatchOutput, WildersError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(WildersError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, st) = sweep.period;
+        return Err(WildersError::InvalidRange { start: s, end: e, step: st });
     }
     let first = data
         .iter()
@@ -940,6 +972,14 @@ fn wilders_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    // Checked arithmetic before allocation
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(WildersError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1050,10 +1090,8 @@ pub fn wilders_batch_inner_into(
 ) -> Result<Vec<WildersParams>, WildersError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(WildersError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, st) = sweep.period;
+        return Err(WildersError::InvalidRange { start: s, end: e, step: st });
     }
 
     let first = data
@@ -1070,6 +1108,14 @@ pub fn wilders_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    // Guard potential overflow of rows * cols used by callers for preallocation
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(WildersError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
     // 1) Cast to MaybeUninit and paint warm prefixes via helper
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
@@ -1463,7 +1509,7 @@ mod tests {
         // Try to use a non-batch kernel for batch operation
         let res = wilders_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(
-            matches!(res, Err(WildersError::InvalidKernelType { .. })),
+            matches!(res, Err(WildersError::InvalidKernelForBatch(_))),
             "Wilders batch should fail with non-batch kernel, got: {:?}",
             res
         );
@@ -2099,7 +2145,7 @@ pub fn wilders_cuda_batch_dev_py(
     data_f32: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<WildersDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaWilders;
 
@@ -2118,7 +2164,7 @@ pub fn wilders_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(WildersDeviceArrayF32Py { inner })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2129,7 +2175,7 @@ pub fn wilders_cuda_many_series_one_param_dev_py(
     data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<WildersDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaWilders;
     use numpy::PyUntypedArrayMethods;
@@ -2151,7 +2197,134 @@ pub fn wilders_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(WildersDeviceArrayF32Py { inner })
+}
+
+// Wilders-specific CUDA Array Interface v3 + DLPack stubs (context-guarded handle)
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct WildersDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32Wilders,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl WildersDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        // 2D row-major FP32: (rows, cols)
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Wrapper synchronizes its stream before returning, so omit 'stream' per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA
+        (2, self.inner.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        struct DlpGuard {
+            // Own the shape/strides allocations and keep CUDA context alive
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<cust::context::Context>,
+        }
+
+        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() { return; }
+                // Reclaim guard first (drops Arc + Boxed arrays)
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                // Finally free the DLManagedTensor itself
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let name = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter { del(ptr); }
+                    // Rename capsule per convention to prevent double use
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        // Build shape/strides (element-based strides per DLPack)
+        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
+        let strides = Box::new([self.inner.cols as i64, 1i64]);
+        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+
+        let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self.inner.ctx.clone() });
+        let guard_ptr = Box::into_raw(guard);
+
+        // SAFETY: guard owns shape/strides; we borrow raw pointers into the tensor
+        let guard_ref = unsafe { &*guard_ptr };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2 /* kDLFloat */, bits: 32, lanes: 1 },
+                shape: guard_ref._shape.as_ptr() as *mut i64,
+                strides: guard_ref._strides.as_ptr() as *mut i64,
+                byte_offset: 0,
+            },
+            manager_ctx: guard_ptr as *mut c_void,
+            deleter: Some(managed_deleter),
+        });
+        let mt_raw = Box::into_raw(mt);
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(mt_raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor))
+        };
+        if capsule.is_null() {
+            // If capsule creation failed, free the managed tensor explicitly
+            unsafe { managed_deleter(mt_raw); }
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 #[cfg(feature = "wasm")]

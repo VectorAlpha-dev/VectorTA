@@ -11,7 +11,6 @@
 
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::adosc::{AdoscBatchRange, AdoscParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
@@ -22,28 +21,50 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaAdoscError {
-    Cuda(String),
+    #[error("CUDA: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buffer device {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
 
-impl fmt::Display for CudaAdoscError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaAdoscError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaAdoscError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
+/// VRAM-backed array handle for ADOSC with context guard and device id
+pub struct DeviceArrayF32Adosc {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
 }
-impl std::error::Error for CudaAdoscError {}
+impl DeviceArrayF32Adosc {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
+}
 
 pub struct CudaAdosc {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
+    device_id: u32,
     policy: CudaAdoscPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -70,17 +91,13 @@ impl CudaAdosc {
     }
     #[inline]
     fn device_max_grid_x(&self) -> Result<u32, CudaAdoscError> {
-        let dev = Device::get_device(0).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        Ok(
-            dev.get_attribute(DeviceAttribute::MaxGridDimX)
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))? as u32,
-        )
+        let dev = Device::get_device(self.device_id).map_err(CudaAdoscError::Cuda)?;
+        Ok(dev.get_attribute(DeviceAttribute::MaxGridDimX).map_err(CudaAdoscError::Cuda)? as u32)
     }
     pub fn new(device_id: usize) -> Result<Self, CudaAdoscError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/adosc_kernel.ptx"));
         let jit_opts = &[
@@ -88,14 +105,15 @@ impl CudaAdosc {
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
             policy: CudaAdoscPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -133,33 +151,24 @@ impl CudaAdosc {
         close: &[f32],
         volume: &[f32],
         sweep: &AdoscBatchRange,
-    ) -> Result<DeviceArrayF32, CudaAdoscError> {
+    ) -> Result<DeviceArrayF32Adosc, CudaAdoscError> {
         let len = high.len();
         if len == 0 || low.len() != len || close.len() != len || volume.len() != len {
-            return Err(CudaAdoscError::InvalidInput(
-                "input slices are empty or mismatched".into(),
-            ));
+            return Err(CudaAdoscError::InvalidInput("input slices are empty or mismatched".into()));
         }
-        let combos = expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaAdoscError::InvalidInput("no parameter combos".into()));
-        }
+        let combos = expand_grid_checked_cuda(sweep)?;
 
         // Async H2D copies
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            ?;
         let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            ?;
         let d_volume = unsafe { DeviceBuffer::from_slice_async(volume, &self.stream) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            ?;
 
         // Precompute ADL on device (enqueued)
-        let mut d_adl: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(len, &self.stream)
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
-        };
+        let mut d_adl: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
         self.launch_adl(&d_high, &d_low, &d_close, &d_volume, len, &mut d_adl)?;
 
         // Period arrays
@@ -176,39 +185,38 @@ impl CudaAdosc {
             shorts.push(sp);
             longs.push(lp);
         }
-        let d_shorts = unsafe { DeviceBuffer::from_slice_async(&shorts, &self.stream) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_longs = unsafe { DeviceBuffer::from_slice_async(&longs, &self.stream) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_shorts = unsafe { DeviceBuffer::from_slice_async(&shorts, &self.stream) }?;
+        let d_longs = unsafe { DeviceBuffer::from_slice_async(&longs, &self.stream) }?;
 
         // Memory sizing
         let (rows, cols) = (combos.len(), len);
         let bytes_inputs = 4 * cols * std::mem::size_of::<f32>();
         let bytes_adl = cols * std::mem::size_of::<f32>();
         let bytes_periods = 2 * rows * std::mem::size_of::<i32>();
-        let bytes_out_total = rows * cols * std::mem::size_of::<f32>();
+        let bytes_out_total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?
+            * std::mem::size_of::<f32>();
         let headroom = 64usize * 1024 * 1024;
 
-        let fits_all = match mem_get_info() {
-            Ok((free, _)) => {
-                let required = bytes_inputs + bytes_adl + bytes_periods + bytes_out_total;
-                required.saturating_add(headroom) <= free
-            }
-            Err(_) => true,
-        };
+        let required = bytes_inputs
+            .checked_add(bytes_adl).ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
+            .checked_add(bytes_periods).ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
+            .checked_add(bytes_out_total).ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?;
+        let fits_all = Self::will_fit(required, headroom);
 
         if fits_all {
-            let mut d_out: DeviceBuffer<f32> = unsafe {
-                DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
-                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
-            };
+            let total = rows.checked_mul(cols).ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
+            let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
             unsafe {
                 (*(self as *const _ as *mut CudaAdosc)).last_batch =
                     Some(BatchKernelSelected::Plain { block_x: self.default_block_x_for_batch() });
             }
             self.launch_batch_from_adl(&d_adl, &d_shorts, &d_longs, cols, rows, &mut d_out)?;
             self.maybe_log_batch_debug();
-            return Ok(DeviceArrayF32 { buf: d_out, rows, cols });
+            // Synchronize producing stream so CAI can omit 'stream'
+            self.stream.synchronize()?;
+            return Ok(DeviceArrayF32Adosc { buf: d_out, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id });
         }
 
         // Try keeping a full device output and fill by chunks
@@ -222,69 +230,59 @@ impl CudaAdosc {
         let max_grid = self.device_max_grid_x().unwrap_or(65_535) as usize;
 
         if can_hold_whole_output {
-            let mut d_out_full: DeviceBuffer<f32> = unsafe {
-                DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
-                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
-            };
+            let total = rows.checked_mul(cols).ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
+            let mut d_out_full: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
             let mut start = 0usize;
             while start < rows {
                 let remain = rows - start;
                 let chunk = remain.min(max_grid);
                 let d_shorts_off = unsafe {
-                    DeviceBuffer::from_slice_async(&shorts[start..start + chunk], &self.stream)
-                        .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+                    DeviceBuffer::from_slice_async(&shorts[start..start + chunk], &self.stream)?
                 };
                 let d_longs_off = unsafe {
-                    DeviceBuffer::from_slice_async(&longs[start..start + chunk], &self.stream)
-                        .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+                    DeviceBuffer::from_slice_async(&longs[start..start + chunk], &self.stream)?
                 };
                 let mut d_out_chunk: DeviceBuffer<f32> = unsafe {
-                    DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)
-                        .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+                    DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)?
                 };
                 self.launch_batch_from_adl(&d_adl, &d_shorts_off, &d_longs_off, cols, chunk, &mut d_out_chunk)?;
                 let base = start * cols;
                 let mut dst_slice = d_out_full.index(base..base + chunk * cols);
-                unsafe {
-                    dst_slice.async_copy_from(&d_out_chunk, &self.stream)
-                }
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+                unsafe { dst_slice.async_copy_from(&d_out_chunk, &self.stream) }?;
                 start += chunk;
             }
-            return Ok(DeviceArrayF32 { buf: d_out_full, rows, cols });
+            // Synchronize producing stream so CAI may omit 'stream'.
+            self.stream.synchronize()?;
+            return Ok(DeviceArrayF32Adosc { buf: d_out_full, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id });
         }
 
         // If we cannot hold the full output in VRAM, fall back to chunked device fill
         // into a single preallocated device buffer (no host re-upload).
-        let mut d_out_full: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
-        };
+        let total = rows.checked_mul(cols).ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_out_full: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
         let mut start = 0usize;
         while start < rows {
             let remain = rows - start;
             let chunk = remain.min(max_grid);
             let d_shorts_off = unsafe {
-                DeviceBuffer::from_slice_async(&shorts[start..start + chunk], &self.stream)
-                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+                DeviceBuffer::from_slice_async(&shorts[start..start + chunk], &self.stream)?
             };
             let d_longs_off = unsafe {
-                DeviceBuffer::from_slice_async(&longs[start..start + chunk], &self.stream)
-                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+                DeviceBuffer::from_slice_async(&longs[start..start + chunk], &self.stream)?
             };
             // launch directly into the correct offset inside the final output using a scratch chunk
             let mut d_out_chunk: DeviceBuffer<f32> = unsafe {
-                DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)
-                    .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
+                DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)?
             };
             self.launch_batch_from_adl(&d_adl, &d_shorts_off, &d_longs_off, cols, chunk, &mut d_out_chunk)?;
             let base = start * cols;
             let mut dst_slice = d_out_full.index(base..base + chunk * cols);
-            unsafe { dst_slice.async_copy_from(&d_out_chunk, &self.stream) }
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            unsafe { dst_slice.async_copy_from(&d_out_chunk, &self.stream) }?;
             start += chunk;
         }
-        Ok(DeviceArrayF32 { buf: d_out_full, rows, cols })
+        // Synchronize producing stream so CAI can omit 'stream'
+        self.stream.synchronize()?;
+        Ok(DeviceArrayF32Adosc { buf: d_out_full, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id })
     }
 
     /// Many-series × one-param (time-major). Returns a (rows x cols) device matrix
@@ -299,10 +297,8 @@ impl CudaAdosc {
         rows: usize,
         short: usize,
         long: usize,
-    ) -> Result<DeviceArrayF32, CudaAdoscError> {
-        let len = rows
-            .checked_mul(cols)
-            .ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
+    ) -> Result<DeviceArrayF32Adosc, CudaAdoscError> {
+        let len = rows.checked_mul(cols).ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
         if high_tm.len() != len
             || low_tm.len() != len
             || close_tm.len() != len
@@ -314,30 +310,20 @@ impl CudaAdosc {
         }
         if short == 0 || long == 0 || short >= long {
             return Err(CudaAdoscError::InvalidInput("invalid short/long".into()));
-            return Err(CudaAdoscError::InvalidInput("invalid short/long".into()));
         }
 
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
-        let d_volume = unsafe { DeviceBuffer::from_slice_async(volume_tm, &self.stream) }
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }?;
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }?;
+        let d_volume = unsafe { DeviceBuffer::from_slice_async(volume_tm, &self.stream) }?;
 
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(len, &self.stream)
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?
-        };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
         self.launch_many_series_one_param(
             &d_high, &d_low, &d_close, &d_volume, cols, rows, short, long, &mut d_out,
         )?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        // Synchronize producing stream so CAI can omit 'stream'
+        self.stream.synchronize()?;
+        Ok(DeviceArrayF32Adosc { buf: d_out, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id })
     }
 
     fn launch_adl(
@@ -352,7 +338,7 @@ impl CudaAdosc {
         let func = self
             .module
             .get_function("adosc_adl_f32")
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaAdoscError::MissingKernelSymbol { name: "adosc_adl_f32" })?;
         let grid: GridSize = (1, 1, 1).into();
         let block: BlockSize = (1, 1, 1).into();
         unsafe {
@@ -370,9 +356,7 @@ impl CudaAdosc {
                 &mut n_i as *mut _ as *mut c_void,
                 &mut out as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -392,7 +376,7 @@ impl CudaAdosc {
         let func = self
             .module
             .get_function("adosc_batch_from_adl_f32")
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaAdoscError::MissingKernelSymbol { name: "adosc_batch_from_adl_f32" })?;
         // Throughput mapping: many threads grid‑stride over combos
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
@@ -421,9 +405,7 @@ impl CudaAdosc {
                 &mut combos as *mut _ as *mut c_void,
                 &mut out as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -449,7 +431,7 @@ impl CudaAdosc {
         let func = self
             .module
             .get_function("adosc_many_series_one_param_f32")
-            .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaAdoscError::MissingKernelSymbol { name: "adosc_many_series_one_param_f32" })?;
         // Throughput mapping: threads grid‑stride over series
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
@@ -484,9 +466,7 @@ impl CudaAdosc {
                 &mut lp as *mut _ as *mut c_void,
                 &mut out as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaAdoscError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -664,25 +644,52 @@ pub mod benches {
 }
 
 fn expand_grid(r: &AdoscBatchRange) -> Vec<AdoscParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
+    match expand_grid_checked_cuda(r) {
+        Ok(v) => v,
+        Err(_) => Vec::new(),
     }
-    let shorts = axis(r.short_period);
-    let longs = axis(r.long_period);
+}
+
+fn expand_grid_checked_cuda(r: &AdoscBatchRange) -> Result<Vec<AdoscParams>, CudaAdoscError> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaAdoscError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let v: Vec<_> = (start..=end).step_by(step).collect();
+            if v.is_empty() { return Err(CudaAdoscError::InvalidInput("empty range".into())); }
+            Ok(v)
+        } else {
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                if cur - end < step { break; }
+                cur -= step;
+            }
+            if v.is_empty() { return Err(CudaAdoscError::InvalidInput("empty range".into())); }
+            Ok(v)
+        }
+    }
+    let shorts = axis(r.short_period)?;
+    let longs = axis(r.long_period)?;
     let mut out = Vec::new();
     for &s in &shorts {
         for &l in &longs {
-            if s == 0 || l == 0 || s >= l {
-                continue;
-            }
-            out.push(AdoscParams {
-                short_period: Some(s),
-                long_period: Some(l),
-            });
+            if s == 0 || l == 0 || s >= l { continue; }
+            out.push(AdoscParams { short_period: Some(s), long_period: Some(l) });
         }
     }
-    out
+    if out.is_empty() { return Err(CudaAdoscError::InvalidInput("no parameter combos".into())); }
+    Ok(out)
+}
+
+impl CudaAdosc {
+    #[inline]
+    fn will_fit(required: usize, headroom: usize) -> bool {
+        match mem_get_info() {
+            Ok((free, _)) => required.saturating_add(headroom) <= free,
+            Err(_) => true,
+        }
+    }
 }

@@ -25,11 +25,23 @@ use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu; // raw CUDA driver API for stream memset
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use cust::error::CudaError;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaTilsonError {
-    Cuda(String),
+    // Typed CUDA error
+    Cuda(#[from] CudaError),
+    // Resource/launch issues
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    MissingKernelSymbol { name: &'static str },
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    InvalidPolicy(&'static str),
+    DeviceMismatch { buf: u32, current: u32 },
+    NotImplemented,
+    // Validation
     InvalidInput(String),
 }
 
@@ -37,12 +49,30 @@ impl fmt::Display for CudaTilsonError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CudaTilsonError::Cuda(e) => write!(f, "CUDA error: {}", e),
+            CudaTilsonError::OutOfMemory { required, free, headroom } => write!(
+                f,
+                "Out of memory: required={}B, free={}B, headroom={}B",
+                required, free, headroom
+            ),
+            CudaTilsonError::MissingKernelSymbol { name } => write!(f, "Missing CUDA kernel symbol: {}", name),
+            CudaTilsonError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+                f,
+                "Launch config too large: grid=({}, {}, {}), block=({}, {}, {})",
+                gx, gy, gz, bx, by, bz
+            ),
+            CudaTilsonError::InvalidPolicy(s) => write!(f, "Invalid policy: {}", s),
+            CudaTilsonError::DeviceMismatch { buf, current } => write!(
+                f,
+                "Device/context mismatch: buffer on device {}, current device {}",
+                buf, current
+            ),
+            CudaTilsonError::NotImplemented => write!(f, "Not implemented"),
             CudaTilsonError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
         }
     }
 }
 
-impl std::error::Error for CudaTilsonError {}
+// thiserror::Error derive implements std::error::Error; keep Display manual impl
 
 // -------- Kernel policy / selection (kept lightweight; no tiling kernels yet) --------
 
@@ -86,12 +116,28 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaTilson {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
+    device_id: u32,
     policy: CudaTilsonPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+}
+
+/// VRAM-backed array handle for Tilson with context guard and device id
+pub struct DeviceArrayF32Tilson {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+impl DeviceArrayF32Tilson {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
 }
 
 struct PreparedTilsonBatch {
@@ -120,10 +166,10 @@ struct PreparedTilsonManySeries {
 
 impl CudaTilson {
     pub fn new(device_id: usize) -> Result<Self, CudaTilsonError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty()).map_err(CudaTilsonError::from)?;
+        let device = Device::get_device(device_id as u32).map_err(CudaTilsonError::from)?;
+        let context = Context::new(device).map_err(CudaTilsonError::from)?;
+        let context = Arc::new(context);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/tilson_kernel.ptx"));
         let jit_opts = &[
@@ -134,18 +180,16 @@ impl CudaTilson {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaTilsonError::Cuda(e.to_string()))?
-                }
+                Err(_) => Module::from_ptx(ptx, &[]).map_err(CudaTilsonError::from)?,
             },
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaTilsonError::from)?;
 
         Ok(Self {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
             policy: CudaTilsonPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -224,7 +268,7 @@ impl CudaTilson {
         let res = unsafe { cu::cuMemsetD32Async(ptr, QNAN_BITS, n_elems, st) };
         match res {
             cu::CUresult::CUDA_SUCCESS => Ok(()),
-            e => Err(CudaTilsonError::Cuda(format!(
+            e => Err(CudaTilsonError::InvalidInput(format!(
                 "cuMemsetD32Async failed: {:?}",
                 e
             ))),
@@ -258,12 +302,12 @@ impl CudaTilson {
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
             return true;
         }
         if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(Self::headroom_bytes()) <= free
+            required_bytes.saturating_add(headroom_bytes) <= free
         } else {
             true
         }
@@ -273,29 +317,44 @@ impl CudaTilson {
         &self,
         data_f32: &[f32],
         sweep: &TilsonBatchRange,
-    ) -> Result<DeviceArrayF32, CudaTilsonError> {
+    ) -> Result<DeviceArrayF32Tilson, CudaTilsonError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&prepared.periods_i32)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
-        let d_ks = DeviceBuffer::from_slice(&prepared.ks_f32)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
-        let d_c1 = DeviceBuffer::from_slice(&prepared.c1_f32)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
-        let d_c2 = DeviceBuffer::from_slice(&prepared.c2_f32)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
-        let d_c3 = DeviceBuffer::from_slice(&prepared.c3_f32)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
-        let d_c4 = DeviceBuffer::from_slice(&prepared.c4_f32)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
-        let d_lookbacks = DeviceBuffer::from_slice(&prepared.lookbacks_i32)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
+        // Best-effort VRAM fit check for large buffers (inputs + params + outputs)
+        let headroom = Self::headroom_bytes();
+        let item_f32 = std::mem::size_of::<f32>();
+        let input_bytes = data_f32.len().checked_mul(item_f32)
+            .ok_or_else(|| CudaTilsonError::InvalidInput("input_bytes overflow".into()))?;
+        let per_combo_bytes = std::mem::size_of::<i32>()
+            .checked_add(5usize.checked_mul(item_f32).ok_or_else(|| CudaTilsonError::InvalidInput("params_bytes overflow".into()))?)
+            .and_then(|v| v.checked_add(std::mem::size_of::<i32>()))
+            .ok_or_else(|| CudaTilsonError::InvalidInput("params_bytes overflow".into()))?;
+        let params_bytes = prepared.combos.len().checked_mul(per_combo_bytes)
+            .ok_or_else(|| CudaTilsonError::InvalidInput("params_bytes overflow".into()))?;
+        let out_elems = prepared.series_len.checked_mul(n_combos)
+            .ok_or_else(|| CudaTilsonError::InvalidInput("out elements overflow".into()))?;
+        let out_bytes = out_elems.checked_mul(item_f32)
+            .ok_or_else(|| CudaTilsonError::InvalidInput("out bytes overflow".into()))?;
+        let required = input_bytes
+            .checked_add(params_bytes).ok_or_else(|| CudaTilsonError::InvalidInput("bytes overflow".into()))?
+            .checked_add(out_bytes).ok_or_else(|| CudaTilsonError::InvalidInput("bytes overflow".into()))?;
+        if let Some((free, _)) = Self::device_mem_info() {
+            if !Self::will_fit(required, headroom) {
+                return Err(CudaTilsonError::OutOfMemory { required, free, headroom });
+            }
+        }
+
+        let d_prices = DeviceBuffer::from_slice(data_f32).map_err(CudaTilsonError::from)?;
+        let d_periods = DeviceBuffer::from_slice(&prepared.periods_i32).map_err(CudaTilsonError::from)?;
+        let d_ks = DeviceBuffer::from_slice(&prepared.ks_f32).map_err(CudaTilsonError::from)?;
+        let d_c1 = DeviceBuffer::from_slice(&prepared.c1_f32).map_err(CudaTilsonError::from)?;
+        let d_c2 = DeviceBuffer::from_slice(&prepared.c2_f32).map_err(CudaTilsonError::from)?;
+        let d_c3 = DeviceBuffer::from_slice(&prepared.c3_f32).map_err(CudaTilsonError::from)?;
+        let d_c4 = DeviceBuffer::from_slice(&prepared.c4_f32).map_err(CudaTilsonError::from)?;
+        let d_lookbacks = DeviceBuffer::from_slice(&prepared.lookbacks_i32).map_err(CudaTilsonError::from)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(prepared.series_len * n_combos)
-                .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(prepared.series_len * n_combos).map_err(CudaTilsonError::from)?
         };
 
         // Chunk by VRAM and grid dimension limits.
@@ -322,14 +381,14 @@ impl CudaTilson {
         }
 
         // ensure completion for consistent handle semantics
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaTilsonError::from)?;
 
-        Ok(DeviceArrayF32 {
+        Ok(DeviceArrayF32Tilson {
             buf: d_out,
             rows: n_combos,
             cols: prepared.series_len,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
         })
     }
 
@@ -405,9 +464,7 @@ impl CudaTilson {
             )?;
             launched += this;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaTilsonError::from)
     }
 
     pub fn tilson_many_series_one_param_time_major_dev(
@@ -416,17 +473,34 @@ impl CudaTilson {
         num_series: usize,
         series_len: usize,
         params: &TilsonParams,
-    ) -> Result<DeviceArrayF32, CudaTilsonError> {
+    ) -> Result<DeviceArrayF32Tilson, CudaTilsonError> {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
+        // VRAM fit check (input + first_valids + output)
+        let headroom = Self::headroom_bytes();
+        let item_f32 = std::mem::size_of::<f32>();
+        let input_bytes = data_tm_f32.len().checked_mul(item_f32)
+            .ok_or_else(|| CudaTilsonError::InvalidInput("input_bytes overflow".into()))?;
+        let first_valids_bytes = prepared.first_valids.len().checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaTilsonError::InvalidInput("first_valids_bytes overflow".into()))?;
+        let out_elems = num_series.checked_mul(series_len)
+            .ok_or_else(|| CudaTilsonError::InvalidInput("out elements overflow".into()))?;
+        let out_bytes = out_elems.checked_mul(item_f32)
+            .ok_or_else(|| CudaTilsonError::InvalidInput("out bytes overflow".into()))?;
+        let required = input_bytes
+            .checked_add(first_valids_bytes).ok_or_else(|| CudaTilsonError::InvalidInput("bytes overflow".into()))?
+            .checked_add(out_bytes).ok_or_else(|| CudaTilsonError::InvalidInput("bytes overflow".into()))?;
+        if let Some((free, _)) = Self::device_mem_info() {
+            if !Self::will_fit(required, headroom) {
+                return Err(CudaTilsonError::OutOfMemory { required, free, headroom });
+            }
+        }
+
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32).map_err(CudaTilsonError::from)?;
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).map_err(CudaTilsonError::from)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(num_series * series_len)
-                .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(num_series * series_len).map_err(CudaTilsonError::from)?
         };
 
         self.launch_many_series_kernel(
@@ -445,14 +519,14 @@ impl CudaTilson {
         )?;
 
         // ensure completion
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaTilsonError::from)?;
 
-        Ok(DeviceArrayF32 {
+        Ok(DeviceArrayF32Tilson {
             buf: d_out,
             rows: series_len,
             cols: num_series,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
         })
     }
 
@@ -528,7 +602,7 @@ impl CudaTilson {
         let func = self
             .module
             .get_function("tilson_batch_f32")
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTilsonError::MissingKernelSymbol { name: "tilson_batch_f32" })?;
 
         // Policy select block size
         let block_x = match self.policy.batch {
@@ -537,6 +611,9 @@ impl CudaTilson {
         };
         // 1-D launch across combos
         let blocks_x = ((n_combos as u32) + block_x - 1) / block_x;
+        if block_x > 1024 || blocks_x == 0 {
+            return Err(CudaTilsonError::LaunchConfigTooLarge { gx: blocks_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         let grid: GridSize = (blocks_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -601,7 +678,7 @@ impl CudaTilson {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
+                .map_err(CudaTilsonError::from)?;
         }
 
         Ok(())
@@ -630,7 +707,7 @@ impl CudaTilson {
         let func = self
             .module
             .get_function("tilson_many_series_one_param_f32")
-            .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTilsonError::MissingKernelSymbol { name: "tilson_many_series_one_param_f32" })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256u32,
@@ -638,6 +715,9 @@ impl CudaTilson {
         };
         // 1-D launch across series
         let blocks_x = ((num_series as u32) + block_x - 1) / block_x;
+        if block_x > 1024 || blocks_x == 0 {
+            return Err(CudaTilsonError::LaunchConfigTooLarge { gx: blocks_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         let grid: GridSize = (blocks_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -683,7 +763,7 @@ impl CudaTilson {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTilsonError::Cuda(e.to_string()))?;
+                .map_err(CudaTilsonError::from)?;
         }
 
         Ok(())
@@ -697,7 +777,7 @@ impl CudaTilson {
             return Err(CudaTilsonError::InvalidInput("input data is empty".into()));
         }
 
-        let combos = expand_combos(sweep);
+        let combos = expand_combos(sweep)?;
         if combos.is_empty() {
             return Err(CudaTilsonError::InvalidInput(
                 "no parameter combinations provided".into(),
@@ -920,47 +1000,67 @@ pub mod benches {
     pub use tilson_benches::bench_profiles;
 }
 
-fn expand_combos(range: &TilsonBatchRange) -> Vec<TilsonParams> {
-    fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
+fn expand_combos(range: &TilsonBatchRange) -> Result<Vec<TilsonParams>, CudaTilsonError> {
+    fn axis_usize(axis: (usize, usize, usize)) -> Result<Vec<usize>, CudaTilsonError> {
         let (start, end, step) = axis;
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        let mut out = Vec::new();
-        let mut value = start;
-        while value <= end {
-            out.push(value);
-            value = value.saturating_add(step);
+        if start < end {
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                cur = cur.checked_add(step).ok_or_else(|| CudaTilsonError::InvalidInput("usize range overflow".into()))?;
+            }
+            return Ok(v);
         }
-        out
+        // reversed bounds; step interpreted as decrement
+        let mut v = Vec::new();
+        let mut cur = start;
+        loop {
+            v.push(cur);
+            match cur.checked_sub(step) {
+                Some(next) if next >= end => cur = next,
+                _ => break,
+            }
+        }
+        if v.is_empty() { Err(CudaTilsonError::InvalidInput("empty usize range".into())) } else { Ok(v) }
     }
 
-    fn axis_f64(axis: (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64(axis: (f64, f64, f64)) -> Result<Vec<f64>, CudaTilsonError> {
         let (start, end, step) = axis;
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        let mut out = Vec::new();
-        let mut value = start;
-        while value <= end + 1e-12 {
-            out.push(value);
-            value += step;
+        let mut v = Vec::new();
+        let mut x = start;
+        if step > 0.0 {
+            while x <= end + 1e-12 {
+                v.push(x);
+                x = x + step;
+            }
+        } else {
+            while x >= end - 1e-12 {
+                v.push(x);
+                x = x + step; // negative step
+            }
         }
-        out
+        if v.is_empty() { Err(CudaTilsonError::InvalidInput("empty f64 range".into())) } else { Ok(v) }
     }
 
-    let periods = axis_usize(range.period);
-    let volume_factors = axis_f64(range.volume_factor);
-    let mut combos = Vec::with_capacity(periods.len() * volume_factors.len());
+    let periods = axis_usize(range.period)?;
+    let volume_factors = axis_f64(range.volume_factor)?;
+    let mut combos = Vec::with_capacity(periods.len().saturating_mul(volume_factors.len()));
     for &period in &periods {
         for &vf in &volume_factors {
-            combos.push(TilsonParams {
-                period: Some(period),
-                volume_factor: Some(vf),
-            });
+            combos.push(TilsonParams { period: Some(period), volume_factor: Some(vf) });
         }
     }
-    combos
+    if combos.is_empty() {
+        return Err(CudaTilsonError::InvalidInput("no parameter combinations".into()));
+    }
+    Ok(combos)
 }
 
 // ---------- helper: choose combos-per-launch based on VRAM and grid limits ----------

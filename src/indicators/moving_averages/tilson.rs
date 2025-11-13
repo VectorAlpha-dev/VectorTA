@@ -32,7 +32,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::{CudaTilson, CudaTilsonError};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::tilson_wrapper::DeviceArrayF32Tilson;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -226,6 +226,21 @@ pub enum TilsonError {
 
     #[error("tilson: Invalid volume factor: {v_factor}")]
     InvalidVolumeFactor { v_factor: f64 },
+
+    #[error("tilson: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("tilson: Invalid kernel for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("tilson: Invalid integer range expansion: start={start}, end={end}, step={step}")]
+    InvalidRangeUsize { start: usize, end: usize, step: usize },
+
+    #[error("tilson: Invalid float range expansion: start={start}, end={end}, step={step}")]
+    InvalidRangeF64 { start: f64, end: f64, step: f64 },
+
+    #[error("tilson: invalid input: {0}")]
+    InvalidInput(&'static str),
 }
 
 #[inline]
@@ -258,9 +273,9 @@ pub fn tilson_into(input: &TilsonInput, out: &mut [f64]) -> Result<(), TilsonErr
     let (data, period, v_factor, first, len, chosen) = tilson_prepare(input, Kernel::Auto)?;
 
     if out.len() != len {
-        return Err(TilsonError::InvalidPeriod {
-            period: out.len(),
-            data_len: len,
+        return Err(TilsonError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
         });
     }
 
@@ -283,9 +298,9 @@ pub fn tilson_into_slice(
 ) -> Result<(), TilsonError> {
     let (data, period, v_factor, first, _len, chosen) = tilson_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(TilsonError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(TilsonError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
     tilson_compute_into(data, period, v_factor, first, chosen, dst)?;
@@ -908,12 +923,7 @@ pub fn tilson_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(TilsonError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
-        }
+        _ => return Err(TilsonError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
@@ -1019,29 +1029,60 @@ impl TilsonBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &TilsonBatchRange) -> Vec<TilsonParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &TilsonBatchRange) -> Result<Vec<TilsonParams>, TilsonError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TilsonError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return Ok((start..=end).step_by(step).collect());
+        }
+        // reversed bounds supported by stepping down
+        let mut v = Vec::new();
+        let mut cur = start;
+        loop {
+            v.push(cur);
+            match cur.checked_sub(step) {
+                Some(next) if next >= end => {
+                    cur = next;
+                }
+                _ => break,
+            }
+        }
+        if v.is_empty() {
+            Err(TilsonError::InvalidRangeUsize { start, end, step })
+        } else {
+            Ok(v)
+        }
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, TilsonError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if step > 0.0 {
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += step;
+            }
+        } else {
+            while x >= end - 1e-12 {
+                v.push(x);
+                x += step; // negative step
+            }
         }
-        v
+        if v.is_empty() {
+            Err(TilsonError::InvalidRangeF64 { start, end, step })
+        } else {
+            Ok(v)
+        }
     }
-    let periods = axis_usize(r.period);
-    let v_factors = axis_f64(r.volume_factor);
 
-    let mut out = Vec::with_capacity(periods.len() * v_factors.len());
+    let periods = axis_usize(r.period)?;
+    let v_factors = axis_f64(r.volume_factor)?;
+
+    let mut out = Vec::with_capacity(periods.len().saturating_mul(v_factors.len()));
     for &p in &periods {
         for &v in &v_factors {
             out.push(TilsonParams {
@@ -1050,7 +1091,10 @@ fn expand_grid(r: &TilsonBatchRange) -> Vec<TilsonParams> {
             });
         }
     }
-    out
+    if out.is_empty() {
+        return Err(TilsonError::InvalidInput("empty parameter sweep"));
+    }
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1078,13 +1122,7 @@ fn tilson_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<TilsonBatchOutput, TilsonError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(TilsonError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     if data.is_empty() {
         return Err(TilsonError::EmptyInputData);
@@ -1146,10 +1184,13 @@ fn tilson_batch_inner(
 
     // ------------- 4. convert to Vec<f64> like alma.rs ----------
     let mut guard = core::mem::ManuallyDrop::new(raw);
+    let total_cells = rows
+        .checked_mul(cols)
+        .ok_or(TilsonError::InvalidInput("rows*cols overflow"))?;
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
-            guard.len(),
+            total_cells,
             guard.capacity(),
         )
     };
@@ -2314,13 +2355,7 @@ fn tilson_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<TilsonParams>, TilsonError> {
     // ---------- 0. parameter checks ----------
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(TilsonError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     if data.is_empty() {
         return Err(TilsonError::EmptyInputData);
@@ -2342,6 +2377,17 @@ fn tilson_batch_inner_into(
     // ---------- 1. matrix dimensions ----------
     let rows = combos.len();
     let cols = data.len();
+
+    // Verify output slice length to avoid UB
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(TilsonError::InvalidInput("rows*cols overflow"))?;
+    if out.len() != expected {
+        return Err(TilsonError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // ---------- 2. build per-row warm-up lengths ----------
     let warm: Vec<usize> = combos
@@ -2533,8 +2579,9 @@ pub fn tilson_batch_py<'py>(
     };
 
     // Calculate dimensions
-    let combos = expand_grid(&sweep);
-    let rows = combos.len();
+    let combos_dim = expand_grid(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let rows = combos_dim.len();
     let cols = slice_in.len();
 
     // Pre-allocate output array (OK for batch operations)
@@ -2593,7 +2640,7 @@ pub fn tilson_cuda_batch_dev_py(
     period_range: (usize, usize, usize),
     volume_factor_range: Option<(f64, f64, f64)>,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32TilsonPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2610,7 +2657,7 @@ pub fn tilson_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32TilsonPy { inner })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2622,7 +2669,7 @@ pub fn tilson_cuda_many_series_one_param_dev_py(
     period: usize,
     volume_factor: f64,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32TilsonPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2643,7 +2690,123 @@ pub fn tilson_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32TilsonPy { inner })
+}
+
+// -------------------- Python: CUDA Array Interface v3 + DLPack (Tilson) ----------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32TilsonPy {
+    pub(crate) inner: DeviceArrayF32Tilson,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32TilsonPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing stream is synchronized before returning the handle
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.inner.device_id as i32) }
+
+    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<cust::context::Context>,
+        }
+
+        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let name = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter { del(ptr); }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
+        let strides = Box::new([self.inner.cols as i64, 1i64]);
+        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+
+        let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self.inner.ctx.clone() });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2 /* kDLFloat */, bits: 32, lanes: 1 },
+                shape: guard_ref._shape.as_ptr() as *mut i64,
+                strides: guard_ref._strides.as_ptr() as *mut i64,
+                byte_offset: 0,
+            },
+            manager_ctx: guard_ptr as *mut c_void,
+            deleter: Some(managed_deleter),
+        });
+        let mt_raw = Box::into_raw(mt);
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(mt_raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor))
+        };
+        if capsule.is_null() {
+            unsafe { managed_deleter(mt_raw); }
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 #[cfg(feature = "python")]
@@ -2768,7 +2931,10 @@ pub fn tilson_batch_metadata_js(
         volume_factor: (v_factor_start, v_factor_end, v_factor_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = match expand_grid(&sweep) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
     let mut result = Vec::with_capacity(combos.len() * 2);
 
     // First, all periods
@@ -2915,7 +3081,7 @@ pub fn tilson_batch_into(
             volume_factor: (v_factor_start, v_factor_end, v_factor_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows * cols;

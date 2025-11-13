@@ -11,7 +11,7 @@ use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::cwma::{CwmaBatchRange, CwmaParams};
 use cust::context::Context;
 use cust::context::{CacheConfig, SharedMemoryConfig};
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, Function, GridSize};
 use cust::memory::{
     mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer,
@@ -21,6 +21,7 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
@@ -30,12 +31,16 @@ pub enum CudaCwmaError {
     Cuda(#[from] cust::error::CudaError),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("device out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("launch configuration too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buffer device {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
@@ -112,7 +117,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaCwma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaCwmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -125,7 +130,7 @@ impl CudaCwma {
     pub fn new(device_id: usize) -> Result<Self, CudaCwmaError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cwma_kernel.ptx"));
         // JIT preference: determine target from context + O2, then fall back.
@@ -187,6 +192,9 @@ impl CudaCwma {
     pub fn synchronize(&self) -> Result<(), CudaCwmaError> {
         self.stream.synchronize().map_err(Into::into)
     }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -629,6 +637,20 @@ impl CudaCwma {
 
             for (start, len) in Self::grid_y_chunks(n_combos) {
                 let grid: GridSize = (grid_x, len as u32, 1).into();
+                // Validate grid X does not exceed device limits (best-effort)
+                let max_gx = Device::get_device(self.device_id)
+                    .and_then(|d| d.get_attribute(DeviceAttribute::MaxGridDimX))?
+                    as u32;
+                if grid_x > max_gx {
+                    return Err(CudaCwmaError::LaunchConfigTooLarge {
+                        gx: grid_x,
+                        gy: len as u32,
+                        gz: 1,
+                        bx: block_x,
+                        by: 1,
+                        bz: 1,
+                    });
+                }
                 unsafe {
                     let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                     // Offset parameter arrays to this Y-slice
@@ -657,6 +679,8 @@ impl CudaCwma {
                     self.stream.launch(&func, grid, block, shared_bytes, args)?;
                 }
             }
+            // Synchronize producing stream before returning a VRAM handle
+            self.synchronize()?;
         } else {
             // Plain kernel path (use occupancy suggestion when Auto)
             let shared_bytes = ((max_period.saturating_sub(1)) * std::mem::size_of::<f32>()) as u32;
@@ -686,6 +710,19 @@ impl CudaCwma {
                     let mut first_valid_i = first_valid as i32;
                     let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();
                     let grid: GridSize = (grid_x, len as u32, 1).into();
+                    let max_gx = Device::get_device(self.device_id)
+                        .and_then(|d| d.get_attribute(DeviceAttribute::MaxGridDimX))?
+                        as u32;
+                    if grid_x > max_gx {
+                        return Err(CudaCwmaError::LaunchConfigTooLarge {
+                            gx: grid_x,
+                            gy: len as u32,
+                            gz: 1,
+                            bx: block_x,
+                            by: 1,
+                            bz: 1,
+                        });
+                    }
                     let args: &mut [*mut c_void] = &mut [
                         &mut prices_ptr as *mut _ as *mut c_void,
                         &mut weights_ptr as *mut _ as *mut c_void,
@@ -705,6 +742,8 @@ impl CudaCwma {
                 (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
             }
             self.maybe_log_batch_debug();
+            // Synchronize producing stream before returning a VRAM handle
+            self.synchronize()?;
         }
         Ok(())
     }

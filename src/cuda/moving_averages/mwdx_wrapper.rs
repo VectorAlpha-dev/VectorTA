@@ -7,7 +7,6 @@
 
 #![cfg(feature = "cuda")]
 
-use super::alma_wrapper::DeviceArrayF32;
 use super::cwma_wrapper::{BatchKernelPolicy, ManySeriesKernelPolicy};
 use crate::indicators::moving_averages::mwdx::{expand_grid_mwdx, MwdxBatchRange, MwdxParams};
 use cust::context::Context;
@@ -21,29 +20,51 @@ use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu; // raw CUDA driver API
 use std::ffi::c_void;
 use std::fmt;
+use thiserror::Error;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaMwdxError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error(
+        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
+    )]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
 
-impl fmt::Display for CudaMwdxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMwdxError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMwdxError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
+/// VRAM-backed array handle for MWDX with context guard and device id
+pub struct DeviceArrayF32Mwdx {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
 }
-
-impl std::error::Error for CudaMwdxError {}
+impl DeviceArrayF32Mwdx {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
+}
 
 pub struct CudaMwdx {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaMwdxPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -114,10 +135,9 @@ impl CudaMwdx {
         );
     }
     pub fn new(device_id: usize) -> Result<Self, CudaMwdxError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/mwdx_kernel.ptx"));
         let jit_opts = &[
@@ -132,12 +152,11 @@ impl CudaMwdx {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaMwdxError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -173,16 +192,14 @@ impl CudaMwdx {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaMwdxError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaMwdxError::from)
     }
 
     pub fn mwdx_batch_dev(
         &self,
         data_f32: &[f32],
         sweep: &MwdxBatchRange,
-    ) -> Result<DeviceArrayF32, CudaMwdxError> {
+    ) -> Result<DeviceArrayF32Mwdx, CudaMwdxError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
@@ -190,21 +207,28 @@ impl CudaMwdx {
         let bytes_prices = prepared.series_len * std::mem::size_of::<f32>();
         let bytes_factors = n_combos * std::mem::size_of::<f32>();
         let bytes_out = prepared.series_len * n_combos * std::mem::size_of::<f32>();
-        let required = bytes_prices + bytes_factors + bytes_out;
+        let required = bytes_prices
+            .checked_add(bytes_factors)
+            .and_then(|x| x.checked_add(bytes_out))
+            .ok_or_else(|| CudaMwdxError::InvalidInput("byte size overflow".into()))?;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaMwdxError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaMwdxError::OutOfMemory {
+                    required,
+                    free,
+                    headroom: 64 * 1024 * 1024,
+                });
+            } else {
+                return Err(CudaMwdxError::InvalidInput(
+                    "insufficient VRAM (mem_get_info unavailable)".into(),
+                ));
+            }
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
-        let d_factors = DeviceBuffer::from_slice(&prepared.factors_f32)
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let d_factors = DeviceBuffer::from_slice(&prepared.factors_f32)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(prepared.series_len * n_combos)
-                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(prepared.series_len * n_combos)?
         };
 
         self.launch_batch_kernel(
@@ -216,10 +240,12 @@ impl CudaMwdx {
             &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 {
+        Ok(DeviceArrayF32Mwdx {
             buf: d_out,
             rows: n_combos,
             cols: prepared.series_len,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
         })
     }
 
@@ -291,17 +317,17 @@ impl CudaMwdx {
         // Use page-locked host buffer and async copy for better throughput.
         let mut host_locked: LockedBuffer<f32> = unsafe {
             LockedBuffer::uninitialized(out_flat.len())
-                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?
+                .map_err(CudaMwdxError::from)?
         };
         unsafe {
             handle
                 .buf
                 .async_copy_to(&mut host_locked, &self.stream)
-                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+                .map_err(CudaMwdxError::from)?;
         }
         self.stream
             .synchronize()
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+            .map_err(CudaMwdxError::from)?;
         out_flat.copy_from_slice(host_locked.as_slice());
         Ok(())
     }
@@ -312,7 +338,7 @@ impl CudaMwdx {
         num_series: usize,
         series_len: usize,
         params: &MwdxParams,
-    ) -> Result<DeviceArrayF32, CudaMwdxError> {
+    ) -> Result<DeviceArrayF32Mwdx, CudaMwdxError> {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
@@ -320,21 +346,28 @@ impl CudaMwdx {
         let bytes_prices = num_series * series_len * std::mem::size_of::<f32>();
         let bytes_first = num_series * std::mem::size_of::<i32>();
         let bytes_out = num_series * series_len * std::mem::size_of::<f32>();
-        let required = bytes_prices + bytes_first + bytes_out;
+        let required = bytes_prices
+            .checked_add(bytes_first)
+            .and_then(|x| x.checked_add(bytes_out))
+            .ok_or_else(|| CudaMwdxError::InvalidInput("byte size overflow".into()))?;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaMwdxError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaMwdxError::OutOfMemory {
+                    required,
+                    free,
+                    headroom: 64 * 1024 * 1024,
+                });
+            } else {
+                return Err(CudaMwdxError::InvalidInput(
+                    "insufficient VRAM (mem_get_info unavailable)".into(),
+                ));
+            }
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(num_series * series_len)
-                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(num_series * series_len)?
         };
 
         self.launch_many_series_kernel(
@@ -346,10 +379,12 @@ impl CudaMwdx {
             &mut d_out,
         )?;
 
-        Ok(DeviceArrayF32 {
+        Ok(DeviceArrayF32Mwdx {
             buf: d_out,
             rows: series_len,
             cols: num_series,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
         })
     }
 
@@ -418,19 +453,14 @@ impl CudaMwdx {
             params,
         )?;
 
-        let mut host_locked: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(out_tm.len())
-                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?
-        };
+        let mut host_locked: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out_tm.len())? };
         unsafe {
             handle
                 .buf
                 .async_copy_to(&mut host_locked, &self.stream)
-                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+                .map_err(CudaMwdxError::from)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaMwdxError::from)?;
         out_tm.copy_from_slice(host_locked.as_slice());
         Ok(())
     }
@@ -465,7 +495,7 @@ impl CudaMwdx {
         let func = self
             .module
             .get_function("mwdx_batch_f32")
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMwdxError::MissingKernelSymbol { name: "mwdx_batch_f32" })?;
 
         // Hint driver to persist `prices` in L2 across combo CTAs.
         unsafe {
@@ -494,15 +524,11 @@ impl CudaMwdx {
                     &mut combos_i as *mut _ as *mut c_void,
                     &mut out_raw as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, &mut args)
-                    .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, &mut args)?;
             }
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaMwdxError::from)
     }
 
     fn launch_many_series_kernel(
@@ -536,7 +562,7 @@ impl CudaMwdx {
             let func = self
                 .module
                 .get_function(func_name)
-                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaMwdxError::MissingKernelSymbol { name: func_name })?;
 
             // Introspection
             unsafe {
@@ -564,15 +590,13 @@ impl CudaMwdx {
                     &mut series_len_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, &mut args)
-                    .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, &mut args)?;
             }
         } else {
             let func = self
                 .module
                 .get_function("mwdx_many_series_one_param_f32")
-                .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaMwdxError::MissingKernelSymbol { name: "mwdx_many_series_one_param_f32" })?;
 
             // Introspection
             unsafe {
@@ -599,15 +623,11 @@ impl CudaMwdx {
                     &mut series_len_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, &mut args)
-                    .map_err(|e| CudaMwdxError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, &mut args)?;
             }
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMwdxError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaMwdxError::from)
     }
 
     fn prepare_batch_inputs(

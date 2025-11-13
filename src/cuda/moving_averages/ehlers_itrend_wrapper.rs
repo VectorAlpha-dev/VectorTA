@@ -51,6 +51,8 @@ pub enum CudaEhlersITrendError {
     },
     #[error("Not implemented")]
     NotImplemented,
+    #[error("Device mismatch: buffer bound to a different device (buf={buf}, current={current})")]
+    DeviceMismatch { buf: u32, current: u32 },
 }
 
 // Display derives from `thiserror::Error` per-variant messages.
@@ -171,6 +173,9 @@ impl CudaEhlersITrend {
             debug_many_logged: false,
         })
     }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     pub fn new_with_policy(
         device_id: usize,
@@ -930,28 +935,52 @@ pub mod benches {
 fn expand_grid_cuda(
     range: &EhlersITrendBatchRange,
 ) -> Result<Vec<EhlersITrendParams>, CudaEhlersITrendError> {
-    // Mirror CPU semantics exactly to keep behavior/tests aligned:
-    // - step==0 → singleton only if start==end; otherwise error
-    // - reversed bounds (start > end) → error
-    fn axis(tuple: (usize, usize, usize)) -> Option<Vec<usize>> {
+    // Robust semantics to match CPU:
+    // - step == 0 → singleton if start==end, else error
+    // - support reversed bounds by descending sequence
+    fn axis(tuple: (usize, usize, usize)) -> Result<Vec<usize>, CudaEhlersITrendError> {
         let (start, end, step) = tuple;
         if step == 0 {
-            if start == end {
-                Some(vec![start])
+            return if start == end {
+                Ok(vec![start])
             } else {
-                None
-            }
-        } else if start > end {
-            None
-        } else {
-            Some((start..=end).step_by(step).collect())
+                Err(CudaEhlersITrendError::InvalidInput(format!(
+                    "invalid range: start={}, end={}, step={}",
+                    start, end, step
+                )))
+            };
         }
+        let mut out = Vec::new();
+        if start <= end {
+            let mut x = start;
+            loop {
+                out.push(x);
+                match x.checked_add(step) {
+                    Some(n) if n > x && n <= end => x = n,
+                    _ => break,
+                }
+            }
+        } else {
+            let mut x = start;
+            loop {
+                out.push(x);
+                match x.checked_sub(step) {
+                    Some(n) if n < x && n >= end => x = n,
+                    _ => break,
+                }
+            }
+        }
+        if out.is_empty() {
+            return Err(CudaEhlersITrendError::InvalidInput(format!(
+                "invalid range produced empty set: start={}, end={}, step={}",
+                start, end, step
+            )));
+        }
+        Ok(out)
     }
 
-    let warmups = axis(range.warmup_bars)
-        .ok_or_else(|| CudaEhlersITrendError::InvalidInput("invalid warmup range".into()))?;
-    let max_dcs = axis(range.max_dc_period)
-        .ok_or_else(|| CudaEhlersITrendError::InvalidInput("invalid max_dc range".into()))?;
+    let warmups = axis(range.warmup_bars)?;
+    let max_dcs = axis(range.max_dc_period)?;
 
     let mut combos = Vec::with_capacity(warmups.len() * max_dcs.len());
     for &w in &warmups {

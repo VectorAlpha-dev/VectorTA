@@ -9,7 +9,6 @@
 
 #![cfg(feature = "cuda")]
 
-use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::kama::{KamaBatchRange, KamaParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -20,6 +19,7 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
@@ -43,10 +43,25 @@ pub enum CudaKamaError {
     NotImplemented,
 }
 
+/// VRAM-backed array handle for KAMA with context guard and device id
+pub struct DeviceArrayF32Kama {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+impl DeviceArrayF32Kama {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
+}
+
 pub struct CudaKama {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaKamaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -59,7 +74,7 @@ impl CudaKama {
     pub fn new(device_id: usize) -> Result<Self, CudaKamaError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kama_kernel.ptx"));
         // Match ALMA loader behavior: prefer DetermineTargetFromContext + O2, fallback progressively.
@@ -357,7 +372,7 @@ impl CudaKama {
         first_valid: usize,
         series_len: usize,
         max_period: usize,
-    ) -> Result<DeviceArrayF32, CudaKamaError> {
+    ) -> Result<DeviceArrayF32Kama, CudaKamaError> {
         let n_combos = combos.len();
         let prices_bytes = series_len
             .checked_mul(std::mem::size_of::<f32>())
@@ -440,10 +455,12 @@ impl CudaKama {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
+        Ok(DeviceArrayF32Kama {
             buf: d_out,
             rows: n_combos,
             cols: series_len,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
         })
     }
 
@@ -458,7 +475,7 @@ impl CudaKama {
         &self,
         data_f32: &[f32],
         sweep: &KamaBatchRange,
-    ) -> Result<DeviceArrayF32, CudaKamaError> {
+    ) -> Result<DeviceArrayF32Kama, CudaKamaError> {
         let (combos, first_valid, series_len, max_period) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
         self.run_batch_kernel(data_f32, &combos, first_valid, series_len, max_period)
@@ -616,7 +633,7 @@ impl CudaKama {
         rows: usize,
         first_valids: &[i32],
         period: usize,
-    ) -> Result<DeviceArrayF32, CudaKamaError> {
+    ) -> Result<DeviceArrayF32Kama, CudaKamaError> {
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaKamaError::InvalidInput("cols*rows overflow".into()))?;
@@ -647,10 +664,12 @@ impl CudaKama {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
+        Ok(DeviceArrayF32Kama {
             buf: d_out,
             rows,
             cols,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
         })
     }
 
@@ -660,7 +679,7 @@ impl CudaKama {
         cols: usize,
         rows: usize,
         params: &KamaParams,
-    ) -> Result<DeviceArrayF32, CudaKamaError> {
+    ) -> Result<DeviceArrayF32Kama, CudaKamaError> {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period)

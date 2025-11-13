@@ -1513,7 +1513,10 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // ADOSC CUDA
         use crate::indicators::adosc::{
             adosc_cuda_batch_dev_py, adosc_cuda_many_series_one_param_dev_py,
+            DeviceArrayF32AdoscPy,
         };
+        // Export the device handle class so consumers can isinstance-check or import it
+        m.add_class::<DeviceArrayF32AdoscPy>()?;
         m.add_function(wrap_pyfunction!(adosc_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(
             adosc_cuda_many_series_one_param_dev_py,
@@ -1735,6 +1738,8 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<KamaStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
+        use crate::indicators::moving_averages::kama::KamaDeviceArrayF32Py;
+        m.add_class::<KamaDeviceArrayF32Py>()?;
         m.add_function(wrap_pyfunction!(kama_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(kama_cuda_many_series_one_param_dev_py, m)?)?;
     }
@@ -2738,9 +2743,14 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
         use crate::indicators::rsx::{
             rsx_cuda_batch_dev_py, rsx_cuda_many_series_one_param_dev_py,
         };
-        // Ensure DeviceArrayF32Py type is exported once for consumers like CuPy
+        // Ensure Device device-handle types are exported for consumers like CuPy
         use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
         m.add_class::<DeviceArrayF32Py>()?;
+        #[cfg(all(feature = "python", feature = "cuda"))]
+        {
+            use crate::indicators::moving_averages::cwma::DeviceArrayF32CwmaPy;
+            m.add_class::<DeviceArrayF32CwmaPy>()?;
+        }
         m.add_function(wrap_pyfunction!(rsx_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(rsx_cuda_many_series_one_param_dev_py, m)?)?;
     }

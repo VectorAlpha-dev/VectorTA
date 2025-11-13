@@ -47,7 +47,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaSama};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::sama_wrapper::DeviceArrayF32Sama;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -252,6 +252,15 @@ pub enum SamaError {
 
     #[error("sama: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+
+    #[error("sama: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("sama: Invalid range expansion: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("sama: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline(always)]
@@ -284,9 +293,9 @@ pub fn sama_into(input: &SamaInput, out: &mut [f64]) -> Result<(), SamaError> {
         sama_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(SamaError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
+        return Err(SamaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
 
@@ -309,9 +318,9 @@ pub fn sama_into_slice(dst: &mut [f64], input: &SamaInput, kern: Kernel) -> Resu
     let (data, length, maj_length, min_length, first, chosen) = sama_prepare(input, kern)?;
 
     if dst.len() != data.len() {
-        return Err(SamaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(SamaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -700,19 +709,55 @@ impl Default for SamaBatchRange {
 }
 
 #[inline(always)]
-fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-    if step == 0 || start == end {
-        return vec![start];
+fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, SamaError> {
+    if start == end || step == 0 {
+        return Ok(vec![start]);
     }
-    (start..=end).step_by(step).collect()
+    if start < end {
+        if step == 0 { return Ok(vec![start]); }
+        let mut v = Vec::new();
+        let mut x = start;
+        while x <= end {
+            v.push(x);
+            match x.checked_add(step) {
+                Some(nx) => x = nx,
+                None => break,
+            }
+        }
+        if v.is_empty() { return Err(SamaError::InvalidRange { start, end, step }); }
+        Ok(v)
+    } else {
+        // reversed bounds supported
+        if step == 0 { return Ok(vec![start]); }
+        let mut v = Vec::new();
+        let mut x = start;
+        loop {
+            v.push(x);
+            if x <= end { break; }
+            x = x.saturating_sub(step);
+            if x == 0 && end > 0 && x < end { break; }
+            if v.len() > 1 && *v.last().unwrap() == x { break; }
+            if x == 0 && end == 0 { break; }
+            if x < end { break; }
+        }
+        if v.is_empty() { return Err(SamaError::InvalidRange { start, end, step }); }
+        Ok(v)
+    }
 }
 
 #[inline(always)]
-fn expand_grid_sama(r: &SamaBatchRange) -> Vec<SamaParams> {
-    let lens = axis_usize(r.length);
-    let maj = axis_usize(r.maj_length);
-    let min = axis_usize(r.min_length);
-    let mut out = Vec::with_capacity(lens.len() * maj.len() * min.len());
+fn expand_grid_sama(r: &SamaBatchRange) -> Result<Vec<SamaParams>, SamaError> {
+    let lens = axis_usize(r.length)?;
+    let maj = axis_usize(r.maj_length)?;
+    let min = axis_usize(r.min_length)?;
+    if lens.is_empty() || maj.is_empty() || min.is_empty() {
+        return Err(SamaError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
+    }
+    let mut out = Vec::with_capacity(lens.len().saturating_mul(maj.len()).saturating_mul(min.len()));
     for &l in &lens {
         for &j in &maj {
             for &m in &min {
@@ -724,7 +769,7 @@ fn expand_grid_sama(r: &SamaBatchRange) -> Vec<SamaParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn sama_batch_with_kernel(
@@ -735,11 +780,8 @@ pub fn sama_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(SamaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+        other => {
+            return Err(SamaError::InvalidKernelForBatch(other))
         }
     };
 
@@ -779,12 +821,21 @@ fn sama_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<SamaBatchOutput, SamaError> {
-    let combos = expand_grid_sama(sweep);
+    let combos = expand_grid_sama(sweep)?;
     let cols = data.len();
     let rows = combos.len();
     if cols == 0 {
         return Err(SamaError::EmptyInputData);
     }
+
+    // checked rows*cols to prevent overflow
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(SamaError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        })?;
 
     // Allocate uninit rows×cols without copies
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -802,8 +853,9 @@ fn sama_batch_inner(
 
     // Reborrow as &mut [f64] for writing results
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
-    let out: &mut [f64] =
-        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
+    let out: &mut [f64] = unsafe {
+        core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
+    };
 
     // Fill each row in-place
     sama_batch_inner_into(data, &combos, first, kern, parallel, out)?;
@@ -1264,7 +1316,8 @@ pub fn sama_batch_py<'py>(
     };
 
     // Build combos up front for metadata and sizing
-    let combos = expand_grid_sama(&sweep);
+    let combos = expand_grid_sama(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -1335,7 +1388,7 @@ pub fn sama_cuda_batch_dev_py(
     maj_length_range: (usize, usize, usize),
     min_length_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32SamaPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1353,7 +1406,7 @@ pub fn sama_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32SamaPy { inner })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1366,7 +1419,7 @@ pub fn sama_cuda_many_series_one_param_dev_py(
     maj_length: usize,
     min_length: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32SamaPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1392,7 +1445,7 @@ pub fn sama_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32SamaPy { inner })
 }
 
 #[cfg(feature = "python")]
@@ -1564,7 +1617,7 @@ pub fn sama_batch_into(
             maj_length: (maj_start, maj_end, maj_step),
             min_length: (min_start, min_end, min_step),
         };
-        let combos = expand_grid_sama(&sweep);
+    let combos = expand_grid_sama(&sweep).map_err(|_| JsValue::from_str("Invalid range"))?;
         let rows = combos.len();
         let cols = len;
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
@@ -2200,5 +2253,123 @@ mod prop_tests {
                 }
             }
         }
+    }
+}
+// Python device handle: CUDA Array Interface v3 + DLPack (SAMA)
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32SamaPy {
+    pub(crate) inner: DeviceArrayF32Sama,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32SamaPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producing stream is synchronized before return, so omit 'stream'
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA per DLPack
+        (2, self.inner.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<cust::context::Context>,
+        }
+
+        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let name = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                    as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter { del(ptr); }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
+        let strides = Box::new([self.inner.cols as i64, 1i64]);
+        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+
+        let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self.inner.ctx.clone() });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: guard_ref._shape.as_ptr() as *mut i64,
+                strides: guard_ref._strides.as_ptr() as *mut i64,
+                byte_offset: 0,
+            },
+            manager_ctx: guard_ptr as *mut c_void,
+            deleter: Some(managed_deleter),
+        });
+        let mt_raw = Box::into_raw(mt);
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(mt_raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor))
+        };
+        if capsule.is_null() {
+            unsafe { managed_deleter(mt_raw); }
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
     }
 }

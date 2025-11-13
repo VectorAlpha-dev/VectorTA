@@ -48,8 +48,6 @@ use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaAo;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 
 impl<'a> AsRef<[f64]> for AoInput<'a> {
     #[inline(always)]
@@ -197,22 +195,26 @@ impl AoBuilder {
 
 #[derive(Debug, Error)]
 pub enum AoError {
+    #[error("ao: Input data slice is empty.")]
+    EmptyInputData,
     #[error("ao: All values are NaN.")]
     AllValuesNaN,
     #[error("ao: Invalid periods: short={short}, long={long}")]
     InvalidPeriods { short: usize, long: usize },
     #[error("ao: Short period must be less than long period: short={short}, long={long}")]
     ShortPeriodNotLess { short: usize, long: usize },
-    #[error("ao: No data provided.")]
-    NoData,
     #[error("ao: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("ao: High and low arrays must have same length: high={high_len}, low={low_len}")]
     MismatchedArrayLengths { high_len: usize, low_len: usize },
-    #[error("ao: Output length mismatch: expected={expected}, got={got}")]
-    OutputLenMismatch { expected: usize, got: usize },
-    #[error("ao: Invalid kernel for batch operation: {kernel:?}")]
-    InvalidKernel { kernel: Kernel },
+    #[error("ao: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("ao: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("ao: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("ao: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -230,7 +232,7 @@ pub fn ao(input: &AoInput) -> Result<AoOutput, AoError> {
 pub fn ao_into(input: &AoInput, out: &mut [f64]) -> Result<(), AoError> {
     let (data, short, long, first, len) = ao_prepare(input)?;
     if out.len() != len {
-        return Err(AoError::OutputLenMismatch {
+        return Err(AoError::OutputLengthMismatch {
             expected: len,
             got: out.len(),
         });
@@ -263,7 +265,7 @@ pub fn ao_into(input: &AoInput, out: &mut [f64]) -> Result<(), AoError> {
 pub fn ao_into_slice(dst: &mut [f64], input: &AoInput, kern: Kernel) -> Result<(), AoError> {
     let (data, short, long, first, len) = ao_prepare(input)?;
     if dst.len() != len {
-        return Err(AoError::OutputLenMismatch {
+        return Err(AoError::OutputLengthMismatch {
             expected: len,
             got: dst.len(),
         });
@@ -296,7 +298,7 @@ pub fn ao_into_slice(dst: &mut [f64], input: &AoInput, kern: Kernel) -> Result<(
 fn ao_prepare<'a>(input: &'a AoInput) -> Result<(&'a [f64], usize, usize, usize, usize), AoError> {
     let data = input.as_ref();
     if data.is_empty() {
-        return Err(AoError::NoData);
+        return Err(AoError::EmptyInputData);
     }
 
     let first = data
@@ -360,7 +362,7 @@ pub fn compute_hl2(high: &[f64], low: &[f64]) -> Result<Vec<f64>, AoError> {
         });
     }
     if high.is_empty() {
-        return Err(AoError::NoData);
+        return Err(AoError::EmptyInputData);
     }
 
     let mut out = alloc_with_nan_prefix(high.len(), 0);
@@ -835,9 +837,7 @@ pub fn ao_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        other => {
-            return Err(AoError::InvalidKernel { kernel: other });
-        }
+        other => return Err(AoError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -871,17 +871,49 @@ impl AoBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &AoBatchRange) -> Vec<AoParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
+fn expand_grid_checked(r: &AoBatchRange) -> Result<Vec<AoParams>, AoError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, AoError> {
+        if step == 0 {
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start == end {
+            return Ok(vec![start]);
+        }
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) => {
+                        if next == v { break; }
+                        v = next;
+                    }
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            while v >= end {
+                out.push(v);
+                if v < end + step { break; }
+                v -= step;
+                if v == 0 { break; }
+            }
+        }
+        if out.is_empty() {
+            return Err(AoError::InvalidRange { start, end, step });
+        }
+        Ok(out)
     }
-    let shorts = axis(r.short_period);
-    let longs = axis(r.long_period);
+    let shorts = axis_usize(r.short_period)?;
+    let longs = axis_usize(r.long_period)?;
 
-    let mut out = Vec::with_capacity(shorts.len() * longs.len());
+    let cap = shorts
+        .len()
+        .checked_mul(longs.len())
+        .ok_or_else(|| AoError::InvalidInput("rows*cols overflow".into()))?;
+    let mut out = Vec::with_capacity(cap);
     for &s in &shorts {
         for &l in &longs {
             if s < l && s > 0 && l > 0 {
@@ -892,7 +924,10 @@ fn expand_grid(r: &AoBatchRange) -> Vec<AoParams> {
             }
         }
     }
-    out
+    if out.is_empty() {
+        return Err(AoError::InvalidInput("no valid parameter combinations".into()));
+    }
+    Ok(out)
 }
 
 #[inline(always)]
@@ -919,10 +954,7 @@ fn ao_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<AoParams>, AoError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(AoError::InvalidPeriods { short: 0, long: 0 });
-    }
+    let combos = expand_grid_checked(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -978,18 +1010,15 @@ fn ao_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<AoBatchOutput, AoError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid_checked(sweep)?;
     let rows = combos.len();
     let cols = data.len();
 
     if cols == 0 {
-        return Err(AoError::NoData);
+        return Err(AoError::EmptyInputData);
     }
 
     // Validate BEFORE allocation to prevent memory leaks
-    if combos.is_empty() {
-        return Err(AoError::InvalidPeriods { short: 0, long: 0 });
-    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1001,6 +1030,11 @@ fn ao_batch_inner(
             valid: data.len() - first,
         });
     }
+
+    // Guard rows*cols overflow before allocation
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| AoError::InvalidInput("rows*cols overflow".into()))?;
 
     // Now safe to allocate - we've validated all error conditions
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1648,7 +1682,7 @@ mod tests {
         let result = ao_into_slice(&mut wrong_sized_buf, &input, Kernel::Auto);
         assert!(result.is_err());
 
-        if let Err(AoError::OutputLenMismatch { expected, got }) = result {
+        if let Err(AoError::OutputLengthMismatch { expected, got }) = result {
             assert_eq!(expected, 5);
             assert_eq!(got, 10);
         } else {
@@ -1665,7 +1699,7 @@ mod tests {
         let result = ao_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(result.is_err());
 
-        if let Err(AoError::InvalidKernel { kernel }) = result {
+        if let Err(AoError::InvalidKernelForBatch(kernel)) = result {
             assert!(matches!(kernel, Kernel::Scalar));
         } else {
             panic!("Expected InvalidKernel error");
@@ -1911,7 +1945,7 @@ pub fn ao_batch_py<'py>(
     };
 
     // 1. Expand grid once to know rows*cols
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
 
@@ -1986,6 +2020,123 @@ pub fn ao_batch_py<'py>(
 
 // ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32AoPy {
+    pub(crate) inner: crate::cuda::oscillators::ao_wrapper::DeviceArrayF32Ao,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32AoPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing stream is synchronized before return
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA per DLPack
+        (2, self.inner.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<cust::context::Context>,
+        }
+
+        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let name = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter { del(ptr); }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
+        let strides = Box::new([self.inner.cols as i64, 1i64]);
+        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+
+        let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self.inner.ctx.clone() });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: guard_ref._shape.as_ptr() as *mut i64,
+                strides: guard_ref._strides.as_ptr() as *mut i64,
+                byte_offset: 0,
+            },
+            manager_ctx: guard_ptr as *mut c_void,
+            deleter: Some(managed_deleter),
+        });
+        let mt_raw = Box::into_raw(mt);
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(mt_raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor))
+        };
+        if capsule.is_null() {
+            unsafe { managed_deleter(mt_raw); }
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ao_cuda_batch_dev")]
 #[pyo3(signature = (high, low, short_period_range, long_period_range, device_id=0))]
 pub fn ao_cuda_batch_dev_py(
@@ -1995,7 +2146,7 @@ pub fn ao_cuda_batch_dev_py(
     short_period_range: (usize, usize, usize),
     long_period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32AoPy> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2020,7 +2171,7 @@ pub fn ao_cuda_batch_dev_py(
         cuda.ao_batch_dev(&hl2_f32, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32AoPy { inner })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2035,7 +2186,7 @@ pub fn ao_cuda_many_series_one_param_dev_py(
     short_period: usize,
     long_period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32AoPy> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2063,7 +2214,7 @@ pub fn ao_cuda_many_series_one_param_dev_py(
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32AoPy { inner })
 }
 
 #[cfg(feature = "wasm")]
@@ -2130,7 +2281,7 @@ pub fn ao_batch_metadata_js(
         long_period: (long_start, long_end, long_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let mut metadata = Vec::with_capacity(combos.len() * 2);
 
     for combo in combos {
@@ -2287,7 +2438,7 @@ pub fn ao_batch_into(
             long_period: (long_period_start, long_period_end, long_period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * len);
 

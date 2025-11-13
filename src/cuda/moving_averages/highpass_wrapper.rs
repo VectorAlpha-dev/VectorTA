@@ -21,6 +21,7 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
@@ -81,7 +82,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaHighpass {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaHighpassPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -90,11 +91,26 @@ pub struct CudaHighpass {
     debug_many_logged: bool,
 }
 
+/// VRAM-backed array handle for HighPass with context guard and device id
+pub struct DeviceArrayF32Highpass {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+impl DeviceArrayF32Highpass {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
+}
+
 impl CudaHighpass {
     pub fn new(device_id: usize) -> Result<Self, CudaHighpassError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/highpass_kernel.ptx"));
         // Prefer DetermineTargetFromContext + O4, with optional register cap
@@ -189,10 +205,14 @@ impl CudaHighpass {
 
     fn expand_periods(range: &HighPassBatchRange) -> Vec<HighPassParams> {
         let (start, end, step) = range.period;
-        let periods = if step == 0 || start == end {
+        let periods: Vec<usize> = if step == 0 || start == end {
             vec![start]
-        } else {
+        } else if start < end {
             (start..=end).step_by(step).collect::<Vec<_>>()
+        } else {
+            let mut v = (end..=start).step_by(step).collect::<Vec<_>>();
+            v.reverse();
+            v
         };
         periods
             .into_iter()
@@ -405,7 +425,7 @@ impl CudaHighpass {
         data_f32: &[f32],
         combos: &[HighPassParams],
         series_len: usize,
-    ) -> Result<DeviceArrayF32, CudaHighpassError> {
+    ) -> Result<DeviceArrayF32Highpass, CudaHighpassError> {
         let n_combos = combos.len();
 
         let prices_bytes = series_len
@@ -442,10 +462,12 @@ impl CudaHighpass {
         // Keep inputs alive until kernel completes
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
+        Ok(DeviceArrayF32Highpass {
             buf: d_out,
             rows: n_combos,
             cols: series_len,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
         })
     }
 
@@ -453,7 +475,7 @@ impl CudaHighpass {
         &self,
         data_f32: &[f32],
         sweep: &HighPassBatchRange,
-    ) -> Result<DeviceArrayF32, CudaHighpassError> {
+    ) -> Result<DeviceArrayF32Highpass, CudaHighpassError> {
         let (combos, _first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         self.run_batch_kernel(data_f32, &combos, series_len)
     }
@@ -675,7 +697,7 @@ impl CudaHighpass {
         cols: usize,
         rows: usize,
         params: &HighPassParams,
-    ) -> Result<DeviceArrayF32, CudaHighpassError> {
+    ) -> Result<DeviceArrayF32Highpass, CudaHighpassError> {
         let period = Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         let elems = data_tm_f32.len();
@@ -703,10 +725,12 @@ impl CudaHighpass {
         // Inputs created here; ensure they outlive the launch.
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
+        Ok(DeviceArrayF32Highpass {
             buf: d_out,
             rows,
             cols,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
         })
     }
 
