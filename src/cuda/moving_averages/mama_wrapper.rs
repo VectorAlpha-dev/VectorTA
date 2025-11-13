@@ -31,6 +31,8 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
 // (No cudart FFI here by design.)
 
@@ -85,22 +87,25 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaMamaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buffer on device {buf}, current device {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaMamaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMamaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMamaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CudaMamaError {}
 
 /// Pair of VRAM-backed arrays produced by the MAMA kernels (MAMA + FAMA).
 pub struct DeviceMamaPair {
@@ -123,7 +128,8 @@ impl DeviceMamaPair {
 pub struct CudaMama {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaMamaPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -133,11 +139,10 @@ pub struct CudaMama {
 
 impl CudaMama {
     pub fn new(device_id: usize) -> Result<Self, CudaMamaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
 
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mama_kernel.ptx"));
         // Prefer context-targeted JIT with moderate optimization; fall back conservatively.
@@ -148,21 +153,20 @@ impl CudaMama {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaMamaPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -186,6 +190,11 @@ impl CudaMama {
     pub fn policy(&self) -> &CudaMamaPolicy {
         &self.policy
     }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
 
     /// Selected kernels (if any) for debugging/inspection.
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
@@ -304,25 +313,17 @@ impl CudaMama {
         let pair = self.run_batch_kernel(prices, &inputs)?;
 
         // Stage Device -> pinned host, then memcpy into caller's slices.
-        let mut pinned_m: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(expected).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
-        };
-        let mut pinned_f: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(expected).map_err(|e| CudaMamaError::Cuda(e.to_string()))?
-        };
+        let mut pinned_m: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected) }?;
+        let mut pinned_f: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected) }?;
         unsafe {
             pair.mama
                 .buf
-                .async_copy_to(pinned_m.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+                .async_copy_to(pinned_m.as_mut_slice(), &self.stream)?;
             pair.fama
                 .buf
-                .async_copy_to(pinned_f.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+                .async_copy_to(pinned_f.as_mut_slice(), &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         out_mama.copy_from_slice(pinned_m.as_slice());
         out_fama.copy_from_slice(pinned_f.as_slice());
         Ok((pair.rows(), pair.cols(), inputs.combos))
@@ -430,31 +431,34 @@ impl CudaMama {
         let n_combos = inputs.combos.len();
         let series_len = inputs.series_len;
 
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let fast_bytes = n_combos * std::mem::size_of::<f32>();
-        let slow_bytes = n_combos * std::mem::size_of::<f32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
+        // checked arithmetic for sizes
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaMamaError::InvalidInput("rows*cols overflow".into()))?;
+
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMamaError::InvalidInput("bytes overflow".into()))?;
+        let fast_bytes = n_combos
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMamaError::InvalidInput("bytes overflow".into()))?;
+        let slow_bytes = fast_bytes;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMamaError::InvalidInput("bytes overflow".into()))?;
         let required = prices_bytes + fast_bytes + slow_bytes + (out_bytes * 2);
         let headroom = 64 * 1024 * 1024; // ~64MB safety margin
 
         if !Self::will_fit(required, headroom) {
-            return Err(CudaMamaError::InvalidInput(
-                "insufficient device memory for MAMA batch launch".into(),
-            ));
+            let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
+            return Err(CudaMamaError::OutOfMemory { required, free, headroom });
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices).map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        let d_fast = DeviceBuffer::from_slice(&inputs.fast_limits)
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        let d_slow = DeviceBuffer::from_slice(&inputs.slow_limits)
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        let mut d_out_mama: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        let mut d_out_fama: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices)?;
+        let d_fast = DeviceBuffer::from_slice(&inputs.fast_limits)?;
+        let d_slow = DeviceBuffer::from_slice(&inputs.slow_limits)?;
+        let mut d_out_mama: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
+        let mut d_out_fama: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -467,9 +471,7 @@ impl CudaMama {
             &mut d_out_fama,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceMamaPair {
             mama: DeviceArrayF32 {
@@ -494,28 +496,31 @@ impl CudaMama {
         slow_limit: f32,
         prepared: &ManySeriesInputs,
     ) -> Result<DeviceMamaPair, CudaMamaError> {
-        let prices_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
-        let first_valid_bytes = prepared.first_valids.len() * std::mem::size_of::<i32>();
-        let out_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
+        let prices_bytes = prices_tm_f32
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMamaError::InvalidInput("bytes overflow".into()))?;
+        let first_valid_bytes = prepared
+            .first_valids
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaMamaError::InvalidInput("bytes overflow".into()))?;
+        let out_bytes = prices_tm_f32
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMamaError::InvalidInput("bytes overflow".into()))?;
         let required = prices_bytes + first_valid_bytes + (out_bytes * 2);
         let headroom = 64 * 1024 * 1024; // ~64MB safety margin
 
         if !Self::will_fit(required, headroom) {
-            return Err(CudaMamaError::InvalidInput(
-                "insufficient device memory for MAMA many-series launch".into(),
-            ));
+            let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
+            return Err(CudaMamaError::OutOfMemory { required, free, headroom });
         }
 
-        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        let mut d_out_m: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
-        let mut d_out_f: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)?;
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)?;
+        let mut d_out_m: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }?;
+        let mut d_out_f: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -528,9 +533,7 @@ impl CudaMama {
             &mut d_out_f,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceMamaPair {
             mama: DeviceArrayF32 {
@@ -560,7 +563,7 @@ impl CudaMama {
         let func = self
             .module
             .get_function("mama_batch_f32")
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMamaError::MissingKernelSymbol { name: "mama_batch_f32" })?;
 
         let user_block = match self.policy.batch {
             BatchKernelPolicy::Auto => None,
@@ -594,9 +597,7 @@ impl CudaMama {
                 &mut out_m_ptr as *mut _ as *mut c_void,
                 &mut out_f_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -615,7 +616,7 @@ impl CudaMama {
         let func = self
             .module
             .get_function("mama_many_series_one_param_f32")
-            .map_err(|e| CudaMamaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMamaError::MissingKernelSymbol { name: "mama_many_series_one_param_f32" })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 1,
@@ -652,9 +653,7 @@ impl CudaMama {
                 &mut out_m_ptr as *mut _ as *mut c_void,
                 &mut out_f_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaMamaError::Cuda(e.to_string()))?
+            self.stream.launch(&func, grid, block, 0, args)?
         }
         Ok(())
     }
@@ -667,11 +666,10 @@ impl CudaMama {
             return Err(CudaMamaError::InvalidInput("empty prices".into()));
         }
 
-        let combos = expand_grid(sweep);
+        let combos = expand_grid(sweep)
+            .map_err(|e| CudaMamaError::InvalidInput(format!("expand_grid error: {}", e)))?;
         if combos.is_empty() {
-            return Err(CudaMamaError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
+            return Err(CudaMamaError::InvalidInput("no parameter combinations".into()));
         }
 
         let first_valid = prices
@@ -729,7 +727,10 @@ impl CudaMama {
                 "matrix dimensions must be positive".into(),
             ));
         }
-        if prices_tm_f32.len() != cols * rows {
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMamaError::InvalidInput("matrix shape overflow".into()))?;
+        if prices_tm_f32.len() != elems {
             return Err(CudaMamaError::InvalidInput(
                 "price matrix shape mismatch".into(),
             ));

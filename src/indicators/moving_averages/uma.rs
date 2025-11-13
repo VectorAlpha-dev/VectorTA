@@ -1,5 +1,7 @@
 //! # Ultimate Moving Average (UMA)
 //!
+//! Decision log: SIMD kept scalar-first; CUDA enabled with typed errors and VRAM checks; Python exposes CAI v3 and DLPack (device handle keeps CUDA context alive). Performance matches scalar; no reference changes.
+//!
 //! An adaptive moving average that dynamically adjusts its length based on multiple indicators
 //! including RSI, MFI, and standard deviation to respond to market conditions.
 //!
@@ -41,6 +43,14 @@ use crate::cuda::cuda_available;
 use crate::cuda::moving_averages::CudaUma;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::ffi::c_void;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
@@ -661,6 +671,14 @@ pub enum UmaError {
         min_length: usize,
         max_length: usize,
     },
+    #[error("uma: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("uma: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("uma: Invalid kernel for batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("uma: arithmetic overflow while computing {context}")]
+    ArithmeticOverflow { context: &'static str },
     #[error("uma: Error from dependency: {0}")]
     DependencyError(String),
 }
@@ -1202,9 +1220,9 @@ pub fn uma_with_kernel(input: &UmaInput, kernel: Kernel) -> Result<UmaOutput, Um
 pub fn uma_into_slice(dst: &mut [f64], input: &UmaInput, kern: Kernel) -> Result<(), UmaError> {
     let (data, first, min_len, max_len, accel) = uma_prepare(input)?;
     if dst.len() != data.len() {
-        return Err(UmaError::InvalidMaxLength {
-            max_length: dst.len(),
-            data_len: data.len(),
+        return Err(UmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -1402,37 +1420,110 @@ impl UmaBatchOutput {
 
 #[inline(always)]
 pub fn expand_grid_uma(r: &UmaBatchRange) -> Vec<UmaParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+    fn axis_usize(range: (usize, usize, usize)) -> Result<Vec<usize>, UmaError> {
+        let (start, end, step) = range;
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step).collect();
+            return if v.is_empty() {
+                Err(UmaError::InvalidRange { start, end, step })
+            } else {
+                Ok(v)
+            };
+        }
+        // start > end: descend by step
+        let mut v = Vec::new();
+        let mut cur = start;
+        loop {
+            v.push(cur);
+            if cur == end {
+                break;
+            }
+            cur = cur
+                .checked_sub(step)
+                .ok_or(UmaError::InvalidRange { start, end, step })?;
+            if cur < end {
+                break;
+            }
+        }
+        if v.is_empty() {
+            return Err(UmaError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64(range: (f64, f64, f64)) -> Result<Vec<f64>, UmaError> {
+        let (start, end, step) = range;
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start <= end {
+            let s = step.abs();
+            if s < 1e-12 {
+                return Ok(vec![start]);
+            }
+            let mut x = start;
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += s;
+            }
+        } else {
+            let s = -step.abs();
+            if s.abs() < 1e-12 {
+                return Ok(vec![start]);
+            }
+            let mut x = start;
+            while x >= end - 1e-12 {
+                v.push(x);
+                x += s;
+            }
         }
-        v
+        if v.is_empty() {
+            return Err(UmaError::InvalidRange {
+                start: start as usize,
+                end: end as usize,
+                step: step.abs() as usize,
+            });
+        }
+        Ok(v)
     }
 
-    let accs = axis_f64(r.accelerator);
-    let mins = axis_usize(r.min_length);
-    let maxs = axis_usize(r.max_length);
-    let smooths = axis_usize(r.smooth_length);
+    let accs = axis_f64(r.accelerator).unwrap_or_else(|_| vec![r.accelerator.0]);
+    let mins = match axis_usize(r.min_length) {
+        Ok(v) => v,
+        Err(_) => vec![r.min_length.0],
+    };
+    let maxs = match axis_usize(r.max_length) {
+        Ok(v) => v,
+        Err(_) => vec![r.max_length.0],
+    };
+    let smooths = match axis_usize(r.smooth_length) {
+        Ok(v) => v,
+        Err(_) => vec![r.smooth_length.0],
+    };
 
-    let mut out = Vec::with_capacity(accs.len() * mins.len() * maxs.len() * smooths.len());
+    // Guard against impossible combinations (all min > all max)
+    if !mins.is_empty() && !maxs.is_empty() {
+        if let (Some(min_min), Some(max_max)) = (mins.iter().min(), maxs.iter().max()) {
+            if *min_min > *max_max {
+                return vec![];
+            }
+        }
+    }
+
+    let cap = accs.len()
+        .checked_mul(mins.len())
+        .and_then(|x| x.checked_mul(maxs.len()))
+        .and_then(|x| x.checked_mul(smooths.len()))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
     for &a in &accs {
         for &min in &mins {
             for &max in &maxs {
                 for &s in &smooths {
                     if min <= max {
-                        // Only valid combinations
                         out.push(UmaParams {
                             accelerator: Some(a),
                             min_length: Some(min),
@@ -1456,12 +1547,7 @@ pub fn uma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(UmaError::InvalidMaxLength {
-                max_length: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(UmaError::InvalidKernelForBatch(other)),
     };
 
     uma_batch_inner(data, volume, sweep, kernel, true)
@@ -1508,16 +1594,23 @@ fn uma_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<UmaParams>, UmaError> {
     let combos = expand_grid_uma(sweep);
+    let combos = combos;
     if combos.is_empty() {
-        return Err(UmaError::InvalidMaxLength {
-            max_length: 0,
-            data_len: 0,
+        return Err(UmaError::InvalidRange {
+            start: sweep.min_length.0,
+            end: sweep.max_length.1,
+            step: sweep.max_length.2,
         });
     }
 
     let cols = data.len();
     let rows = combos.len();
-    debug_assert_eq!(out.len(), rows * cols);
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(UmaError::ArithmeticOverflow { context: "rows * cols (batch out)" })?;
+    if out.len() != expected {
+        return Err(UmaError::OutputLengthMismatch { expected, got: out.len() });
+    }
 
     let per_row_kernel = debatch(kern);
 
@@ -1574,6 +1667,18 @@ fn uma_batch_inner(
     if cols == 0 {
         return Err(UmaError::EmptyInputData);
     }
+    if rows == 0 {
+        return Err(UmaError::InvalidRange {
+            start: sweep.min_length.0,
+            end: sweep.max_length.1,
+            step: sweep.max_length.2,
+        });
+    }
+
+    // Guard allocation size
+    let _cap = rows
+        .checked_mul(cols)
+        .ok_or(UmaError::ArithmeticOverflow { context: "rows * cols (matrix alloc)" })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos
@@ -1775,6 +1880,136 @@ pub fn uma_batch_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct UmaDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl UmaDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producer stream is synchronized before returning; omit "stream" per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32) // 2 == kDLCUDA
+    }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        // Move DeviceBuffer into DLManagedTensor so consumer owns it
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        // Minimal DLPack FFI defs
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        // Keep context, buffer, and shape/strides alive until deleter runs
+        struct Manager {
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+        }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            let mt = Box::from_raw(p);
+            let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
+            drop(mt);
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt) }
+            }
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1]); // element strides (row-major)
+        let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
+        let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
+        let mgr_ptr = Box::into_raw(mgr);
+        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
+        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr as *mut c_void,
+            deleter: Some(dlpack_deleter),
+        });
+
+        // Wrap in PyCapsule named "dltensor"
+        let raw_capsule = unsafe {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
+        };
+        if raw_capsule.is_null() {
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "uma_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, accelerator_range, min_length_range, max_length_range, smooth_length_range, volume_f32=None, device_id=0))]
 pub fn uma_cuda_batch_dev_py(
@@ -1800,13 +2035,16 @@ pub fn uma_cuda_batch_dev_py(
         smooth_length: smooth_length_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaUma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.uma_batch_dev(slice_in, volume_slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .uma_batch_dev(slice_in, volume_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    let crate::cuda::DeviceArrayF32 { buf, rows, cols } = inner;
+    Ok(UmaDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1852,13 +2090,16 @@ pub fn uma_cuda_many_series_one_param_dev_py(
         smooth_length: Some(smooth_length),
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaUma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.uma_many_series_one_param_time_major_dev(prices_flat, volume_flat, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .uma_many_series_one_param_time_major_dev(prices_flat, volume_flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    let crate::cuda::DeviceArrayF32 { buf, rows, cols } = inner;
+    Ok(UmaDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })
 }
 
 // ==================== WASM BINDINGS ====================

@@ -28,6 +28,7 @@ use std::convert::TryFrom;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 // -------- Kernel selection policy (mirrors ALMA; only Plain used here) --------
 
@@ -128,10 +129,20 @@ impl fmt::Display for CudaJsaError {
 
 impl std::error::Error for CudaJsaError {}
 
+/// Minimal VRAM handle for Python interop (keeps context/device alive)
+#[cfg(all(feature = "python", feature = "cuda"))]
+pub struct JsaDeviceHandle {
+    pub(crate) buf: DeviceBuffer<f32>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
 pub struct CudaJsa {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaJsaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -160,7 +171,7 @@ impl CudaJsa {
     pub fn new(device_id: usize) -> Result<Self, CudaJsaError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/jsa_kernel.ptx"));
         // Adopt ALMA's robust JIT loading strategy. Prefer O4, then relax.
@@ -341,6 +352,53 @@ impl CudaJsa {
         }
     }
 
+    // ---------------- Python-friendly variants returning a handle with context ----------------
+    #[cfg(all(feature = "python", feature = "cuda"))]
+    pub fn jsa_batch_dev_handle(
+        &self,
+        data_f32: &[f32],
+        sweep: &JsaBatchRange,
+    ) -> Result<JsaDeviceHandle, CudaJsaError> {
+        use core::mem::ManuallyDrop;
+        let arr = self.jsa_batch_dev(data_f32, sweep)?;
+        let arr = ManuallyDrop::new(arr);
+        // SAFETY: prevent dropping `arr` so moving out the buffer is safe
+        let buf = unsafe { std::ptr::read(&arr.buf) };
+        Ok(JsaDeviceHandle {
+            buf,
+            rows: arr.rows,
+            cols: arr.cols,
+            _ctx: self._context.clone(),
+            device_id: self.device_id,
+        })
+    }
+
+    #[cfg(all(feature = "python", feature = "cuda"))]
+    pub fn jsa_many_series_one_param_time_major_dev_handle(
+        &self,
+        data_tm_f32: &[f32],
+        num_series: usize,
+        series_len: usize,
+        params: &JsaParams,
+    ) -> Result<JsaDeviceHandle, CudaJsaError> {
+        use core::mem::ManuallyDrop;
+        let arr = self.jsa_many_series_one_param_time_major_dev(
+            data_tm_f32,
+            num_series,
+            series_len,
+            params,
+        )?;
+        let arr = ManuallyDrop::new(arr);
+        let buf = unsafe { std::ptr::read(&arr.buf) };
+        Ok(JsaDeviceHandle {
+            buf,
+            rows: arr.rows,
+            cols: arr.cols,
+            _ctx: self._context.clone(),
+            device_id: self.device_id,
+        })
+    }
+
     pub fn jsa_batch_dev(
         &self,
         data_f32: &[f32],
@@ -349,11 +407,28 @@ impl CudaJsa {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         // VRAM estimate + headroom (~64MB)
         let n_combos = prepared.combos.len();
-        let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let warm_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = prepared.series_len * n_combos * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + warm_bytes + out_bytes;
+        let prices_bytes = prepared
+            .series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
+        let warm_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
+        let out_elems = prepared
+            .series_len
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(periods_bytes)
+            .and_then(|x| x.checked_add(warm_bytes))
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
@@ -366,9 +441,12 @@ impl CudaJsa {
             unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }?;
         let d_warm =
             unsafe { DeviceBuffer::from_slice_async(&prepared.warm_indices, &self.stream) }?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(prepared.series_len * n_combos, &self.stream)?
-        };
+        let total_elems = prepared
+            .series_len
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total_elems, &self.stream)? };
 
         // Best-effort L2 persisting hint for shared prices vector
         self.try_enable_persisting_l2(d_prices.as_device_ptr().as_raw() as u64, prices_bytes);
@@ -474,16 +552,21 @@ impl CudaJsa {
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
         // VRAM estimate with ~64MB headroom (mirror ALMA approach)
-        let input_bytes = num_series
-            .saturating_mul(series_len)
-            .saturating_mul(std::mem::size_of::<f32>());
+        let elems = num_series
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
+        let input_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
         let out_bytes = input_bytes;
         let idx_bytes = num_series
-            .saturating_mul(std::mem::size_of::<i32>())
-            .saturating_mul(2); // first_valids + warm_indices
+            .checked_mul(std::mem::size_of::<i32>())
+            .and_then(|x| x.checked_mul(2)) // first_valids + warm_indices
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
         let required = input_bytes
-            .saturating_add(out_bytes)
-            .saturating_add(idx_bytes);
+            .checked_add(out_bytes)
+            .and_then(|x| x.checked_add(idx_bytes))
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // 64MB
         if !Self::will_fit(required, headroom) {
             let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
@@ -497,9 +580,11 @@ impl CudaJsa {
             unsafe { DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream) }?;
         let d_warm =
             unsafe { DeviceBuffer::from_slice_async(&prepared.warm_indices, &self.stream) }?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)?
-        };
+        let total_elems = num_series
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaJsaError::InvalidInput("size overflow".into()))?;
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total_elems, &self.stream)? };
 
         self.launch_many_series_kernel(
             &d_prices_tm,

@@ -186,12 +186,24 @@ impl MamaBuilder {
     }
 }
 
-// Error type
+// Error type (richer coverage for CPU/batch callers)
 
 #[derive(Debug, Error)]
 pub enum MamaError {
+    #[error("mama: empty input data")]
+    EmptyInputData,
+    #[error("mama: all values are NaN")]
+    AllValuesNaN,
+    #[error("mama: not enough valid data: needed {needed}, valid {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
     #[error("mama: Not enough data: needed at least {needed}, found {found}")]
     NotEnoughData { needed: usize, found: usize },
+    #[error("mama: output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("mama: invalid range expansion start={start} end={end} step={step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+    #[error("mama: invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("mama: Invalid fast limit: {fast_limit}")]
     InvalidFastLimit { fast_limit: f64 },
     #[error("mama: Invalid slow limit: {slow_limit}")]
@@ -225,11 +237,19 @@ fn mama_prepare<'a>(
     // ---------- 0. validate ----------------------------------------
     let data = input.as_ref();
     let len = data.len();
+    if len == 0 {
+        return Err(MamaError::EmptyInputData);
+    }
     if len < 10 {
         return Err(MamaError::NotEnoughData {
             needed: 10,
             found: len,
         });
+    }
+
+    // Optional sanity: fail fast if all-NaN
+    if input.as_ref().iter().all(|v| v.is_nan()) {
+        return Err(MamaError::AllValuesNaN);
     }
 
     let fast_limit = input.get_fast_limit();
@@ -372,9 +392,9 @@ pub fn mama_compute_into(
 
     // ---------- validate output buffer sizes -----------------------
     if out_mama.len() != data.len() || out_fama.len() != data.len() {
-        return Err(MamaError::NotEnoughData {
-            needed: data.len(),
-            found: out_mama.len(),
+        return Err(MamaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out_mama.len().min(out_fama.len()),
         });
     }
 
@@ -431,9 +451,9 @@ pub fn mama_into(
 ) -> Result<(), MamaError> {
     let data = input.as_ref();
     if out_mama.len() != data.len() || out_fama.len() != data.len() {
-        return Err(MamaError::NotEnoughData {
-            needed: data.len(),
-            found: out_mama.len().min(out_fama.len()),
+        return Err(MamaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out_mama.len().min(out_fama.len()),
         });
     }
 
@@ -463,9 +483,9 @@ pub fn mama_into_slice(
 ) -> Result<(), MamaError> {
     let (data, _fast, _slow, _chosen) = mama_prepare(input, kern)?;
     if dst_mama.len() != data.len() || dst_fama.len() != data.len() {
-        return Err(MamaError::NotEnoughData {
-            needed: data.len(),
-            found: dst_mama.len().min(dst_fama.len()),
+        return Err(MamaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst_mama.len().min(dst_fama.len()),
         });
     }
     mama_compute_into(input, kern, dst_mama, dst_fama)?;
@@ -1599,22 +1619,61 @@ impl MamaBatchOutput {
 }
 
 #[inline(always)]
-pub fn expand_grid(r: &MamaBatchRange) -> Vec<MamaParams> {
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+pub fn expand_grid(r: &MamaBatchRange) -> Result<Vec<MamaParams>, MamaError> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, MamaError> {
+        // Treat zero step or identical bounds as a static axis
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
+
+        // Support reversed bounds by aligning step sign with the direction
+        let mut step_signed = step;
+        if end < start && step_signed > 0.0 {
+            step_signed = -step_signed;
+        } else if end > start && step_signed < 0.0 {
+            step_signed = -step_signed;
+        }
+
+        // Build inclusive sequence with a tiny epsilon to avoid FP fencepost issues
         let mut v = Vec::new();
+        let eps = 1e-12_f64;
         let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if step_signed > 0.0 {
+            while x <= end + eps {
+                v.push(x);
+                x += step_signed;
+            }
+        } else {
+            while x >= end - eps {
+                v.push(x);
+                x += step_signed;
+            }
         }
-        v
+
+        if v.is_empty() {
+            return Err(MamaError::InvalidRange {
+                start,
+                end,
+                step,
+            });
+        }
+        Ok(v)
     }
-    let fast_limits = axis_f64(r.fast_limit);
-    let slow_limits = axis_f64(r.slow_limit);
-    let mut out = Vec::with_capacity(fast_limits.len() * slow_limits.len());
+
+    let fast_limits = axis_f64(r.fast_limit)?;
+    let slow_limits = axis_f64(r.slow_limit)?;
+
+    // checked capacity to avoid usize overflow
+    let cap = fast_limits
+        .len()
+        .checked_mul(slow_limits.len())
+        .ok_or(MamaError::InvalidRange {
+            start: r.fast_limit.0,
+            end: r.fast_limit.1,
+            step: r.fast_limit.2,
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &f in &fast_limits {
         for &s in &slow_limits {
             out.push(MamaParams {
@@ -1623,7 +1682,7 @@ pub fn expand_grid(r: &MamaBatchRange) -> Vec<MamaParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn mama_batch_with_kernel(
@@ -1635,12 +1694,7 @@ pub fn mama_batch_with_kernel(
         // ScalarBatch is faster for this indicator; short-circuit Auto → ScalarBatch.
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(MamaError::NotEnoughData {
-                needed: 10,
-                found: 0,
-            })
-        }
+        other => return Err(MamaError::InvalidKernelForBatch(other)),
     };
     // Route any SIMD batch request to the scalar batch path for this indicator.
     let simd = Kernel::Scalar;
@@ -1672,11 +1726,12 @@ fn mama_batch_inner(
     parallel: bool,
 ) -> Result<MamaBatchOutput, MamaError> {
     // ---------- 0. prelim checks ----------
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(MamaError::NotEnoughData {
-            needed: 10,
-            found: 0,
+        return Err(MamaError::InvalidRange {
+            start: sweep.fast_limit.0,
+            end: sweep.fast_limit.1,
+            step: sweep.fast_limit.2,
         });
     }
     if data.len() < 10 {
@@ -1958,11 +2013,12 @@ pub fn mama_batch_inner_into(
     out_fama: &mut [f64],
 ) -> Result<Vec<MamaParams>, MamaError> {
     // ---------- 0. prelim checks ----------
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(MamaError::NotEnoughData {
-            needed: 10,
-            found: 0,
+        return Err(MamaError::InvalidRange {
+            start: sweep.fast_limit.0,
+            end: sweep.fast_limit.1,
+            step: sweep.fast_limit.2,
         });
     }
     if data.len() < 10 {
@@ -1989,10 +2045,17 @@ pub fn mama_batch_inner_into(
     let cols = data.len();
 
     // Validate output slice sizes
-    if out_mama.len() != rows * cols || out_fama.len() != rows * cols {
-        return Err(MamaError::NotEnoughData {
-            needed: rows * cols,
-            found: out_mama.len().min(out_fama.len()),
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(MamaError::InvalidRange {
+            start: sweep.fast_limit.0,
+            end: sweep.fast_limit.1,
+            step: sweep.fast_limit.2,
+        })?;
+    if out_mama.len() != expected || out_fama.len() != expected {
+        return Err(MamaError::OutputLengthMismatch {
+            expected,
+            got: out_mama.len().min(out_fama.len()),
         });
     }
 
@@ -2904,7 +2967,13 @@ mod python_bindings {
     #[cfg(feature = "cuda")]
     use crate::cuda::moving_averages::{CudaMama, DeviceMamaPair};
     #[cfg(feature = "cuda")]
-    use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+    use cust::context::Context;
+    #[cfg(feature = "cuda")]
+    use cust::memory::DeviceBuffer;
+    #[cfg(feature = "cuda")]
+    use std::os::raw::c_void;
+    #[cfg(feature = "cuda")]
+    use std::sync::Arc;
     use crate::utilities::kernel_validation::validate_kernel;
     #[cfg(feature = "cuda")]
     use numpy::PyReadonlyArray2;
@@ -2962,7 +3031,8 @@ mod python_bindings {
         };
 
         // 1. Expand grid once to know rows*cols
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let rows = combos.len();
         let cols = slice_in.len();
 
@@ -3038,17 +3108,19 @@ mod python_bindings {
             slow_limit: slow_limit_range,
         };
 
-        let pair = py.allow_threads(|| {
-            let cuda =
-                CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.mama_batch_dev(slice_in, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
+        let (pair, ctx, dev_id) = py.allow_threads(|| {
+            let cuda = CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let pair = cuda.mama_batch_dev(slice_in, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, PyErr>((pair, ctx, dev_id))
         })?;
 
         let DeviceMamaPair { mama, fama } = pair;
         Ok((
-            DeviceArrayF32Py { inner: mama },
-            DeviceArrayF32Py { inner: fama },
+            DeviceArrayF32Py { buf: Some(mama.buf), rows: mama.rows, cols: mama.cols, _ctx: ctx.clone(), device_id: dev_id },
+            DeviceArrayF32Py { buf: Some(fama.buf), rows: fama.rows, cols: fama.cols, _ctx: ctx, device_id: dev_id },
         ))
     }
 
@@ -3079,17 +3151,20 @@ mod python_bindings {
         let fast = fast_limit as f32;
         let slow = slow_limit as f32;
 
-        let pair = py.allow_threads(|| {
-            let cuda =
-                CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cuda.mama_many_series_one_param_time_major_dev(flat, cols, rows, fast, slow)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
+        let (pair, ctx, dev_id) = py.allow_threads(|| {
+            let cuda = CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let pair = cuda
+                .mama_many_series_one_param_time_major_dev(flat, cols, rows, fast, slow)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, PyErr>((pair, ctx, dev_id))
         })?;
 
         let DeviceMamaPair { mama, fama } = pair;
         Ok((
-            DeviceArrayF32Py { inner: mama },
-            DeviceArrayF32Py { inner: fama },
+            DeviceArrayF32Py { buf: Some(mama.buf), rows: mama.rows, cols: mama.cols, _ctx: ctx.clone(), device_id: dev_id },
+            DeviceArrayF32Py { buf: Some(fama.buf), rows: fama.rows, cols: fama.cols, _ctx: ctx, device_id: dev_id },
         ))
     }
 
@@ -3215,7 +3290,7 @@ pub fn mama_batch_js(
         fast_limit: (fast_start, fast_end, fast_step),
         slow_limit: (slow_start, slow_end, slow_step),
     };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = data.len();
 
@@ -3259,7 +3334,7 @@ pub fn mama_batch_metadata_js(
         slow_limit: (slow_limit_start, slow_limit_end, slow_limit_step),
     };
 
-    let combos = expand_grid(&range);
+    let combos = expand_grid(&range).unwrap_or_else(|_| Vec::new());
     let mut metadata = Vec::with_capacity(combos.len() * 2);
 
     for combo in combos {
@@ -3286,7 +3361,7 @@ pub fn mama_batch_rows_cols_js(
         slow_limit: (slow_limit_start, slow_limit_end, slow_limit_step),
     };
 
-    let combos = expand_grid(&range);
+    let combos = expand_grid(&range).unwrap_or_else(|_| Vec::new());
     vec![combos.len(), data_len]
 }
 
@@ -3355,3 +3430,137 @@ pub fn mama_batch_into(
         Ok(rows)
     }
 }
+    // MAMA-specific VRAM-backed Python handle with CAI v3 + DLPack
+    #[cfg(feature = "cuda")]
+    #[pyclass(module = "ta_indicators.cuda", unsendable)]
+    pub struct DeviceArrayF32Py {
+        pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+        pub(crate) rows: usize,
+        pub(crate) cols: usize,
+        pub(crate) _ctx: Arc<Context>,
+        pub(crate) device_id: u32,
+    }
+
+    #[cfg(feature = "cuda")]
+    #[pymethods]
+    impl DeviceArrayF32Py {
+        #[getter]
+        fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+            let d = PyDict::new(py);
+            d.set_item("shape", (self.rows, self.cols))?;
+            d.set_item("typestr", "<f4")?;
+            d.set_item(
+                "strides",
+                (
+                    self.cols * std::mem::size_of::<f32>(),
+                    std::mem::size_of::<f32>(),
+                ),
+            )?;
+            let ptr = self
+                .buf
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+                .as_device_ptr()
+                .as_raw() as usize;
+            d.set_item("data", (ptr, false))?;
+            d.set_item("version", 3)?; // producer stream synchronized before return
+            Ok(d)
+        }
+
+        fn __dlpack_device__(&self) -> (i32, i32) {
+            (2, self.device_id as i32) // 2 == kDLCUDA
+        }
+
+        fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+            // Move ownership of the device buffer into the DLManagedTensor
+            let buf = self
+                .buf
+                .take()
+                .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+            // DLPack FFI structs (minimal subset)
+            #[repr(C)]
+            struct DLDevice { device_type: i32, device_id: i32 }
+            #[repr(C)]
+            struct DLDataType { code: u8, bits: u8, lanes: u16 }
+            #[repr(C)]
+            struct DLTensor {
+                data: *mut c_void,
+                device: DLDevice,
+                ndim: i32,
+                dtype: DLDataType,
+                shape: *mut i64,
+                strides: *mut i64,
+                byte_offset: u64,
+            }
+            #[repr(C)]
+            struct DLManagedTensor {
+                dl_tensor: DLTensor,
+                manager_ctx: *mut c_void,
+                deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+            }
+
+            // Keep buffer/context and shape/strides alive until consumer calls deleter.
+            struct Manager {
+                _ctx: Arc<Context>,
+                _buf: DeviceBuffer<f32>,
+                _shape: Box<[i64; 2]>,
+                _strides: Box<[i64; 2]>,
+            }
+
+            unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+                if p.is_null() { return; }
+                // Reclaim allocation of the managed tensor and its manager
+                let mt = Box::from_raw(p);
+                let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
+                drop(mt);
+            }
+
+            unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+                // If a consumer didn’t take ownership, call deleter now.
+                let name = std::ffi::CString::new("dltensor").unwrap();
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+                if !ptr.is_null() {
+                    let mt = ptr as *mut DLManagedTensor;
+                    if let Some(del) = (*mt).deleter { del(mt) }
+                }
+            }
+
+            let rows = self.rows as i64;
+            let cols = self.cols as i64;
+            let shape = Box::new([rows, cols]);
+            let strides = Box::new([cols, 1]); // element strides (row-major)
+
+            let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
+            let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
+
+            // Pointers that live until deleter runs
+            let mgr_ptr = Box::into_raw(mgr);
+            let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
+            let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
+
+            let mt = Box::new(DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: data_ptr,
+                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: shape_ptr,
+                    strides: strides_ptr,
+                    byte_offset: 0,
+                },
+                manager_ctx: mgr_ptr as *mut c_void,
+                deleter: Some(dlpack_deleter),
+            });
+
+            // Wrap in a PyCapsule named "dltensor"
+            let raw_capsule = unsafe {
+                let name = std::ffi::CString::new("dltensor").unwrap();
+                pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
+            };
+            if raw_capsule.is_null() {
+                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+        }
+    }

@@ -1,5 +1,8 @@
 //! # Reflex
 //!
+//! Decision: SIMD paths delegate to the scalar implementation for identical
+//! numerics and stable performance; row-specific batch kernels not attempted.
+//!
 //! An indicator (attributed to John Ehlers) designed to detect turning points in a time
 //! series by comparing a 2-pole filtered version of the data to a projected slope over
 //! a specified window (`period`). It then adjusts its output (`Reflex`) based on the
@@ -10,9 +13,9 @@
 //! - **period**: The window size used for measuring and predicting the slope (must be ≥ 2).
 //!
 //! ## Errors
-//! - **NoData**: reflex: No data provided (empty slice).
-//! - **InvalidPeriod**: reflex: `period` < 2.
-//! - **NotEnoughData**: reflex: The available data is shorter than `period`.
+//! - **EmptyInputData**: reflex: Input data slice is empty.
+//! - **InvalidPeriod**: reflex: `period` < 2 or exceeds data length.
+//! - **NotEnoughValidData**: reflex: Valid tail after first non-NaN < `period`.
 //! - **AllValuesNaN**: reflex: All input data values are `NaN`.
 //!
 //! ## Returns
@@ -53,7 +56,13 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaReflex;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::ffi::c_void;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -194,14 +203,20 @@ impl ReflexBuilder {
 
 #[derive(Debug, Error)]
 pub enum ReflexError {
-    #[error("reflex: No data available for Reflex.")]
-    NoData,
-    #[error("reflex: Reflex period must be >=2. Provided period was {period}")]
-    InvalidPeriod { period: usize },
-    #[error("reflex: Not enough data: needed {needed}, found {found}")]
-    NotEnoughData { needed: usize, found: usize },
+    #[error("reflex: Input data slice is empty.")]
+    EmptyInputData,
     #[error("reflex: All values are NaN.")]
     AllValuesNaN,
+    #[error("reflex: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("reflex: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("reflex: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("reflex: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("reflex: invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
 }
 
 #[inline]
@@ -250,9 +265,9 @@ pub fn reflex_into_slice(
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(ReflexError::NotEnoughData {
-            needed: data.len(),
-            found: dst.len(),
+        return Err(ReflexError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -391,7 +406,7 @@ fn reflex_prepare<'a>(
 
     let len = data.len();
     if len == 0 {
-        return Err(ReflexError::NoData);
+        return Err(ReflexError::EmptyInputData);
     }
 
     let first = data
@@ -401,12 +416,15 @@ fn reflex_prepare<'a>(
     let period = input.get_period();
 
     if period < 2 {
-        return Err(ReflexError::InvalidPeriod { period });
+        return Err(ReflexError::InvalidPeriod { period, data_len: len });
     }
-    if period > len - first {
-        return Err(ReflexError::NotEnoughData {
+    if period > len {
+        return Err(ReflexError::InvalidPeriod { period, data_len: len });
+    }
+    if period > (len - first) {
+        return Err(ReflexError::NotEnoughValidData {
             needed: period,
-            found: len - first,
+            valid: len - first,
         });
     }
 
@@ -472,7 +490,7 @@ impl ReflexStream {
     pub fn try_new(params: ReflexParams) -> Result<Self, ReflexError> {
         let period = params.period.unwrap_or(20);
         if period < 2 {
-            return Err(ReflexError::InvalidPeriod { period });
+            return Err(ReflexError::InvalidPeriod { period, data_len: 0 });
         }
 
         // Same coefficients as scalar (half-period per Ehlers reflex article)
@@ -662,7 +680,7 @@ pub fn reflex_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(ReflexError::InvalidPeriod { period: 0 }),
+        other => return Err(ReflexError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -696,19 +714,43 @@ impl ReflexBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &ReflexBatchRange) -> Vec<ReflexParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_checked(r: &ReflexBatchRange) -> Result<Vec<ReflexParams>, ReflexError> {
+    fn axis_usize(range: (usize, usize, usize)) -> Result<Vec<usize>, ReflexError> {
+        let (start, end, step) = range;
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                out.push(cur);
+                cur = match cur.checked_add(step) {
+                    Some(v) => v,
+                    None => break,
+                };
+            }
+        } else {
+            let mut cur = start;
+            while cur >= end {
+                out.push(cur);
+                cur = match cur.checked_sub(step) {
+                    Some(v) => v,
+                    None => break,
+                };
+                if cur == 0 { break; }
+            }
+        }
+        if out.is_empty() {
+            return Err(ReflexError::InvalidRange { start, end, step });
+        }
+        Ok(out)
     }
-    let periods = axis_usize(r.period);
-    let mut out = Vec::with_capacity(periods.len());
-    for &p in &periods {
-        out.push(ReflexParams { period: Some(p) });
-    }
-    out
+    let periods = axis_usize(r.period)?;
+    Ok(periods
+        .into_iter()
+        .map(|p| ReflexParams { period: Some(p) })
+        .collect())
 }
 
 #[inline(always)]
@@ -736,24 +778,29 @@ fn reflex_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<ReflexBatchOutput, ReflexError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(ReflexError::InvalidPeriod { period: 0 });
-    }
+    let combos = expand_grid_checked(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(ReflexError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
-        return Err(ReflexError::NotEnoughData {
+        return Err(ReflexError::NotEnoughValidData {
             needed: max_p,
-            found: data.len() - first,
+            valid: data.len() - first,
         });
     }
 
     let rows = combos.len();
     let cols = data.len();
+    // Guard rows * cols against overflow
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(ReflexError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        })?;
 
     // Allocate rows×cols uninit and mark only the Reflex warm prefix per row.
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -825,10 +872,7 @@ fn reflex_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<ReflexBatchMetadata, ReflexError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(ReflexError::InvalidPeriod { period: 0 });
-    }
+    let combos = expand_grid_checked(sweep)?;
 
     let first = data
         .iter()
@@ -836,14 +880,25 @@ fn reflex_batch_inner_into(
         .ok_or(ReflexError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first < max_p {
-        return Err(ReflexError::NotEnoughData {
+        return Err(ReflexError::NotEnoughValidData {
             needed: max_p,
-            found: data.len() - first,
+            valid: data.len() - first,
         });
     }
 
     let rows = combos.len();
     let cols = data.len();
+    // checked arithmetic for shape and output buffer length
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(ReflexError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        })?;
+    if out.len() != expected {
+        return Err(ReflexError::OutputLengthMismatch { expected, got: out.len() });
+    }
 
     // Write into the provided output buffer
     let do_row = |row: usize, dst: &mut [f64]| unsafe {
@@ -983,7 +1038,8 @@ pub fn reflex_batch_py<'py>(
     let range = ReflexBatchRange { period: periods };
 
     // Pre-calculate metadata
-    let combos = expand_grid(&range);
+    let combos = expand_grid_checked(&range)
+        .map_err(|e| PyValueError::new_err(format!("reflex batch error: {}", e)))?;
     let rows = combos.len();
     let cols = data_slice.len();
 
@@ -1050,13 +1106,19 @@ pub fn reflex_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaReflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.reflex_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let (ctx, inner) = py
+        .allow_threads(|| {
+            let cuda = CudaReflex::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let arr = cuda
+                .reflex_batch_dev(slice_in, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, PyErr>((ctx, arr))
+        })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    let DeviceArrayF32 { buf, rows, cols } = inner;
+    Ok(DeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: device_id as u32 })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1082,13 +1144,19 @@ pub fn reflex_cuda_many_series_one_param_dev_py(
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaReflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.reflex_many_series_one_param_time_major_dev(flat, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let (ctx, inner) = py
+        .allow_threads(|| {
+            let cuda = CudaReflex::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let arr = cuda
+                .reflex_many_series_one_param_time_major_dev(flat, cols, rows, period)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, PyErr>((ctx, arr))
+        })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    let DeviceArrayF32 { buf, rows, cols } = inner;
+    Ok(DeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: device_id as u32 })
 }
 
 #[cfg(feature = "python")]
@@ -1164,8 +1232,145 @@ pub fn reflex_batch_metadata_js(
     let range = ReflexBatchRange {
         period: (period_start, period_end, period_step),
     };
-    let combos = expand_grid(&range);
-    combos.iter().map(|c| c.period.unwrap_or(20)).collect()
+    match expand_grid_checked(&range) {
+        Ok(combos) => combos.iter().map(|c| c.period.unwrap_or(20)).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+// --- Reflex-specific VRAM-backed Python handle with CAI v3 + DLPack ---
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        d.set_item("version", 3)?; // producer stream synchronized before return
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        // Move ownership of the device buffer into the DLManagedTensor
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        // DLPack FFI structs (minimal subset)
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        // Keep buffer/context and shape/strides alive until consumer calls deleter.
+        struct Manager {
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+        }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            let mt = Box::from_raw(p);
+            let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
+            drop(mt);
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = unsafe { (*mt).deleter } { unsafe { del(mt) } }
+            }
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1]); // element strides (row-major)
+
+        let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
+        let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
+
+        // Pointers that live until deleter runs
+        let mgr_ptr = Box::into_raw(mgr);
+        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
+        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr as *mut c_void,
+            deleter: Some(dlpack_deleter),
+        });
+
+        // Wrap in a PyCapsule named "dltensor"
+        let raw_capsule = unsafe {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
+        };
+        if raw_capsule.is_null() {
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -1179,8 +1384,8 @@ pub fn reflex_batch_rows_cols_js(
     let range = ReflexBatchRange {
         period: (period_start, period_end, period_step),
     };
-    let combos = expand_grid(&range);
-    vec![combos.len(), data_len]
+    let rows = expand_grid_checked(&range).map(|c| c.len()).unwrap_or(0);
+    vec![rows, data_len]
 }
 
 #[cfg(feature = "wasm")]
@@ -1268,10 +1473,14 @@ pub fn reflex_batch_into(
     };
 
     // rows = combos.len()
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_checked(&sweep)
+        .map_err(|e| JsValue::from_str(&format!("reflex batch error: {}", e)))?;
     let rows = combos.len();
     let cols = len;
-    let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, rows * cols) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("size overflow"))?;
+    let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, total) };
 
     reflex_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;

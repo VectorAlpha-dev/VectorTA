@@ -12,6 +12,10 @@
 //! - **`Err(AsoError)`** otherwise.
 //!
 //! ## Developer Notes
+//! - SIMD: Implemented as stubs that delegate to scalar; disabled by default due to
+//!   control-flow/deque costs. Scalar is the reference path and matches tests.
+//! - CUDA: Wrapper provided with typed errors; Python device handle exposes CAI v3 and
+//!   DLPack for interop (when `python` + `cuda` features are enabled).
 //! - Scalar: hybrid path. Uses naive O(period) scan for short windows and
 //!   monotonic deques (O(1) amortized) for long windows; warmup ramp and
 //!   zero-copy allocation preserved.
@@ -272,6 +276,15 @@ pub enum AsoError {
 
     #[error("aso: Required OHLC data is missing or has mismatched lengths")]
     MissingData,
+
+    #[error("aso: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("aso: Invalid range: start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("aso: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // ==================== CORE COMPUTATION FUNCTIONS ====================
@@ -307,10 +320,7 @@ pub fn aso_into(input: &AsoInput, bulls_out: &mut [f64], bears_out: &mut [f64]) 
     let (open, high, low, close, period, mode, first, chosen) = aso_prepare(input, Kernel::Auto)?;
 
     if bulls_out.len() != close.len() || bears_out.len() != close.len() {
-        return Err(AsoError::InvalidPeriod {
-            period: bulls_out.len(),
-            data_len: close.len(),
-        });
+        return Err(AsoError::OutputLengthMismatch { expected: close.len(), got: bulls_out.len().min(bears_out.len()) });
     }
 
     // Prefill warmup prefix with quiet-NaN to match alloc_with_nan_prefix semantics
@@ -348,10 +358,7 @@ pub fn aso_into_slices(
     let (open, high, low, close, period, mode, first, chosen) = aso_prepare(input, kern)?;
 
     if bulls_dst.len() != close.len() || bears_dst.len() != close.len() {
-        return Err(AsoError::InvalidPeriod {
-            period: bulls_dst.len(),
-            data_len: close.len(),
-        });
+        return Err(AsoError::OutputLengthMismatch { expected: close.len(), got: bulls_dst.len().min(bears_dst.len()) });
     }
 
     aso_compute_into(
@@ -878,7 +885,13 @@ impl AsoBatchBuilder {
     }
 
     pub fn apply_candles(self, c: &Candles) -> Result<AsoBatchOutput, AsoError> {
-        aso_batch_with_kernel(&c.open, &c.high, &c.low, &c.close, &self.range, self.kernel)
+        let k = match self.kernel {
+            Kernel::Scalar => Kernel::ScalarBatch,
+            Kernel::Avx2 => Kernel::Avx2Batch,
+            Kernel::Avx512 => Kernel::Avx512Batch,
+            other => other,
+        };
+        aso_batch_with_kernel(&c.open, &c.high, &c.low, &c.close, &self.range, k)
     }
 
     pub fn apply_slices(
@@ -888,7 +901,13 @@ impl AsoBatchBuilder {
         l: &[f64],
         c: &[f64],
     ) -> Result<AsoBatchOutput, AsoError> {
-        aso_batch_with_kernel(o, h, l, c, &self.range, self.kernel)
+        let k = match self.kernel {
+            Kernel::Scalar => Kernel::ScalarBatch,
+            Kernel::Avx2 => Kernel::Avx2Batch,
+            Kernel::Avx512 => Kernel::Avx512Batch,
+            other => other,
+        };
+        aso_batch_with_kernel(o, h, l, c, &self.range, k)
     }
 
     pub fn with_default_candles(c: &Candles) -> Result<AsoBatchOutput, AsoError> {
@@ -945,28 +964,41 @@ impl AsoBatchOutput {
 
 /// Expand parameter grid for batch processing
 #[inline(always)]
-fn expand_grid_aso(r: &AsoBatchRange) -> Vec<AsoParams> {
-    fn axis_usize(a: (usize, usize, usize)) -> Vec<usize> {
-        let (s, e, st) = a;
-        if st == 0 || s == e {
-            return vec![s];
+fn expand_grid_aso(r: &AsoBatchRange) -> Result<Vec<AsoParams>, AsoError> {
+    fn axis_usize((s, e, st): (usize, usize, usize)) -> Result<Vec<usize>, AsoError> {
+        if st == 0 || s == e { return Ok(vec![s]); }
+        let mut v = Vec::new();
+        if s < e {
+            let mut cur = s;
+            while cur <= e {
+                v.push(cur);
+                let next = cur.saturating_add(st);
+                if next == cur { break; }
+                cur = next;
+            }
+        } else {
+            let mut cur = s;
+            while cur >= e {
+                v.push(cur);
+                let next = cur.saturating_sub(st);
+                if next == cur { break; }
+                cur = next;
+                if cur == 0 && e > 0 { break; }
+            }
         }
-        (s..=e).step_by(st).collect()
+        if v.is_empty() { return Err(AsoError::InvalidRange { start: s, end: e, step: st }); }
+        Ok(v)
     }
 
-    let ps = axis_usize(r.period);
-    let ms = axis_usize(r.mode);
-    let mut out = Vec::with_capacity(ps.len() * ms.len());
-
+    let ps = axis_usize(r.period)?;
+    let ms = axis_usize(r.mode)?;
+    let mut out = Vec::with_capacity(ps.len().saturating_mul(ms.len()));
     for &p in &ps {
         for &m in &ms {
-            out.push(AsoParams {
-                period: Some(p),
-                mode: Some(m),
-            });
+            out.push(AsoParams { period: Some(p), mode: Some(m) });
         }
     }
-    out
+    Ok(out)
 }
 
 /// Batch processing with kernel selection
@@ -978,7 +1010,7 @@ pub fn aso_batch_with_kernel(
     sweep: &AsoBatchRange,
     k: Kernel,
 ) -> Result<AsoBatchOutput, AsoError> {
-    let combos = expand_grid_aso(sweep);
+    let combos = expand_grid_aso(sweep)?;
     let rows = combos.len();
     let cols = close.len();
 
@@ -1024,7 +1056,8 @@ pub fn aso_batch_with_kernel(
 
     let actual = match k {
         Kernel::Auto => detect_best_batch_kernel(),
-        kk => kk,
+        Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => k,
+        other => return Err(AsoError::InvalidKernelForBatch(other)),
     };
 
     // Per-row closure
@@ -1108,7 +1141,13 @@ pub fn aso_batch_slice(
     sweep: &AsoBatchRange,
     kern: Kernel,
 ) -> Result<AsoBatchOutput, AsoError> {
-    aso_batch_with_kernel(open, high, low, close, sweep, kern)
+    let k = match kern {
+        Kernel::Scalar => Kernel::ScalarBatch,
+        Kernel::Avx2 => Kernel::Avx2Batch,
+        Kernel::Avx512 => Kernel::Avx512Batch,
+        other => other,
+    };
+    aso_batch_with_kernel(open, high, low, close, sweep, k)
 }
 
 /// Parallel batch processing for slices
@@ -1123,7 +1162,13 @@ pub fn aso_batch_par_slice(
 ) -> Result<AsoBatchOutput, AsoError> {
     // For now, just use the regular batch processing
     // In the future, this could be optimized with explicit parallel control
-    aso_batch_with_kernel(open, high, low, close, sweep, kern)
+    let k = match kern {
+        Kernel::Scalar => Kernel::ScalarBatch,
+        Kernel::Avx2 => Kernel::Avx2Batch,
+        Kernel::Avx512 => Kernel::Avx512Batch,
+        other => other,
+    };
+    aso_batch_with_kernel(open, high, low, close, sweep, k)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1152,12 +1197,9 @@ fn aso_batch_inner_into(
     out_bulls: &mut [f64], // rows*cols
     out_bears: &mut [f64], // rows*cols
 ) -> Result<Vec<AsoParams>, AsoError> {
-    let combos = expand_grid_aso(sweep);
+    let combos = expand_grid_aso(sweep)?;
     if combos.is_empty() {
-        return Err(AsoError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(AsoError::InvalidRange { start: 0, end: 0, step: 0 });
     }
 
     let cols = close.len();
@@ -1168,11 +1210,11 @@ fn aso_batch_inner_into(
         return Err(AsoError::MissingData);
     }
     let rows = combos.len();
-    if out_bulls.len() != rows * cols || out_bears.len() != rows * cols {
-        return Err(AsoError::InvalidPeriod {
-            period: out_bulls.len(),
-            data_len: rows * cols,
-        });
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(AsoError::InvalidRange { start: rows, end: cols, step: 0 })?;
+    if out_bulls.len() != total || out_bears.len() != total {
+        return Err(AsoError::OutputLengthMismatch { expected: total, got: out_bulls.len().min(out_bears.len()) });
     }
 
     let first = close
@@ -1209,7 +1251,8 @@ fn aso_batch_inner_into(
 
     let actual = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
-        k => k,
+        Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => kern,
+        other => return Err(AsoError::InvalidKernelForBatch(other)),
     };
 
     let do_row = |row: usize, br: &mut [MaybeUninit<f64>], er: &mut [MaybeUninit<f64>]| unsafe {
@@ -1223,14 +1266,18 @@ fn aso_batch_inner_into(
             Kernel::Scalar | Kernel::ScalarBatch => {
                 aso_scalar(open, high, low, close, p, m, first, b, e)
             }
+            // Accept non-batch variants by delegating to scalar to preserve semantics
+            Kernel::Avx2 | Kernel::Avx512 => {
+                aso_scalar(open, high, low, close, p, m, first, b, e)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => aso_avx2(open, high, low, close, p, m, first, b, e),
+            Kernel::Avx2Batch => aso_avx2(open, high, low, close, p, m, first, b, e),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
+            Kernel::Avx512Batch => {
                 aso_avx512(open, high, low, close, p, m, first, b, e)
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            Kernel::Avx2Batch | Kernel::Avx512Batch => {
                 aso_scalar(open, high, low, close, p, m, first, b, e)
             }
             Kernel::Auto => unreachable!(),
@@ -1585,12 +1632,15 @@ pub fn aso_batch_py<'py>(
         period: period_range,
         mode: mode_range,
     };
-    let combos = expand_grid_aso(&sweep);
+    let combos = expand_grid_aso(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = c.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("size overflow"))?;
 
-    let bulls_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let bears_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let bulls_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let bears_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let b = unsafe { bulls_arr.as_slice_mut()? };
     let e = unsafe { bears_arr.as_slice_mut()? };
 
@@ -1634,7 +1684,131 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaAso;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context as CudaContext;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct AsoDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<CudaContext>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl AsoDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Stream omitted: producing stream is synchronized before return
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        // Take ownership of the device buffer for transfer to consumer
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Manager {
+            _ctx: Arc<CudaContext>,
+            _buf: DeviceBuffer<f32>,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+        }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            let mt: Box<DLManagedTensor> = Box::from_raw(p);
+            let mgr_ptr = mt.manager_ctx as *mut Manager;
+            if !mgr_ptr.is_null() { let _mgr: Box<Manager> = Box::from_raw(mgr_ptr); drop(_mgr); }
+            drop(mt);
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt) }
+            }
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1]);
+        let data_ptr = buf.as_device_ptr().as_raw() as *mut std::ffi::c_void;
+        let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
+        let mgr_ptr = Box::into_raw(mgr);
+        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
+        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
+
+        let mt = Box::new(DLManagedTensor { dl_tensor: DLTensor {
+            data: data_ptr,
+            device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        }, manager_ctx: mgr_ptr as *mut std::ffi::c_void, deleter: Some(dlpack_deleter) });
+
+        let raw_capsule = unsafe {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut std::ffi::c_void, name.as_ptr(), Some(capsule_destructor))
+        };
+        if raw_capsule.is_null() { return Err(PyValueError::new_err("failed to create DLPack capsule")); }
+        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "aso_cuda_batch_dev")]
@@ -1648,7 +1822,7 @@ pub fn aso_cuda_batch_dev_py(
     period_range: (usize, usize, usize),
     mode_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(AsoDeviceArrayF32Py, AsoDeviceArrayF32Py)> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1663,14 +1837,16 @@ pub fn aso_cuda_batch_dev_py(
         period: period_range,
         mode: mode_range,
     };
-    let (bulls, bears): (DeviceArrayF32, DeviceArrayF32) = py.allow_threads(|| {
+    let (bulls, bears, ctx_guard, dev_id) = py.allow_threads(|| {
         let cuda = CudaAso::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.aso_batch_dev(o, h, l, c, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .aso_batch_dev(o, h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((out.0, out.1, cuda.context_arc(), cuda.device_id()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: bulls },
-        DeviceArrayF32Py { inner: bears },
+        AsoDeviceArrayF32Py { buf: Some(bulls.buf), rows: bulls.rows, cols: bulls.cols, _ctx: ctx_guard.clone(), device_id: dev_id },
+        AsoDeviceArrayF32Py { buf: Some(bears.buf), rows: bears.rows, cols: bears.cols, _ctx: ctx_guard, device_id: dev_id },
     ))
 }
 
@@ -1688,7 +1864,7 @@ pub fn aso_cuda_many_series_one_param_dev_py(
     period: usize,
     mode: usize,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(AsoDeviceArrayF32Py, AsoDeviceArrayF32Py)> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1696,20 +1872,25 @@ pub fn aso_cuda_many_series_one_param_dev_py(
     let h = high_tm.as_slice()?;
     let l = low_tm.as_slice()?;
     let c = close_tm.as_slice()?;
-    if cols * rows != o.len() || h.len() != o.len() || l.len() != o.len() || c.len() != o.len() {
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("size overflow"))?;
+    if expected != o.len() || h.len() != o.len() || l.len() != o.len() || c.len() != o.len() {
         return Err(PyValueError::new_err("mismatched input sizes"));
     }
     if mode > 2 {
         return Err(PyValueError::new_err("invalid mode"));
     }
-    let (bulls, bears) = py.allow_threads(|| {
+    let (bulls, bears, ctx_guard, dev_id) = py.allow_threads(|| {
         let cuda = CudaAso::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.aso_many_series_one_param_time_major_dev(o, h, l, c, cols, rows, period, mode)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .aso_many_series_one_param_time_major_dev(o, h, l, c, cols, rows, period, mode)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((out.0, out.1, cuda.context_arc(), cuda.device_id()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: bulls },
-        DeviceArrayF32Py { inner: bears },
+        AsoDeviceArrayF32Py { buf: Some(bulls.buf), rows: bulls.rows, cols: bulls.cols, _ctx: ctx_guard.clone(), device_id: dev_id },
+        AsoDeviceArrayF32Py { buf: Some(bears.buf), rows: bears.rows, cols: bears.cols, _ctx: ctx_guard, device_id: dev_id },
     ))
 }
 
@@ -1891,7 +2072,8 @@ pub fn aso_batch_into(
             mode: (mode_start, mode_end, mode_step),
         };
 
-        let combos = expand_grid_aso(&sweep);
+        let combos = expand_grid_aso(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
@@ -1936,7 +2118,8 @@ pub fn aso_batch_unified_js(
         period: cfg.period_range,
         mode: cfg.mode_range,
     };
-    let combos = expand_grid_aso(&sweep);
+    let combos = expand_grid_aso(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = close.len();
     if cols == 0 {

@@ -2473,7 +2473,7 @@ mod tests {
     use std::error::Error;
 
     #[test]
-    fn test_deviation_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
+fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>> {
         // Build a non-trivial input with initial NaNs to exercise warmup handling
         let len = 256;
         let mut data = Vec::with_capacity(len);
