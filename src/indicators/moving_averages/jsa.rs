@@ -1029,7 +1029,15 @@ use pyo3::types::PyDict;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaJsa};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::jsa_wrapper::JsaDeviceHandle;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::ffi::c_void;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[cfg(feature = "python")]
 #[pyfunction]
@@ -1149,7 +1157,7 @@ pub fn jsa_cuda_batch_dev_py(
     data_f32: PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<JsaDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1159,13 +1167,15 @@ pub fn jsa_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaJsa::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.jsa_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let handle: JsaDeviceHandle = py
+        .allow_threads(|| {
+            let cuda =
+                CudaJsa::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.jsa_batch_dev_handle(slice_in, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(JsaDeviceArrayF32Py::from_handle(handle))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1176,7 +1186,7 @@ pub fn jsa_cuda_many_series_one_param_dev_py(
     data_tm_f32: PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<JsaDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1195,13 +1205,20 @@ pub fn jsa_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaJsa::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.jsa_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
+    let handle: JsaDeviceHandle = py
+        .allow_threads(|| {
+            let cuda =
+                CudaJsa::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cuda.jsa_many_series_one_param_time_major_dev_handle(
+                flat,
+                num_series,
+                series_len,
+                &params,
+            )
             .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+        })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(JsaDeviceArrayF32Py::from_handle(handle))
 }
 
 // Note: jsa_batch_with_metadata_py is no longer needed since jsa_batch_py now returns metadata in the dictionary
@@ -1439,10 +1456,156 @@ pub fn register_jsa_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     m.add_class::<JsaStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
+        m.add_class::<JsaDeviceArrayF32Py>()?;
         m.add_function(wrap_pyfunction!(jsa_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(jsa_cuda_many_series_one_param_dev_py, m)?)?;
     }
     Ok(())
+}
+
+// -------------------- Python: CUDA Array Interface v3 + DLPack for JSA ----------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct JsaDeviceArrayF32Py {
+    buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    rows: usize,
+    cols: usize,
+    _ctx: Arc<Context>,
+    device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl JsaDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producer stream is synchronized before returning the handle
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    #[staticmethod]
+    fn from_handle(handle: JsaDeviceHandle) -> Self {
+        JsaDeviceArrayF32Py {
+            buf: Some(handle.buf),
+            rows: handle.rows,
+            cols: handle.cols,
+            _ctx: handle._ctx,
+            device_id: handle.device_id,
+        }
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        // Move DeviceBuffer into DLManagedTensor so consumer owns it
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        // Minimal DLPack C structs (subset)
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        // Keep buffer/context and shape/strides alive until consumer calls deleter.
+        struct Manager {
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+        }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            // Reclaim allocation of the managed tensor and its manager
+            let mt = Box::from_raw(p);
+            let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
+            drop(mt);
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            // If a consumer didn’t take ownership, call deleter now.
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt) }
+            }
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1]); // element strides (row-major)
+
+        let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
+        let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
+
+        // Pointers that live until deleter runs
+        let mgr_ptr = Box::into_raw(mgr);
+        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
+        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr as *mut c_void,
+            deleter: Some(dlpack_deleter),
+        });
+
+        // Wrap in a PyCapsule named "dltensor"
+        let raw_capsule = unsafe {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
+        };
+        if raw_capsule.is_null() {
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+    }
 }
 
 #[cfg(test)]

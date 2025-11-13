@@ -21,6 +21,7 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::error::CudaError;
 use thiserror::Error;
+use std::sync::Arc;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
@@ -97,7 +98,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaEma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _ctx: Arc<Context>,
+    device_id: u32,
     policy: CudaEmaPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -131,6 +133,7 @@ impl CudaEma {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
         let context = Context::new(device)?;
+        let ctx = Arc::new(context);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/ema_kernel.ptx"));
         // Match ALMA: prefer DetermineTargetFromContext + O2; fall back to simpler modes.
@@ -163,7 +166,8 @@ impl CudaEma {
         Ok(Self {
             module,
             stream,
-            _context: context,
+            _ctx: ctx,
+            device_id: device_id as u32,
             policy: CudaEmaPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -187,6 +191,12 @@ impl CudaEma {
     pub fn synchronize(&self) -> Result<(), CudaEmaError> {
         self.stream.synchronize().map_err(Into::into)
     }
+
+    #[inline]
+    pub(crate) fn context_arc(&self) -> Arc<Context> { self._ctx.clone() }
+
+    #[inline]
+    pub(crate) fn device_id(&self) -> u32 { self.device_id }
 
     pub fn ema_batch_dev(
         &self,

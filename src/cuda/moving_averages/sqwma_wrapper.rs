@@ -20,28 +20,34 @@ use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaSqwmaError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Out of memory on device: required={required}B, free={free}B, headroom={headroom}B")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Device mismatch: buffer device = {buf}, current context device = {current}")]
+    DeviceMismatch { buf: i32, current: i32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaSqwmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaSqwmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaSqwmaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CudaSqwmaError {}
 
 pub struct CudaSqwma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
+    device_id: u32,
     // Cached device attributes for launch sizing
     sm_count: i32,
     max_grid_x: u32,
@@ -50,58 +56,51 @@ pub struct CudaSqwma {
 
 impl CudaSqwma {
     pub fn new(device_id: usize) -> Result<Self, CudaSqwmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
 
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         // Cache basic device attributes for launch heuristics
-        let sm_count = device
-            .get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
-        let max_grid_x = device
-            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))? as u32;
-        let warp_size = device
-            .get_attribute(cust::device::DeviceAttribute::WarpSize)
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        let sm_count = device.get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)?;
+        let max_grid_x = device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as u32;
+        let warp_size = device.get_attribute(cust::device::DeviceAttribute::WarpSize)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sqwma_kernel.ptx"));
 
         // Prefer higher JIT opt level first, then fallback for compatibility
-        let module = Module::from_ptx(
+        let module = match Module::from_ptx(
             ptx,
             &[
                 ModuleJitOption::DetermineTargetFromContext,
                 ModuleJitOption::OptLevel(OptLevel::O4),
             ],
-        )
-        .or_else(|_| {
-            Module::from_ptx(
-                ptx,
-                &[
-                    ModuleJitOption::DetermineTargetFromContext,
-                    ModuleJitOption::OptLevel(OptLevel::O2),
-                ],
-            )
-        })
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        ) {
+            Ok(m) => m,
+            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                Ok(m) => m,
+                Err(_) => Module::from_ptx(ptx, &[])?
+            },
+        };
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
             sm_count,
             max_grid_x,
             _warp_size: warp_size,
         })
     }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -112,29 +111,18 @@ impl CudaSqwma {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { cust::memory::mem_get_info().ok() }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaSqwmaError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
-        if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
-        }
+        let (free, _total) = match Self::device_mem_info() { Some(v) => v, None => return Ok(()) };
+        let need = required_bytes
+            .checked_add(headroom_bytes)
+            .ok_or(CudaSqwmaError::InvalidInput("required_bytes overflow".into()))?;
+        if need <= free { Ok(()) } else { Err(CudaSqwmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes }) }
     }
 
     pub fn sqwma_batch_dev(
@@ -153,7 +141,10 @@ impl CudaSqwma {
         out: &mut [f32],
     ) -> Result<(usize, usize, Vec<SqwmaParams>), CudaSqwmaError> {
         let inputs = Self::prepare_batch_inputs(prices, sweep)?;
-        let expected = inputs.series_len * inputs.combos.len();
+        let expected = inputs
+            .series_len
+            .checked_mul(inputs.combos.len())
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("rows * cols overflow".into()))?;
         if out.len() != expected {
             return Err(CudaSqwmaError::InvalidInput(format!(
                 "out slice wrong length: got {}, expected {}",
@@ -163,9 +154,7 @@ impl CudaSqwma {
         }
 
         let arr = self.run_batch_kernel(prices, &inputs)?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        arr.buf.copy_to(out).map_err(CudaSqwmaError::Cuda)?;
         Ok((arr.rows, arr.cols, inputs.combos))
     }
 
@@ -253,19 +242,20 @@ impl CudaSqwma {
         period: usize,
         out_tm: &mut [f32],
     ) -> Result<(), CudaSqwmaError> {
-        if out_tm.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("rows * cols overflow".into()))?;
+        if out_tm.len() != expected {
             return Err(CudaSqwmaError::InvalidInput(format!(
                 "out slice wrong length: got {}, expected {}",
                 out_tm.len(),
-                cols * rows
+                expected
             )));
         }
 
         let inputs = Self::prepare_many_series_inputs(prices_tm_f32, cols, rows, period)?;
         let arr = self.run_many_series_kernel(prices_tm_f32, cols, rows, period, &inputs)?;
-        arr.buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))
+        arr.buf.copy_to(out_tm).map_err(CudaSqwmaError::Cuda)
     }
 
     fn run_batch_kernel(
@@ -276,25 +266,32 @@ impl CudaSqwma {
         let n_combos = inputs.combos.len();
         let series_len = inputs.series_len;
 
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + out_bytes;
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("series_len bytes overflow".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("n_combos bytes overflow".into()))?;
+        let elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("n_combos * series_len overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("out bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(periods_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("required bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // ~64MB safety margin
 
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaSqwmaError::InvalidInput(
-                "insufficient device memory for SQWMA batch launch".into(),
-            ));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices).map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&inputs.periods)
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
-                .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices)?;
+        let d_periods = DeviceBuffer::from_slice(&inputs.periods)?;
+        let out_elems = series_len
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("series_len * n_combos overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -306,9 +303,7 @@ impl CudaSqwma {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -325,25 +320,31 @@ impl CudaSqwma {
         period: usize,
         prepared: &ManySeriesInputs,
     ) -> Result<DeviceArrayF32, CudaSqwmaError> {
-        let prices_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
-        let first_valid_bytes = prepared.first_valids.len() * std::mem::size_of::<i32>();
-        let out_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_valid_bytes + out_bytes;
+        let prices_bytes = prices_tm_f32
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("prices bytes overflow".into()))?;
+        let first_valid_bytes = prepared
+            .first_valids
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("first_valids bytes overflow".into()))?;
+        let out_bytes = prices_tm_f32
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("out bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(first_valid_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("required bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // ~64MB safety margin
 
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaSqwmaError::InvalidInput(
-                "insufficient device memory for SQWMA many-series launch".into(),
-            ));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
-        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)?;
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)?;
         let mut d_out_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }
-                .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -354,9 +355,7 @@ impl CudaSqwma {
             &mut d_out_tm,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
@@ -381,12 +380,23 @@ impl CudaSqwma {
         let func = self
             .module
             .get_function("sqwma_batch_f32")
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaSqwmaError::MissingKernelSymbol { name: "sqwma_batch_f32" })?;
         let block_x: u32 = Self::block_x();
         let grid_x: u32 = self.grid_x_for_series(series_len);
         let grid: GridSize = (grid_x, n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         let shared_bytes: u32 = 0; // optimized kernels do not use dynamic shared memory
+
+        if grid_x > self.max_grid_x {
+            return Err(CudaSqwmaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: n_combos as u32,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -403,9 +413,7 @@ impl CudaSqwma {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?
+            self.stream.launch(&func, grid, block, shared_bytes, args)?
         }
         Ok(())
     }
@@ -422,12 +430,23 @@ impl CudaSqwma {
         let func = self
             .module
             .get_function("sqwma_many_series_one_param_f32")
-            .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaSqwmaError::MissingKernelSymbol { name: "sqwma_many_series_one_param_f32" })?;
         let block_x: u32 = Self::block_x();
         let grid_x: u32 = self.grid_x_for_series(series_len);
         let grid: GridSize = (grid_x, num_series as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         let shared_bytes: u32 = 0; // optimized kernels do not use dynamic shared memory
+
+        if grid_x > self.max_grid_x {
+            return Err(CudaSqwmaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: num_series as u32,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
@@ -444,9 +463,7 @@ impl CudaSqwma {
                 &mut first_valids_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaSqwmaError::Cuda(e.to_string()))?
+            self.stream.launch(&func, grid, block, shared_bytes, args)?
         }
         Ok(())
     }
@@ -501,7 +518,7 @@ impl CudaSqwma {
             return Err(CudaSqwmaError::InvalidInput("empty prices".into()));
         }
 
-        let combos = expand_grid_sqwma(sweep);
+        let combos = expand_grid_sqwma(sweep)?;
         if combos.is_empty() {
             return Err(CudaSqwmaError::InvalidInput(
                 "no parameter combinations".into(),
@@ -720,15 +737,34 @@ struct ManySeriesInputs {
     first_valids: Vec<i32>,
 }
 
-fn expand_grid_sqwma(range: &SqwmaBatchRange) -> Vec<SqwmaParams> {
+fn expand_grid_sqwma(range: &SqwmaBatchRange) -> Result<Vec<SqwmaParams>, CudaSqwmaError> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {
-        return vec![SqwmaParams {
-            period: Some(start),
-        }];
+        return Ok(vec![SqwmaParams { period: Some(start) }]);
     }
-    (start..=end)
-        .step_by(step)
-        .map(|p| SqwmaParams { period: Some(p) })
-        .collect()
+    if start < end {
+        let v: Vec<SqwmaParams> = (start..=end)
+            .step_by(step)
+            .map(|p| SqwmaParams { period: Some(p) })
+            .collect();
+        if v.is_empty() {
+            return Err(CudaSqwmaError::InvalidInput("invalid period range (empty)".into()));
+        }
+        return Ok(v);
+    }
+    // Descend
+    let mut v = Vec::new();
+    let mut cur = start;
+    loop {
+        v.push(SqwmaParams { period: Some(cur) });
+        if cur == end { break; }
+        cur = cur
+            .checked_sub(step)
+            .ok_or_else(|| CudaSqwmaError::InvalidInput("period underflow".into()))?;
+        if cur < end { break; }
+    }
+    if v.is_empty() {
+        return Err(CudaSqwmaError::InvalidInput("invalid period range (empty)".into()));
+    }
+    Ok(v)
 }

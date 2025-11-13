@@ -51,7 +51,11 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaTema;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::gaussian_wrapper::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -154,6 +158,14 @@ pub enum TemaError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("tema: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("tema: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("tema: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("tema: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("tema: Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 // ========== Builder ==========
@@ -240,9 +252,9 @@ pub fn tema_into(input: &TemaInput, out: &mut [f64]) -> Result<(), TemaError> {
     let (data, period, first, len, chosen) = tema_prepare(input, Kernel::Auto)?;
 
     if out.len() != len {
-        return Err(TemaError::InvalidPeriod {
-            period: out.len(),
-            data_len: len,
+        return Err(TemaError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
         });
     }
 
@@ -543,12 +555,7 @@ pub fn tema_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(TemaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(TemaError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -581,19 +588,43 @@ impl TemaBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &TemaBatchRange) -> Vec<TemaParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &TemaBatchRange) -> Result<Vec<TemaParams>, TemaError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TemaError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        // Support reversed bounds when step > 0 by generating a descending sequence
+        if start > end {
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                // checked_sub to avoid underflow when cur < step
+                if let Some(next) = cur.checked_sub(step) {
+                    if next == cur { break; }
+                    cur = next;
+                } else {
+                    break;
+                }
+                if cur == usize::MAX { break; }
+                if cur < end { break; }
+            }
+            if v.is_empty() { return Err(TemaError::InvalidRange { start, end, step }); }
+            return Ok(v);
+        }
+        let it = (start..=end).step_by(step);
+        let v: Vec<usize> = it.collect();
+        if v.is_empty() {
+            return Err(TemaError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(TemaParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -622,11 +653,12 @@ fn tema_batch_inner(
     parallel: bool,
 ) -> Result<TemaBatchOutput, TemaError> {
     // ---------- 0. parameter checks ----------
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(TemaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(TemaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -645,6 +677,10 @@ fn tema_batch_inner(
     // ---------- 1. matrix dimensions ----------
     let rows = combos.len();
     let cols = data.len();
+    // Guard rows * cols overflow
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| TemaError::InvalidInput("rows * cols overflow".into()))?;
 
     // Resolve the kernel if it's Auto
     let actual_kern = match kern {
@@ -1555,11 +1591,12 @@ fn tema_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<TemaParams>, TemaError> {
     // ---------- 0. parameter checks ----------
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(TemaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(TemaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -1582,6 +1619,12 @@ fn tema_batch_inner_into(
     // ---------- 1. matrix dimensions ----------
     let rows = combos.len();
     let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| TemaError::InvalidInput("rows * cols overflow".into()))?;
+    if out.len() != expected {
+        return Err(TemaError::OutputLengthMismatch { expected, got: out.len() });
+    }
 
     // Resolve the kernel if it's Auto
     let actual_kern = match kern {
@@ -1768,12 +1811,15 @@ pub fn tema_batch_py<'py>(
     };
 
     // Calculate dimensions
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
     // Pre-allocate output array (OK for batch operations)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Compute without GIL
@@ -1830,13 +1876,21 @@ pub fn tema_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaTema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.tema_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let (inner, stream_handle, ctx_guard, dev_id) = py
+        .allow_threads(|| -> Result<(_, _, Arc<Context>, u32), PyErr> {
+            let cuda = CudaTema::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let inner = cuda
+                .tema_batch_dev(slice_in, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let guard = cuda.context_guard();
+            let sh = cuda.stream_handle();
+            let did = cuda.device_id();
+            Ok((inner, sh, guard, did))
+        })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    // CUDA stream was synchronized before returning device buffer; omit stream in CAI v3
+    Ok(DeviceArrayF32Py::new_from_rust(inner, 0, ctx_guard, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1859,13 +1913,21 @@ pub fn tema_cuda_many_series_one_param_dev_py(
 
     let prices_flat = prices_tm_f32.as_slice()?;
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaTema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.tema_many_series_one_param_time_major_dev(prices_flat, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let (inner, stream_handle, ctx_guard, dev_id) = py
+        .allow_threads(|| -> Result<(_, _, Arc<Context>, u32), PyErr> {
+            let cuda = CudaTema::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let inner = cuda
+                .tema_many_series_one_param_time_major_dev(prices_flat, cols, rows, period)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let guard = cuda.context_guard();
+            let sh = cuda.stream_handle();
+            let did = cuda.device_id();
+            Ok((inner, sh, guard, did))
+        })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    // CUDA stream was synchronized before returning device buffer; omit stream in CAI v3
+    Ok(DeviceArrayF32Py::new_from_rust(inner, 0, ctx_guard, dev_id))
 }
 
 // ========== WASM Bindings ==========
@@ -1874,9 +1936,9 @@ pub fn tema_cuda_many_series_one_param_dev_py(
 pub fn tema_into_slice(dst: &mut [f64], input: &TemaInput, kern: Kernel) -> Result<(), TemaError> {
     let (data, period, first, len, chosen) = tema_prepare(input, kern)?;
     if dst.len() != len {
-        return Err(TemaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: len,
+        return Err(TemaError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
         });
     }
     tema_compute_into(data, period, first, chosen, dst);

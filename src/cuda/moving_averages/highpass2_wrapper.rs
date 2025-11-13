@@ -23,6 +23,7 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use cust::error::CudaError;
@@ -33,12 +34,22 @@ pub enum CudaHighPass2Error {
     Cuda(#[from] CudaError),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("Out of device memory (required={required}B, free={free}B, headroom={headroom}B)")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buffer on device {buf}, current device {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Invalid usize range: start={start}, end={end}, step={step}")]
+    InvalidRangeUsize { start: usize, end: usize, step: usize },
+    #[error("Invalid f64 range: start={start}, end={end}, step={step}")]
+    InvalidRangeF64 { start: f64, end: f64, step: f64 },
+    #[error("size overflow while computing {what}")]
+    SizeOverflow { what: &'static str },
     #[error("Not implemented")]
     NotImplemented,
 }
@@ -83,7 +94,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaHighPass2 {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaHighPass2Policy,
     last_batch: Option<BatchKernelSelected>,
@@ -128,7 +139,7 @@ impl CudaHighPass2 {
     pub fn new(device_id: usize) -> Result<Self, CudaHighPass2Error> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/highpass2_kernel.ptx"));
         let jit_opts = &[
@@ -188,6 +199,8 @@ impl CudaHighPass2 {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaHighPass2Error> { self.stream.synchronize().map_err(Into::into) }
+    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
     fn calc_launch_1d(
@@ -280,11 +293,30 @@ impl CudaHighPass2 {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
-        // VRAM estimate: prices + param arrays + out
-        let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
-        let params_bytes = n_combos * (std::mem::size_of::<i32>() + 4 * std::mem::size_of::<f32>());
-        let out_bytes = n_combos * prepared.series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
+        // VRAM estimate: prices + param arrays + out (guard overflow)
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let prices_bytes = prepared
+            .series_len
+            .checked_mul(sz_f32)
+            .ok_or(CudaHighPass2Error::SizeOverflow { what: "prices bytes" })?;
+        let per_combo_bytes = sz_i32
+            .checked_add(4usize.checked_mul(sz_f32).ok_or(CudaHighPass2Error::SizeOverflow { what: "param bytes" })?)
+            .ok_or(CudaHighPass2Error::SizeOverflow { what: "param bytes" })?;
+        let params_bytes = n_combos
+            .checked_mul(per_combo_bytes)
+            .ok_or(CudaHighPass2Error::SizeOverflow { what: "params bytes" })?;
+        let out_elems = prepared
+            .series_len
+            .checked_mul(n_combos)
+            .ok_or(CudaHighPass2Error::SizeOverflow { what: "output elements" })?;
+        let out_bytes = out_elems
+            .checked_mul(sz_f32)
+            .ok_or(CudaHighPass2Error::SizeOverflow { what: "output bytes" })?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or(CudaHighPass2Error::SizeOverflow { what: "total bytes" })?;
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
@@ -414,11 +446,23 @@ impl CudaHighPass2 {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        // VRAM estimate: input + out + first_valids
-        let in_bytes = num_series * series_len * std::mem::size_of::<f32>();
+        // VRAM estimate: input + out + first_valids (guard overflow)
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let elems = num_series
+            .checked_mul(series_len)
+            .ok_or(CudaHighPass2Error::SizeOverflow { what: "many-series elements" })?;
+        let in_bytes = elems
+            .checked_mul(sz_f32)
+            .ok_or(CudaHighPass2Error::SizeOverflow { what: "input bytes" })?;
         let out_bytes = in_bytes;
-        let param_bytes = num_series * std::mem::size_of::<i32>();
-        let required = in_bytes + out_bytes + param_bytes;
+        let param_bytes = num_series
+            .checked_mul(sz_i32)
+            .ok_or(CudaHighPass2Error::SizeOverflow { what: "first_valids bytes" })?;
+        let required = in_bytes
+            .checked_add(out_bytes)
+            .and_then(|x| x.checked_add(param_bytes))
+            .ok_or(CudaHighPass2Error::SizeOverflow { what: "total bytes" })?;
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
@@ -784,7 +828,7 @@ impl CudaHighPass2 {
                 "input data is empty".into(),
             ));
         }
-        let combos = expand_grid(sweep);
+        let combos = expand_grid(sweep)?;
         if combos.is_empty() {
             return Err(CudaHighPass2Error::InvalidInput(
                 "no parameter combinations provided".into(),
@@ -971,39 +1015,55 @@ fn compute_coefficients(period: usize, k: f64) -> Coefficients {
     }
 }
 
-fn expand_grid(range: &HighPass2BatchRange) -> Vec<HighPass2Params> {
-    fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
-        let (start, end, step) = axis;
+fn expand_grid(range: &HighPass2BatchRange) -> Result<Vec<HighPass2Params>, CudaHighPass2Error> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaHighPass2Error> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let v: Vec<usize> = (lo..=hi).step_by(step).collect();
+        if v.is_empty() {
+            return Err(CudaHighPass2Error::InvalidRangeUsize { start, end, step });
+        }
+        Ok(v)
     }
 
-    fn axis_f64(axis: (f64, f64, f64)) -> Vec<f64> {
-        let (start, end, step) = axis;
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaHighPass2Error> {
+        const EPS: f64 = 1e-12;
+        if step.abs() < EPS || (start - end).abs() < EPS {
+            return Ok(vec![start]);
         }
-        let mut values = Vec::new();
-        let mut current = start;
-        while current <= end + 1e-12 {
-            values.push(current);
-            current += step;
+        let step_eff = if start <= end { step.abs() } else { -step.abs() };
+        let mut v = Vec::new();
+        let mut x = start;
+        if step_eff > 0.0 {
+            while x <= end + EPS {
+                v.push(x);
+                x += step_eff;
+            }
+        } else {
+            while x >= end - EPS {
+                v.push(x);
+                x += step_eff;
+            }
         }
-        values
+        if v.is_empty() {
+            return Err(CudaHighPass2Error::InvalidRangeF64 { start, end, step });
+        }
+        Ok(v)
     }
 
-    let periods = axis_usize(range.period);
-    let ks = axis_f64(range.k);
-    let mut out = Vec::with_capacity(periods.len() * ks.len());
+    let periods = axis_usize(range.period)?;
+    let ks = axis_f64(range.k)?;
+    let total = periods
+        .len()
+        .checked_mul(ks.len())
+        .ok_or(CudaHighPass2Error::SizeOverflow { what: "parameter grid" })?;
+    let mut out = Vec::with_capacity(total);
     for &p in &periods {
         for &k in &ks {
-            out.push(HighPass2Params {
-                period: Some(p),
-                k: Some(k),
-            });
+            out.push(HighPass2Params { period: Some(p), k: Some(k) });
         }
     }
-    out
+    Ok(out)
 }

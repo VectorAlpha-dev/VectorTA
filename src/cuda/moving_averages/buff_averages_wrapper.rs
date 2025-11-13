@@ -24,6 +24,7 @@ use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
@@ -33,12 +34,20 @@ pub enum CudaBuffAveragesError {
     Cuda(#[from] cust::error::CudaError),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("out of memory on device: required ≈{required} bytes (incl headroom {headroom}), free={free}")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("arithmetic overflow while computing {context}")]
     ArithmeticOverflow { context: &'static str },
+    #[error(
+        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
+    )]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device/context mismatch: buffer on device {buf}, current device {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
@@ -241,7 +250,7 @@ pub mod benches {
 pub struct CudaBuffAverages {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaBuffPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -295,7 +304,7 @@ impl CudaBuffAverages {
     pub fn new(device_id: usize) -> Result<Self, CudaBuffAveragesError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/buff_averages_kernel.ptx"));
         // Align with ALMA JIT policy: prefer DetermineTargetFromContext + O2, allow optional MaxRegisters via env
@@ -543,6 +552,42 @@ impl CudaBuffAverages {
     }
 
     #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+
+    #[inline]
+    fn validate_launch(&self, grid: GridSize, block: BlockSize) -> Result<(), CudaBuffAveragesError> {
+        // Best-effort static checks against common device limits.
+        // Use conservative defaults if attribute queries fail.
+        unsafe {
+            let dev = Device::get_device(self.device_id).ok();
+            let mut max_threads_per_block: i32 = 1024; // typical default
+            if let Some(d) = dev {
+                let _ = cu::cuDeviceGetAttribute(
+                    &mut max_threads_per_block as *mut _,
+                    cu::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                    d.as_raw(),
+                );
+            }
+            let (bx, by, bz) = (block.x, block.y, block.z);
+            let threads = (bx as u64) * (by as u64) * (bz as u64);
+            if threads > (max_threads_per_block as u64) {
+                return Err(CudaBuffAveragesError::LaunchConfigTooLarge {
+                    gx: grid.x,
+                    gy: grid.y,
+                    gz: grid.z,
+                    bx,
+                    by,
+                    bz,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
     fn pick_tiled_block(&self, series_len: usize) -> u32 {
         if let Ok(v) = std::env::var("BUFF_TILE") {
             if let Ok(tile) = v.parse::<u32>() {
@@ -563,7 +608,8 @@ impl CudaBuffAverages {
             if step == 0 || start == end {
                 return vec![start];
             }
-            (start..=end).step_by(step).collect()
+            let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+            (lo..=hi).step_by(step).collect()
         }
 
         let fasts = axis(range.fast_period);
@@ -762,6 +808,7 @@ impl CudaBuffAverages {
                         &mut fast_out_ptr as *mut _ as *mut c_void,
                         &mut slow_out_ptr as *mut _ as *mut c_void,
                     ];
+                    self.validate_launch(grid, block)?;
                     self.stream.launch(&func, grid, block, 0, args)?;
                 }
                 start += chunk;
@@ -819,6 +866,7 @@ impl CudaBuffAverages {
                         &mut fast_out_ptr as *mut _ as *mut c_void,
                         &mut slow_out_ptr as *mut _ as *mut c_void,
                     ];
+                    self.validate_launch(grid, block)?;
                     self.stream.launch(&func, grid, block, 0, args)?;
                 }
                 start += chunk;
@@ -990,6 +1038,7 @@ impl CudaBuffAverages {
                     &mut outf_ptr as *mut _ as *mut c_void,
                     &mut outs_ptr as *mut _ as *mut c_void,
                 ];
+                self.validate_launch(grid, block)?;
                 self.stream
                     .launch(&func, grid, block, 0, args)
                     .map_err(|e| CudaBuffAveragesError::Cuda(e))
@@ -1063,6 +1112,7 @@ impl CudaBuffAverages {
                 &mut outf_ptr as *mut _ as *mut c_void,
                 &mut outs_ptr as *mut _ as *mut c_void,
             ];
+            self.validate_launch(grid, block)?;
             self.stream.launch(&func, grid, block, 0, args)?;
         }
         unsafe {
@@ -1476,6 +1526,7 @@ impl CudaBuffAverages {
                 &mut outf_ptr as *mut _ as *mut c_void,
                 &mut outs_ptr as *mut _ as *mut c_void,
             ];
+            self.validate_launch(grid, block)?;
             self.stream.launch(&func, grid, block, 0, args)?;
         }
         self.stream.synchronize()?;

@@ -2255,7 +2255,7 @@ mod tests {
 
     #[cfg(not(feature = "wasm"))]
     #[test]
-    fn test_correlation_cycle_into_matches_api() -> Result<(), Box<dyn Error>> {
+fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         // Use the same CSV dataset as the module's other tests
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;

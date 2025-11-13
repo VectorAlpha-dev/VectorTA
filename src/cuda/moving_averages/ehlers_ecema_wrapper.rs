@@ -26,6 +26,7 @@ use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use thiserror::Error;
+use std::sync::Arc;
 use cust::error::CudaError;
 
 #[derive(Debug, Error)]
@@ -34,6 +35,8 @@ pub enum CudaEhlersEcemaError {
     Cuda(#[from] CudaError),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("device out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("missing kernel symbol: {name}")]
@@ -42,6 +45,8 @@ pub enum CudaEhlersEcemaError {
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
     #[error("size computation overflow: {context}")]
     SizeOverflow { context: &'static str },
+    #[error("device mismatch: buffer on device {buf}, current device {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
@@ -102,7 +107,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaEhlersEcema {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaEhlersEcemaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -115,7 +120,7 @@ impl CudaEhlersEcema {
     pub fn new(device_id: usize) -> Result<Self, CudaEhlersEcemaError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_ecema_kernel.ptx"));
         // PATCH 2: Harden JIT policy. Default to O2 with optional env overrides.
@@ -142,7 +147,7 @@ impl CudaEhlersEcema {
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaEhlersEcemaPolicy::default(),
             last_batch: None,
@@ -169,6 +174,12 @@ impl CudaEhlersEcema {
     pub fn policy(&self) -> &CudaEhlersEcemaPolicy {
         &self.policy
     }
+
+    /// Expose a cloned Arc to the current CUDA context for Python interop guards.
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+
+    /// Return the numeric CUDA device id.
+    pub fn device_id(&self) -> u32 { self.device_id }
     /// Last selected batch kernel (if any).
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch

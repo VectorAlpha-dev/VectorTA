@@ -23,8 +23,14 @@ use std::fmt;
 
 #[derive(Debug)]
 pub enum CudaVwmaError {
-    Cuda(String),
+    Cuda(cust::error::CudaError),
     InvalidInput(String),
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    MissingKernelSymbol { name: &'static str },
+    InvalidPolicy(&'static str),
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    DeviceMismatch { buf: u32, current: u32 },
+    NotImplemented,
 }
 
 impl fmt::Display for CudaVwmaError {
@@ -32,25 +38,47 @@ impl fmt::Display for CudaVwmaError {
         match self {
             CudaVwmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaVwmaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
+            CudaVwmaError::OutOfMemory { required, free, headroom } => write!(
+                f,
+                "Out of memory: required={}B, free={}B, headroom={}B",
+                required, free, headroom
+            ),
+            CudaVwmaError::MissingKernelSymbol { name } => write!(f, "Missing kernel symbol: {}", name),
+            CudaVwmaError::InvalidPolicy(s) => write!(f, "Invalid policy: {}", s),
+            CudaVwmaError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+                f,
+                "Launch config too large: grid=({},{},{}), block=({},{},{})",
+                gx, gy, gz, bx, by, bz
+            ),
+            CudaVwmaError::DeviceMismatch { buf, current } => write!(
+                f,
+                "Device/context mismatch: buffer on device {}, current device {}",
+                buf, current
+            ),
+            CudaVwmaError::NotImplemented => write!(f, "Not implemented"),
         }
     }
 }
 
 impl std::error::Error for CudaVwmaError {}
 
+impl From<cust::error::CudaError> for CudaVwmaError {
+    fn from(e: cust::error::CudaError) -> Self { CudaVwmaError::Cuda(e) }
+}
+
 pub struct CudaVwma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: std::sync::Arc<Context>,
+    device_id: u32,
 }
 
 impl CudaVwma {
     pub fn new(device_id: usize) -> Result<Self, CudaVwmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
 
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = std::sync::Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vwma_kernel.ptx"));
         // Prefer context-derived target and the most aggressive JIT optimization (O4)
@@ -60,17 +88,21 @@ impl CudaVwma {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
         })
     }
+
+    #[inline]
+    pub fn context_arc(&self) -> std::sync::Arc<Context> { self._context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     pub fn vwma_batch_dev(
         &self,
@@ -102,13 +134,9 @@ impl CudaVwma {
         let arr = self.run_batch_kernel(prices, volumes, &inputs)?;
 
         // Pinned host staging + async D2H on our stream, then memcpy into caller slice.
-        let mut h_out: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out.len()) }
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        unsafe { arr.buf.async_copy_to(h_out.as_mut_slice(), &self.stream) }
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let mut h_out: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out.len()) }?;
+        unsafe { arr.buf.async_copy_to(h_out.as_mut_slice(), &self.stream) }?;
+        self.stream.synchronize()?;
         out.copy_from_slice(h_out.as_slice());
         Ok((arr.rows, arr.cols, inputs.combos))
     }
@@ -249,9 +277,12 @@ impl CudaVwma {
         let required = pv_bytes + vol_bytes + period_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaVwmaError::InvalidInput(
-                "not enough device memory for VWMA batch".into(),
-            ));
+            let (free, _total) = Self::device_mem_info().unwrap_or((0, 0));
+            return Err(CudaVwmaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
         // Pinned host buffers and async H2D copies on our stream
@@ -262,18 +293,10 @@ impl CudaVwma {
         let h_periods = LockedBuffer::from_slice(&inputs.periods)
             .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
 
-        let d_pv: DeviceBuffer<f64> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let d_vol: DeviceBuffer<f64> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let d_periods: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_periods, &self.stream) }
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let d_pv: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }?;
+        let d_vol: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }?;
+        let d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&*h_periods, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
 
         self.launch_batch_kernel(
             &d_pv,
@@ -285,9 +308,7 @@ impl CudaVwma {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -320,7 +341,7 @@ impl CudaVwma {
         let func = self
             .module
             .get_function("vwma_batch_f32")
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVwmaError::MissingKernelSymbol { name: "vwma_batch_f32" })?;
 
         const MAX_GRID_Y: usize = 65_535;
         let block_x: u32 = 256;
@@ -336,7 +357,18 @@ impl CudaVwma {
         let mut start = 0usize;
         while start < n_combos {
             let chunk = (n_combos - start).min(MAX_GRID_Y);
-            let grid: GridSize = (grid_x, chunk as u32, 1).into();
+            let grid_y = chunk as u32;
+            if grid_y as usize > MAX_GRID_Y {
+                return Err(CudaVwmaError::LaunchConfigTooLarge {
+                    gx: grid_x,
+                    gy: grid_y,
+                    gz: 1,
+                    bx: block_x,
+                    by: 1,
+                    bz: 1,
+                });
+            }
+            let grid: GridSize = (grid_x, grid_y, 1).into();
 
             unsafe {
                 let mut pv_ptr = pv_base;
@@ -358,9 +390,7 @@ impl CudaVwma {
                     &mut first_valid_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
             start += chunk;
         }
@@ -398,7 +428,7 @@ impl CudaVwma {
                     let func = self
                         .module
                         .get_function("vwma_multi_series_one_param_f32")
-                        .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+                        .map_err(|_| CudaVwmaError::MissingKernelSymbol { name: "vwma_multi_series_one_param_f32" })?;
                     let block_x: u32 = 128;
                     let grid_x = ((series_len as u32) + block_x - 1) / block_x;
                     let grid: GridSize = (grid_x, num_series as u32, 1).into();
@@ -410,7 +440,7 @@ impl CudaVwma {
             let func = self
                 .module
                 .get_function("vwma_multi_series_one_param_f32")
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaVwmaError::MissingKernelSymbol { name: "vwma_multi_series_one_param_f32" })?;
             let block_x: u32 = 128;
             let grid_x = ((series_len as u32) + block_x - 1) / block_x;
             let grid: GridSize = (grid_x, num_series as u32, 1).into();
@@ -434,9 +464,7 @@ impl CudaVwma {
                 &mut first_valids_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?
+            self.stream.launch(&func, grid, block, 0, args)?
         }
         Ok(())
     }
@@ -466,25 +494,14 @@ impl CudaVwma {
         }
 
         // Pinned host buffers + async H2D copies
-        let h_pv = LockedBuffer::from_slice(&inputs.pv_prefix_tm)
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let h_vol = LockedBuffer::from_slice(&inputs.vol_prefix_tm)
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let h_fv = LockedBuffer::from_slice(&inputs.first_valids)
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let h_pv = LockedBuffer::from_slice(&inputs.pv_prefix_tm)?;
+        let h_vol = LockedBuffer::from_slice(&inputs.vol_prefix_tm)?;
+        let h_fv = LockedBuffer::from_slice(&inputs.first_valids)?;
 
-        let d_pv: DeviceBuffer<f64> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let d_vol: DeviceBuffer<f64> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let d_first_valids: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_fv, &self.stream) }
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(prices_tm_f32.len(), &self.stream) }
-                .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        let d_pv: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }?;
+        let d_vol: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }?;
+        let d_first_valids: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&*h_fv, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(prices_tm_f32.len(), &self.stream) }?;
 
         self.launch_many_series_kernel(
             &d_pv,
@@ -496,9 +513,7 @@ impl CudaVwma {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -893,9 +908,19 @@ fn expand_grid(r: &VwmaBatchRange) -> Vec<VwmaParams> {
             period: Some(start),
         }];
     }
-
-    (start..=end)
-        .step_by(step)
-        .map(|p| VwmaParams { period: Some(p) })
-        .collect()
+    if start < end {
+        (start..=end)
+            .step_by(step)
+            .map(|p| VwmaParams { period: Some(p) })
+            .collect()
+    } else {
+        let mut v = Vec::new();
+        let mut p = start;
+        while p >= end {
+            v.push(VwmaParams { period: Some(p) });
+            if p - end < step { break; }
+            p -= step;
+        }
+        v
+    }
 }

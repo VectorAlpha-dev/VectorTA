@@ -16,9 +16,11 @@
 //! - **Err(VwmaError)** on error.
 //!
 //! ## Developer Notes
-//! - SIMD status: AVX2/AVX512 implementations exist but are disabled by default.
+//! - SIMD: AVX2/AVX512 implementations exist but are disabled by default.
 //!   Rationale: strict non-finite bit-equality property tests and minimal wins for short periods.
 //!   Runtime selection short-circuits to scalar; SIMD kept for future experimentation.
+//! - CUDA: FP32 wrappers present; kernels loaded from embedded PTX. Wrapper validates memory
+//!   headroom and launch shape and returns VRAM handles usable from Python via CAI v3 + DLPack.
 //! - Streaming: O(1) ring-buffer update with running sums; hot path avoids modulo.
 //!   Exact IEEE math retained (no fast-math) to preserve test reference values.
 //! - Memory: uses `alloc_with_nan_prefix` for zero-copy allocation (see alma.rs for patterns).
@@ -27,8 +29,138 @@
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaVwma;
+// VWMA-specific VRAM handle for Python with CAI v3 + DLPack
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::ffi::c_void;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct VwmaDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl VwmaDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producer stream is synchronized in the CUDA wrapper; omit "stream" per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        // Move DeviceBuffer into DLManagedTensor so consumer owns it
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Manager {
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+        }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            let mt = Box::from_raw(p);
+            let _mgr: Box<Manager> = Box::from_raw(mt.manager_ctx as *mut Manager);
+            drop(mt);
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt) }
+            }
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1]); // element strides, row-major
+        let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
+        let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
+        let mgr_ptr = Box::into_raw(mgr);
+        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
+        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr as *mut c_void,
+            deleter: Some(dlpack_deleter),
+        });
+
+        let raw_capsule = unsafe {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
+        };
+        if raw_capsule.is_null() {
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+    }
+}
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -162,6 +294,12 @@ pub enum VwmaError {
     PriceVolumeMismatch { price_len: usize, volume_len: usize },
     #[error("vwma: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("vwma: output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("vwma: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("vwma: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -568,12 +706,7 @@ pub fn vwma_batch_with_kernel(
     let chosen = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(VwmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(VwmaError::InvalidKernelForBatch(other)),
     };
     let simd = match chosen {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -622,14 +755,24 @@ impl VwmaBatchOutput {
 fn expand_grid_vwma(r: &VwmaBatchRange) -> Vec<VwmaParams> {
     let (start, end, step) = r.period;
     if step == 0 || start == end {
-        return vec![VwmaParams {
-            period: Some(start),
-        }];
+        return vec![VwmaParams { period: Some(start) }];
     }
-    (start..=end)
-        .step_by(step)
-        .map(|p| VwmaParams { period: Some(p) })
-        .collect()
+    if start < end {
+        (start..=end)
+            .step_by(step)
+            .map(|p| VwmaParams { period: Some(p) })
+            .collect()
+    } else {
+        // reversed bounds supported
+        let mut v = Vec::new();
+        let mut p = start;
+        while p >= end {
+            v.push(VwmaParams { period: Some(p) });
+            if p - end < step { break; }
+            p -= step;
+        }
+        v
+    }
 }
 
 #[inline(always)]
@@ -663,9 +806,11 @@ fn vwma_batch_inner(
     // ---------- 0. parameter checks ----------
     let combos = expand_grid_vwma(sweep);
     if combos.is_empty() {
-        return Err(VwmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        let (s, e, st) = sweep.period;
+        return Err(VwmaError::InvalidRange {
+            start: s,
+            end: e,
+            step: st,
         });
     }
 
@@ -693,6 +838,13 @@ fn vwma_batch_inner(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(VwmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm_prefixes) };
 
@@ -941,9 +1093,11 @@ pub fn vwma_batch_inner_into(
     // 0) grid + validity
     let combos = expand_grid_vwma(sweep);
     if combos.is_empty() {
-        return Err(VwmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        let (s, e, st) = sweep.period;
+        return Err(VwmaError::InvalidRange {
+            start: s,
+            end: e,
+            step: st,
         });
     }
     let len = price.len();
@@ -969,11 +1123,15 @@ pub fn vwma_batch_inner_into(
     // 1) shape + out buffer
     let rows = combos.len();
     let cols = len;
-    if out.len() != rows * cols {
-        return Err(VwmaError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(VwmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(VwmaError::OutputLengthMismatch { expected, got: out.len() });
     }
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
@@ -1841,7 +1999,7 @@ pub fn vwma_cuda_batch_dev_py(
     volumes_f32: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VwmaDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1852,13 +2010,17 @@ pub fn vwma_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev) = py.allow_threads(|| {
         let cuda = CudaVwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vwma_batch_dev(price_slice, volume_slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let arr = cuda
+            .vwma_batch_dev(price_slice, volume_slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
+        Ok::<_, pyo3::PyErr>((arr.buf, arr.rows, arr.cols, ctx, dev))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VwmaDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1870,7 +2032,7 @@ pub fn vwma_cuda_many_series_one_param_dev_py(
     volumes_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<VwmaDeviceArrayF32Py> {
     use numpy::PyUntypedArrayMethods;
 
     if !cuda_available() {
@@ -1891,19 +2053,23 @@ pub fn vwma_cuda_many_series_one_param_dev_py(
     let prices_flat = prices_tm_f32.as_slice()?;
     let volumes_flat = volumes_tm_f32.as_slice()?;
 
-    let inner = py.allow_threads(|| {
+    let (buf, rows_o, cols_o, ctx, dev) = py.allow_threads(|| {
         let cuda = CudaVwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vwma_many_series_one_param_time_major_dev(
-            prices_flat,
-            volumes_flat,
-            cols,
-            rows,
-            period,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+        let arr = cuda
+            .vwma_many_series_one_param_time_major_dev(
+                prices_flat,
+                volumes_flat,
+                cols,
+                rows,
+                period,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
+        Ok::<_, pyo3::PyErr>((arr.buf, arr.rows, arr.cols, ctx, dev))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(VwmaDeviceArrayF32Py { buf: Some(buf), rows: rows_o, cols: cols_o, _ctx: ctx, device_id: dev })
 }
 
 #[cfg(feature = "wasm")]
@@ -1996,10 +2162,7 @@ pub fn vwma_into_slice(dst: &mut [f64], input: &VwmaInput, kern: Kernel) -> Resu
         });
     }
     if dst.len() != len {
-        return Err(VwmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: len,
-        });
+        return Err(VwmaError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
     let first = price

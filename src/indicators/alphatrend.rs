@@ -69,7 +69,11 @@ use thiserror::Error;
 use crate::cuda::alphatrend_wrapper::CudaAlphaTrend;
 use crate::indicators::mfi::{mfi_with_kernel, MfiInput, MfiParams};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use crate::indicators::rsi::{rsi_with_kernel, RsiInput, RsiParams};
 
 impl<'a> AsRef<[f64]> for AlphaTrendInput<'a> {
@@ -283,6 +287,9 @@ pub enum AlphaTrendError {
     #[error("alphatrend: Inconsistent data lengths")]
     InconsistentDataLengths,
 
+    #[error("alphatrend: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
     #[error("alphatrend: Invalid coefficient: {coeff}")]
     InvalidCoeff { coeff: f64 },
 
@@ -291,6 +298,18 @@ pub enum AlphaTrendError {
 
     #[error("alphatrend: MFI calculation failed: {msg}")]
     MfiError { msg: String },
+
+    #[error("alphatrend: Invalid range (usize): start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("alphatrend: Invalid range (f64): start={start} end={end} step={step}")]
+    InvalidRangeF64 { start: f64, end: f64, step: f64 },
+
+    #[error("alphatrend: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("alphatrend: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -345,8 +364,17 @@ pub fn alphatrend_into_slices(
     let (open, high, low, close, volume, coeff, period, no_volume, first, chosen) =
         alphatrend_prepare(input, kern)?;
 
-    if dst_k1.len() != close.len() || dst_k2.len() != close.len() {
-        return Err(AlphaTrendError::InconsistentDataLengths);
+    if dst_k1.len() != close.len() {
+        return Err(AlphaTrendError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst_k1.len(),
+        });
+    }
+    if dst_k2.len() != close.len() {
+        return Err(AlphaTrendError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst_k2.len(),
+        });
     }
 
     let warm = first + period - 1;
@@ -1641,30 +1669,61 @@ impl AlphaTrendBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid_alphatrend(r: &AlphaTrendBatchRange) -> Vec<AlphaTrendParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid_alphatrend(r: &AlphaTrendBatchRange) -> Result<Vec<AlphaTrendParams>, AlphaTrendError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, AlphaTrendError> {
         if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
-    }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                cur = cur.saturating_add(step);
+                if cur == *v.last().unwrap() { break; }
+            }
+        } else {
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                let next = cur.saturating_sub(step);
+                if next == cur { break; }
+                cur = next;
+                if cur == 0 && end > 0 { break; }
+            }
         }
-        v
+        if v.is_empty() { return Err(AlphaTrendError::InvalidRange { start, end, step }); }
+        Ok(v)
+    }
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, AlphaTrendError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let mut out = Vec::new();
+        if start < end {
+            let st = if step > 0.0 { step } else { -step };
+            let mut x = start;
+            while x <= end + 1e-12 {
+                out.push(x);
+                x += st;
+            }
+        } else {
+            let st = if step > 0.0 { -step } else { step };
+            if st.abs() < 1e-12 { return Ok(vec![start]); }
+            let mut x = start;
+            while x >= end - 1e-12 {
+                out.push(x);
+                x += st; // st is negative here or positive toward decreasing
+            }
+        }
+        if out.is_empty() { return Err(AlphaTrendError::InvalidRangeF64 { start, end, step }); }
+        Ok(out)
     }
 
-    let coeffs = axis_f64(r.coeff);
-    let periods = axis_usize(r.period);
+    let coeffs = axis_f64(r.coeff)?;
+    let periods = axis_usize(r.period)?;
 
-    let mut out = Vec::with_capacity(coeffs.len() * periods.len());
+    let mut out = Vec::with_capacity(coeffs.len().saturating_mul(periods.len()));
     for &c in &coeffs {
         for &p in &periods {
             out.push(AlphaTrendParams {
@@ -1674,7 +1733,7 @@ fn expand_grid_alphatrend(r: &AlphaTrendBatchRange) -> Vec<AlphaTrendParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn alphatrend_batch_with_kernel(
@@ -1685,12 +1744,7 @@ pub fn alphatrend_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(AlphaTrendError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(AlphaTrendError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -1740,9 +1794,12 @@ fn alphatrend_batch_inner_from_slices(
     kern: Kernel,
     parallel: bool,
 ) -> Result<AlphaTrendBatchOutput, AlphaTrendError> {
-    let combos = expand_grid_alphatrend(sweep);
+    let combos = expand_grid_alphatrend(sweep)?;
     let cols = close.len();
     let rows = combos.len();
+    let _elems = rows
+        .checked_mul(cols)
+        .ok_or_else(|| AlphaTrendError::InvalidInput("rows*cols overflow".into()))?;
     if cols == 0 {
         return Err(AlphaTrendError::EmptyInputData);
     }
@@ -1812,9 +1869,12 @@ fn alphatrend_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<AlphaTrendBatchOutput, AlphaTrendError> {
-    let combos = expand_grid_alphatrend(sweep);
+    let combos = expand_grid_alphatrend(sweep)?;
     let cols = candles.close.len();
     let rows = combos.len();
+    let _elems = rows
+        .checked_mul(cols)
+        .ok_or_else(|| AlphaTrendError::InvalidInput("rows*cols overflow".into()))?;
     if cols == 0 {
         return Err(AlphaTrendError::EmptyInputData);
     }
@@ -1927,7 +1987,7 @@ pub fn alphatrend_batch_inner_into_slices(
     k1_slice: &mut [f64],
     k2_slice: &mut [f64],
 ) -> Result<(), AlphaTrendError> {
-    let combos = expand_grid_alphatrend(sweep);
+    let combos = expand_grid_alphatrend(sweep)?;
     let cols = close.len();
     let rows = combos.len();
 
@@ -1935,8 +1995,14 @@ pub fn alphatrend_batch_inner_into_slices(
         return Err(AlphaTrendError::EmptyInputData);
     }
 
-    if k1_slice.len() != rows * cols || k2_slice.len() != rows * cols {
-        return Err(AlphaTrendError::InconsistentDataLengths);
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| AlphaTrendError::InvalidInput("rows*cols overflow".into()))?;
+    if k1_slice.len() != total {
+        return Err(AlphaTrendError::OutputLengthMismatch { expected: total, got: k1_slice.len() });
+    }
+    if k2_slice.len() != total {
+        return Err(AlphaTrendError::OutputLengthMismatch { expected: total, got: k2_slice.len() });
     }
 
     // Resolve kernel and SIMD mapping for momentum precompute
@@ -2208,7 +2274,8 @@ pub fn alphatrend_batch_py<'py>(
     dict.set_item("cols", len)?;
 
     // Add combo parameters
-    let combos = expand_grid_alphatrend(&sweep);
+    let combos = expand_grid_alphatrend(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let combo_list = PyList::new(
         py,
         combos.iter().map(|c| {
@@ -2260,7 +2327,7 @@ pub fn alphatrend_cuda_batch_dev_py<'py>(
         period: period_range,
         no_volume,
     };
-    let (batch, coeffs_vec, periods_vec) = py.allow_threads(|| {
+    let (batch, coeffs_vec, periods_vec, ctx_guard, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaAlphaTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
@@ -2272,14 +2339,29 @@ pub fn alphatrend_cuda_batch_dev_py<'py>(
             .iter()
             .map(|p| p.period.unwrap_or(14) as u64)
             .collect();
-        Ok::<_, PyErr>((out, coeffs, periods))
+        Ok::<_, PyErr>((out, coeffs, periods, cuda.context_arc(), cuda.device_id()))
     })?;
 
     let rows = batch.k1.rows;
     let cols = batch.k1.cols;
     let dict = PyDict::new(py);
-    dict.set_item("k1", Py::new(py, DeviceArrayF32Py { inner: batch.k1 })?)?;
-    dict.set_item("k2", Py::new(py, DeviceArrayF32Py { inner: batch.k2 })?)?;
+    // Move the device buffers into Python wrappers that keep context alive and support DLPack
+    let k1_py = AtDeviceArrayF32Py {
+        buf: Some(batch.k1.buf),
+        rows,
+        cols,
+        _ctx: ctx_guard.clone(),
+        device_id: dev_id,
+    };
+    let k2_py = AtDeviceArrayF32Py {
+        buf: Some(batch.k2.buf),
+        rows,
+        cols,
+        _ctx: ctx_guard,
+        device_id: dev_id,
+    };
+    dict.set_item("k1", Py::new(py, k1_py)?)?;
+    dict.set_item("k2", Py::new(py, k2_py)?)?;
     dict.set_item("coeffs", coeffs_vec.into_pyarray(py))?;
     dict.set_item("periods", periods_vec.into_pyarray(py))?;
     dict.set_item("rows", rows)?;
@@ -2302,7 +2384,7 @@ pub fn alphatrend_cuda_many_series_one_param_dev_py<'py>(
     period: usize,
     no_volume: bool,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(AtDeviceArrayF32Py, AtDeviceArrayF32Py)> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2320,18 +2402,142 @@ pub fn alphatrend_cuda_many_series_one_param_dev_py<'py>(
     {
         return Err(PyValueError::new_err("Inconsistent time-major shapes"));
     }
-    let (k1, k2) = py.allow_threads(|| {
+    let (k1, k2, ctx_guard, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaAlphaTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.alphatrend_many_series_one_param_time_major_dev(
+        let out = cuda.alphatrend_many_series_one_param_time_major_dev(
             h, l, c, v, cols, rows, coeff, period, no_volume,
         )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((out.0, out.1, cuda.context_arc(), cuda.device_id()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: k1 },
-        DeviceArrayF32Py { inner: k2 },
+        AtDeviceArrayF32Py { buf: Some(k1.buf), rows: k1.rows, cols: k1.cols, _ctx: ctx_guard.clone(), device_id: dev_id },
+        AtDeviceArrayF32Py { buf: Some(k2.buf), rows: k2.rows, cols: k2.cols, _ctx: ctx_guard, device_id: dev_id },
     ))
+}
+
+// ------------------------ Python CUDA device handle ------------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct AtDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl AtDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Stream omitted: producing stream is synchronized before return
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32) // 2 == kDLCUDA
+    }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        // Take ownership of the device buffer for transfer to consumer
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Manager {
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+        }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            let mt: Box<DLManagedTensor> = Box::from_raw(p);
+            let mgr_ptr = mt.manager_ctx as *mut Manager;
+            if !mgr_ptr.is_null() { let _mgr: Box<Manager> = Box::from_raw(mgr_ptr); drop(_mgr); }
+            drop(mt);
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt) }
+            }
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1]);
+        let data_ptr = buf.as_device_ptr().as_raw() as *mut std::ffi::c_void;
+        let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
+        let mgr_ptr = Box::into_raw(mgr);
+        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
+        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
+
+        let mt = Box::new(DLManagedTensor { dl_tensor: DLTensor {
+            data: data_ptr,
+            device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        }, manager_ctx: mgr_ptr as *mut std::ffi::c_void, deleter: Some(dlpack_deleter) });
+
+        let raw_capsule = unsafe {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut std::ffi::c_void, name.as_ptr(), Some(capsule_destructor))
+        };
+        if raw_capsule.is_null() { return Err(PyValueError::new_err("failed to create DLPack capsule")); }
+        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+    }
 }
 
 // ==================== ENHANCED WASM BINDINGS ====================
@@ -2366,7 +2572,8 @@ pub fn alphatrend_batch_js(
         period: (period_start, period_end, period_step),
         no_volume,
     };
-    let combos = expand_grid_alphatrend(&sweep);
+    let combos = expand_grid_alphatrend(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = close.len();
 
@@ -2444,7 +2651,8 @@ pub fn alphatrend_batch_into_flat(
             period: (period_start, period_end, period_step),
             no_volume,
         };
-        let combos = expand_grid_alphatrend(&sweep);
+        let combos = expand_grid_alphatrend(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 

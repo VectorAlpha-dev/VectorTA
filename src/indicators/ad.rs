@@ -19,8 +19,6 @@
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaAd;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -146,17 +144,31 @@ impl AdBuilder {
 
 #[derive(Debug, Error)]
 pub enum AdError {
-    #[error("ad: Candle field error: {0}")]
+    #[error("ad: candle field error: {0}")]
     CandleFieldError(String),
-    #[error("ad: Data length mismatch for AD calculation: high={high_len}, low={low_len}, close={close_len}, volume={volume_len}")]
+    #[error(
+        "ad: input slice length mismatch: high={high_len}, low={low_len}, close={close_len}, volume={volume_len}"
+    )]
     DataLengthMismatch {
         high_len: usize,
         low_len: usize,
         close_len: usize,
         volume_len: usize,
     },
-    #[error("ad: Not enough data points to calculate AD. Length={len}")]
-    NotEnoughData { len: usize },
+    #[error("ad: output length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("ad: not enough valid data: needed={needed}, valid={valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("ad: empty input data")]
+    EmptyInputData,
+    #[error("ad: all values are NaN")]
+    AllValuesNaN,
+    #[error("ad: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: isize, end: isize, step: isize },
+    #[error("ad: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("ad: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -199,8 +211,8 @@ pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdErr
     }
 
     let size = high.len();
-    if size < 1 {
-        return Err(AdError::NotEnoughData { len: size });
+    if size == 0 {
+        return Err(AdError::EmptyInputData);
     }
 
     let chosen = match kernel {
@@ -255,7 +267,7 @@ pub fn ad_into_slice(dst: &mut [f64], input: &AdInput, kern: Kernel) -> Result<(
 
     // Check for empty input
     if high.is_empty() {
-        return Err(AdError::NotEnoughData { len: 0 });
+        return Err(AdError::EmptyInputData);
     }
 
     // Validate array lengths
@@ -269,12 +281,7 @@ pub fn ad_into_slice(dst: &mut [f64], input: &AdInput, kern: Kernel) -> Result<(
     }
 
     if dst.len() != high.len() {
-        return Err(AdError::DataLengthMismatch {
-            high_len: high.len(),
-            low_len: dst.len(),
-            close_len: dst.len(),
-            volume_len: dst.len(),
-        });
+        return Err(AdError::OutputLengthMismatch { expected: high.len(), got: dst.len() });
     }
 
     // Compute AD values directly into dst
@@ -520,7 +527,7 @@ pub fn ad_batch_with_kernel(data: &AdBatchInput, k: Kernel) -> Result<AdBatchOut
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => Kernel::ScalarBatch,
+        other => return Err(AdError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -619,13 +626,11 @@ fn ad_batch_inner_into(
         }
     }
 
-    if out.len() != rows * cols {
-        return Err(AdError::DataLengthMismatch {
-            high_len: rows,
-            low_len: rows,
-            close_len: rows,
-            volume_len: out.len(),
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| AdError::InvalidInput("rows*cols overflow".into()))?;
+    if out.len() != expected {
+        return Err(AdError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     // Resolve actual kernel for row computation
@@ -787,6 +792,155 @@ impl AdStream {
 
 // ------------------------ Python CUDA bindings ------------------------
 #[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct AdDeviceArrayF32Py {
+    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl AdDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        // Producing stream is synchronized before return; omit the 'stream' key
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32) // 2 == kDLCUDA
+    }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        // Move ownership of the device buffer into the DLManagedTensor capsule
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        // Minimal DLPack FFI structs
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        // Keep buffer/context and shape/strides alive until consumer calls deleter.
+        struct Manager {
+            _ctx: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+        }
+
+        // Deleter to reclaim Manager + managed tensor
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            // Reclaim allocation of the managed tensor and its manager
+            let mt: Box<DLManagedTensor> = Box::from_raw(p);
+            let mgr_ptr = mt.manager_ctx as *mut Manager;
+            if !mgr_ptr.is_null() {
+                let _mgr: Box<Manager> = Box::from_raw(mgr_ptr);
+                drop(_mgr);
+            }
+            drop(mt);
+        }
+
+        // Capsule destructor calls the deleter if consumer didn't rename to used_dltensor
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr());
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt) }
+            }
+        }
+
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let shape = Box::new([rows, cols]);
+        let strides = Box::new([cols, 1]); // element strides (row-major)
+
+        let data_ptr = buf.as_device_ptr().as_raw() as *mut std::ffi::c_void;
+        let mgr = Box::new(Manager {
+            _ctx: self._ctx.clone(),
+            _buf: buf,
+            _shape: shape,
+            _strides: strides,
+        });
+
+        // Pointers that live until deleter runs
+        let mgr_ptr = Box::into_raw(mgr);
+        let shape_ptr = unsafe { (*mgr_ptr)._shape.as_ptr() as *mut i64 };
+        let strides_ptr = unsafe { (*mgr_ptr)._strides.as_ptr() as *mut i64 };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr,
+                strides: strides_ptr,
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr as *mut std::ffi::c_void,
+            deleter: Some(dlpack_deleter),
+        });
+
+        // Wrap in a PyCapsule named "dltensor"
+        let raw_capsule = unsafe {
+            let name = std::ffi::CString::new("dltensor").unwrap();
+            pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut std::ffi::c_void, name.as_ptr(), Some(capsule_destructor))
+        };
+        if raw_capsule.is_null() {
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+    }
+}
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ad_cuda_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, volume_f32, device_id=0))]
 pub fn ad_cuda_dev_py(
@@ -796,7 +950,7 @@ pub fn ad_cuda_dev_py(
     close_f32: PyReadonlyArray1<'_, f32>,
     volume_f32: PyReadonlyArray1<'_, f32>,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<AdDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -807,13 +961,16 @@ pub fn ad_cuda_dev_py(
     let close = close_f32.as_slice()?;
     let volume = volume_f32.as_slice()?;
 
-    let inner = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ad_series_dev(high, low, close, volume)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .ad_series_dev(high, low, close, volume)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((out.buf, out.rows, out.cols, ctx, cuda.device_id()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(AdDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -828,7 +985,7 @@ pub fn ad_cuda_many_series_one_param_dev_py(
     cols: usize,
     rows: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<AdDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -838,15 +995,16 @@ pub fn ad_cuda_many_series_one_param_dev_py(
     let close_tm = close_tm_f32.as_slice()?;
     let volume_tm = volume_tm_f32.as_slice()?;
 
-    let inner = py.allow_threads(|| {
+    let (buf, r_out, c_out, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ad_many_series_one_param_time_major_dev(
-            high_tm, low_tm, close_tm, volume_tm, cols, rows,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .ad_many_series_one_param_time_major_dev(high_tm, low_tm, close_tm, volume_tm, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((out.buf, out.rows, out.cols, ctx, cuda.device_id()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(AdDeviceArrayF32Py { buf: Some(buf), rows: r_out, cols: c_out, _ctx: ctx, device_id: dev_id })
 }
 
 // Batch Builder for parity with Alma
@@ -1149,7 +1307,7 @@ pub fn ad_batch_js(
         volumes: &volume_slices,
     };
 
-    ad_batch_with_kernel(&batch_input, Kernel::Scalar)
+    ad_batch_with_kernel(&batch_input, Kernel::ScalarBatch)
         .map(|o| o.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }

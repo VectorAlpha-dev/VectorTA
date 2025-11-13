@@ -30,23 +30,30 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaUmaError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Out of memory on device: required={required}B, free={free}B, headroom={headroom}B")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("arithmetic overflow when computing {what}")]
+    ArithmeticOverflow { what: &'static str },
+    #[error("device mismatch for buffer (buf={buf}, current={current})")]
+    DeviceMismatch { buf: i32, current: i32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaUmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaUmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaUmaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CudaUmaError {}
 
 // -------- Kernel selection policy (parity with ALMA/CWMA style) --------
 
@@ -90,7 +97,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaUma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaUmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -101,11 +108,10 @@ pub struct CudaUma {
 
 impl CudaUma {
     pub fn new(device_id: usize) -> Result<Self, CudaUmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
 
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/uma_kernel.ptx"));
         // Prefer context-targeted JIT with moderate opt level; fallback progressively
@@ -117,18 +123,15 @@ impl CudaUma {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaUmaError::Cuda(e.to_string()))?
-                }
+                Err(_) => Module::from_ptx(ptx, &[])?,
             },
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context: context.clone(),
             device_id: device_id as u32,
             policy: CudaUmaPolicy::default(),
             last_batch: None,
@@ -152,6 +155,16 @@ impl CudaUma {
     }
 
     #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
@@ -165,14 +178,21 @@ impl CudaUma {
     }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaUmaError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
-        if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+        let (free, _total) = match Self::device_mem_info() {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        let need = required_bytes
+            .checked_add(headroom_bytes)
+            .ok_or(CudaUmaError::ArithmeticOverflow { what: "required_bytes + headroom_bytes" })?;
+        if need <= free {
+            Ok(())
         } else {
-            true
+            Err(CudaUmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
         }
     }
 
@@ -249,9 +269,7 @@ impl CudaUma {
         }
 
         let arr = self.run_batch_kernel(prices, volumes, &inputs)?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        arr.buf.copy_to(out)?;
         let BatchInputs { combos, .. } = inputs;
         Ok((arr.rows, arr.cols, combos))
     }
@@ -272,7 +290,7 @@ impl CudaUma {
     ) -> Result<(), CudaUmaError> {
         let mut d_raw: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
-                .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+                .map_err(CudaUmaError::Cuda)?;
 
         self.launch_batch_kernel(
             d_prices,
@@ -289,9 +307,7 @@ impl CudaUma {
             d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaUmaError::from)
     }
 
     pub fn uma_many_series_one_param_device(
@@ -372,9 +388,7 @@ impl CudaUma {
             )?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(CudaUmaError::from)
     }
 
     pub fn uma_many_series_one_param_time_major_dev(
@@ -409,9 +423,7 @@ impl CudaUma {
         let inputs =
             Self::prepare_many_series_inputs(prices_tm_f32, volumes_tm_f32, cols, rows, params)?;
         let arr = self.run_many_series_kernel(prices_tm_f32, volumes_tm_f32, &inputs)?;
-        arr.buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        arr.buf.copy_to(out_tm)?;
         Ok(())
     }
 
@@ -424,44 +436,39 @@ impl CudaUma {
         let n_combos = inputs.combos.len();
         let series_len = inputs.series_len;
 
-        let price_bytes = prices.len() * std::mem::size_of::<f32>();
+        let sz_f32 = std::mem::size_of::<f32>();
+        let price_bytes = prices.len().checked_mul(sz_f32).ok_or(CudaUmaError::ArithmeticOverflow { what: "len(prices) * sizeof(f32)" })?;
         let volume_bytes = if inputs.has_volume {
-            series_len * std::mem::size_of::<f32>()
-        } else {
-            0
-        };
-        let accel_bytes = n_combos * std::mem::size_of::<f32>();
-        let len_bytes = n_combos * std::mem::size_of::<i32>() * 3;
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
+            series_len.checked_mul(sz_f32).ok_or(CudaUmaError::ArithmeticOverflow { what: "series_len * sizeof(f32)" })?
+        } else { 0 };
+        let accel_bytes = n_combos.checked_mul(sz_f32).ok_or(CudaUmaError::ArithmeticOverflow { what: "n_combos * sizeof(f32)" })?;
+        let len_bytes_each = n_combos.checked_mul(std::mem::size_of::<i32>()).ok_or(CudaUmaError::ArithmeticOverflow { what: "n_combos * sizeof(i32)" })?;
+        let len_bytes = len_bytes_each.checked_mul(3).ok_or(CudaUmaError::ArithmeticOverflow { what: "(n_combos * sizeof(i32)) * 3" })?;
+        let out_elems = n_combos.checked_mul(series_len).ok_or(CudaUmaError::ArithmeticOverflow { what: "n_combos * series_len" })?;
+        let out_bytes = out_elems.checked_mul(sz_f32).ok_or(CudaUmaError::ArithmeticOverflow { what: "out_elems * sizeof(f32)" })?;
         let alias_raw_final = Self::all_smooth_leq_one(&inputs.smooth_lengths);
         let raw_bytes = if alias_raw_final { 0 } else { out_bytes };
-        let required = price_bytes + volume_bytes + accel_bytes + len_bytes + out_bytes + raw_bytes;
+        let required = price_bytes
+            .checked_add(volume_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "price+volume" })?
+            .checked_add(accel_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+accel" })?
+            .checked_add(len_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+lens" })?
+            .checked_add(out_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+out" })?
+            .checked_add(raw_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+raw" })?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaUmaError::InvalidInput(
-                "not enough device memory for UMA batch".into(),
-            ));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices).map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices)?;
         let d_volumes = if let Some(v) = volumes {
-            Some(DeviceBuffer::from_slice(v).map_err(|e| CudaUmaError::Cuda(e.to_string()))?)
+            Some(DeviceBuffer::from_slice(v)?)
         } else {
             None
         };
-        let d_accels = DeviceBuffer::from_slice(&inputs.accelerators)
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
-        let d_min = DeviceBuffer::from_slice(&inputs.min_lengths)
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
-        let d_max = DeviceBuffer::from_slice(&inputs.max_lengths)
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
-        let d_smooth = DeviceBuffer::from_slice(&inputs.smooth_lengths)
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        let d_accels = DeviceBuffer::from_slice(&inputs.accelerators)?;
+        let d_min = DeviceBuffer::from_slice(&inputs.min_lengths)?;
+        let d_max = DeviceBuffer::from_slice(&inputs.max_lengths)?;
+        let d_smooth = DeviceBuffer::from_slice(&inputs.smooth_lengths)?;
 
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
-                .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
         if alias_raw_final {
             let raw_ptr = d_out.as_device_ptr().as_raw();
             let out_ptr = raw_ptr;
@@ -480,9 +487,7 @@ impl CudaUma {
                 out_ptr,
             )?;
         } else {
-            let mut d_raw: DeviceBuffer<f32> =
-                unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
-                    .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+            let mut d_raw: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
             self.launch_batch_kernel(
                 &d_prices,
                 d_volumes.as_ref(),
@@ -499,9 +504,7 @@ impl CudaUma {
             )?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -516,39 +519,36 @@ impl CudaUma {
         volumes_tm_f32: Option<&[f32]>,
         inputs: &ManySeriesInputs,
     ) -> Result<DeviceArrayF32, CudaUmaError> {
-        let prices_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
+        let sz_f32 = std::mem::size_of::<f32>();
+        let prices_bytes = prices_tm_f32.len().checked_mul(sz_f32).ok_or(CudaUmaError::ArithmeticOverflow { what: "len(prices_tm) * sizeof(f32)" })?;
         let volume_bytes = if inputs.has_volume {
-            inputs.num_series * inputs.series_len * std::mem::size_of::<f32>()
-        } else {
-            0
-        };
-        let first_valid_bytes = inputs.num_series * std::mem::size_of::<i32>();
-        let out_bytes = inputs.num_series * inputs.series_len * std::mem::size_of::<f32>();
+            inputs.num_series.checked_mul(inputs.series_len).and_then(|x| x.checked_mul(sz_f32)).ok_or(CudaUmaError::ArithmeticOverflow { what: "num_series * series_len * sizeof(f32)" })?
+        } else { 0 };
+        let first_valid_bytes = inputs.num_series.checked_mul(std::mem::size_of::<i32>()).ok_or(CudaUmaError::ArithmeticOverflow { what: "num_series * sizeof(i32)" })?;
+        let out_bytes = inputs.num_series.checked_mul(inputs.series_len).and_then(|x| x.checked_mul(sz_f32)).ok_or(CudaUmaError::ArithmeticOverflow { what: "num_series * series_len * sizeof(f32) (out)" })?;
         let alias_raw_final = inputs.smooth_length <= 1;
         let raw_bytes = if alias_raw_final { 0 } else { out_bytes };
-        let required = prices_bytes + volume_bytes + first_valid_bytes + out_bytes + raw_bytes;
+        let required = prices_bytes
+            .checked_add(volume_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prices+volume" })?
+            .checked_add(first_valid_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+first_valid" })?
+            .checked_add(out_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+out" })?
+            .checked_add(raw_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+raw" })?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaUmaError::InvalidInput(
-                "not enough device memory for UMA many-series".into(),
-            ));
-        }
+        Self::will_fit_checked(required, headroom)?;
 
-        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)?;
         let d_volumes_tm = if inputs.has_volume {
             let slice = volumes_tm_f32.ok_or_else(|| {
                 CudaUmaError::InvalidInput("volume matrix missing despite has_volume".into())
             })?;
-            Some(DeviceBuffer::from_slice(slice).map_err(|e| CudaUmaError::Cuda(e.to_string()))?)
+            Some(DeviceBuffer::from_slice(slice)?)
         } else {
             None
         };
-        let d_first_valids = DeviceBuffer::from_slice(&inputs.first_valids)
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(inputs.num_series * inputs.series_len) }
-                .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        let d_first_valids = DeviceBuffer::from_slice(&inputs.first_valids)?;
+        let out_elems = inputs.num_series.checked_mul(inputs.series_len)
+            .ok_or(CudaUmaError::ArithmeticOverflow { what: "num_series * series_len" })?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
         if alias_raw_final {
             let raw_ptr = d_out_tm.as_device_ptr().as_raw();
             let out_ptr = raw_ptr;
@@ -567,9 +567,7 @@ impl CudaUma {
                 out_ptr,
             )?;
         } else {
-            let mut d_raw_tm: DeviceBuffer<f32> =
-                unsafe { DeviceBuffer::uninitialized(inputs.num_series * inputs.series_len) }
-                    .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+            let mut d_raw_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
             self.launch_many_series_kernel(
                 &d_prices_tm,
                 d_volumes_tm.as_ref(),
@@ -586,9 +584,7 @@ impl CudaUma {
             )?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
@@ -626,7 +622,7 @@ impl CudaUma {
         let func = self
             .module
             .get_function("uma_batch_f32")
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaUmaError::MissingKernelSymbol { name: "uma_batch_f32" })?;
 
         // Warp-cooperative kernels expect one warp per block by default
         let block_x = match self.policy.batch {
@@ -665,9 +661,7 @@ impl CudaUma {
                 &mut raw_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaUmaError::Cuda(e.to_string()))?
+            self.stream.launch(&func, grid, block, 0, args)?
         }
         unsafe {
             (*(self as *const _ as *mut CudaUma)).last_batch =
@@ -707,7 +701,7 @@ impl CudaUma {
         let func = self
             .module
             .get_function("uma_batch_f32")
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaUmaError::MissingKernelSymbol { name: "uma_batch_f32" })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 32u32,
@@ -745,9 +739,7 @@ impl CudaUma {
                 &mut raw_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaUmaError::Cuda(e.to_string()))?
+            self.stream.launch(&func, grid, block, 0, args)?
         }
         unsafe {
             (*(self as *const _ as *mut CudaUma)).last_batch =
@@ -781,7 +773,7 @@ impl CudaUma {
         let func = self
             .module
             .get_function("uma_many_series_one_param_f32")
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaUmaError::MissingKernelSymbol { name: "uma_many_series_one_param_f32" })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 32u32,
@@ -819,9 +811,7 @@ impl CudaUma {
                 &mut raw_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaUmaError::Cuda(e.to_string()))?
+            self.stream.launch(&func, grid, block, 0, args)?
         }
         unsafe {
             (*(self as *const _ as *mut CudaUma)).last_many =
@@ -856,7 +846,7 @@ impl CudaUma {
         let func = self
             .module
             .get_function("uma_many_series_one_param_f32")
-            .map_err(|e| CudaUmaError::Cuda(e.to_string()))?;
+            .map_err(CudaUmaError::Cuda)?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 32u32,
@@ -896,7 +886,7 @@ impl CudaUma {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaUmaError::Cuda(e.to_string()))?
+                .map_err(CudaUmaError::Cuda)?
         }
         unsafe {
             (*(self as *const _ as *mut CudaUma)).last_many =

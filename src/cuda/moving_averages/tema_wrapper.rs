@@ -23,10 +23,12 @@ use cust::module::{Module, ModuleJitOption};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
+use cust::error::CudaError;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 const WARP: u32 = 32;
 #[inline]
@@ -86,8 +88,14 @@ pub enum ManySeriesKernelSelected {
 
 #[derive(Debug)]
 pub enum CudaTemaError {
-    Cuda(String),
+    Cuda(CudaError),
     InvalidInput(String),
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    MissingKernelSymbol { name: &'static str },
+    InvalidPolicy(&'static str),
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    DeviceMismatch { buf: u32, current: u32 },
+    NotImplemented,
 }
 
 impl fmt::Display for CudaTemaError {
@@ -95,6 +103,24 @@ impl fmt::Display for CudaTemaError {
         match self {
             CudaTemaError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaTemaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
+            CudaTemaError::OutOfMemory { required, free, headroom } => write!(
+                f,
+                "Out of memory: required={} bytes (free={}, headroom={})",
+                required, free, headroom
+            ),
+            CudaTemaError::MissingKernelSymbol { name } => write!(f, "Missing kernel symbol: {}", name),
+            CudaTemaError::InvalidPolicy(s) => write!(f, "Invalid policy: {}", s),
+            CudaTemaError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+                f,
+                "Launch config too large: grid=({}, {}, {}), block=({}, {}, {})",
+                gx, gy, gz, bx, by, bz
+            ),
+            CudaTemaError::DeviceMismatch { buf, current } => write!(
+                f,
+                "Device mismatch: buffer device {} vs current {}",
+                buf, current
+            ),
+            CudaTemaError::NotImplemented => write!(f, "Not implemented"),
         }
     }
 }
@@ -104,7 +130,7 @@ impl std::error::Error for CudaTemaError {}
 pub struct CudaTema {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaTemaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -119,14 +145,13 @@ pub struct CudaTema {
 
 impl CudaTema {
     pub fn new(device_id: usize) -> Result<Self, CudaTemaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty()).map_err(CudaTemaError::Cuda)?;
 
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32).map_err(CudaTemaError::Cuda)?;
         let max_grid_x = device
             .get_attribute(DeviceAttribute::MaxGridDimX)
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))? as u32;
-        let context = Context::new(device).map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+            .map_err(CudaTemaError::Cuda)? as u32;
+        let context = Arc::new(Context::new(device).map_err(CudaTemaError::Cuda)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/tema_kernel.ptx"));
         // JIT to current context target; let optimization default to O4.
@@ -138,12 +163,11 @@ impl CudaTema {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaTemaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[]).map_err(CudaTemaError::Cuda)?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaTemaError::Cuda)?;
 
         let warps_per_block = env_warps_per_block();
 
@@ -182,6 +206,19 @@ impl CudaTema {
     }
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
+    }
+
+    #[inline]
+    pub fn context_guard(&self) -> Arc<Context> {
+        self._context.clone()
+    }
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+    #[inline]
+    pub fn stream_handle(&self) -> usize {
+        self.stream.as_inner() as usize
     }
 
     #[inline]
@@ -299,11 +336,8 @@ impl CudaTema {
         }
 
         let arr = self.run_batch_kernel(prices, &inputs)?;
-        unsafe { arr.buf.async_copy_to(out, &self.stream) }
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        unsafe { arr.buf.async_copy_to(out, &self.stream) }.map_err(CudaTemaError::Cuda)?;
+        self.stream.synchronize().map_err(CudaTemaError::Cuda)?;
         Ok((arr.rows, arr.cols, inputs.combos))
     }
 
@@ -399,11 +433,8 @@ impl CudaTema {
 
         let prepared = Self::prepare_many_series_inputs(prices_tm_f32, cols, rows, period)?;
         let arr = self.run_many_series_kernel(prices_tm_f32, cols, rows, period, &prepared)?;
-        unsafe { arr.buf.async_copy_to(out_tm, &self.stream) }
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        unsafe { arr.buf.async_copy_to(out_tm, &self.stream) }.map_err(CudaTemaError::Cuda)?;
+        self.stream.synchronize().map_err(CudaTemaError::Cuda)?;
         Ok(())
     }
 
@@ -415,29 +446,32 @@ impl CudaTema {
         let n_combos = inputs.combos.len();
         let series_len = inputs.series_len;
 
+        let total_elems = series_len
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaTemaError::InvalidInput("rows * cols overflow".into()))?;
+
         let prices_bytes = series_len * std::mem::size_of::<f32>();
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
+        let out_bytes = total_elems * std::mem::size_of::<f32>();
         let required = prices_bytes + periods_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024; // 64MB safety margin
 
         if !Self::will_fit(required, headroom) {
-            return Err(CudaTemaError::InvalidInput(
-                "insufficient device memory for TEMA batch launch".into(),
-            ));
+            let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
+            return Err(CudaTemaError::OutOfMemory { required, free, headroom });
         }
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+            .map_err(CudaTemaError::Cuda)?;
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&inputs.periods, &self.stream) }
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+            .map_err(CudaTemaError::Cuda)?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
-                .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(total_elems) }
+                .map_err(CudaTemaError::Cuda)?;
 
         // Prefill output with canonical quiet-NaN so the kernel only writes the warm region
         memset_f32_qnan_async(&self.stream, &mut d_out)
-            .map_err(|e| CudaTemaError::Cuda(format!("prefill qNaN failed: {}", e)))?;
+            .map_err(|e| CudaTemaError::InvalidInput(format!("prefill qNaN failed: {}", e)))?;
 
         // Hint the driver to persist prices[] in L2 across blocks (best effort)
         self.try_enable_persisting_l2(d_prices.as_device_ptr().as_raw(), prices_bytes);
@@ -460,9 +494,7 @@ impl CudaTema {
         }
 
         // Ensure kernels complete before returning device buffer to callers that may use copy_to
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaTemaError::Cuda)?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -489,22 +521,19 @@ impl CudaTema {
         let headroom = 32 * 1024 * 1024; // 32MB safety margin
 
         if !Self::will_fit(required, headroom) {
-            return Err(CudaTemaError::InvalidInput(
-                "insufficient device memory for TEMA many-series launch".into(),
-            ));
+            let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
+            return Err(CudaTemaError::OutOfMemory { required, free, headroom });
         }
 
-        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32).map_err(CudaTemaError::Cuda)?;
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).map_err(CudaTemaError::Cuda)?;
         let mut d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }
-                .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+                .map_err(CudaTemaError::Cuda)?;
 
         // Prefill output with quiet-NaN so the kernel only writes the warm region
         memset_f32_qnan_async(&self.stream, &mut d_out_tm)
-            .map_err(|e| CudaTemaError::Cuda(format!("prefill qNaN failed: {}", e)))?;
+            .map_err(|e| CudaTemaError::InvalidInput(format!("prefill qNaN failed: {}", e)))?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -515,14 +544,10 @@ impl CudaTema {
             &mut d_out_tm,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaTemaError::Cuda)?;
 
         // Ensure kernels complete before returning device buffer
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaTemaError::Cuda)?;
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
@@ -562,7 +587,7 @@ impl CudaTema {
         let func = self
             .module
             .get_function("tema_batch_f32")
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTemaError::MissingKernelSymbol { name: "tema_batch_f32" })?;
 
         let (grid, block, block_x) = self.warp_launch_dims(n_combos);
         unsafe {
@@ -588,7 +613,7 @@ impl CudaTema {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTemaError::Cuda(e.to_string()))?
+                .map_err(CudaTemaError::Cuda)?
         }
         Ok(())
     }
@@ -605,7 +630,7 @@ impl CudaTema {
         let func = self
             .module
             .get_function("tema_multi_series_one_param_f32")
-            .map_err(|e| CudaTemaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTemaError::MissingKernelSymbol { name: "tema_multi_series_one_param_f32" })?;
 
         let (grid, block, block_x) = self.warp_launch_dims(num_series);
         unsafe {
@@ -631,7 +656,7 @@ impl CudaTema {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTemaError::Cuda(e.to_string()))?
+                .map_err(CudaTemaError::Cuda)?
         }
         Ok(())
     }
@@ -644,7 +669,7 @@ impl CudaTema {
             return Err(CudaTemaError::InvalidInput("empty prices".into()));
         }
 
-        let combos = expand_grid_tema(sweep);
+        let combos = expand_grid_tema(sweep)?;
         if combos.is_empty() {
             return Err(CudaTemaError::InvalidInput(
                 "no parameter combinations".into(),
@@ -839,15 +864,25 @@ struct ManySeriesInputs {
     first_valids: Vec<i32>,
 }
 
-fn expand_grid_tema(range: &TemaBatchRange) -> Vec<TemaParams> {
+fn expand_grid_tema(range: &TemaBatchRange) -> Result<Vec<TemaParams>, CudaTemaError> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {
-        return vec![TemaParams {
-            period: Some(start),
-        }];
+        return Ok(vec![TemaParams { period: Some(start) }]);
     }
-    (start..=end)
-        .step_by(step)
-        .map(|p| TemaParams { period: Some(p) })
-        .collect()
+    let out: Vec<usize> = if start <= end {
+        (start..=end).step_by(step).collect()
+    } else {
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            if let Some(next) = cur.checked_sub(step) { cur = next; } else { break; }
+            if cur < end { break; }
+        }
+        v
+    };
+    if out.is_empty() {
+        return Err(CudaTemaError::InvalidInput("invalid period range".into()));
+    }
+    Ok(out.into_iter().map(|p| TemaParams { period: Some(p) }).collect())
 }
