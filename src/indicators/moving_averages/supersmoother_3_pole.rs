@@ -6,6 +6,7 @@
 //!
 //! Decision: Streaming uses the same FMA evaluation order as the batch core for consistency;
 //! first three samples pass through unchanged. Outputs match batch (tests unchanged).
+//! CUDA wrapper present; Python VRAM handle returns implement CAI v3 + DLPack with a context guard.
 //!
 //! ## Parameters
 //! - **period**: Smoothing period (>= 1, defaults to 14)
@@ -28,7 +29,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaSupersmoother3Pole;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::supersmoother_3_pole_wrapper::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -190,8 +191,12 @@ pub enum SuperSmoother3PoleError {
         "supersmoother_3_pole: Output length mismatch: expected = {expected}, actual = {actual}"
     )]
     OutputLengthMismatch { expected: usize, actual: usize },
-    #[error("supersmoother_3_pole: Invalid kernel for batch operation")]
-    InvalidKernel,
+    #[error("supersmoother_3_pole: Invalid kernel for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("supersmoother_3_pole: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("supersmoother_3_pole: Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 // Main Entrypoint
@@ -702,7 +707,7 @@ pub fn supersmoother_3_pole_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(SuperSmoother3PoleError::InvalidKernel),
+        _ => return Err(SuperSmoother3PoleError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -737,10 +742,27 @@ impl SuperSmoother3PoleBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &SuperSmoother3PoleBatchRange) -> Vec<SuperSmoother3PoleParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // Zero step → static (single value). Supports reversed bounds too.
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return (start..=end).step_by(step).collect();
+        }
+        // Reversed bounds: generate descending sequence.
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            // checked_sub to avoid panic on underflow
+            if let Some(next) = cur.checked_sub(step) {
+                if next == cur { break; }
+                cur = next;
+            } else {
+                break;
+            }
+        }
+        v
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -777,7 +799,18 @@ fn supersmoother_3_pole_batch_inner(
 ) -> Result<SuperSmoother3PoleBatchOutput, SuperSmoother3PoleError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(SuperSmoother3PoleError::InvalidPeriod { period: 0 });
+        return Err(SuperSmoother3PoleError::InvalidRange {
+            start: (sweep.period).0,
+            end: (sweep.period).1,
+            step: (sweep.period).2,
+        });
+    }
+    if combos.iter().any(|c| c.period.unwrap_or(0) == 0) {
+        return Err(SuperSmoother3PoleError::InvalidRange {
+            start: (sweep.period).0,
+            end: (sweep.period).1,
+            step: (sweep.period).2,
+        });
     }
     let first = data
         .iter()
@@ -792,9 +825,18 @@ fn supersmoother_3_pole_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+    // Guard potential overflow in rows * cols
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| SuperSmoother3PoleError::InvalidInput("rows * cols overflow".into()))?;
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.period.unwrap() - 1)
+        .map(|c| {
+            let p = c.period.unwrap();
+            first
+                .checked_add(p - 1)
+                .unwrap_or(first) // on overflow, keep first; compute will revalidate bounds
+        })
         .collect();
 
     let mut raw = make_uninit_matrix(rows, cols);
@@ -1813,14 +1855,17 @@ pub fn supersmoother_3_pole_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaSupersmoother3Pole::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.supersmoother_3_pole_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    // Create CUDA wrapper outside of allow_threads so we can capture context/stream
+    let cuda = CudaSupersmoother3Pole::new(device_id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let stream = cuda.stream_handle();
+    let dev_id = cuda.device_id();
+    let ctx_guard = cuda.context_arc();
+    let inner = py
+        .allow_threads(|| cuda.supersmoother_3_pole_batch_dev(slice_in, &sweep))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, stream, ctx_guard, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1845,14 +1890,16 @@ pub fn supersmoother_3_pole_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaSupersmoother3Pole::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.supersmoother_3_pole_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let cuda = CudaSupersmoother3Pole::new(device_id)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let stream = cuda.stream_handle();
+    let dev_id = cuda.device_id();
+    let ctx_guard = cuda.context_arc();
+    let inner = py
+        .allow_threads(|| cuda.supersmoother_3_pole_many_series_one_param_time_major_dev(flat_in, cols, rows, &params))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, stream, ctx_guard, dev_id))
 }
 
 /// Computes SuperSmoother 3-Pole directly into a provided output slice, avoiding allocation.

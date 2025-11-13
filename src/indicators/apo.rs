@@ -149,7 +149,11 @@ pub enum ApoError {
     #[error("apo: Not enough valid data: needed={needed}, valid={valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("apo: output length mismatch: expected={expected}, got={got}")]
-    MismatchedOutputLen { expected: usize, got: usize },
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("apo: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("apo: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // --- Builder API
@@ -311,7 +315,7 @@ pub fn apo_with_kernel(input: &ApoInput, kernel: Kernel) -> Result<ApoOutput, Ap
 pub fn apo_into(input: &ApoInput, out: &mut [f64]) -> Result<(), ApoError> {
     let (data, first, short, long, len, chosen) = apo_prepare(input, Kernel::Auto)?;
     if out.len() != len {
-        return Err(ApoError::MismatchedOutputLen {
+        return Err(ApoError::OutputLengthMismatch {
             expected: len,
             got: out.len(),
         });
@@ -693,7 +697,7 @@ impl ApoStream {
 pub fn apo_into_slice(dst: &mut [f64], input: &ApoInput, kern: Kernel) -> Result<(), ApoError> {
     let (data, first, short, long, len, chosen) = apo_prepare(input, kern)?;
     if dst.len() != len {
-        return Err(ApoError::MismatchedOutputLen {
+        return Err(ApoError::OutputLengthMismatch {
             expected: len,
             got: dst.len(),
         });
@@ -796,27 +800,45 @@ impl ApoBatchOutput {
 // --- Grid Expansion
 
 #[inline(always)]
-fn expand_grid(r: &ApoBatchRange) -> Vec<ApoParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &ApoBatchRange) -> Result<Vec<ApoParams>, ApoError> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, ApoError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut v = Vec::new();
+        if start < end {
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                match cur.checked_add(step) {
+                    Some(n) => cur = n,
+                    None => break,
+                }
+            }
+        } else {
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                if let Some(n) = cur.checked_sub(step) { cur = n; } else { break; }
+                if cur == usize::MAX { break; }
+            }
+        }
+        if v.is_empty() {
+            return Err(ApoError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    let shorts = axis(r.short);
-    let longs = axis(r.long);
-    let mut out = Vec::with_capacity(shorts.len() * longs.len());
+    let shorts = axis(r.short)?;
+    let longs = axis(r.long)?;
+    let mut out = Vec::with_capacity(shorts.len().saturating_mul(longs.len()));
     for &s in &shorts {
         for &l in &longs {
             if s < l && s > 0 && l > 0 {
-                out.push(ApoParams {
-                    short_period: Some(s),
-                    long_period: Some(l),
-                });
+                out.push(ApoParams { short_period: Some(s), long_period: Some(l) });
             }
         }
     }
-    out
+    Ok(out)
 }
 
 // --- Batch Slice API
@@ -830,9 +852,7 @@ pub fn apo_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(ApoError::InvalidPeriod { short: 0, long: 0 });
-        }
+        other => return Err(ApoError::InvalidKernelForBatch(other)),
     };
     apo_batch_par_slice(data, sweep, kernel)
 }
@@ -862,9 +882,9 @@ fn apo_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<ApoBatchOutput, ApoError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(ApoError::InvalidPeriod { short: 0, long: 0 });
+        return Err(ApoError::InvalidRange { start: sweep.short.0, end: sweep.short.1, step: sweep.short.2 });
     }
     let first = data
         .iter()
@@ -880,6 +900,10 @@ fn apo_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    // Checked arithmetic guard
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(ApoError::OutputLengthMismatch { expected: rows, got: cols })?;
 
     // Step 1: Allocate uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1055,9 +1079,9 @@ fn apo_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<ApoParams>, ApoError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(ApoError::InvalidPeriod { short: 0, long: 0 });
+        return Err(ApoError::InvalidRange { start: sweep.short.0, end: sweep.short.1, step: sweep.short.2 });
     }
 
     let first = data
@@ -1074,6 +1098,12 @@ fn apo_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(ApoError::OutputLengthMismatch { expected: rows, got: cols })?;
+    if out.len() != expected {
+        return Err(ApoError::OutputLengthMismatch { expected, got: out.len() });
+    }
 
     // 1) Treat caller buffer as uninitialized and set NaN warm prefixes with helper.
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
@@ -2348,15 +2378,19 @@ pub fn apo_batch_py<'py>(
         short: short_period_range,
         long: long_period_range,
     };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     if combos.is_empty() {
         return Err(PyValueError::new_err("No valid parameter combinations"));
     }
     let rows = combos.len();
     let cols = slice_in.len();
+    // Checked arithmetic for total elements
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
 
     // Pre-allocate uninitialized NumPy array
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Warm-prefix init using helper on a MaybeUninit overlay
@@ -2409,7 +2443,119 @@ pub fn apo_batch_py<'py>(
 
 // ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context as CudaContext;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Apo", unsendable)]
+pub struct DeviceArrayF32ApoPy {
+    pub(crate) inner: crate::cuda::moving_averages::apo_wrapper::DeviceArrayF32,
+    _ctx_guard: Arc<CudaContext>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32ApoPy {
+    #[new]
+    fn py_new() -> PyResult<Self> {
+        Err(pyo3::exceptions::PyTypeError::new_err("use factory methods from CUDA functions"))
+    }
+
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<usize>) -> PyResult<PyObject> {
+        // Minimal DLPack v0.6 capsule for 2D FP32 row-major CUDA tensor
+        use std::ffi::{c_void, CString};
+        use pyo3::ffi as pyffi;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: usize,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            _self_ref: pyo3::PyObject,
+        }
+
+        unsafe extern "C" fn deleter(self_ptr: *mut DLManagedTensor) {
+            if self_ptr.is_null() { return; }
+            let mt = Box::from_raw(self_ptr);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() { let _ctx = Box::from_raw(ctx_ptr); }
+            drop(mt);
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
+        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
+
+        // Keep this Python object alive via a strong ref in the manager ctx
+        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape_box: shape_box, _strides_box: strides_box, _self_ref: self_ref });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let tensor = DLTensor {
+            data: slf.inner.buf.as_device_ptr().as_raw() as *mut c_void,
+            device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
+        let ptr = Box::into_raw(mt) as *mut c_void;
+
+        unsafe {
+            let name = CString::new("dltensor").unwrap();
+            let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+            if cap.is_null() {
+                let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+        }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "apo_cuda_batch_dev")]
@@ -2420,7 +2566,7 @@ pub fn apo_cuda_batch_dev_py(
     short_range: (usize, usize, usize),
     long_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32ApoPy> {
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaApo;
     if !cuda_available() {
@@ -2436,7 +2582,9 @@ pub fn apo_cuda_batch_dev_py(
         cuda.apo_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let ctx = inner.ctx();
+    let dev_id = inner.device_id();
+    Ok(DeviceArrayF32ApoPy { inner, _ctx_guard: ctx, _device_id: dev_id })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2448,7 +2596,7 @@ pub fn apo_cuda_many_series_one_param_dev_py(
     short_period: usize,
     long_period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32ApoPy> {
     use crate::cuda::cuda_available;
     use crate::cuda::moving_averages::CudaApo;
     use numpy::PyUntypedArrayMethods;
@@ -2470,7 +2618,9 @@ pub fn apo_cuda_many_series_one_param_dev_py(
         cuda.apo_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    let ctx = inner.ctx();
+    let dev_id = inner.device_id();
+    Ok(DeviceArrayF32ApoPy { inner, _ctx_guard: ctx, _device_id: dev_id })
 }
 
 // ================================================================================================
@@ -2584,7 +2734,7 @@ pub fn apo_batch_metadata_js(
         long: (long_period_start, long_period_end, long_period_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let mut metadata = Vec::with_capacity(combos.len() * 2);
 
     for combo in combos {
@@ -2617,7 +2767,7 @@ pub fn apo_batch_into(
             short: (short_start, short_end, short_step),
             long: (long_start, long_end, long_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 

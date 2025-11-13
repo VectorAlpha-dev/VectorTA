@@ -42,7 +42,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaVolumeAdjustedMa;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::volume_adjusted_ma_wrapper::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -341,6 +341,15 @@ pub enum VolumeAdjustedMaError {
         "volume_adjusted_ma: Data length mismatch: price = {price_len}, volume = {volume_len}"
     )]
     DataLengthMismatch { price_len: usize, volume_len: usize },
+
+    #[error("volume_adjusted_ma: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("volume_adjusted_ma: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("volume_adjusted_ma: invalid range expansion: start={start:?}, end={end:?}, step={step:?}")]
+    InvalidRange { start: String, end: String, step: String },
 }
 
 // ==================== PREPARATION AND COMPUTE FUNCTIONS ====================
@@ -1018,10 +1027,7 @@ pub fn VolumeAdjustedMa_into_slice(
     let (data, vol, length, vi_factor, strict, sample_period, first, chosen) =
         VolumeAdjustedMa_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(VolumeAdjustedMaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
+        return Err(VolumeAdjustedMaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
     VolumeAdjustedMa_compute_into(
         data,
@@ -1186,25 +1192,31 @@ impl VolumeAdjustedMaBatchOutput {
 #[inline(always)]
 fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
     if st == 0 || s == e {
-        vec![s]
-    } else {
-        (s..=e).step_by(st).collect()
+        return vec![s];
     }
+    let (lo, hi) = if s <= e { (s, e) } else { (e, s) };
+    (lo..=hi).step_by(st).collect()
 }
 
 #[inline(always)]
 fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
     if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
-        vec![s]
-    } else {
-        let mut v = Vec::new();
-        let mut x = s;
+        return vec![s];
+    }
+    let mut v = Vec::new();
+    let mut x = s;
+    if st > 0.0 {
         while x <= e + 1e-12 {
             v.push(x);
             x += st;
         }
-        v
+    } else {
+        while x >= e - 1e-12 {
+            v.push(x);
+            x += st; // negative step
+        }
     }
+    v
 }
 
 #[inline(always)]
@@ -1243,12 +1255,7 @@ pub fn VolumeAdjustedMa_batch_with_kernel(
     let batch = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(VolumeAdjustedMaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(VolumeAdjustedMaError::InvalidKernelForBatch(other)),
     };
     // Map batch kernel to single kernel used by the row worker
     let simd = match batch {
@@ -1270,12 +1277,7 @@ pub fn VolumeAdjustedMa_batch_slice(
     let batch = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(VolumeAdjustedMaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(VolumeAdjustedMaError::InvalidKernelForBatch(other)),
     };
     let simd = match batch {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1296,12 +1298,7 @@ pub fn VolumeAdjustedMa_batch_par_slice(
     let batch = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(VolumeAdjustedMaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(VolumeAdjustedMaError::InvalidKernelForBatch(other)),
     };
     let simd = match batch {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1327,9 +1324,10 @@ fn VolumeAdjustedMa_batch_inner(
     }
     let combos = expand_grid_VolumeAdjustedMa(sweep);
     if combos.is_empty() {
-        return Err(VolumeAdjustedMaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(VolumeAdjustedMaError::InvalidRange {
+            start: format!("{:?}", sweep.length.0),
+            end: format!("{:?}", sweep.length.1),
+            step: format!("{:?}", sweep.length.2),
         });
     }
     let cols = data.len();
@@ -1342,6 +1340,14 @@ fn VolumeAdjustedMa_batch_inner(
         .ok_or(VolumeAdjustedMaError::AllValuesNaN)?;
     let rows = combos.len();
 
+    // checked rows*cols to avoid potential overflow on extreme sweeps
+    if rows.checked_mul(cols).is_none() {
+        return Err(VolumeAdjustedMaError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "mul".into(),
+        });
+    }
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warms: Vec<usize> = combos
         .iter()
@@ -1934,14 +1940,19 @@ pub fn volume_adjusted_ma_cuda_batch_dev_py(
         strict,
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaVolumeAdjustedMa::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.volume_adjusted_ma_batch_dev(prices, volumes, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| {
+            let cuda = CudaVolumeAdjustedMa::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let arr = cuda
+                .volume_adjusted_ma_batch_dev(prices, volumes, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, PyErr>((arr, ctx, dev_id))
+        })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1985,20 +1996,25 @@ pub fn volume_adjusted_ma_cuda_many_series_one_param_dev_py(
         sample_period: Some(sample_period),
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaVolumeAdjustedMa::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.volume_adjusted_ma_many_series_one_param_time_major_dev(
-            price_slice,
-            volume_slice,
-            cols,
-            rows,
-            &params,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| {
+            let cuda = CudaVolumeAdjustedMa::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let arr = cuda
+                .volume_adjusted_ma_many_series_one_param_time_major_dev(
+                    price_slice,
+                    volume_slice,
+                    cols,
+                    rows,
+                    &params,
+                )
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, PyErr>((arr, ctx, dev_id))
+        })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(feature = "python")]

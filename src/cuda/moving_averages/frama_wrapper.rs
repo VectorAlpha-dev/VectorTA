@@ -28,6 +28,7 @@ use std::ffi::c_void;
 use thiserror::Error;
 use cust::error::CudaError;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 const FRAMA_MAX_WINDOW: usize = 1024;
 
@@ -85,8 +86,12 @@ pub enum CudaFramaError {
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("Launch configuration too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buf on {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
     #[error("Arithmetic overflow while computing {context}")]
     ArithmeticOverflow { context: &'static str },
     #[error("Not implemented")]
@@ -150,7 +155,7 @@ fn first_valid_index(high: &[f32], low: &[f32], close: &[f32]) -> Option<usize> 
 pub struct CudaFrama {
     module: Module,
     stream: Stream,
-    _context: Context,
+    ctx: Arc<Context>,
     device_id: u32,
     policy: CudaFramaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -190,7 +195,7 @@ impl CudaFrama {
         Ok(Self {
             module,
             stream,
-            _context: context,
+            ctx: Arc::new(context),
             device_id: device_id as u32,
             policy: CudaFramaPolicy::default(),
             last_batch: None,
@@ -220,6 +225,12 @@ impl CudaFrama {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
+
+    #[inline]
+    pub fn ctx(&self) -> Arc<Context> { Arc::clone(&self.ctx) }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {

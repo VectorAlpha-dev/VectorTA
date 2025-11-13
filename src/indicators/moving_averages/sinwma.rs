@@ -54,7 +54,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaSinwma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::gaussian_wrapper::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -212,6 +212,12 @@ pub enum SinWmaError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("sinwma: Sum of sines is zero or too close to zero. sum_sines = {sum_sines}")]
     ZeroSumSines { sum_sines: f64 },
+    #[error("sinwma: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("sinwma: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("sinwma: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -244,9 +250,9 @@ pub fn sinwma_into_slice(
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(SinWmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(SinWmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -895,10 +901,7 @@ pub fn sinwma_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(SinWmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(SinWmaError::InvalidKernelForBatch(k))
         }
     };
 
@@ -934,21 +937,40 @@ impl SinWmaBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &SinWmaBatchRange) -> Vec<SinWmaParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &SinWmaBatchRange) -> Result<Vec<SinWmaParams>, SinWmaError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, SinWmaError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step).collect();
+            if v.is_empty() {
+                return Err(SinWmaError::InvalidRange { start, end, step });
+            }
+            return Ok(v);
+        }
+        // reversed bounds supported
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            if cur == end { break; }
+            // checked_sub to avoid underflow
+            let next = cur.saturating_sub(step);
+            if next == cur { break; }
+            cur = next;
+        }
+        if v.is_empty() { return Err(SinWmaError::InvalidRange { start, end, step }); }
+        Ok(v)
     }
 
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
 
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(SinWmaParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline]
@@ -1004,11 +1026,12 @@ fn sinwma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<SinWmaBatchOutput, SinWmaError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(SinWmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(SinWmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -1030,6 +1053,14 @@ fn sinwma_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    // checked rows*cols to avoid overflow
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(SinWmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1040,7 +1071,13 @@ fn sinwma_batch_inner(
 
     // Precompute normalized sine weights into flat buffer with padded stride
     let stride = round_up8(max_p);
-    let cap = rows * stride;
+    let cap = rows
+        .checked_mul(stride)
+        .ok_or(SinWmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
 
@@ -1115,11 +1152,12 @@ fn sinwma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<SinWmaParams>, SinWmaError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(SinWmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(SinWmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -1146,6 +1184,17 @@ fn sinwma_batch_inner_into(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
+    // Validate out length matches rows*cols and cast to MaybeUninit
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(SinWmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(SinWmaError::OutputLengthMismatch { expected, got: out.len() });
+    }
     // Cast output to MaybeUninit and prefix NaNs
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
@@ -1154,7 +1203,13 @@ fn sinwma_batch_inner_into(
 
     // Precompute normalized sine weights into flat buffer with padded stride
     let stride = round_up8(max_p);
-    let cap = rows * stride;
+    let cap = rows
+        .checked_mul(stride)
+        .ok_or(SinWmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
 
@@ -2206,7 +2261,7 @@ pub fn sinwma_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2253,7 +2308,7 @@ pub fn sinwma_cuda_batch_dev_py(
     data_f32: PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+    ) -> PyResult<DeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2263,13 +2318,15 @@ pub fn sinwma_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let handle = py.allow_threads(|| {
         let cuda = CudaSinwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.sinwma_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let h = cuda
+            .sinwma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>(cuda.py_wrap_device_array(h))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(handle)
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2280,7 +2337,7 @@ pub fn sinwma_cuda_many_series_one_param_dev_py(
     data_tm_f32: PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+    ) -> PyResult<DeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2292,13 +2349,15 @@ pub fn sinwma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
+    let handle = py.allow_threads(|| {
         let cuda = CudaSinwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.sinwma_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let h = cuda
+            .sinwma_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>(cuda.py_wrap_device_array(h))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(handle)
 }
 
 #[cfg(feature = "wasm")]
@@ -2459,7 +2518,7 @@ pub fn sinwma_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).unwrap_or_else(|_| Vec::new());
     combos.iter().map(|p| p.period.unwrap() as u32).collect()
 }
 
@@ -2475,7 +2534,7 @@ pub fn sinwma_batch_rows_cols_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).unwrap_or_else(|_| Vec::new());
     vec![combos.len() as u32, data_len as u32]
 }
 
@@ -2499,7 +2558,7 @@ pub fn sinwma_batch_into(
         let sweep = SinWmaBatchRange {
             period: (period_start, period_end, period_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 

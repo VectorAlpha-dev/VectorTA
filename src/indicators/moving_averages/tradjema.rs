@@ -18,6 +18,10 @@
 //! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix) ✓; O(length) scratch only
 //! - **SIMD status**: Disabled by default; recurrence + deque updates limit benefits
 //! - **Batch**: Precomputes TR once; per-length deques drive all rows
+//!
+//! Decision log: SIMD remains disabled by default (scalar is fastest/stable at 100k+).
+//! CUDA wrapper exists; this module now returns more precise errors and hardens batch range
+//! expansion without changing outputs or public API behavior.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -26,7 +30,11 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaTradjema;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -243,6 +251,22 @@ pub enum TradjemaError {
 
     #[error("tradjema: Invalid multiplier: {mult}")]
     InvalidMult { mult: f64 },
+
+    #[error("tradjema: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error(
+        "tradjema: Invalid length range (start={start}, end={end}, step={step})"
+    )]
+    InvalidLengthRange { start: usize, end: usize, step: usize },
+
+    #[error(
+        "tradjema: Invalid mult range (start={start}, end={end}, step={step})"
+    )]
+    InvalidMultRange { start: f64, end: f64, step: f64 },
+
+    #[error("tradjema: non-batch kernel passed to batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 // ==================== MAIN COMPUTATION ====================
@@ -332,7 +356,10 @@ pub fn tradjema_with_kernel(
 pub fn tradjema_into(input: &TradjemaInput, out: &mut [f64]) -> Result<(), TradjemaError> {
     let (h, l, c, length, first, mult, chosen) = tradjema_prepare(input, Kernel::Auto)?;
     if out.len() != c.len() {
-        return Err(TradjemaError::InvalidLength { length: out.len(), data_len: c.len() });
+        return Err(TradjemaError::OutputLengthMismatch {
+            expected: c.len(),
+            got: out.len(),
+        });
     }
 
     // Prefill warmup prefix with the same quiet-NaN used by alloc_with_nan_prefix
@@ -354,9 +381,9 @@ pub fn tradjema_into_slice(
 ) -> Result<(), TradjemaError> {
     let (h, l, c, length, first, mult, chosen) = tradjema_prepare(input, kern)?;
     if dst.len() != c.len() {
-        return Err(TradjemaError::InvalidLength {
-            length: dst.len(),
-            data_len: c.len(),
+        return Err(TradjemaError::OutputLengthMismatch {
+            expected: c.len(),
+            got: dst.len(),
         });
     }
     tradjema_compute_into(h, l, c, length, mult, first, chosen, dst);
@@ -945,9 +972,13 @@ pub fn tradjema_batch_py<'py>(
     }
     let rows = combos.len();
     let cols = c.len();
+    // Checked rows*cols to avoid overflow in extreme inputs
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
     // Create uninitialized NumPy buffer
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Warm-prefix NaNs per row without copying full rows
@@ -1010,7 +1041,7 @@ pub fn tradjema_cuda_batch_dev_py(
     length_range: (usize, usize, usize),
     mult_range: (f64, f64, f64),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32TradjemaPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1030,14 +1061,17 @@ pub fn tradjema_cuda_batch_dev_py(
         mult: mult_range,
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda =
-            CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.tradjema_batch_dev(high, low, close, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .tradjema_batch_dev(high, low, close, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32TradjemaPy::new(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1051,7 +1085,7 @@ pub fn tradjema_cuda_many_series_one_param_dev_py(
     length: usize,
     mult: f64,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32TradjemaPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1077,14 +1111,135 @@ pub fn tradjema_cuda_many_series_one_param_dev_py(
         mult: Some(mult),
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda =
-            CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.tradjema_many_series_one_param_time_major_dev(high, low, close, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .tradjema_many_series_one_param_time_major_dev(high, low, close, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32TradjemaPy::new(inner, ctx, dev_id))
+}
+
+// ==================== PYTHON: Device handle with CAI v3 + DLPack ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Tradjema", unsendable)]
+pub struct DeviceArrayF32TradjemaPy {
+    pub(crate) inner: DeviceArrayF32,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32TradjemaPy {
+    #[new]
+    fn py_new() -> PyResult<Self> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "use factory methods from CUDA functions",
+        ))
+    }
+
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<usize>) -> PyResult<PyObject> {
+        use std::ffi::{c_void, CString};
+        use pyo3::ffi as pyffi;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: usize,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            _self_ref: pyo3::PyObject,
+        }
+
+        unsafe extern "C" fn deleter(self_ptr: *mut DLManagedTensor) {
+            if self_ptr.is_null() { return; }
+            let mt = Box::from_raw(self_ptr);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() { let _ = Box::from_raw(ctx_ptr); }
+            drop(mt);
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
+        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
+
+        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape_box: shape_box, _strides_box: strides_box, _self_ref: self_ref });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let tensor = DLTensor {
+            data: slf.inner.buf.as_device_ptr().as_raw() as *mut c_void,
+            device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
+        let ptr = Box::into_raw(mt) as *mut c_void;
+
+        unsafe {
+            let name = CString::new("dltensor").unwrap();
+            let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+            if cap.is_null() {
+                let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl DeviceArrayF32TradjemaPy {
+    pub fn new(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self { inner, _ctx_guard: ctx_guard, _device_id: device_id }
+    }
 }
 
 #[cfg(feature = "python")]
@@ -1439,55 +1594,78 @@ impl TradjemaBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &TradjemaBatchRange) -> Vec<TradjemaParams> {
-    let (l_start, l_end, l_step) = r.length;
-    let (m_start, m_end, m_step) = r.mult;
+    let (ls, le, lstep) = r.length;
+    let (ms, me, mstep) = r.mult;
 
-    // Handle single value case - when both ranges have only one value
-    // This handles: step=0 OR start==end for both dimensions
-    let length_is_single = l_step == 0 || l_start >= l_end;
-    let mult_is_single = m_step == 0.0 || m_start >= m_end;
-
-    if length_is_single && mult_is_single {
-        return vec![TradjemaParams {
-            length: Some(l_start),
-            mult: Some(m_start),
-        }];
-    }
-
-    let mut combos = Vec::new();
-
-    // Generate all combinations
-    let mut length = l_start;
-    loop {
-        let mut mult = m_start;
-        loop {
-            combos.push(TradjemaParams {
-                length: Some(length),
-                mult: Some(mult),
-            });
-
-            // Check if we should continue with mult
-            if mult_is_single || mult >= m_end {
-                break;
+    // Axis helpers: treat step==0 as static, support reversed bounds.
+    #[inline]
+    fn axis_usize(start: usize, end: usize, step: usize) -> Vec<usize> {
+        if step == 0 {
+            return vec![start];
+        }
+        let mut vals = Vec::new();
+        if start <= end {
+            let mut v = start;
+            while v <= end {
+                vals.push(v);
+                match v.checked_add(step) {
+                    Some(n) if n > v => v = n,
+                    _ => break,
+                }
             }
-            mult += m_step;
-            // Only include end value if we haven't gone past it
-            if mult > m_end {
-                break; // Don't include values past the end
+        } else {
+            // descending
+            let mut v = start;
+            loop {
+                vals.push(v);
+                if v <= end {
+                    break;
+                }
+                v = v.saturating_sub(step);
+                if v < end { break; }
             }
         }
-
-        // Check if we should continue with length
-        if length_is_single || length >= l_end {
-            break;
-        }
-        length += l_step;
-        // Only include end value if we haven't gone past it
-        if length > l_end {
-            break; // Don't include values past the end
-        }
+        vals
     }
 
+    #[inline]
+    fn axis_f64(start: f64, end: f64, step: f64) -> Vec<f64> {
+        if step == 0.0 {
+            return vec![start];
+        }
+        let mut vals = Vec::new();
+        if start <= end {
+            let mut v = start;
+            while v <= end {
+                vals.push(v);
+                v += step;
+                // Protect from non-progress due to subnormals
+                if !v.is_finite() { break; }
+                if step.is_sign_negative() { break; }
+            }
+        } else {
+            let mut v = start;
+            while v >= end {
+                vals.push(v);
+                v -= step.abs();
+                if !v.is_finite() { break; }
+                if step == 0.0 { break; }
+            }
+        }
+        vals
+    }
+
+    let lengths = axis_usize(ls, le, lstep);
+    let mults = axis_f64(ms, me, mstep);
+    if lengths.is_empty() || mults.is_empty() {
+        return Vec::new();
+    }
+    let mut combos = Vec::with_capacity(lengths.len().saturating_mul(mults.len()));
+    for &l in &lengths {
+        for &m in &mults {
+            combos.push(TradjemaParams { length: Some(l), mult: Some(m) });
+        }
+    }
     combos
 }
 
@@ -1501,11 +1679,10 @@ pub fn tradjema_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        // Also handle non-batch kernels by converting them
-        Kernel::Scalar => Kernel::ScalarBatch,
-        Kernel::Avx2 => Kernel::Avx2Batch,
-        Kernel::Avx512 => Kernel::Avx512Batch,
-        _ => Kernel::ScalarBatch, // Default to scalar batch
+        Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
+            return Err(TradjemaError::InvalidKernelForBatch(k));
+        }
+        _ => detect_best_batch_kernel(),
     };
 
     let simd = match kernel {
@@ -1515,6 +1692,29 @@ pub fn tradjema_batch_with_kernel(
         _ => Kernel::Scalar, // Default fallback
     };
 
+    // Guard potential overflow before allocation
+    let combos = expand_grid(sweep);
+    if combos.is_empty() {
+        // Attribute to the axis that produced emptiness where possible
+        let (ls, le, lstep) = sweep.length;
+        let (ms, me, mstep) = sweep.mult;
+        // classify which axis is empty
+        let length_empty = (lstep == 0 && ls != le)
+            || (lstep > 0 && ls > le && ls.saturating_sub(le) < lstep);
+        if length_empty {
+            return Err(TradjemaError::InvalidLengthRange { start: ls, end: le, step: lstep });
+        } else {
+            return Err(TradjemaError::InvalidMultRange { start: ms, end: me, step: mstep });
+        }
+    }
+    let rows = combos.len();
+    let cols = close.len();
+    rows.checked_mul(cols).ok_or(TradjemaError::InvalidLengthRange {
+        start: sweep.length.0,
+        end: sweep.length.1,
+        step: sweep.length.2,
+    })?;
+    // Delegate to core implementation (recompute combos inside for warmup init)
     tradjema_batch_inner(high, low, close, sweep, simd, true)
 }
 
@@ -1530,10 +1730,15 @@ fn tradjema_batch_inner_into(
 ) -> Result<Vec<TradjemaParams>, TradjemaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(TradjemaError::InvalidLength {
-            length: 0,
-            data_len: 0,
-        });
+        let (ls, le, lstep) = sweep.length;
+        let (ms, me, mstep) = sweep.mult;
+        let length_empty = (lstep == 0 && ls != le)
+            || (lstep > 0 && ls > le && ls.saturating_sub(le) < lstep);
+        if length_empty {
+            return Err(TradjemaError::InvalidLengthRange { start: ls, end: le, step: lstep });
+        } else {
+            return Err(TradjemaError::InvalidMultRange { start: ms, end: me, step: mstep });
+        }
     }
     if high.len() != low.len() || low.len() != close.len() {
         return Err(TradjemaError::MissingData);

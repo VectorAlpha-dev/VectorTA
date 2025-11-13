@@ -18,7 +18,7 @@
 //! - **`Err(AdxError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - **Decision**: SIMD enabled for warmup (AVX2/AVX512); main loop stays scalar to preserve determinism (streaming parity ≤ 1e-8).
+//! - **Decision**: SIMD enabled for warmup (AVX2/AVX512); main loop stays scalar to preserve determinism (streaming parity ≤ 1e-8). CUDA wrapper returns typed errors; Python CAI v3 kept with synchronized stream.
 //! - **AVX2/AVX512 kernels**: Warmup window vectorized; main pass remains scalar
 //! - **Streaming update**: O(1) - maintains running smoothed values (ATR, +DM, -DM, ADX)
 //! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
@@ -197,6 +197,15 @@ pub enum AdxError {
 
     #[error("adx: Input data slice is empty.")]
     EmptyInputData,
+
+    #[error("adx: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("adx: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("adx: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline(always)]
@@ -862,10 +871,7 @@ pub fn adx_batch_with_kernel(
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 => Kernel::Avx512Batch,
         _ => {
-            return Err(AdxError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(AdxError::InvalidKernelForBatch(k))
         }
     };
 
@@ -1206,7 +1212,11 @@ impl AdxBatchOutput {
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::adx_wrapper::CudaAdx;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "adx_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, period_range, device_id=0))]
@@ -1217,7 +1227,7 @@ pub fn adx_cuda_batch_dev_py<'py>(
     close_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+) -> PyResult<(DeviceArrayF32AdxPy, Bound<'py, PyDict>)> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -1228,10 +1238,13 @@ pub fn adx_cuda_batch_dev_py<'py>(
     let sweep = AdxBatchRange {
         period: period_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaAdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.adx_batch_dev(h, l, c, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.ctx();
+        let dev_id = cuda.device_id();
+        let (dev_arr, cmb) = cuda.adx_batch_dev(h, l, c, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((dev_arr, cmb, ctx, dev_id))
     })?;
     let dict = PyDict::new(py);
     dict.set_item(
@@ -1242,7 +1255,7 @@ pub fn adx_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((DeviceArrayF32AdxPy::new(inner, ctx, dev_id), dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1257,7 +1270,7 @@ pub fn adx_cuda_many_series_one_param_dev_py(
     rows: usize,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32AdxPy> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -1265,21 +1278,168 @@ pub fn adx_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaAdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.adx_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.ctx();
+        let dev_id = cuda.device_id();
+        let arr = cuda.adx_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32AdxPy::new(inner, ctx, dev_id))
+}
+
+// ==================== PYTHON: Device handle with CAI v3 + DLPack ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Adx", unsendable)]
+pub struct DeviceArrayF32AdxPy {
+    pub(crate) inner: DeviceArrayF32,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32AdxPy {
+    #[new]
+    fn py_new() -> PyResult<Self> {
+        Err(pyo3::exceptions::PyTypeError::new_err("use factory methods from CUDA functions"))
+    }
+
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<usize>) -> PyResult<PyObject> {
+        // Minimal DLPack v0.6 capsule for 2D FP32 row-major CUDA tensor
+        use std::ffi::{c_void, CString};
+        use pyo3::ffi as pyffi;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: usize,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            // Keep Rust allocations alive
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            // Hold self to keep DeviceBuffer + Context alive
+            _self_ref: pyo3::PyObject,
+        }
+
+        unsafe extern "C" fn deleter(self_ptr: *mut DLManagedTensor) {
+            if self_ptr.is_null() { return; }
+            let mt = Box::from_raw(self_ptr);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ctx = Box::from_raw(ctx_ptr);
+                // drops shape/strides boxes and self_ref
+            }
+            drop(mt);
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
+        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
+
+        // Keep this Python object alive via a strong ref in the manager ctx
+        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape_box: shape_box,
+            _strides_box: strides_box,
+            _self_ref: self_ref,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let tensor = DLTensor {
+            data: slf.inner.buf.as_device_ptr().as_raw() as *mut c_void,
+            device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
+        let ptr = Box::into_raw(mt) as *mut c_void;
+
+        // Build PyCapsule("dltensor", ptr, deleter)
+        unsafe {
+            let name = CString::new("dltensor").unwrap();
+            let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+            if cap.is_null() {
+                // If capsule creation fails, clean up
+                let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl DeviceArrayF32AdxPy {
+    pub fn new(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self { inner, _ctx_guard: ctx_guard, _device_id: device_id }
+    }
 }
 
 #[inline(always)]
 fn expand_grid(r: &AdxBatchRange) -> Vec<AdxParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
+        if start == end || step == 0 {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return (start..=end).step_by(step.max(1)).collect();
+        }
+        // reversed bounds: start > end
+        let mut v = Vec::new();
+        let mut cur = start;
+        let s = step.max(1);
+        while cur >= end {
+            v.push(cur);
+            if cur < s { break; }
+            cur -= s;
+            if cur == usize::MAX { break; }
+        }
+        v
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -1304,19 +1464,24 @@ fn adx_batch_inner_into(
     }
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(AdxError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(AdxError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
     let rows = combos.len();
     let cols = close.len();
-    if out.len() != rows * cols {
-        return Err(AdxError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(AdxError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(AdxError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     let first = first_valid_triple(high, low, close);
@@ -1329,10 +1494,23 @@ fn adx_batch_inner_into(
     }
 
     // initialize only warm prefixes
-    let warms: Vec<usize> = combos
-        .iter()
-        .map(|c| first + (2 * c.period.unwrap() - 1))
-        .collect();
+    let mut warms: Vec<usize> = Vec::with_capacity(combos.len());
+    for c in &combos {
+        let p = c.period.unwrap();
+        let two_p = p.checked_mul(2).ok_or(AdxError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+        let warm = first
+            .checked_add(two_p.saturating_sub(1))
+            .ok_or(AdxError::InvalidRange {
+                start: sweep.period.0,
+                end: sweep.period.1,
+                step: sweep.period.2,
+            })?;
+        warms.push(warm);
+    }
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -1541,9 +1719,10 @@ fn adx_batch_inner(
     }
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(AdxError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(AdxError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -1563,13 +1742,33 @@ fn adx_batch_inner(
     }
 
     // 1) allocate rows×cols uninit
+    let _cap = rows
+        .checked_mul(cols)
+        .ok_or(AdxError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     // 2) per-row warm prefixes: first + 2*period - 1
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + (2 * c.period.unwrap() - 1))
-        .collect();
+    let mut warm: Vec<usize> = Vec::with_capacity(combos.len());
+    for c in &combos {
+        let p = c.period.unwrap();
+        let two_p = p.checked_mul(2).ok_or(AdxError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+        let w = first
+            .checked_add(two_p.saturating_sub(1))
+            .ok_or(AdxError::InvalidRange {
+                start: sweep.period.0,
+                end: sweep.period.1,
+                step: sweep.period.2,
+            })?;
+        warm.push(w);
+    }
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
     // 3) compute into the matrix in place using shared TR/+DM/−DM streams (for many rows)
@@ -3179,10 +3378,7 @@ pub fn adx_into_slice(dst: &mut [f64], input: &AdxInput, kern: Kernel) -> Result
     }
     let len = close.len();
     if dst.len() != len {
-        return Err(AdxError::InvalidPeriod {
-            period: dst.len(),
-            data_len: len,
-        });
+        return Err(AdxError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
     if len == 0 {
         return Err(AdxError::EmptyInputData);

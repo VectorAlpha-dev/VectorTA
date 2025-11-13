@@ -30,9 +30,7 @@
 //! Warmup semantics unchanged; counters use saturating add to avoid wrap.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaDema;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::{CudaDema, DeviceArrayF32};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -885,9 +883,6 @@ fn expand_grid(r: &DemaBatchRange) -> Vec<DemaParams> {
                 _ => break,
             }
         }
-        if out.is_empty() {
-            out.push(start);
-        }
         out
     }
     let periods = axis_usize(r.period);
@@ -950,7 +945,17 @@ fn dema_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<DemaBatchOutput, DemaError> {
-    let combos = expand_grid(sweep);
+    let combos = {
+        let v = expand_grid(sweep);
+        if v.is_empty() {
+            return Err(DemaError::InvalidRange {
+                start: sweep.period.0,
+                end: sweep.period.1,
+                step: sweep.period.2,
+            });
+        }
+        v
+    };
     let cols = data.len();
     let rows = combos.len();
     // Checked arithmetic to avoid overflow before allocation
@@ -969,8 +974,10 @@ fn dema_batch_inner(
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
-            data.iter().position(|x| !x.is_nan()).unwrap_or(0) + c.period.unwrap() - 1
-            // DEMA warmup is period - 1
+            data.iter()
+                .position(|x| !x.is_nan())
+                .unwrap_or(0)
+                .saturating_add(c.period.unwrap().saturating_sub(1))
         })
         .collect();
 
@@ -1012,13 +1019,17 @@ fn dema_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<DemaParams>, DemaError> {
     // ── 1. validation ──────────────────────────────────────────────────────
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(DemaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = {
+        let v = expand_grid(sweep);
+        if v.is_empty() {
+            return Err(DemaError::InvalidRange {
+                start: sweep.period.0,
+                end: sweep.period.1,
+                step: sweep.period.2,
+            });
+        }
+        v
+    };
 
     if data.is_empty() {
         return Err(DemaError::EmptyInputData);
@@ -1104,6 +1115,122 @@ unsafe fn dema_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f6
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn dema_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     dema_avx512(data, period, first, out)
+}
+
+// ==================== PYTHON: Device handle with CAI v3 + DLPack ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Dema", unsendable)]
+pub struct DeviceArrayF32DemaPy {
+    pub(crate) inner: DeviceArrayF32,
+    _ctx_guard: std::sync::Arc<cust::context::Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32DemaPy {
+    #[new]
+    fn py_new() -> PyResult<Self> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "use factory methods from CUDA functions",
+        ))
+    }
+
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        d.set_item("version", 3)?; // stream omitted (producer syncs)
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<usize>) -> PyResult<pyo3::PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: usize,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            _self_ref: pyo3::PyObject,
+        }
+        unsafe extern "C" fn deleter(self_ptr: *mut DLManagedTensor) {
+            if self_ptr.is_null() { return; }
+            let mt = Box::from_raw(self_ptr);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ctx = Box::from_raw(ctx_ptr);
+            }
+            drop(mt);
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
+        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
+        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape_box: shape_box, _strides_box: strides_box, _self_ref: self_ref });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let tensor = DLTensor {
+            data: slf.inner.buf.as_device_ptr().as_raw() as *mut c_void,
+            device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
+        let ptr = Box::into_raw(mt) as *mut c_void;
+        unsafe {
+            let name = CString::new("dltensor").unwrap();
+            let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+            if cap.is_null() {
+                let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl DeviceArrayF32DemaPy {
+    pub fn new(inner: DeviceArrayF32, ctx_guard: std::sync::Arc<cust::context::Context>, device_id: u32) -> Self {
+        Self { inner, _ctx_guard: ctx_guard, _device_id: device_id }
+    }
 }
 
 #[cfg(test)]
@@ -2003,6 +2130,9 @@ pub fn dema_batch_py<'py>(
 
     // build grid + dims
     let combos = expand_grid(&sweep);
+    if combos.is_empty() {
+        return Err(PyValueError::new_err("invalid period range: empty expansion"));
+    }
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2069,7 +2199,7 @@ pub fn dema_cuda_batch_dev_py(
     data_f32: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32DemaPy> {
     use crate::cuda::cuda_available;
 
     if !cuda_available() {
@@ -2081,13 +2211,17 @@ pub fn dema_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaDema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.dema_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.ctx();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .dema_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32DemaPy::new(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2098,7 +2232,7 @@ pub fn dema_cuda_many_series_one_param_dev_py(
     data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32DemaPy> {
     use crate::cuda::cuda_available;
     use numpy::PyUntypedArrayMethods;
     if !cuda_available() {
@@ -2114,12 +2248,16 @@ pub fn dema_cuda_many_series_one_param_dev_py(
     let params = DemaParams {
         period: Some(period),
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaDema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.dema_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.ctx();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .dema_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32DemaPy::new(inner, ctx, dev_id))
 }
 
 // ================== WASM API ====================

@@ -3089,7 +3089,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dvdiqqe_into_matches_api() -> Result<(), Box<dyn Error>> {
+    fn test_dvdiqqe_into_matches_api_alt() -> Result<(), Box<dyn Error>> {
         // Use the same CSV as other tests to ensure consistent warmup and values
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;

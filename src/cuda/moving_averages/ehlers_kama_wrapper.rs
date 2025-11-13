@@ -22,6 +22,7 @@ use std::env;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
+use std::sync::Arc;
 
 // -------- Policies and introspection (API parity with ALMA) --------
 
@@ -72,6 +73,8 @@ pub enum CudaEhlersKamaError {
     Cuda(#[from] cust::error::CudaError),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("insufficient device memory: required={required}B free={free}B headroom={headroom}B")]
@@ -82,6 +85,8 @@ pub enum CudaEhlersKamaError {
     SizeOverflow,
     #[error("not implemented")]
     NotImplemented,
+    #[error("device mismatch: buf on {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
 }
 
 /// CUDA Ehlers KAMA launcher and VRAM handle utilities.
@@ -92,7 +97,7 @@ pub enum CudaEhlersKamaError {
 pub struct CudaEhlersKama {
     module: Module,
     stream: Stream,
-    _context: Context,
+    ctx: Arc<Context>,
     device_id: u32,
     policy: CudaEhlersKamaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -106,7 +111,7 @@ impl CudaEhlersKama {
     pub fn new(device_id: usize) -> Result<Self, CudaEhlersKamaError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_kama_kernel.ptx"));
         // Match ALMA: prefer context-determined target and O2, with fallbacks
@@ -129,7 +134,7 @@ impl CudaEhlersKama {
         Ok(Self {
             module,
             stream,
-            _context: context,
+            ctx: context,
             device_id: device_id as u32,
             policy: CudaEhlersKamaPolicy::default(),
             last_batch: None,
@@ -160,6 +165,11 @@ impl CudaEhlersKama {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { Arc::clone(&self.ctx) }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     /// Synchronize the stream for deterministic timing.
     pub fn synchronize(&self) -> Result<(), CudaEhlersKamaError> {
@@ -250,34 +260,33 @@ impl CudaEhlersKama {
     fn expand_grid(range: &EhlersKamaBatchRange) -> Vec<EhlersKamaParams> {
         let (start, end, step) = range.period;
         if step == 0 || start == end {
-            return vec![EhlersKamaParams {
-                period: Some(start),
-            }];
+            return vec![EhlersKamaParams { period: Some(start) }];
         }
         let mut params = Vec::new();
-        let step_sz = if step == 0 { 1 } else { step };
-        let mut value = start;
-        loop {
-            if value > end {
-                break;
-            }
-            params.push(EhlersKamaParams {
-                period: Some(value),
-            });
-            match value.checked_add(step_sz) {
-                Some(next) => {
-                    if next > end {
-                        break;
-                    }
-                    value = next;
+        if start < end {
+            let mut value = start;
+            let step_sz = step.max(1);
+            while value <= end {
+                params.push(EhlersKamaParams { period: Some(value) });
+                match value.checked_add(step_sz) {
+                    Some(next) => value = next,
+                    None => break,
                 }
-                None => break,
             }
-        }
-        if params.is_empty() {
-            params.push(EhlersKamaParams {
-                period: Some(start),
-            });
+        } else {
+            // reversed bounds supported
+            let mut value = start;
+            let step_sz = step.max(1);
+            loop {
+                params.push(EhlersKamaParams { period: Some(value) });
+                match value.checked_sub(step_sz) {
+                    Some(next) => {
+                        if next < end { break; }
+                        value = next;
+                    }
+                    None => break,
+                }
+            }
         }
         params
     }

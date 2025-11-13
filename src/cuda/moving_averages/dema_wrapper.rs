@@ -24,6 +24,7 @@ use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
+use std::sync::Arc;
 
 #[derive(Debug, Error)]
 pub enum CudaDemaError {
@@ -31,12 +32,16 @@ pub enum CudaDemaError {
     Cuda(#[from] cust::error::CudaError),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf on {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
@@ -95,7 +100,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaDema {
     module: Module,
     stream: Stream,
-    _context: Context,
+    ctx: Arc<Context>,
     device_id: u32,
     policy: CudaDemaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -124,7 +129,7 @@ impl CudaDema {
         Ok(Self {
             module,
             stream,
-            _context: context,
+            ctx: Arc::new(context),
             device_id: device_id as u32,
             policy: CudaDemaPolicy::default(),
             last_batch: None,
@@ -154,6 +159,10 @@ impl CudaDema {
     pub fn policy(&self) -> &CudaDemaPolicy {
         &self.policy
     }
+    #[inline]
+    pub fn ctx(&self) -> Arc<Context> { Arc::clone(&self.ctx) }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch
     }
@@ -735,20 +744,22 @@ fn memset_f32_qnan_async(
 fn expand_periods(range: &DemaBatchRange) -> Vec<DemaParams> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {
-        return vec![DemaParams {
-            period: Some(start),
-        }];
+        return vec![DemaParams { period: Some(start) }];
     }
-
-    let mut out = Vec::new();
-    let mut value = start;
-    while value <= end {
-        out.push(DemaParams {
-            period: Some(value),
-        });
-        value = value.saturating_add(step);
+    let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+    let mut vals = Vec::new();
+    let mut v = lo;
+    while v <= hi {
+        vals.push(v);
+        match v.checked_add(step.max(1)) {
+            Some(n) if n != v => v = n,
+            _ => break,
+        }
     }
-    out
+    if start > end {
+        vals.reverse();
+    }
+    vals.into_iter().map(|p| DemaParams { period: Some(p) }).collect()
 }
 
 // ---------- Bench profiles ----------

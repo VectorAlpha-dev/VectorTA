@@ -22,32 +22,33 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[inline(always)]
 fn div_up(a: usize, b: usize) -> usize {
     (a + b - 1) / b
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CudaSuperSmoother3PoleError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required}B free={free}B headroom={headroom}B")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buffer device={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("not implemented")] 
+    NotImplemented,
 }
-
-impl fmt::Display for CudaSuperSmoother3PoleError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaSuperSmoother3PoleError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaSuperSmoother3PoleError::InvalidInput(msg) => {
-                write!(f, "Invalid input: {}", msg)
-            }
-        }
-    }
-}
-
-impl std::error::Error for CudaSuperSmoother3PoleError {}
 
 // -------- Kernel policy + introspection (kept minimal; no tiled variants) --------
 
@@ -89,7 +90,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaSupersmoother3Pole {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaSupersmoother3PolePolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -100,12 +101,10 @@ pub struct CudaSupersmoother3Pole {
 
 impl CudaSupersmoother3Pole {
     pub fn new(device_id: usize) -> Result<Self, CudaSuperSmoother3PoleError> {
-        cust::init(CudaFlags::empty())
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
-        let context =
-            Context::new(device).map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
+        let ctx = Arc::new(context);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/supersmoother_3_pole_kernel.ptx"));
         // Use context-targeted JIT; default to O4 (most optimized), unless overridden.
@@ -122,15 +121,13 @@ impl CudaSupersmoother3Pole {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            _context: ctx,
             device_id: device_id as u32,
             policy: CudaSupersmoother3PolePolicy::default(),
             last_batch: None,
@@ -161,9 +158,19 @@ impl CudaSupersmoother3Pole {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaSuperSmoother3PoleError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    // Expose interop details for Python wrappers
+    pub fn stream_handle(&self) -> usize {
+        self.stream.as_inner() as usize
+    }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
     }
 
     fn mem_check_enabled() -> bool {
@@ -190,10 +197,24 @@ impl CudaSupersmoother3Pole {
 
     fn expand_periods(range: &SuperSmoother3PoleBatchRange) -> Vec<SuperSmoother3PoleParams> {
         let (start, end, step) = range.period;
-        let periods = if step == 0 || start == end {
+        let periods: Vec<usize> = if step == 0 || start == end {
             vec![start]
-        } else {
+        } else if start < end {
             (start..=end).step_by(step).collect::<Vec<_>>()
+        } else {
+            // Reversed bounds: generate descending sequence
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                if let Some(next) = cur.checked_sub(step) {
+                    if next == cur { break; }
+                    cur = next;
+                } else {
+                    break;
+                }
+            }
+            v
         };
         periods
             .into_iter()
@@ -267,7 +288,9 @@ impl CudaSupersmoother3Pole {
         let mut func = self
             .module
             .get_function("supersmoother_3_pole_batch_f32")
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaSuperSmoother3PoleError::MissingKernelSymbol {
+                name: "supersmoother_3_pole_batch_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         // Occupancy-based block size for Auto
@@ -286,12 +309,19 @@ impl CudaSupersmoother3Pole {
         }
 
         // True device max grid.x
-        let device = Device::get_device(self.device_id)
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
-        let max_grid_x = device
-            .get_attribute(DeviceAttribute::MaxGridDimX)
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?
-            as usize;
+        let device = Device::get_device(self.device_id)?;
+        let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as usize;
+        let max_block_x = device.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        if block_x > max_block_x {
+            return Err(CudaSuperSmoother3PoleError::LaunchConfigTooLarge {
+                gx: 1,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
 
         let tpb = block_x as usize;
         let chunk_capacity = max_grid_x.saturating_mul(tpb);
@@ -319,9 +349,7 @@ impl CudaSupersmoother3Pole {
                     &mut first_valid_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
 
             launched += launch_elems;
@@ -339,26 +367,27 @@ impl CudaSupersmoother3Pole {
         series_len: usize,
     ) -> Result<DeviceArrayF32, CudaSuperSmoother3PoleError> {
         let n_combos = combos.len();
+        let total_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("rows * cols overflow".into()))?;
         let prices_bytes = series_len * std::mem::size_of::<f32>();
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
+        let out_bytes = total_elems * std::mem::size_of::<f32>();
         let required = prices_bytes + periods_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024; // 64MB cushion
         if !Self::will_fit(required, headroom) {
-            return Err(CudaSuperSmoother3PoleError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
+            return Err(CudaSuperSmoother3PoleError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
         let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -369,9 +398,7 @@ impl CudaSupersmoother3Pole {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -407,16 +434,11 @@ impl CudaSupersmoother3Pole {
 
         let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len)?;
         let total = expected;
-        let mut pinned = unsafe { LockedBuffer::<f32>::uninitialized(total) }
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        let mut pinned = unsafe { LockedBuffer::<f32>::uninitialized(total) }?;
         unsafe {
-            arr.buf
-                .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+            arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         out.copy_from_slice(pinned.as_slice());
         Ok((arr.rows, arr.cols, combos))
     }
@@ -519,7 +541,9 @@ impl CudaSupersmoother3Pole {
         let mut func = self
             .module
             .get_function("supersmoother_3_pole_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaSuperSmoother3PoleError::MissingKernelSymbol {
+                name: "supersmoother_3_pole_many_series_one_param_time_major_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x: u32 = match self.policy.many_series {
@@ -536,12 +560,19 @@ impl CudaSupersmoother3Pole {
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
 
-        let device = Device::get_device(self.device_id)
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
-        let max_grid_x = device
-            .get_attribute(DeviceAttribute::MaxGridDimX)
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?
-            as usize;
+        let device = Device::get_device(self.device_id)?;
+        let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as usize;
+        let max_block_x = device.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        if block_x > max_block_x {
+            return Err(CudaSuperSmoother3PoleError::LaunchConfigTooLarge {
+                gx: 1,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
 
         let tpb = block_x as usize;
         let chunk_capacity = max_grid_x.saturating_mul(tpb);
@@ -569,9 +600,7 @@ impl CudaSupersmoother3Pole {
                     &mut first_ptr as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
 
             launched += launch_elems;
@@ -589,30 +618,30 @@ impl CudaSupersmoother3Pole {
         first_valids: &[i32],
         period: usize,
     ) -> Result<DeviceArrayF32, CudaSuperSmoother3PoleError> {
-        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
+        let total_elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("rows * cols overflow".into()))?;
+        let prices_bytes = total_elems * std::mem::size_of::<f32>();
         let first_valid_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
+        let out_bytes = total_elems * std::mem::size_of::<f32>();
         let required = prices_bytes + first_valid_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaSuperSmoother3PoleError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
+            return Err(CudaSuperSmoother3PoleError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
-        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(first_valids, &self.stream) }
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
+        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(first_valids, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
         self.launch_many_series_kernel(&d_prices, period, cols, rows, &d_first_valids, &mut d_out)?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -652,16 +681,11 @@ impl CudaSupersmoother3Pole {
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let arr = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period)?;
         let total = cols * rows;
-        let mut pinned = unsafe { LockedBuffer::<f32>::uninitialized(total) }
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        let mut pinned = unsafe { LockedBuffer::<f32>::uninitialized(total) }?;
         unsafe {
-            arr.buf
-                .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+            arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSuperSmoother3PoleError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         out.copy_from_slice(pinned.as_slice());
         Ok(())
     }
@@ -719,6 +743,135 @@ impl CudaSupersmoother3Pole {
                 }
             }
         }
+    }
+}
+
+// -------------------- Python: CUDA Array Interface v3 + DLPack ----------------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::prelude::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::types::PyDict;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32")]
+pub struct DeviceArrayF32Py {
+    pub inner: DeviceArrayF32,
+    stream_handle: usize,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        let itemsize = std::mem::size_of::<f32>();
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        d.set_item("version", 3)?;
+        if self.stream_handle != 0 {
+            d.set_item("stream", self.stream_handle)?;
+        }
+        Ok(d.into())
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<usize>) -> PyResult<PyObject> {
+        // Minimal DLPack v0.6 capsule for 2D FP32 row‑major CUDA tensor
+        use std::ffi::{c_void, CString};
+        use pyo3::ffi as pyffi;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: usize,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            _self_ref: pyo3::PyObject,
+        }
+
+        unsafe extern "C" fn deleter(self_ptr: *mut DLManagedTensor) {
+            if self_ptr.is_null() { return; }
+            let mt = Box::from_raw(self_ptr);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ctx = Box::from_raw(ctx_ptr);
+            }
+            drop(mt);
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
+        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
+
+        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape_box: shape_box,
+            _strides_box: strides_box,
+            _self_ref: self_ref,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let tensor = DLTensor {
+            data: slf.inner.buf.as_device_ptr().as_raw() as *mut c_void,
+            device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
+        let ptr = Box::into_raw(mt) as *mut c_void;
+
+        unsafe {
+            let name = CString::new("dltensor").unwrap();
+            let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+            if cap.is_null() {
+                let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl DeviceArrayF32Py {
+    pub fn new_from_rust(inner: DeviceArrayF32, stream_handle: usize, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self { inner, stream_handle, _ctx_guard: ctx_guard, _device_id: device_id }
     }
 }
 

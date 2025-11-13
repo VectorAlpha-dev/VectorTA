@@ -30,6 +30,8 @@ use cust::sys::{
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 // -------- Kernel selection policy (mirror ALMA surface) --------
 
@@ -96,27 +98,30 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaNamaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buffer device={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")] 
+    NotImplemented,
 }
-
-impl fmt::Display for CudaNamaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaNamaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaNamaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaNamaError {}
 
 pub struct CudaNama {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaNamaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -189,29 +194,27 @@ impl CudaNama {
         self.module.get_function(name).is_ok()
     }
     pub fn new(device_id: usize) -> Result<Self, CudaNamaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/nama_kernel.ptx"));
-        let module = match Module::from_ptx(
+        let module = Module::from_ptx(
             ptx,
             &[
                 ModuleJitOption::DetermineTargetFromContext,
                 ModuleJitOption::OptLevel(OptLevel::O2),
             ],
-        ) {
-            Ok(m) => m,
-            Err(_) => Module::from_ptx(ptx, &[]).map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        )
+        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+        .or_else(|_| Module::from_ptx(ptx, &[]))?;
+
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            _context: Arc::new(context),
             device_id: device_id as u32,
             policy: CudaNamaPolicy {
                 batch: BatchKernelPolicy::Auto,
@@ -310,13 +313,40 @@ impl CudaNama {
         }
     }
 
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
+
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
     fn expand_periods(range: &NamaBatchRange) -> Vec<NamaParams> {
         let (start, end, step) = range.period;
-        let periods = if step == 0 || start == end {
-            vec![start]
+        let mut periods: Vec<usize> = Vec::new();
+        if step == 0 || start == end {
+            periods.push(start);
+        } else if start < end {
+            let mut cur = start;
+            while cur <= end {
+                periods.push(cur);
+                match cur.checked_add(step) {
+                    Some(nxt) => {
+                        if nxt == cur { break; }
+                        cur = nxt;
+                    }
+                    None => break,
+                }
+            }
         } else {
-            (start..=end).step_by(step.max(1)).collect::<Vec<_>>()
-        };
+            let mut cur = start;
+            while cur >= end {
+                periods.push(cur);
+                if cur < step { break; }
+                cur -= step;
+                if cur == periods.last().copied().unwrap_or(usize::MAX) { break; }
+            }
+        }
         periods
             .into_iter()
             .map(|p| NamaParams { period: Some(p) })
@@ -358,9 +388,11 @@ impl CudaNama {
 
         let combos = Self::expand_periods(sweep);
         if combos.is_empty() {
-            return Err(CudaNamaError::InvalidInput(
-                "no parameter combinations generated".into(),
-            ));
+            let (s, e, t) = sweep.period;
+            return Err(CudaNamaError::InvalidInput(format!(
+                "empty period range expansion: start={}, end={}, step={}",
+                s, e, t
+            )));
         }
 
         let series_len = prices.len();
@@ -427,16 +459,18 @@ impl CudaNama {
         // Select function (prefix or full) first
         let (mut func, is_prefix) = if let Some(_) = d_prefix_tr {
             (
-                self.module
+                self
+                    .module
                     .get_function("nama_batch_prefix_f32")
-                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
+                    .map_err(|_| CudaNamaError::MissingKernelSymbol { name: "nama_batch_prefix_f32" })?,
                 true,
             )
         } else {
             (
-                self.module
+                self
+                    .module
                     .get_function("nama_batch_f32")
-                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
+                    .map_err(|_| CudaNamaError::MissingKernelSymbol { name: "nama_batch_f32" })?,
                 false,
             )
         };
@@ -496,7 +530,7 @@ impl CudaNama {
                 ];
                 self.stream
                     .launch(&func, grid, block, shared_bytes as u32, args)
-                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+                    .map_err(CudaNamaError::Cuda)?;
             }
         } else {
             unsafe {
@@ -524,7 +558,7 @@ impl CudaNama {
                 ];
                 self.stream
                     .launch(&func, grid, block, shared_bytes as u32, args)
-                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+                    .map_err(CudaNamaError::Cuda)?;
             }
         }
 
@@ -557,60 +591,70 @@ impl CudaNama {
         // Decide once whether we’ll use the prefix kernel
         let use_prefix = !has_ohlc && self.has_function("nama_batch_prefix_f32");
 
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
+        let total_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaNamaError::InvalidInput("output size overflow".into()))?;
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?;
         let ohlc_bytes = if has_ohlc {
-            3 * series_len * std::mem::size_of::<f32>()
+            3usize
+                .checked_mul(series_len)
+                .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+                .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?
         } else {
             0
         };
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
+        let periods_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = total_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?;
         // Budget prefix only when it will be used
         let prefix_bytes = if use_prefix {
-            (series_len + 1) * std::mem::size_of::<f32>()
+            (series_len + 1)
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?
         } else {
             0
         };
-        let required = prices_bytes + ohlc_bytes + periods_bytes + out_bytes + prefix_bytes;
+        let required = prices_bytes
+            .checked_add(ohlc_bytes)
+            .and_then(|v| v.checked_add(periods_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .and_then(|v| v.checked_add(prefix_bytes))
+            .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // 64 MiB safety margin
         if !Self::will_fit(required, headroom) {
-            return Err(CudaNamaError::InvalidInput(
-                "not enough free device memory".into(),
-            ));
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaNamaError::OutOfMemory { required, free, headroom });
+            } else {
+                return Err(CudaNamaError::InvalidInput("insufficient device memory".into()));
+            }
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices).map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices).map_err(CudaNamaError::Cuda)?;
         let d_high = if has_ohlc {
-            Some(
-                DeviceBuffer::from_slice(high.unwrap())
-                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
-            )
+            Some(DeviceBuffer::from_slice(high.unwrap()).map_err(CudaNamaError::Cuda)?)
         } else {
             None
         };
         let d_low = if has_ohlc {
-            Some(
-                DeviceBuffer::from_slice(low.unwrap())
-                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
-            )
+            Some(DeviceBuffer::from_slice(low.unwrap()).map_err(CudaNamaError::Cuda)?)
         } else {
             None
         };
         let d_close = if has_ohlc {
-            Some(
-                DeviceBuffer::from_slice(close.unwrap())
-                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
-            )
+            Some(DeviceBuffer::from_slice(close.unwrap()).map_err(CudaNamaError::Cuda)?)
         } else {
             None
         };
 
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).map_err(CudaNamaError::Cuda)?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+                .map_err(CudaNamaError::Cuda)?;
 
         // Optional prefix path: only when no OHLC is provided and kernel exists
         let d_prefix = if use_prefix {
@@ -631,10 +675,7 @@ impl CudaNama {
             }
             // pad to series_len + 1
             prefix.push(acc);
-            Some(
-                DeviceBuffer::from_slice(&prefix)
-                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
-            )
+            Some(DeviceBuffer::from_slice(&prefix).map_err(CudaNamaError::Cuda)?)
         } else {
             None
         };
@@ -677,9 +718,7 @@ impl CudaNama {
             self.maybe_log_batch_debug();
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -740,7 +779,10 @@ impl CudaNama {
     ) -> Result<(usize, usize, Vec<NamaParams>), CudaNamaError> {
         let (combos, first_valid, series_len, max_period, has_ohlc) =
             Self::prepare_batch_inputs(prices, None, None, None, sweep)?;
-        let expected = combos.len() * series_len;
+        let expected = combos
+            .len()
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaNamaError::InvalidInput("output size overflow".into()))?;
         if out.len() != expected {
             return Err(CudaNamaError::InvalidInput(format!(
                 "output slice len {} != expected {}",
@@ -759,9 +801,7 @@ impl CudaNama {
             max_period,
             has_ohlc,
         )?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        arr.buf.copy_to(out).map_err(CudaNamaError::Cuda)?;
         Ok((arr.rows, arr.cols, combos))
     }
 
@@ -813,53 +853,60 @@ impl CudaNama {
         period: usize,
         has_ohlc: bool,
     ) -> Result<DeviceArrayF32, CudaNamaError> {
-        let total = num_series * series_len;
-        let prices_bytes = total * std::mem::size_of::<f32>();
+        let total = num_series
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaNamaError::InvalidInput("output size overflow".into()))?;
+        let prices_bytes = total
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?;
         let ohlc_bytes = if has_ohlc {
-            3 * total * std::mem::size_of::<f32>()
+            3usize
+                .checked_mul(total)
+                .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+                .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?
         } else {
             0
         };
-        let fv_bytes = first_valids.len() * std::mem::size_of::<i32>();
-        let out_bytes = total * std::mem::size_of::<f32>();
-        let required = prices_bytes + ohlc_bytes + fv_bytes + out_bytes;
+        let fv_bytes = first_valids
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = total
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(ohlc_bytes)
+            .and_then(|v| v.checked_add(fv_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaNamaError::InvalidInput(
-                "not enough free device memory".into(),
-            ));
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaNamaError::OutOfMemory { required, free, headroom });
+            } else {
+                return Err(CudaNamaError::InvalidInput("insufficient device memory".into()));
+            }
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(prices_tm).map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(prices_tm).map_err(CudaNamaError::Cuda)?;
         let d_high = if has_ohlc {
-            Some(
-                DeviceBuffer::from_slice(high_tm.unwrap())
-                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
-            )
+            Some(DeviceBuffer::from_slice(high_tm.unwrap()).map_err(CudaNamaError::Cuda)?)
         } else {
             None
         };
         let d_low = if has_ohlc {
-            Some(
-                DeviceBuffer::from_slice(low_tm.unwrap())
-                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
-            )
+            Some(DeviceBuffer::from_slice(low_tm.unwrap()).map_err(CudaNamaError::Cuda)?)
         } else {
             None
         };
         let d_close = if has_ohlc {
-            Some(
-                DeviceBuffer::from_slice(close_tm.unwrap())
-                    .map_err(|e| CudaNamaError::Cuda(e.to_string()))?,
-            )
+            Some(DeviceBuffer::from_slice(close_tm.unwrap()).map_err(CudaNamaError::Cuda)?)
         } else {
             None
         };
-        let d_first_valids = DeviceBuffer::from_slice(first_valids)
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        let d_first_valids = DeviceBuffer::from_slice(first_valids).map_err(CudaNamaError::Cuda)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total) }.map_err(CudaNamaError::Cuda)?;
 
         self.launch_many_series_kernel(
             &d_prices,
@@ -874,10 +921,8 @@ impl CudaNama {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
-
+        self.stream.synchronize()?;
+        
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: series_len,
@@ -925,9 +970,7 @@ impl CudaNama {
         }
         let arr = self
             .nama_many_series_one_param_time_major_dev(prices_tm, num_series, series_len, params)?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))
+        arr.buf.copy_to(out).map_err(CudaNamaError::Cuda)
     }
 
     pub fn nama_many_series_one_param_time_major_device(
@@ -1071,7 +1114,7 @@ impl CudaNama {
         let mut func = self
             .module
             .get_function("nama_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaNamaError::MissingKernelSymbol { name: "nama_many_series_one_param_time_major_f32" })?;
 
         // Preferences and opt-in
         let _ = func.set_cache_config(CacheConfig::PreferShared);
@@ -1134,7 +1177,7 @@ impl CudaNama {
             let block: BlockSize = (block_x, 1, 1).into();
             self.stream
                 .launch(&func, grid, block, shared_bytes as u32, args)
-                .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+                .map_err(CudaNamaError::Cuda)?;
         }
 
         unsafe {
@@ -1168,16 +1211,14 @@ impl CudaNama {
             max_period,
             has_ohlc,
         )?;
-        let mut pinned = unsafe { LockedBuffer::<f32>::uninitialized(arr.rows * arr.cols) }
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        let mut pinned = unsafe { LockedBuffer::<f32>::uninitialized(arr.len()) }
+            .map_err(CudaNamaError::Cuda)?;
         unsafe {
             arr.buf
                 .async_copy_to(&mut pinned, &self.stream)
-                .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+                .map_err(CudaNamaError::Cuda)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaNamaError::Cuda)?;
         Ok((pinned, arr.rows, arr.cols, combos))
     }
 
@@ -1191,16 +1232,14 @@ impl CudaNama {
     ) -> Result<LockedBuffer<f32>, CudaNamaError> {
         let arr = self
             .nama_many_series_one_param_time_major_dev(prices_tm, num_series, series_len, params)?;
-        let mut pinned = unsafe { LockedBuffer::<f32>::uninitialized(num_series * series_len) }
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        let mut pinned = unsafe { LockedBuffer::<f32>::uninitialized(arr.len()) }
+            .map_err(CudaNamaError::Cuda)?;
         unsafe {
             arr.buf
                 .async_copy_to(&mut pinned, &self.stream)
-                .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+                .map_err(CudaNamaError::Cuda)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaNamaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaNamaError::Cuda)?;
         Ok(pinned)
     }
 }

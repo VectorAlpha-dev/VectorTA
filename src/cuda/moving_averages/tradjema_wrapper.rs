@@ -27,11 +27,18 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum CudaTradjemaError {
-    Cuda(String),
+    Cuda(cust::error::CudaError),
     InvalidInput(String),
+    InvalidPolicy(&'static str),
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    MissingKernelSymbol { name: &'static str },
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    DeviceMismatch { buf: u32, current: u32 },
+    NotImplemented,
 }
 
 impl fmt::Display for CudaTradjemaError {
@@ -39,6 +46,26 @@ impl fmt::Display for CudaTradjemaError {
         match self {
             CudaTradjemaError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaTradjemaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
+            CudaTradjemaError::InvalidPolicy(p) => write!(f, "Invalid policy: {}", p),
+            CudaTradjemaError::OutOfMemory { required, free, headroom } => write!(
+                f,
+                "out of memory: required={} free={} headroom={}",
+                required, free, headroom
+            ),
+            CudaTradjemaError::MissingKernelSymbol { name } => {
+                write!(f, "missing kernel symbol: {}", name)
+            }
+            CudaTradjemaError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+                f,
+                "launch config too large: grid=({},{},{}) block=({},{},{})",
+                gx, gy, gz, bx, by, bz
+            ),
+            CudaTradjemaError::DeviceMismatch { buf, current } => write!(
+                f,
+                "device mismatch: buf={} current={}",
+                buf, current
+            ),
+            CudaTradjemaError::NotImplemented => write!(f, "not implemented"),
         }
     }
 }
@@ -88,7 +115,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaTradjema {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaTradjemaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -99,10 +126,9 @@ pub struct CudaTradjema {
 
 impl CudaTradjema {
     pub fn new(device_id: usize) -> Result<Self, CudaTradjemaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty()).map_err(CudaTradjemaError::Cuda)?;
+        let device = Device::get_device(device_id as u32).map_err(CudaTradjemaError::Cuda)?;
+        let context = Context::new(device).map_err(CudaTradjemaError::Cuda)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/tradjema_kernel.ptx"));
         // Prefer target-from-context + O2, then relax
@@ -114,17 +140,15 @@ impl CudaTradjema {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])
-                    .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?,
+                Err(_) => Module::from_ptx(ptx, &[]).map_err(CudaTradjemaError::Cuda)?,
             },
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaTradjemaError::Cuda)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            _context: Arc::new(context),
             device_id: device_id as u32,
             policy: CudaTradjemaPolicy::default(),
             last_batch: None,
@@ -145,6 +169,8 @@ impl CudaTradjema {
     pub fn set_policy(&mut self, policy: CudaTradjemaPolicy) {
         self.policy = policy;
     }
+    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
     pub fn policy(&self) -> &CudaTradjemaPolicy {
         &self.policy
     }
@@ -157,7 +183,7 @@ impl CudaTradjema {
     pub fn synchronize(&self) -> Result<(), CudaTradjemaError> {
         self.stream
             .synchronize()
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))
+            .map_err(CudaTradjemaError::Cuda)
     }
 
     fn mem_check_enabled() -> bool {
@@ -188,48 +214,73 @@ impl CudaTradjema {
         length * (std::mem::size_of::<f64>() + 2 * std::mem::size_of::<i32>())
     }
 
+    #[inline]
+    fn validate_launch(device_id: u32, block_x: u32, grid_x: u32) -> Result<(), CudaTradjemaError> {
+        let dev = Device::get_device(device_id).map_err(CudaTradjemaError::Cuda)?;
+        let max_threads = dev
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .map_err(CudaTradjemaError::Cuda)? as u32;
+        let max_grid_x = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(CudaTradjemaError::Cuda)? as u32;
+        if block_x == 0 || block_x > max_threads || grid_x > max_grid_x {
+            return Err(CudaTradjemaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
+        Ok(())
+    }
+
     fn expand_range(range: &TradjemaBatchRange) -> Vec<TradjemaParams> {
-        let (l_start, l_end, l_step) = range.length;
-        let (m_start, m_end, m_step) = range.mult;
+        let (ls, le, lstep) = range.length;
+        let (ms, me, mstep) = range.mult;
 
-        let length_is_single = l_step == 0 || l_start >= l_end;
-        let mult_is_single = m_step == 0.0 || m_start >= m_end;
-
-        if length_is_single && mult_is_single {
-            return vec![TradjemaParams {
-                length: Some(l_start),
-                mult: Some(m_start),
-            }];
-        }
-
-        let mut combos = Vec::new();
-        let mut length = l_start;
-        loop {
-            let mut mult = m_start;
-            loop {
-                combos.push(TradjemaParams {
-                    length: Some(length),
-                    mult: Some(mult),
-                });
-
-                if mult_is_single || mult >= m_end {
-                    break;
+        #[inline]
+        fn axis_usize(start: usize, end: usize, step: usize) -> Vec<usize> {
+            if step == 0 { return vec![start]; }
+            let mut vals = Vec::new();
+            if start <= end {
+                let mut v = start;
+                while v <= end {
+                    vals.push(v);
+                    match v.checked_add(step) { Some(n) if n > v => v = n, _ => break }
                 }
-                mult += m_step;
-                if mult > m_end {
-                    break;
+            } else {
+                let mut v = start;
+                loop {
+                    vals.push(v);
+                    if v <= end { break; }
+                    v = v.saturating_sub(step);
+                    if v < end { break; }
                 }
             }
-
-            if length_is_single || length >= l_end {
-                break;
-            }
-            length += l_step;
-            if length > l_end {
-                break;
-            }
+            vals
         }
 
+        #[inline]
+        fn axis_f64(start: f64, end: f64, step: f64) -> Vec<f64> {
+            if step == 0.0 { return vec![start]; }
+            let mut vals = Vec::new();
+            if start <= end {
+                let mut v = start;
+                while v <= end { vals.push(v); v += step; if !v.is_finite() { break; } }
+            } else {
+                let mut v = start;
+                while v >= end { vals.push(v); v -= step.abs(); if !v.is_finite() { break; } }
+            }
+            vals
+        }
+
+        let lengths = axis_usize(ls, le, lstep);
+        let mults = axis_f64(ms, me, mstep);
+        if lengths.is_empty() || mults.is_empty() { return Vec::new(); }
+        let mut combos = Vec::with_capacity(lengths.len().saturating_mul(mults.len()));
+        for &l in &lengths { for &m in &mults { combos.push(TradjemaParams { length: Some(l), mult: Some(m) }); } }
         combos
     }
 
@@ -342,11 +393,7 @@ impl CudaTradjema {
 
     fn choose_many_block_x(&self) -> u32 {
         match self.policy.many_series {
-            ManySeriesKernelPolicy::Auto => std::env::var("TRADJEMA_MS_BLOCK_X")
-                .ok()
-                .and_then(|s| s.parse::<u32>().ok())
-                .filter(|&bx| bx >= 1 && bx <= 1024)
-                .unwrap_or(256),
+            ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.clamp(1, 1024),
         }
     }
@@ -364,18 +411,27 @@ impl CudaTradjema {
         max_length: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTradjemaError> {
+        // Basic bounds for i32 kernel args
+        if series_len > i32::MAX as usize
+            || n_combos > i32::MAX as usize
+            || first_valid > i32::MAX as usize
+            || max_length > i32::MAX as usize
+        {
+            return Err(CudaTradjemaError::InvalidInput(
+                "series_len/n_combos/first_valid/max_length exceed i32".into(),
+            ));
+        }
         let mut func = self
             .module
             .get_function("tradjema_batch_f32")
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTradjemaError::MissingKernelSymbol { name: "tradjema_batch_f32" })?;
 
         // Compute dynamic shared memory and validate against device capability
         let shared_bytes = Self::smem_bytes_for_len(max_length);
-        let dev = Device::get_device(self.device_id)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+        let dev = Device::get_device(self.device_id).map_err(CudaTradjemaError::Cuda)?;
         let max_optin = dev
             .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))? as usize;
+            .map_err(CudaTradjemaError::Cuda)? as usize;
         if shared_bytes > max_optin {
             return Err(CudaTradjemaError::InvalidInput(format!(
                 "requested {} B dynamic shared memory exceeds device limit {} B",
@@ -399,7 +455,9 @@ impl CudaTradjema {
         }
         self.maybe_log_batch_debug();
 
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        let grid_x = n_combos as u32;
+        Self::validate_launch(self.device_id, block_x, grid_x)?;
+        let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
@@ -425,7 +483,7 @@ impl CudaTradjema {
             ];
             self.stream
                 .launch(&func, grid, block, shared_bytes as u32, args)
-                .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+                .map_err(CudaTradjemaError::Cuda)?;
         }
 
         Ok(())
@@ -449,50 +507,62 @@ impl CudaTradjema {
             mults_f32[idx] = prm.mult.unwrap() as f32;
         }
 
-        let bytes_ohlc = series_len * std::mem::size_of::<f32>() * 3;
-        let lengths_bytes = n_combos * std::mem::size_of::<i32>();
-        let mults_bytes = n_combos * std::mem::size_of::<f32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = bytes_ohlc + lengths_bytes + mults_bytes + out_bytes;
+        let item_f32 = std::mem::size_of::<f32>();
+        let bytes_ohlc = series_len
+            .checked_mul(item_f32)
+            .and_then(|b| b.checked_mul(3))
+            .ok_or_else(|| CudaTradjemaError::InvalidInput("byte size overflow".into()))?;
+        let lengths_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaTradjemaError::InvalidInput("byte size overflow".into()))?;
+        let mults_bytes = n_combos
+            .checked_mul(item_f32)
+            .ok_or_else(|| CudaTradjemaError::InvalidInput("byte size overflow".into()))?;
+        let out_elems = n_combos.checked_mul(series_len)
+            .ok_or_else(|| CudaTradjemaError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(item_f32)
+            .ok_or_else(|| CudaTradjemaError::InvalidInput("byte size overflow".into()))?;
+        let required = bytes_ohlc
+            .checked_add(lengths_bytes)
+            .and_then(|s| s.checked_add(mults_bytes))
+            .and_then(|s| s.checked_add(out_bytes))
+            .ok_or_else(|| CudaTradjemaError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaTradjemaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            let (free, _total) = Self::device_mem_info().unwrap_or((0, 0));
+            return Err(CudaTradjemaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
         // Pinned host buffers + async H2D for better throughput
-        let h_high =
-            LockedBuffer::from_slice(high).map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let h_low =
-            LockedBuffer::from_slice(low).map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let h_close =
-            LockedBuffer::from_slice(close).map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let d_lengths = DeviceBuffer::from_slice(&lengths_i32)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let d_mults = DeviceBuffer::from_slice(&mults_f32)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+        let h_high = LockedBuffer::from_slice(high).map_err(CudaTradjemaError::Cuda)?;
+        let h_low = LockedBuffer::from_slice(low).map_err(CudaTradjemaError::Cuda)?;
+        let h_close = LockedBuffer::from_slice(close).map_err(CudaTradjemaError::Cuda)?;
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32).map_err(CudaTradjemaError::Cuda)?;
+        let d_mults = DeviceBuffer::from_slice(&mults_f32).map_err(CudaTradjemaError::Cuda)?;
+        let mut d_high: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len) }.map_err(CudaTradjemaError::Cuda)?;
+        let mut d_low: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len) }.map_err(CudaTradjemaError::Cuda)?;
+        let mut d_close: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len) }.map_err(CudaTradjemaError::Cuda)?;
         unsafe {
             d_high
                 .async_copy_from(h_high.as_slice(), &self.stream)
-                .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+                .map_err(CudaTradjemaError::Cuda)?;
             d_low
                 .async_copy_from(h_low.as_slice(), &self.stream)
-                .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+                .map_err(CudaTradjemaError::Cuda)?;
             d_close
                 .async_copy_from(h_close.as_slice(), &self.stream)
-                .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+                .map_err(CudaTradjemaError::Cuda)?;
         }
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.map_err(CudaTradjemaError::Cuda)?;
 
         self.launch_batch_kernel(
             &d_high,
@@ -507,9 +577,7 @@ impl CudaTradjema {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaTradjemaError::Cuda)?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -598,16 +666,14 @@ impl CudaTradjema {
             max_length,
         )?;
         // Async device->pinned copy then slice copy for better D2H throughput
-        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out.len()) }
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+        let mut pinned: LockedBuffer<f32> =
+            unsafe { LockedBuffer::uninitialized(out.len()) }.map_err(CudaTradjemaError::Cuda)?;
         unsafe {
             arr.buf
                 .async_copy_to(&mut pinned, &self.stream)
-                .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+                .map_err(CudaTradjemaError::Cuda)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaTradjemaError::Cuda)?;
         out.copy_from_slice(pinned.as_slice());
         Ok((arr.rows, arr.cols, combos))
     }
@@ -625,7 +691,9 @@ impl CudaTradjema {
                 "num_series or series_len is zero".into(),
             ));
         }
-        let expected = cols * rows;
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaTradjemaError::InvalidInput("rows*cols overflow".into()))?;
         if high_tm.len() != expected || low_tm.len() != expected || close_tm.len() != expected {
             return Err(CudaTradjemaError::InvalidInput(format!(
                 "time-major length mismatch: high={}, low={}, close={}, expected={}",
@@ -693,14 +761,16 @@ impl CudaTradjema {
         let mut func = self
             .module
             .get_function("tradjema_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTradjemaError::MissingKernelSymbol {
+                name: "tradjema_many_series_one_param_time_major_f32",
+            })?;
 
-        let shared_bytes = Self::smem_bytes_for_len(length);
-        let dev = Device::get_device(self.device_id)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+        // Many-series kernel only needs TR ring buffer (f64 * length)
+        let shared_bytes = length * std::mem::size_of::<f64>();
+        let dev = Device::get_device(self.device_id).map_err(CudaTradjemaError::Cuda)?;
         let max_optin = dev
             .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))? as usize;
+            .map_err(CudaTradjemaError::Cuda)? as usize;
         if shared_bytes > max_optin {
             return Err(CudaTradjemaError::InvalidInput(format!(
                 "requested {} B dynamic shared memory exceeds device limit {} B",
@@ -722,7 +792,9 @@ impl CudaTradjema {
         }
         self.maybe_log_many_debug();
 
-        let grid: GridSize = (cols as u32, 1, 1).into();
+        let grid_x = cols as u32;
+        Self::validate_launch(self.device_id, block_x, grid_x)?;
+        let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
@@ -748,7 +820,7 @@ impl CudaTradjema {
             ];
             self.stream
                 .launch(&func, grid, block, shared_bytes as u32, args)
-                .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+                .map_err(CudaTradjemaError::Cuda)?;
         }
         Ok(())
     }
@@ -764,51 +836,52 @@ impl CudaTradjema {
         length: usize,
         mult: f32,
     ) -> Result<DeviceArrayF32, CudaTradjemaError> {
-        let bytes_ohlc = cols * rows * std::mem::size_of::<f32>() * 3;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaTradjemaError::InvalidInput("rows*cols overflow".into()))?;
+        let bytes_ohlc = elems * std::mem::size_of::<f32>() * 3;
         let first_valid_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
         let required = bytes_ohlc + first_valid_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaTradjemaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            let (free, _total) = Self::device_mem_info().unwrap_or((0, 0));
+            return Err(CudaTradjemaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
         // Pinned + async host-to-device
-        let h_high = LockedBuffer::from_slice(high_tm)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let h_low =
-            LockedBuffer::from_slice(low_tm).map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let h_close = LockedBuffer::from_slice(close_tm)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let h_first = LockedBuffer::from_slice(first_valids)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
-        let mut d_first_valids: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(cols) }
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+        let h_high = LockedBuffer::from_slice(high_tm).map_err(CudaTradjemaError::Cuda)?;
+        let h_low = LockedBuffer::from_slice(low_tm).map_err(CudaTradjemaError::Cuda)?;
+        let h_close = LockedBuffer::from_slice(close_tm).map_err(CudaTradjemaError::Cuda)?;
+        let h_first = LockedBuffer::from_slice(first_valids).map_err(CudaTradjemaError::Cuda)?;
+        let mut d_high: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaTradjemaError::Cuda)?;
+        let mut d_low: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaTradjemaError::Cuda)?;
+        let mut d_close: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaTradjemaError::Cuda)?;
+        let mut d_first_valids: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized(cols) }.map_err(CudaTradjemaError::Cuda)?;
         unsafe {
             d_high
                 .async_copy_from(h_high.as_slice(), &self.stream)
-                .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+                .map_err(CudaTradjemaError::Cuda)?;
             d_low
                 .async_copy_from(h_low.as_slice(), &self.stream)
-                .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+                .map_err(CudaTradjemaError::Cuda)?;
             d_close
                 .async_copy_from(h_close.as_slice(), &self.stream)
-                .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+                .map_err(CudaTradjemaError::Cuda)?;
             d_first_valids
                 .async_copy_from(h_first.as_slice(), &self.stream)
-                .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+                .map_err(CudaTradjemaError::Cuda)?;
         }
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaTradjemaError::Cuda)?;
 
         self.launch_many_series_kernel(
             &d_high,
@@ -822,9 +895,7 @@ impl CudaTradjema {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaTradjemaError::Cuda)?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -917,7 +988,7 @@ impl CudaTradjema {
         )?;
         arr.buf
             .copy_to(out_tm)
-            .map_err(|e| CudaTradjemaError::Cuda(e.to_string()))
+            .map_err(CudaTradjemaError::Cuda)
     }
 }
 
