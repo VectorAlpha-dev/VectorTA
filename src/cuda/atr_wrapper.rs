@@ -8,7 +8,6 @@
 
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::atr::AtrBatchRange;
 use cust::context::Context;
 use cust::device::Device;
@@ -20,22 +19,28 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaAtrError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Launch configuration too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buffer on {buf}, current device {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaAtrError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaAtrError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaAtrError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaAtrError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -73,36 +78,41 @@ enum SeedPlan {
 pub struct CudaAtr {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaAtrPolicy,
 }
 
+/// VRAM-backed array handle for ATR with context guard and device id
+pub struct DeviceArrayF32Atr {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+impl DeviceArrayF32Atr {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
+}
+
 impl CudaAtr {
     pub fn new(device_id: usize) -> Result<Self, CudaAtrError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/atr_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaAtrError::Cuda(e.to_string()))?
-                }
-            }
-        };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -202,7 +212,7 @@ impl CudaAtr {
         low: &[f32],
         close: &[f32],
         sweep: &AtrBatchRange,
-    ) -> Result<DeviceArrayF32, CudaAtrError> {
+    ) -> Result<DeviceArrayF32Atr, CudaAtrError> {
         if high.len() != low.len() || low.len() != close.len() {
             return Err(CudaAtrError::InvalidInput("input length mismatch".into()));
         }
@@ -222,8 +232,12 @@ impl CudaAtr {
         }
         let periods: Vec<usize> = if step == 0 || start == end {
             vec![start]
-        } else {
+        } else if start < end {
             (start..=end).step_by(step).collect()
+        } else {
+            let mut v: Vec<usize> = (end..=start).step_by(step).collect();
+            v.reverse();
+            v
         };
         if periods.is_empty() {
             return Err(CudaAtrError::InvalidInput("no parameter combos".into()));
@@ -250,23 +264,17 @@ impl CudaAtr {
             .map(|&p| (first_valid + p - 1) as i32)
             .collect();
 
-        let d_periods = DeviceBuffer::from_slice(&h_periods_i32)
-            .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let d_alphas =
-            DeviceBuffer::from_slice(&h_alphas).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let d_warms =
-            DeviceBuffer::from_slice(&h_warms).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&h_periods_i32)?;
+        let d_alphas = DeviceBuffer::from_slice(&h_alphas)?;
+        let d_warms = DeviceBuffer::from_slice(&h_warms)?;
 
         // Heuristic seed plan (no flags)
         let plan = Self::choose_seed_plan(&periods, len);
 
         // Upload inputs; may be dropped after TR/prefix build.
-        let mut d_high: Option<DeviceBuffer<f32>> =
-            Some(DeviceBuffer::from_slice(high).map_err(|e| CudaAtrError::Cuda(e.to_string()))?);
-        let mut d_low: Option<DeviceBuffer<f32>> =
-            Some(DeviceBuffer::from_slice(low).map_err(|e| CudaAtrError::Cuda(e.to_string()))?);
-        let mut d_close: Option<DeviceBuffer<f32>> =
-            Some(DeviceBuffer::from_slice(close).map_err(|e| CudaAtrError::Cuda(e.to_string()))?);
+        let mut d_high: Option<DeviceBuffer<f32>> = Some(DeviceBuffer::from_slice(high).map_err(CudaAtrError::Cuda)?);
+        let mut d_low: Option<DeviceBuffer<f32>> = Some(DeviceBuffer::from_slice(low).map_err(CudaAtrError::Cuda)?);
+        let mut d_close: Option<DeviceBuffer<f32>> = Some(DeviceBuffer::from_slice(close).map_err(CudaAtrError::Cuda)?);
 
         // Precompute on device as needed
         let mut d_tr: Option<DeviceBuffer<f32>> = None;
@@ -275,7 +283,7 @@ impl CudaAtr {
         // Device functions
         let k_batch = match self.module.get_function("atr_batch_unified_f32") {
             Ok(f) => f,
-            Err(e) => {
+            Err(_e) => {
                 // Fallback to legacy kernels if unified symbol is absent
                 // Keep behavior compatible with older PTX
                 // Try prefix kernel first (legacy), then plain
@@ -289,7 +297,6 @@ impl CudaAtr {
                     &mut d_high,
                     &mut d_low,
                     &mut d_close,
-                    e,
                 );
             }
         };
@@ -305,8 +312,7 @@ impl CudaAtr {
             // Require TR kernel for these plans; if missing, fall back to on-the-fly
             if let Some(k_tr_f) = k_tr {
                 // Allocate TR
-                let mut db_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-                    .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+                let mut db_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
                 // Launch tr_from_hlc_f32
                 let block_tr: BlockSize = (256, 1, 1).into();
@@ -328,17 +334,13 @@ impl CudaAtr {
                         &mut first_i as *mut _ as *mut c_void,
                         &mut tr_ptr as *mut _ as *mut c_void,
                     ];
-                    self.stream
-                        .launch(&k_tr_f, grid_tr, block_tr, 0, args)
-                        .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+                    self.stream.launch(&k_tr_f, grid_tr, block_tr, 0, args)?;
                 }
 
                 if matches!(plan, SeedPlan::Prefix2) {
                     if let Some(k_pf) = k_prefix {
                         // Exclusive prefix (float2) length len+1
-                        let mut db_pfx: DeviceBuffer<[f32; 2]> =
-                            unsafe { DeviceBuffer::uninitialized(len + 1) }
-                                .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+                        let mut db_pfx: DeviceBuffer<[f32; 2]> = unsafe { DeviceBuffer::uninitialized(len + 1) }?;
                         let block_pf: BlockSize = (1, 1, 1).into();
                         let grid_pf: GridSize = (1, 1, 1).into();
                         unsafe {
@@ -350,9 +352,7 @@ impl CudaAtr {
                                 &mut len_i as *mut _ as *mut c_void,
                                 &mut prefix_ptr as *mut _ as *mut c_void,
                             ];
-                            self.stream
-                                .launch(&k_pf, grid_pf, block_pf, 0, args)
-                                .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+                            self.stream.launch(&k_pf, grid_pf, block_pf, 0, args)?;
                         }
                         // We can drop H/L/C now to free VRAM
                         self.synchronize()?;
@@ -401,8 +401,7 @@ impl CudaAtr {
         let block: BlockSize = (block_x, 1, 1).into();
 
         // Output buffer (n_combos x len)
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }
-            .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }?;
 
         let mut launched = 0usize;
         while launched < n_combos {
@@ -469,19 +468,13 @@ impl CudaAtr {
                     &mut cur_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&k_batch, grid, block, 0, args)
-                    .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+                self.stream.launch(&k_batch, grid, block, 0, args)?;
             }
 
             launched += cur;
         }
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: len,
-        })
+        Ok(DeviceArrayF32Atr { buf: d_out, rows: n_combos, cols: len, ctx: Arc::clone(&self._context), device_id: self.device_id })
     }
 
     // Legacy fallback if unified symbol missing; keep API stable
@@ -496,20 +489,17 @@ impl CudaAtr {
         d_high: &mut Option<DeviceBuffer<f32>>,
         d_low: &mut Option<DeviceBuffer<f32>>,
         d_close: &mut Option<DeviceBuffer<f32>>,
-        missing_err: cust::error::CudaError,
-    ) -> Result<DeviceArrayF32, CudaAtrError> {
+    ) -> Result<DeviceArrayF32Atr, CudaAtrError> {
         // Prefer old prefix kernel if available; else plain
         if let Ok(func) = self.module.get_function("atr_batch_from_tr_prefix_f32") {
             // Build TR+prefix on host would be required, but we avoid FP64: fall back to plain kernel
             // to keep code simple here when unified is missing.
             drop(func);
         }
-        let func = self.module.get_function("atr_batch_f32").map_err(|_| {
-            CudaAtrError::Cuda(format!(
-                "missing atr_batch_unified_f32 and legacy symbols: {}",
-                missing_err
-            ))
-        })?;
+        let func = self
+            .module
+            .get_function("atr_batch_f32")
+            .map_err(|_| CudaAtrError::MissingKernelSymbol { name: "atr_batch_f32" })?;
 
         let n_combos = n_combos;
         let chunk = Self::chunk_size_for_batch(n_combos, len);
@@ -518,8 +508,7 @@ impl CudaAtr {
             BatchKernelPolicy::Auto => 256,
         };
         let block: BlockSize = (block_x, 1, 1).into();
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }
-            .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * len) }?;
 
         let mut launched = 0usize;
         while launched < n_combos {
@@ -560,17 +549,11 @@ impl CudaAtr {
                     &mut cur_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
             launched += cur;
         }
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: len,
-        })
+        Ok(DeviceArrayF32Atr { buf: d_out, rows: n_combos, cols: len, ctx: Arc::clone(&self._context), device_id: self.device_id })
     }
 
     fn first_valids_time_major(
@@ -615,7 +598,7 @@ impl CudaAtr {
         cols: usize,
         rows: usize,
         period: usize,
-    ) -> Result<DeviceArrayF32, CudaAtrError> {
+    ) -> Result<DeviceArrayF32Atr, CudaAtrError> {
         if period == 0 {
             return Err(CudaAtrError::InvalidInput("period must be > 0".into()));
         }
@@ -634,35 +617,19 @@ impl CudaAtr {
             ));
         }
 
-        let mut d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let mut d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let mut d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let mut d_high =
-            DeviceBuffer::from_slice(high_tm).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let mut d_low =
-            DeviceBuffer::from_slice(low_tm).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let mut d_close =
-            DeviceBuffer::from_slice(close_tm).map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+        let mut d_high = DeviceBuffer::from_slice(high_tm)?;
+        let mut d_low = DeviceBuffer::from_slice(low_tm)?;
+        let mut d_close = DeviceBuffer::from_slice(close_tm)?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
 
         // Prefer coalesced time-major kernel name if present, else fallback to legacy symbol.
-        let func = match self
-            .module
-            .get_function("atr_many_series_one_param_f32_tm_coalesced")
-        {
+        let func = match self.module.get_function("atr_many_series_one_param_f32_tm_coalesced") {
             Ok(f) => f,
             Err(_) => self
                 .module
                 .get_function("atr_many_series_one_param_f32")
-                .map_err(|e| CudaAtrError::Cuda(e.to_string()))?,
+                .map_err(|_| CudaAtrError::MissingKernelSymbol { name: "atr_many_series_one_param_f32" })?,
         };
         // Launch config: warp tiles of 32 series; each warp walks time in lockstep.
         let mut block_x = match self.policy.many_series {
@@ -697,24 +664,14 @@ impl CudaAtr {
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaAtrError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32Atr { buf: d_out, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id })
     }
 
     #[inline]
-    pub fn synchronize(&self) -> Result<(), CudaAtrError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAtrError::Cuda(e.to_string()))
-    }
+    pub fn synchronize(&self) -> Result<(), CudaAtrError> { Ok(self.stream.synchronize()?) }
 
 // ---------------- Bench profiles ----------------
 // Exclude from test builds to avoid compiling heavy bench prep when running unit tests.

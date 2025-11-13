@@ -39,8 +39,6 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaAtr};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -184,14 +182,25 @@ impl AtrBuilder {
 
 #[derive(Debug, Error)]
 pub enum AtrError {
+    #[error("atr: Input data slice is empty.")]
+    EmptyInputData,
+    #[error("atr: All values are NaN.")]
+    AllValuesNaN,
+    #[error("atr: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("atr: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("atr: Output slice length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("atr: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("atr: Invalid kernel type for batch operation: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    // Back-compat variants used elsewhere in the repo
     #[error("Invalid length for ATR calculation (length={length}).")]
     InvalidLength { length: usize },
     #[error("Inconsistent slice lengths for ATR calculation: high={high_len}, low={low_len}, close={close_len}")]
-    InconsistentSliceLengths {
-        high_len: usize,
-        low_len: usize,
-        close_len: usize,
-    },
+    InconsistentSliceLengths { high_len: usize, low_len: usize, close_len: usize },
     #[error("No candles available for ATR calculation.")]
     NoCandlesAvailable,
     #[error("Not enough data to calculate ATR: length={length}, data length={data_len}")]
@@ -221,11 +230,12 @@ fn atr_prepare_full<'a>(
 ) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize), AtrError> {
     let (high, low, close, length) = atr_prepare(high, low, close, length)?;
     let first = first_valid_hlc(high, low, close);
-    if close.len().saturating_sub(first) < length {
-        return Err(AtrError::NotEnoughData {
-            length,
-            data_len: close.len(),
-        });
+    if first >= close.len() {
+        return Err(AtrError::AllValuesNaN);
+    }
+    let valid = close.len().saturating_sub(first);
+    if valid < length {
+        return Err(AtrError::NotEnoughValidData { needed: length, valid });
     }
     let warmup = first + length - 1;
     Ok((high, low, close, first, warmup))
@@ -264,16 +274,13 @@ pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, At
     let len = close.len();
     let length = input.get_length();
     if length == 0 {
-        return Err(AtrError::InvalidLength { length });
+        return Err(AtrError::InvalidPeriod { period: length, data_len: len });
     }
     if len == 0 {
-        return Err(AtrError::NoCandlesAvailable);
+        return Err(AtrError::EmptyInputData);
     }
     if length > len {
-        return Err(AtrError::NotEnoughData {
-            length,
-            data_len: len,
-        });
+        return Err(AtrError::InvalidPeriod { period: length, data_len: len });
     }
 
     let chosen = match kernel {
@@ -305,21 +312,15 @@ pub fn atr_into(input: &AtrInput, out: &mut [f64]) -> Result<(), AtrError> {
 
     // Compute first-valid and warmup exactly like atr_with_kernel
     let first = first_valid_hlc(high, low, close);
-    if close.len().saturating_sub(first) < length {
-        return Err(AtrError::NotEnoughData {
-            length,
-            data_len: close.len(),
-        });
+    let valid = close.len().saturating_sub(first);
+    if valid < length {
+        return Err(AtrError::NotEnoughValidData { needed: length, valid });
     }
     let warmup = first + length - 1;
 
     // Validate destination length matches input length; reuse existing error
     if out.len() != close.len() {
-        return Err(AtrError::InconsistentSliceLengths {
-            high_len: high.len(),
-            low_len: low.len(),
-            close_len: out.len(),
-        });
+        return Err(AtrError::OutputLengthMismatch { expected: close.len(), got: out.len() });
     }
 
     // Prefill NaN warmup with the same quiet-NaN pattern used elsewhere
@@ -978,14 +979,21 @@ impl AtrBatchOutput {
 fn expand_grid(r: &AtrBatchRange) -> Vec<AtrParams> {
     let (start, end, step) = r.length;
     if step == 0 || start == end {
-        return vec![AtrParams {
-            length: Some(start),
-        }];
+        return vec![AtrParams { length: Some(start) }];
     }
-    (start..=end)
-        .step_by(step)
-        .map(|l| AtrParams { length: Some(l) })
-        .collect()
+    if start < end {
+        (start..=end)
+            .step_by(step)
+            .map(|l| AtrParams { length: Some(l) })
+            .collect()
+    } else {
+        // reversed bounds support
+        let mut v: Vec<usize> = (end..=start).step_by(step).collect();
+        v.reverse();
+        v.into_iter()
+            .map(|l| AtrParams { length: Some(l) })
+            .collect()
+    }
 }
 
 pub fn atr_batch_with_kernel(
@@ -998,7 +1006,7 @@ pub fn atr_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(AtrError::InvalidLength { length: 0 }),
+        other => return Err(AtrError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1041,18 +1049,24 @@ fn atr_batch_inner_into(
 ) -> Result<Vec<AtrParams>, AtrError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(AtrError::InvalidLength { length: 0 });
+        let (s, e, st) = sweep.length;
+        return Err(AtrError::InvalidRange { start: s, end: e, step: st });
     }
     let rows = combos.len();
     let cols = high.len();
-    if out.len() != rows * cols {
-        return Err(AtrError::NotEnoughData {
-            length: rows * cols,
-            data_len: out.len(),
-        });
+    let expected = rows.checked_mul(cols).ok_or(AtrError::InvalidRange {
+        start: sweep.length.0,
+        end: sweep.length.1,
+        step: sweep.length.2,
+    })?;
+    if out.len() != expected {
+        return Err(AtrError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     let first = first_valid_hlc(high, low, close);
+    if first >= cols {
+        return Err(AtrError::AllValuesNaN);
+    }
 
     // Precompute TR series once and its prefix sums for fast per-row seeds
     let mut tr = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols);
@@ -2089,11 +2103,46 @@ create_exception!(atr, InconsistentSliceLengthsError, PyValueError);
 create_exception!(atr, NoCandlesAvailableError, PyValueError);
 #[cfg(feature = "python")]
 create_exception!(atr, NotEnoughDataError, PyValueError);
+#[cfg(feature = "python")]
+create_exception!(atr, EmptyInputDataError, PyValueError);
+#[cfg(feature = "python")]
+create_exception!(atr, AllValuesNaNError, PyValueError);
+#[cfg(feature = "python")]
+create_exception!(atr, InvalidPeriodError, PyValueError);
+#[cfg(feature = "python")]
+create_exception!(atr, NotEnoughValidDataError, PyValueError);
+#[cfg(feature = "python")]
+create_exception!(atr, OutputLengthMismatchError, PyValueError);
+#[cfg(feature = "python")]
+create_exception!(atr, InvalidRangeError, PyValueError);
+#[cfg(feature = "python")]
+create_exception!(atr, InvalidKernelForBatchError, PyValueError);
 
 #[cfg(feature = "python")]
 impl From<AtrError> for PyErr {
     fn from(err: AtrError) -> PyErr {
         match err {
+            AtrError::EmptyInputData => EmptyInputDataError::new_err("atr: Input data slice is empty."),
+            AtrError::AllValuesNaN => AllValuesNaNError::new_err("atr: All values are NaN."),
+            AtrError::InvalidPeriod { period, data_len } => InvalidPeriodError::new_err(format!(
+                "atr: Invalid period: period = {}, data length = {}",
+                period, data_len
+            )),
+            AtrError::NotEnoughValidData { needed, valid } => NotEnoughValidDataError::new_err(format!(
+                "atr: Not enough valid data: needed = {}, valid = {}",
+                needed, valid
+            )),
+            AtrError::OutputLengthMismatch { expected, got } => OutputLengthMismatchError::new_err(format!(
+                "atr: Output slice length mismatch: expected = {}, got = {}",
+                expected, got
+            )),
+            AtrError::InvalidRange { start, end, step } => InvalidRangeError::new_err(format!(
+                "atr: Invalid range: start = {}, end = {}, step = {}",
+                start, end, step
+            )),
+            AtrError::InvalidKernelForBatch(k) => {
+                InvalidKernelForBatchError::new_err(format!("atr: Invalid kernel type for batch operation: {:?}", k))
+            }
             AtrError::InvalidLength { length } => InvalidLengthError::new_err(format!(
                 "Invalid length for ATR calculation (length={}).",
                 length
@@ -2114,6 +2163,125 @@ impl From<AtrError> for PyErr {
                 length, data_len
             )),
         }
+    }
+}
+
+// Local CUDA device array Python wrapper with CAI v3 + DLPack
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::atr_wrapper::DeviceArrayF32Atr;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32Atr,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted; wrapper synchronizes before returning
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.inner.device_id as i32) }
+
+    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: std::sync::Arc<cust::context::Context>,
+        }
+
+        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let name = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter { del(ptr); }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
+        let strides = Box::new([self.inner.cols as i64, 1i64]);
+        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+
+        let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self.inner.ctx.clone() });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.inner.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: guard_ref._shape.as_ptr() as *mut i64,
+                strides: guard_ref._strides.as_ptr() as *mut i64,
+                byte_offset: 0,
+            },
+            manager_ctx: guard_ptr as *mut c_void,
+            deleter: Some(managed_deleter),
+        });
+        let mt_raw = Box::into_raw(mt);
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(mt_raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor))
+        };
+        if capsule.is_null() {
+            unsafe { managed_deleter(mt_raw); }
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
     }
 }
 
@@ -2152,20 +2320,17 @@ fn atr_prepare<'a>(
 
     // Check for empty data
     if close.is_empty() {
-        return Err(AtrError::NoCandlesAvailable);
+        return Err(AtrError::EmptyInputData);
     }
 
     // Check for zero length
     if length == 0 {
-        return Err(AtrError::InvalidLength { length });
+        return Err(AtrError::InvalidPeriod { period: length, data_len: close.len() });
     }
 
-    // Check if we have enough data
+    // Check if we have enough total data
     if length > close.len() {
-        return Err(AtrError::NotEnoughData {
-            length,
-            data_len: close.len(),
-        });
+        return Err(AtrError::InvalidPeriod { period: length, data_len: close.len() });
     }
 
     Ok((high, low, close, length))
@@ -2370,20 +2535,14 @@ pub fn atr_into_slice(dst: &mut [f64], input: &AtrInput, kern: Kernel) -> Result
     let length = input.params.length.unwrap_or(14);
     let (high, low, close, length) = atr_prepare(high, low, close, length)?;
     let first = first_valid_hlc(high, low, close);
-    if close.len().saturating_sub(first) < length {
-        return Err(AtrError::NotEnoughData {
-            length,
-            data_len: close.len(),
-        });
+    let valid = close.len().saturating_sub(first);
+    if valid < length {
+        return Err(AtrError::NotEnoughValidData { needed: length, valid });
     }
     let warm = first + length - 1;
 
     if dst.len() != close.len() {
-        return Err(AtrError::InconsistentSliceLengths {
-            high_len: high.len(),
-            low_len: low.len(),
-            close_len: dst.len(),
-        });
+        return Err(AtrError::OutputLengthMismatch { expected: close.len(), got: dst.len() });
     }
 
     // only once: set prefix NaNs

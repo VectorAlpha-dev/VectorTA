@@ -13,8 +13,8 @@
 
 #![cfg(feature = "cuda")]
 
-use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::volatility_adjusted_ma::{VamaBatchRange, VamaParams};
+use std::sync::Arc;
 use cust::context::Context;
 use cust::context::SharedMemoryConfig;
 use cust::device::Device;
@@ -26,6 +26,7 @@ use cust::stream::{Stream, StreamFlags};
 use cust::sys as cuda_sys;
 use std::ffi::c_void;
 use std::fmt;
+use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // -------- Kernel selection policy (kept simple; no tiled variants for VAMA) --------
@@ -74,33 +75,51 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaVamaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("Missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device mismatch: buffer device {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("Not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaVamaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaVamaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaVamaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for CudaVamaError {}
 
 pub struct CudaVama {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaVamaPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+}
+
+/// VRAM-backed array handle for VAMA with context guard
+pub struct DeviceArrayF32Vama {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+impl DeviceArrayF32Vama {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
 }
 
 struct PreparedVamaBatch {
@@ -124,18 +143,19 @@ struct PreparedVamaManySeries {
 impl CudaVama {
     /// Create a new `CudaVama` on `device_id` and load the PTX module with ALMA-style JIT options.
     pub fn new(device_id: usize) -> Result<Self, CudaVamaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/vama_kernel.ptx"));
-        // Keep conservative default JIT options; ALMA-style O2 is available but disabled here
-        // to ensure bitwise-stable behavior across drivers for this numerically sensitive path.
-        // If desired, we can revisit enabling O2 with driver guards.
-        let module = Module::from_ptx(ptx, &[]).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -243,7 +263,7 @@ impl CudaVama {
             let mut cu_dev: cuda_sys::CUdevice = 0;
             let res = cuda_sys::cuDeviceGet(&mut cu_dev as *mut _, self.device_id as i32);
             if res != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(CudaVamaError::Cuda(format!("cuDeviceGet failed: {res:?}")));
+                return Err(CudaVamaError::InvalidInput(format!("cuDeviceGet failed: {res:?}")));
             }
             let mut bytes: std::os::raw::c_int = 0;
             let res = cuda_sys::cuDeviceGetAttribute(
@@ -252,9 +272,9 @@ impl CudaVama {
                 cu_dev,
             );
             if res != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(CudaVamaError::Cuda(format!(
-                    "cuDeviceGetAttribute(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN) failed: {res:?}"
-                )));
+                return Err(CudaVamaError::InvalidInput(
+                    format!("cuDeviceGetAttribute(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN) failed: {res:?}")
+                ));
             }
             Ok(bytes)
         }
@@ -270,7 +290,7 @@ impl CudaVama {
         let bytes = requested.min(limit);
 
         func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+            .map_err(CudaVamaError::Cuda)?;
 
         unsafe {
             let res = cuda_sys::cuFuncSetAttribute(
@@ -279,9 +299,9 @@ impl CudaVama {
                 bytes as i32,
             );
             if res != cuda_sys::CUresult::CUDA_SUCCESS {
-                return Err(CudaVamaError::Cuda(format!(
-                    "cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES={bytes}) failed: {res:?}"
-                )));
+                return Err(CudaVamaError::InvalidInput(
+                    format!("cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES={bytes}) failed: {res:?}")
+                ));
             }
             let _ = cuda_sys::cuFuncSetAttribute(
                 func.to_raw(),
@@ -297,7 +317,7 @@ impl CudaVama {
         &self,
         data_f32: &[f32],
         sweep: &VamaBatchRange,
-    ) -> Result<DeviceArrayF32, CudaVamaError> {
+    ) -> Result<DeviceArrayF32Vama, CudaVamaError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
@@ -309,30 +329,24 @@ impl CudaVama {
         let work_bytes = n_combos * prepared.series_len * std::mem::size_of::<f32>() * 2; // ema + out
         let total_est = price_bytes + params_bytes + work_bytes;
         if !Self::will_fit(total_est, headroom) {
-            return Err(CudaVamaError::Cuda(format!(
-                "insufficient VRAM for VAMA batch: need ~{} MB",
-                (total_est as f64 / (1024.0 * 1024.0)).ceil() as u64
-            )));
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaVamaError::OutOfMemory { required: total_est, free, headroom });
+            } else {
+                return Err(CudaVamaError::OutOfMemory { required: total_est, free: 0, headroom });
+            }
         }
 
-        let d_prices =
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let d_base = DeviceBuffer::from_slice(&prepared.base_periods)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let d_vol = DeviceBuffer::from_slice(&prepared.vol_periods)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let d_alphas = DeviceBuffer::from_slice(&prepared.alphas)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let d_betas = DeviceBuffer::from_slice(&prepared.betas)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let mut d_ema: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(prepared.series_len * n_combos)
-                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(prepared.series_len * n_combos)
-                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
-        };
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let d_base = DeviceBuffer::from_slice(&prepared.base_periods)?;
+        let d_vol = DeviceBuffer::from_slice(&prepared.vol_periods)?;
+        let d_alphas = DeviceBuffer::from_slice(&prepared.alphas)?;
+        let d_betas = DeviceBuffer::from_slice(&prepared.betas)?;
+        let total = prepared
+            .series_len
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaVamaError::InvalidInput("size overflow".into()))?;
+        let mut d_ema: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total)? };
 
         self.launch_batch_kernel(
             &d_prices,
@@ -349,14 +363,14 @@ impl CudaVama {
         )?;
 
         // Ensure completion before returning VRAM handle for consistency
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
+        Ok(DeviceArrayF32Vama {
             buf: d_out,
             rows: n_combos,
             cols: prepared.series_len,
+            ctx: Arc::clone(&self._context),
+            device_id: self.device_id,
         })
     }
 
@@ -408,9 +422,7 @@ impl CudaVama {
 
         // Fetch vol periods to host to size dynamic shared memory per chunk
         let mut host_vols = vec![0i32; n_combos];
-        d_vol_periods
-            .copy_to(&mut host_vols)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        d_vol_periods.copy_to(&mut host_vols).map_err(CudaVamaError::Cuda)?;
 
         self.launch_batch_kernel(
             d_prices,
@@ -433,22 +445,14 @@ impl CudaVama {
         num_series: usize,
         series_len: usize,
         params: &VamaParams,
-    ) -> Result<DeviceArrayF32, CudaVamaError> {
+    ) -> Result<DeviceArrayF32Vama, CudaVamaError> {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let mut d_ema: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(num_series * series_len)
-                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(num_series * series_len)
-                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
-        };
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)?;
+        let mut d_ema: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
 
         // Shared memory for many-series kernel: 2 deques × (float+int) × vol_period
         let shmem_bytes = (24 * prepared.vol_period + 16) as u32;
@@ -467,10 +471,15 @@ impl CudaVama {
             shmem_bytes,
         )?;
 
-        Ok(DeviceArrayF32 {
+        // Synchronize producing stream so __cuda_array_interface__ can omit 'stream'.
+        self.stream.synchronize()?;
+
+        Ok(DeviceArrayF32Vama {
             buf: d_out,
             rows: series_len,
             cols: num_series,
+            ctx: Arc::clone(&self._context),
+            device_id: self.device_id,
         })
     }
 
@@ -493,18 +502,10 @@ impl CudaVama {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        let mut d_ema: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(num_series * series_len)
-                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(num_series * series_len)
-                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
-        };
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)?;
+        let mut d_ema: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
 
         // Shared memory requirement for many-series kernel
         let shmem_bytes = (24 * prepared.vol_period + 16) as u32;
@@ -523,13 +524,9 @@ impl CudaVama {
             shmem_bytes,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        d_out
-            .copy_to(out_tm)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))
+        d_out.copy_to(out_tm).map_err(CudaVamaError::Cuda)
     }
 
     pub fn vama_many_series_one_param_device(
@@ -666,30 +663,18 @@ impl CudaVama {
         }
         // Fallback: for exact parity, reuse the many-series kernel per-combo (time-major with 1 series).
         // This avoids minor differences between batch kernel and CPU reference.
-        let mut d_first_valids = DeviceBuffer::from_slice(&[first_valid as i32])
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        let mut d_first_valids = DeviceBuffer::from_slice(&[first_valid as i32])?;
         // Temporary EMA/output buffers per call
-        let mut d_ema_tmp: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(series_len)
-                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?
-        };
+        let mut d_ema_tmp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len)? };
         // Host copies of per-combo params
         let mut host_base = vec![0i32; n_combos];
         let mut host_vols = vec![0i32; n_combos];
         let mut host_alphas = vec![0f32; n_combos];
         let mut host_betas = vec![0f32; n_combos];
-        d_base
-            .copy_to(&mut host_base)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        d_vol
-            .copy_to(&mut host_vols)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        d_alphas
-            .copy_to(&mut host_alphas)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
-        d_betas
-            .copy_to(&mut host_betas)
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+        d_base.copy_to(&mut host_base).map_err(CudaVamaError::Cuda)?;
+        d_vol.copy_to(&mut host_vols).map_err(CudaVamaError::Cuda)?;
+        d_alphas.copy_to(&mut host_alphas).map_err(CudaVamaError::Cuda)?;
+        d_betas.copy_to(&mut host_betas).map_err(CudaVamaError::Cuda)?;
         for c in 0..n_combos {
             let base_p = host_base[c] as usize;
             let vol_p = host_vols[c] as usize;
@@ -700,7 +685,7 @@ impl CudaVama {
             let mut func = self
                 .module
                 .get_function("vama_many_series_one_param_f32")
-                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaVamaError::MissingKernelSymbol { name: "vama_many_series_one_param_f32" })?;
             let grid: GridSize = (1u32, 1u32, 1u32).into();
             let block: BlockSize = (128u32, 1u32, 1u32).into();
             let requested_smem = 16usize * vol_p;
@@ -733,9 +718,7 @@ impl CudaVama {
                     &mut ema_ptr as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, smem_bytes, args)
-                    .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, smem_bytes, args)?;
             }
         }
         Ok(())
@@ -834,7 +817,7 @@ impl CudaVama {
         let mut func = self
             .module
             .get_function("vama_many_series_one_param_f32")
-            .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVamaError::MissingKernelSymbol { name: "vama_many_series_one_param_f32" })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => std::env::var("VAMA_MANY_BLOCK_X")
@@ -928,7 +911,19 @@ fn expand_vama_grid(range: &VamaBatchRange) -> Vec<VamaParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        if start <= end {
+            return (start..=end).step_by(step).collect();
+        }
+        // reversed
+        let mut v = Vec::new();
+        let mut x = start;
+        while x >= end {
+            v.push(x);
+            let nx = x.saturating_sub(step);
+            if nx == x { break; }
+            x = nx;
+        }
+        v
     }
 
     let base = axis(range.base_period);

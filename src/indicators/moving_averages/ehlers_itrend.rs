@@ -51,7 +51,9 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaEhlersITrend;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -141,6 +143,9 @@ pub enum EhlersITrendError {
     AllValuesNaN,
     #[error("ehlers_itrend: Not enough data for warmup. warmup_bars={warmup_bars} but data length={length}")]
     NotEnoughDataForWarmup { warmup_bars: usize, length: usize },
+    // Included for parity with error coverage across indicators
+    #[error("ehlers_itrend: Not enough valid data: needed={needed}, valid={valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
     #[error("ehlers_itrend: Invalid warmup_bars: {warmup_bars}")]
     InvalidWarmupBars { warmup_bars: usize },
     #[error("ehlers_itrend: Invalid max_dc_period: {max_dc}")]
@@ -1084,7 +1089,7 @@ pub fn ehlers_itrend_batch_with_kernel(
     let kernel = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(EhlersITrendError::InvalidBatchKernel),
+        other => return Err(EhlersITrendError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -1279,9 +1284,10 @@ impl EhlersITrendBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &EhlersITrendBatchRange) -> Result<Vec<EhlersITrendParams>, EhlersITrendError> {
-    // Keep external behavior stable for tests:
-    // - step == 0 → singleton only if start == end; otherwise error maps to InvalidBatchRange
-    // - reversed bounds (start > end) → error maps to InvalidBatchRange
+    // Robust expansion rules:
+    // - step == 0 → static singleton if start==end; otherwise InvalidRange
+    // - reversed bounds supported (monotonic decreasing sequence)
+    // - error on empty expansion → InvalidRange
     fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, EhlersITrendError> {
         if step == 0 {
             return if start == end {
@@ -1290,13 +1296,33 @@ fn expand_grid(r: &EhlersITrendBatchRange) -> Result<Vec<EhlersITrendParams>, Eh
                 Err(EhlersITrendError::InvalidRange { start, end, step })
             };
         }
-        if start > end {
-            return Err(EhlersITrendError::InvalidBatchRange);
+        let mut out = Vec::new();
+        if start <= end {
+            let mut x = start;
+            loop {
+                out.push(x);
+                match x.checked_add(step) {
+                    Some(n) if n > x && n <= end => x = n,
+                    _ => break,
+                }
+            }
+        } else {
+            let mut x = start;
+            loop {
+                out.push(x);
+                match x.checked_sub(step) {
+                    Some(n) if n < x && n >= end => x = n,
+                    _ => break,
+                }
+            }
         }
-        Ok((start..=end).step_by(step).collect())
+        if out.is_empty() {
+            return Err(EhlersITrendError::InvalidRange { start, end, step });
+        }
+        Ok(out)
     }
-    let warmups = axis(r.warmup_bars).map_err(|_| EhlersITrendError::InvalidBatchRange)?;
-    let max_dcs = axis(r.max_dc_period).map_err(|_| EhlersITrendError::InvalidBatchRange)?;
+    let warmups = axis(r.warmup_bars)?;
+    let max_dcs = axis(r.max_dc_period)?;
     let mut out = Vec::with_capacity(warmups.len() * max_dcs.len());
     for &w in &warmups {
         for &m in &max_dcs {
@@ -1595,7 +1621,7 @@ pub fn ehlers_itrend_cuda_batch_dev_py(
     warmup_range: (usize, usize, usize),
     max_dc_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32ITrendPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1606,16 +1632,15 @@ pub fn ehlers_itrend_cuda_batch_dev_py(
         max_dc_period: max_dc_range,
     };
 
+    let cuda = Arc::new(
+        CudaEhlersITrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?,
+    );
     let inner = py.allow_threads(|| -> PyResult<_> {
-        let cuda =
-            CudaEhlersITrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.ehlers_itrend_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    // CAI v3 note: The CUDA wrapper synchronizes its stream before returning the device
-    // buffer, so __cuda_array_interface__ on the returned Python class omits the
-    // "stream" key (data is ready). Strides and version=3 are provided by DeviceArrayF32Py.
-    Ok(DeviceArrayF32Py { inner })
+    // Producing stream is synchronized inside the wrapper; omit `stream` in CAI v3.
+    Ok(DeviceArrayF32ITrendPy { inner, guard: cuda })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1627,7 +1652,7 @@ pub fn ehlers_itrend_cuda_many_series_one_param_dev_py(
     warmup_bars: usize,
     max_dc_period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32ITrendPy> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1650,16 +1675,171 @@ pub fn ehlers_itrend_cuda_many_series_one_param_dev_py(
         max_dc_period: Some(max_dc_period),
     };
 
+    let cuda = Arc::new(
+        CudaEhlersITrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?,
+    );
     let inner = py.allow_threads(|| -> PyResult<_> {
-        let cuda =
-            CudaEhlersITrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.ehlers_itrend_many_series_one_param_time_major_dev(
             flat, num_series, series_len, &params,
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    // CAI v3 note: producing stream is synchronized in the wrapper; "stream" key omitted.
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32ITrendPy { inner, guard: cuda })
+}
+
+// ---- CUDA Python bindings (DeviceArrayF32ITrendPy handle) ----
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32ITrendPy {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) guard: Arc<CudaEhlersITrend>,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32ITrendPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        // shape: (rows, cols)
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        // typestr for little-endian float32
+        d.set_item("typestr", "<f4")?;
+        // explicit contiguous row-major strides in bytes
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        // data=(ptr, read_only=False)
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // producing stream is synchronized in the wrapper; omit `stream` per CAI v3
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA per DLPack spec
+        (2, self.guard.device_id() as i32)
+    }
+
+    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _cuda: Arc<CudaEhlersITrend>,
+        }
+
+        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() {
+                    return;
+                }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let name = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(
+                    capsule,
+                    name.as_ptr() as *const _,
+                ) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter {
+                        del(ptr);
+                    }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
+        let strides = Box::new([self.inner.cols as i64, 1i64]);
+        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+
+        let guard = Box::new(DlpGuard {
+            _shape: shape,
+            _strides: strides,
+            _cuda: self.guard.clone(),
+        });
+        let guard_ptr = Box::into_raw(guard);
+        let guard_ref = unsafe { &*guard_ptr };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice {
+                    device_type: 2,
+                    device_id: self.guard.device_id() as i32,
+                },
+                ndim: 2,
+                dtype: DLDataType {
+                    code: 2, // kDLFloat
+                    bits: 32,
+                    lanes: 1,
+                },
+                shape: guard_ref._shape.as_ptr() as *mut i64,
+                strides: guard_ref._strides.as_ptr() as *mut i64,
+                byte_offset: 0,
+            },
+            manager_ctx: guard_ptr as *mut c_void,
+            deleter: Some(managed_deleter),
+        });
+        let mt_raw = Box::into_raw(mt);
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_raw as *mut c_void,
+                name.as_ptr() as *const _,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe { managed_deleter(mt_raw) };
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "failed to create DLPack capsule",
+            ));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -2428,19 +2608,17 @@ mod tests {
         let data = [1.0, 2.0, 3.0];
         let sweep = EhlersITrendBatchRange::default();
         let res = ehlers_itrend_batch_with_kernel(&data, &sweep, Kernel::Scalar);
-        assert!(matches!(res, Err(EhlersITrendError::InvalidBatchKernel)));
+        assert!(matches!(res, Err(EhlersITrendError::InvalidKernelForBatch(_))));
         Ok(())
     }
 
     fn check_batch_invalid_range(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
         let data = [1.0, 2.0, 3.0, 4.0];
-        let sweep = EhlersITrendBatchRange {
-            warmup_bars: (5, 1, 1),
-            max_dc_period: (10, 10, 0),
-        };
+        // Invalid due to zero step with unequal bounds → InvalidRange
+        let sweep = EhlersITrendBatchRange { warmup_bars: (5, 1, 0), max_dc_period: (10, 10, 0) };
         let res = ehlers_itrend_batch_with_kernel(&data, &sweep, kernel);
-        assert!(matches!(res, Err(EhlersITrendError::InvalidBatchRange)));
+        assert!(matches!(res, Err(EhlersITrendError::InvalidRange { .. })));
         Ok(())
     }
 

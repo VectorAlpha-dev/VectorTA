@@ -29,6 +29,7 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use thiserror::Error;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Keep TILE in sync with kTile() in the CUDA kernels.
@@ -89,6 +90,10 @@ pub enum CudaEpmaError {
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
     #[error("arithmetic overflow in size computation: {context}")]
     SizeOverflow { context: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("device mismatch: buffer device {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
@@ -96,7 +101,7 @@ pub enum CudaEpmaError {
 pub struct CudaEpma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaEpmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -109,7 +114,7 @@ impl CudaEpma {
     pub fn new(device_id: usize) -> Result<Self, CudaEpmaError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/epma_kernel.ptx"));
         // Prefer context-derived target and most optimized JIT level.
@@ -141,6 +146,10 @@ impl CudaEpma {
             debug_many_logged: false,
         })
     }
+
+    /// Clone a guard to the underlying CUDA context so returned VRAM handles
+    /// can outlive this wrapper safely (Python interop, DLPack, etc.).
+    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
 
     /// Create using an explicit policy.
     pub fn new_with_policy(

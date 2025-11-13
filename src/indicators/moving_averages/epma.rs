@@ -15,8 +15,8 @@
 //! - **InvalidPeriod**: epma: `period` < 2 or `period` > data length
 //! - **InvalidOffset**: epma: `offset` ≥ `period`
 //! - **NotEnoughValidData**: epma: `period` + `offset` + 1 > valid data length
-//! - **InvalidOutputLen**: epma: Output buffer length doesn't match input data length
-//! - **InvalidKernel**: epma: Non-batch kernel provided to batch operation
+//! - **OutputLengthMismatch**: epma: Output buffer length doesn't match input data length
+//! - **InvalidKernelForBatch**: epma: Non-batch kernel provided to batch operation
 //!
 //! ## Returns
 //! - **Ok(EpmaOutput)** with a Vec<f64> of the same length as input
@@ -37,7 +37,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaEpma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -51,6 +51,10 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
 
 // Decision: Streaming uses O(1) updates maintaining S and R with Kahan compensation; matches batch outputs.
 impl<'a> AsRef<[f64]> for EpmaInput<'a> {
@@ -147,11 +151,11 @@ pub enum EpmaError {
     #[error("epma: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 
-    #[error("epma: Invalid output length: expected = {expected}, actual = {actual}")]
-    InvalidOutputLen { expected: usize, actual: usize },
+    #[error("epma: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
 
-    #[error("epma: Invalid kernel for batch operation: expected batch kernel, got {kernel:?}")]
-    InvalidKernel { kernel: Kernel },
+    #[error("epma: Invalid kernel for batch operation: got {0:?}")]
+    InvalidKernelForBatch(Kernel),
 
     // Additional non-breaking coverage for batch/range and sizing guards
     #[error("epma: invalid range: start={start}, end={end}, step={step}")]
@@ -339,17 +343,14 @@ pub fn epma_with_kernel(input: &EpmaInput, kernel: Kernel) -> Result<EpmaOutput,
 /// - Preserves NaN warmup semantics by pre-filling the warmup prefix with the
 ///   module's quiet-NaN pattern (same as `alloc_with_nan_prefix`).
 /// - The `out` slice length must equal the input length; otherwise returns
-///   `EpmaError::InvalidOutputLen`.
+///   `EpmaError::OutputLengthMismatch`.
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn epma_into(input: &EpmaInput, out: &mut [f64]) -> Result<(), EpmaError> {
     let (data, period, offset, first, warmup, chosen) = epma_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(EpmaError::InvalidOutputLen {
-            expected: data.len(),
-            actual: out.len(),
-        });
+        return Err(EpmaError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
     // Prefill warmup with the same quiet-NaN pattern used elsewhere.
@@ -371,10 +372,7 @@ pub fn epma_into_slice(dst: &mut [f64], input: &EpmaInput, kern: Kernel) -> Resu
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(EpmaError::InvalidOutputLen {
-            expected: data.len(),
-            actual: dst.len(),
-        });
+        return Err(EpmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
     // Compute EPMA values directly into dst
@@ -975,7 +973,7 @@ pub fn epma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        other => return Err(EpmaError::InvalidKernel { kernel: other }),
+        other => return Err(EpmaError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1076,10 +1074,8 @@ fn epma_batch_inner_into_uninit(
     }
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EpmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        // Defensive: axis_usize should prevent empty expansions, but keep a typed error.
+        return Err(EpmaError::InvalidRange { start: 0, end: 0, step: 0 });
     }
     for c in &combos {
         let p = c.period.unwrap();
@@ -2224,11 +2220,11 @@ mod tests {
 
         // Verify we get the correct error variant
         match result {
-            Err(EpmaError::InvalidOutputLen { expected, actual }) => {
+            Err(EpmaError::OutputLengthMismatch { expected, got }) => {
                 assert_eq!(expected, 5);
-                assert_eq!(actual, 3);
+                assert_eq!(got, 3);
             }
-            _ => panic!("Expected InvalidOutputLen error"),
+            _ => panic!("Expected OutputLengthMismatch error"),
         }
     }
 
@@ -2246,10 +2242,10 @@ mod tests {
 
         // Verify we get the correct error variant
         match result {
-            Err(EpmaError::InvalidKernel { kernel }) => {
-                assert_eq!(kernel, Kernel::Scalar);
+            Err(EpmaError::InvalidKernelForBatch(k)) => {
+                assert_eq!(k, Kernel::Scalar);
             }
-            _ => panic!("Expected InvalidKernel error"),
+            _ => panic!("Expected InvalidKernelForBatch error"),
         }
     }
 }
@@ -2368,7 +2364,7 @@ pub fn epma_cuda_batch_dev_py(
     period_range: (usize, usize, usize),
     offset_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<EpmaDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2379,13 +2375,16 @@ pub fn epma_cuda_batch_dev_py(
     };
     let slice_in = data_f32.as_slice()?;
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_guard, dev_id) = py.allow_threads(|| {
         let cuda = CudaEpma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.epma_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let arr = cuda
+            .epma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(EpmaDeviceArrayF32Py { inner, _ctx_guard: ctx_guard, device_id: dev_id as u32 })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2397,7 +2396,7 @@ pub fn epma_cuda_many_series_one_param_dev_py(
     period: usize,
     offset: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<EpmaDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2411,13 +2410,136 @@ pub fn epma_cuda_many_series_one_param_dev_py(
         offset: Some(offset),
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_guard, dev_id) = py.allow_threads(|| {
         let cuda = CudaEpma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.epma_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let arr = cuda
+            .epma_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(EpmaDeviceArrayF32Py { inner, _ctx_guard: ctx_guard, device_id: dev_id as u32 })
+}
+
+// EPMA-specific CUDA Array Interface v3 + DLPack handle with context guard
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct EpmaDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx_guard: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl EpmaDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        // 2D row-major FP32: (rows, cols)
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producing stream is synchronized before returning; omit 'stream' per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA
+        (2, self.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(&self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::ffi::c_void;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        struct DlpGuard {
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _ctx: Arc<Context>,
+        }
+
+        extern "C" fn managed_deleter(p: *mut DLManagedTensor) {
+            unsafe {
+                if p.is_null() { return; }
+                let guard_ptr = (*p).manager_ctx as *mut DlpGuard;
+                if !guard_ptr.is_null() {
+                    drop(Box::from_raw(guard_ptr));
+                }
+                drop(Box::from_raw(p));
+            }
+        }
+
+        extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            unsafe {
+                let name = b"dltensor\0";
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _) as *mut DLManagedTensor;
+                if !ptr.is_null() {
+                    if let Some(del) = (*ptr).deleter { del(ptr); }
+                    let used = b"used_dltensor\0";
+                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                }
+            }
+        }
+
+        let shape = Box::new([self.inner.rows as i64, self.inner.cols as i64]);
+        let strides = Box::new([self.inner.cols as i64, 1i64]);
+        let data_ptr = self.inner.device_ptr() as usize as *mut c_void;
+
+        let guard = Box::new(DlpGuard { _shape: shape, _strides: strides, _ctx: self._ctx_guard.clone() });
+        let guard_ref = &*guard;
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: guard_ref._shape.as_ptr() as *mut i64,
+                strides: guard_ref._strides.as_ptr() as *mut i64,
+                byte_offset: 0,
+            },
+            manager_ctx: Box::into_raw(guard) as *mut c_void,
+            deleter: Some(managed_deleter),
+        });
+        let mt_raw = Box::into_raw(mt);
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(mt_raw as *mut c_void, name.as_ptr() as *const _, Some(capsule_destructor))
+        };
+        if capsule.is_null() {
+            unsafe { managed_deleter(mt_raw); }
+            return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 #[cfg(feature = "python")]

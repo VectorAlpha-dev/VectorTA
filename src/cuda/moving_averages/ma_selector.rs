@@ -533,7 +533,9 @@ impl CudaMaSelector {
                 };
                 let cuda = CudaKama::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.kama_batch_dev(ensure_prices!(), &sweep)
+                cuda
+                    .kama_batch_dev(ensure_prices!(), &sweep)
+                    .map(|h| super::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
             }
             "sama" => {
