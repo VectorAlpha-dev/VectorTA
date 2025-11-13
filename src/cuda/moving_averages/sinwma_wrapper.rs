@@ -29,26 +29,33 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
 // raw driver symbol to opt-in >48KB dynamic shared memory per block
 use cust::sys::{cuFuncSetAttribute, CUfunction_attribute_enum as CUfuncAttr};
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaSinwmaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory on device: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid kernel policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buffer on {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
 
-impl fmt::Display for CudaSinwmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaSinwmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaSinwmaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaSinwmaError {}
+// Note: We keep returning DeviceArrayF32 for API parity with other wrappers.
 
 // Kernel policy (mirrors ALMA/CWMA). We only implement 1D-plain variants,
 // but expose the enums for parity and future growth.
@@ -104,7 +111,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaSinwma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaSinwmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -115,10 +122,9 @@ pub struct CudaSinwma {
 
 impl CudaSinwma {
     pub fn new(device_id: usize) -> Result<Self, CudaSinwmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sinwma_kernel.ptx"));
         let jit_opts = &[
@@ -128,16 +134,14 @@ impl CudaSinwma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -173,9 +177,20 @@ impl CudaSinwma {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaSinwmaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
+    }
+
+    #[cfg(all(feature = "python", feature = "cuda"))]
+    pub fn py_wrap_device_array(
+        &self,
+        inner: DeviceArrayF32,
+    ) -> crate::cuda::moving_averages::gaussian_wrapper::DeviceArrayF32Py {
+        crate::cuda::moving_averages::gaussian_wrapper::DeviceArrayF32Py::new_from_rust(
+            inner,
+            0usize,
+            Arc::clone(&self._context),
+            self.device_id,
+        )
     }
 
     #[inline]
@@ -225,32 +240,69 @@ impl CudaSinwma {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
 
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
+    fn ensure_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaSinwmaError> {
+        if !Self::mem_check_enabled() { return Ok(()); }
         if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaSinwmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes });
+            }
         }
+        Ok(())
     }
 
-    fn expand_periods(range: &SinWmaBatchRange) -> Vec<SinWmaParams> {
+    fn validate_launch_dims(&self, grid: (u32,u32,u32), block: (u32,u32,u32)) -> Result<(), CudaSinwmaError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock).unwrap_or(1024) as u32;
+        if block.0.saturating_mul(block.1).saturating_mul(block.2) > max_threads {
+            return Err(CudaSinwmaError::LaunchConfigTooLarge{ gx: grid.0, gy: grid.1, gz: grid.2, bx: block.0, by: block.1, bz: block.2 });
+        }
+        let gx_max = dev.get_attribute(DeviceAttribute::MaxGridDimX).unwrap_or(2_147_483_647) as u32;
+        let gy_max = dev.get_attribute(DeviceAttribute::MaxGridDimY).unwrap_or(65_535) as u32;
+        let gz_max = dev.get_attribute(DeviceAttribute::MaxGridDimZ).unwrap_or(65_535) as u32;
+        if grid.0 > gx_max || grid.1 > gy_max || grid.2 > gz_max {
+            return Err(CudaSinwmaError::LaunchConfigTooLarge{ gx: grid.0, gy: grid.1, gz: grid.2, bx: block.0, by: block.1, bz: block.2 });
+        }
+        Ok(())
+    }
+
+    fn expand_periods(range: &SinWmaBatchRange) -> Result<Vec<SinWmaParams>, CudaSinwmaError> {
         let (start, end, step) = range.period;
-        let periods = if step == 0 || start == end {
+        let periods: Vec<usize> = if step == 0 || start == end {
             vec![start]
+        } else if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step).collect();
+            if v.is_empty() {
+                return Err(CudaSinwmaError::InvalidInput(format!(
+                    "invalid range: start={} end={} step={}",
+                    start, end, step
+                )));
+            }
+            v
         } else {
-            (start..=end).step_by(step).collect::<Vec<_>>()
+            // reversed bounds supported
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                if cur == end { break; }
+                let next = cur.saturating_sub(step);
+                if next == cur { break; }
+                cur = next;
+            }
+            if v.is_empty() {
+                return Err(CudaSinwmaError::InvalidInput(format!(
+                    "invalid range: start={} end={} step={}",
+                    start, end, step
+                )));
+            }
+            v
         };
-        periods
+        Ok(periods
             .into_iter()
             .map(|p| SinWmaParams { period: Some(p) })
-            .collect()
+            .collect())
     }
 
     fn prepare_batch_inputs(
@@ -265,7 +317,7 @@ impl CudaSinwma {
             .position(|x| !x.is_nan())
             .ok_or_else(|| CudaSinwmaError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = Self::expand_periods(sweep);
+        let combos = Self::expand_periods(sweep)?;
         if combos.is_empty() {
             return Err(CudaSinwmaError::InvalidInput(
                 "no parameter combinations".into(),
@@ -328,8 +380,7 @@ impl CudaSinwma {
         }
 
         // Guard by device thread-per-block limit
-        let device =
-            Device::get_device(self.device_id).map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+        let device = Device::get_device(self.device_id).map_err(|e| CudaSinwmaError::Cuda(e))?;
         let max_threads = device
             .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
             .unwrap_or(1024) as u32;
@@ -381,10 +432,8 @@ impl CudaSinwma {
         dynamic_smem: usize,
     ) -> Result<(), CudaSinwmaError> {
         // Prefer shared carve-out and 4-byte bank size for f32 traffic
-        func.set_cache_config(CacheConfig::PreferShared)
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
-        func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+        func.set_cache_config(CacheConfig::PreferShared)?;
+        func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)?;
 
         // Opt-in to >48KB if requested; non-fatal on failure
         unsafe {
@@ -427,7 +476,7 @@ impl CudaSinwma {
         let mut func = self
             .module
             .get_function("sinwma_batch_f32")
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaSinwmaError::MissingKernelSymbol { name: "sinwma_batch_f32" })?;
 
         // Auto-choose a block size that fits dynamic shared memory for worst-case period
         let prefer = match self.policy.batch {
@@ -456,9 +505,9 @@ impl CudaSinwma {
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
                 let grid_chunk: GridSize = (grid_x, len as u32, 1).into();
+                self.validate_launch_dims((grid_x, len as u32, 1), (block_x, 1, 1))?;
                 self.stream
-                    .launch(&func, grid_chunk, block, shared_bytes as u32, args)
-                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                    .launch(&func, grid_chunk, block, shared_bytes as u32, args)?;
             }
         }
         unsafe {
@@ -478,56 +527,54 @@ impl CudaSinwma {
         max_period: usize,
     ) -> Result<DeviceArrayF32, CudaSinwmaError> {
         let n_combos = combos.len();
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + out_bytes;
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaSinwmaError::InvalidInput("matrix size overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(periods_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // 64MB safety margin
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaSinwmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::ensure_fit(required, headroom)?;
 
         let use_pinned = std::env::var("CUDA_PINNED").ok().as_deref() == Some("1");
 
         let d_prices: DeviceBuffer<f32> = if use_pinned {
-            let h_prices = LockedBuffer::from_slice(data_f32)
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+            let h_prices = LockedBuffer::from_slice(data_f32)?;
             unsafe {
-                let mut d = DeviceBuffer::uninitialized_async(series_len, &self.stream)
-                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
-                d.async_copy_from(h_prices.as_slice(), &self.stream)
-                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                let mut d = DeviceBuffer::uninitialized_async(series_len, &self.stream)?;
+                d.async_copy_from(h_prices.as_slice(), &self.stream)?;
                 d
             }
         } else {
-            DeviceBuffer::from_slice(data_f32).map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(data_f32)?
         };
 
         let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
         let d_periods: DeviceBuffer<i32> = if use_pinned {
-            let h_periods = LockedBuffer::from_slice(&periods_i32)
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+            let h_periods = LockedBuffer::from_slice(&periods_i32)?;
             unsafe {
-                let mut d = DeviceBuffer::uninitialized_async(n_combos, &self.stream)
-                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
-                d.async_copy_from(h_periods.as_slice(), &self.stream)
-                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                let mut d = DeviceBuffer::uninitialized_async(n_combos, &self.stream)?;
+                d.async_copy_from(h_periods.as_slice(), &self.stream)?;
                 d
             }
         } else {
-            DeviceBuffer::from_slice(&periods_i32)
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(&periods_i32)?
         };
 
         let mut d_out: DeviceBuffer<f32> = if use_pinned {
-            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?
         } else {
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?
         };
 
         self.launch_batch_kernel(
@@ -540,15 +587,9 @@ impl CudaSinwma {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: series_len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
     }
 
     pub fn sinwma_batch_dev(
@@ -569,7 +610,10 @@ impl CudaSinwma {
     ) -> Result<(usize, usize, Vec<SinWmaParams>), CudaSinwmaError> {
         let (combos, first_valid, series_len, max_period) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
-        let expected = combos.len() * series_len;
+        let expected = combos
+            .len()
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaSinwmaError::InvalidInput("matrix size overflow".into()))?;
         if out.len() != expected {
             return Err(CudaSinwmaError::InvalidInput(format!(
                 "out slice wrong length: got {}, expected {}",
@@ -578,9 +622,7 @@ impl CudaSinwma {
             )));
         }
         let arr = self.run_batch_kernel(data_f32, &combos, first_valid, series_len, max_period)?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+        arr.buf.copy_to(out)?;
         Ok((arr.rows, arr.cols, combos))
     }
 
@@ -673,7 +715,7 @@ impl CudaSinwma {
         let mut func = self
             .module
             .get_function("sinwma_many_series_one_param_time_major_f32")
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaSinwmaError::MissingKernelSymbol { name: "sinwma_many_series_one_param_time_major_f32" })?;
 
         let prefer = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => Some(block_x),
@@ -700,9 +742,8 @@ impl CudaSinwma {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes as u32, args)
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+            self.validate_launch_dims((grid_x.max(1), cols as u32, 1), (block_x, 1, 1))?;
+            self.stream.launch(&func, grid, block, shared_bytes as u32, args)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaSinwma)).last_many =
@@ -720,69 +761,60 @@ impl CudaSinwma {
         first_valids: &[i32],
         period: usize,
     ) -> Result<DeviceArrayF32, CudaSinwmaError> {
-        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
-        let first_valid_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_valid_bytes + out_bytes;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaSinwmaError::InvalidInput("matrix size overflow".into()))?;
+        let prices_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
+        let first_valid_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(first_valid_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
         let headroom = 32 * 1024 * 1024; // 32MB cushion
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaSinwmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::ensure_fit(required, headroom)?;
 
         let use_pinned = std::env::var("CUDA_PINNED").ok().as_deref() == Some("1");
 
         let d_prices: DeviceBuffer<f32> = if use_pinned {
-            let h = LockedBuffer::from_slice(data_tm_f32)
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+            let h = LockedBuffer::from_slice(data_tm_f32)?;
             unsafe {
-                let mut d = DeviceBuffer::uninitialized_async(cols * rows, &self.stream)
-                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
-                d.async_copy_from(h.as_slice(), &self.stream)
-                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                let mut d = DeviceBuffer::uninitialized_async(cols * rows, &self.stream)?;
+                d.async_copy_from(h.as_slice(), &self.stream)?;
                 d
             }
         } else {
-            DeviceBuffer::from_slice(data_tm_f32)
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(data_tm_f32)?
         };
 
         let d_first_valids: DeviceBuffer<i32> = if use_pinned {
-            let h = LockedBuffer::from_slice(first_valids)
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+            let h = LockedBuffer::from_slice(first_valids)?;
             unsafe {
-                let mut d = DeviceBuffer::uninitialized_async(cols, &self.stream)
-                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
-                d.async_copy_from(h.as_slice(), &self.stream)
-                    .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+                let mut d = DeviceBuffer::uninitialized_async(cols, &self.stream)?;
+                d.async_copy_from(h.as_slice(), &self.stream)?;
                 d
             }
         } else {
-            DeviceBuffer::from_slice(first_valids)
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(first_valids)?
         };
 
         let mut d_out: DeviceBuffer<f32> = if use_pinned {
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }?
         } else {
-            unsafe { DeviceBuffer::uninitialized(cols * rows) }
-                .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }?
         };
 
         self.launch_many_series_kernel(&d_prices, period, cols, rows, &d_first_valids, &mut d_out)?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 
     pub fn sinwma_many_series_one_param_time_major_dev(
@@ -814,9 +846,7 @@ impl CudaSinwma {
         }
         let arr =
             self.sinwma_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, params)?;
-        arr.buf
-            .copy_to(out)
-            .map_err(|e| CudaSinwmaError::Cuda(e.to_string()))
+        arr.buf.copy_to(out).map_err(Into::into)
     }
 
     pub fn sinwma_many_series_one_param_time_major_device(

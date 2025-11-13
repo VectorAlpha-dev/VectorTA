@@ -29,7 +29,11 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaNama;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context as CudaContext;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -66,6 +70,126 @@ impl<'a> AsRef<[f64]> for NamaInput<'a> {
         match &self.data {
             NamaData::Slice(slice) => slice,
             NamaData::Candles { candles, source } => source_type(candles, source),
+        }
+    }
+}
+
+// NAMA-specific device handle that keeps the CUDA context alive for the buffer's lifetime.
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32PyNama {
+    pub(crate) inner: DeviceArrayF32,
+    _ctx: Arc<CudaContext>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32PyNama {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producing stream is synchronized before returning the handle.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<usize>) -> PyResult<PyObject> {
+        // Minimal DLPack v0.6 capsule for 2D FP32 row‑major CUDA tensor
+        use std::ffi::{c_void, CString};
+        use pyo3::ffi as pyffi;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: usize,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            _self_ref: pyo3::PyObject,
+        }
+
+        unsafe extern "C" fn deleter(self_ptr: *mut DLManagedTensor) {
+            if self_ptr.is_null() { return; }
+            let mt = Box::from_raw(self_ptr);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ctx = Box::from_raw(ctx_ptr);
+            }
+            drop(mt);
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
+        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
+
+        // Keep this Python object alive via a strong ref in the manager ctx
+        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape_box: shape_box,
+            _strides_box: strides_box,
+            _self_ref: self_ref,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let tensor = DLTensor {
+            data: slf.inner.buf.as_device_ptr().as_raw() as *mut c_void,
+            device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
+        let ptr = Box::into_raw(mt) as *mut c_void;
+
+        // Build PyCapsule("dltensor", ptr, deleter)
+        unsafe {
+            let name = CString::new("dltensor").unwrap();
+            let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+            if cap.is_null() {
+                let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(pyo3::PyObject::from_owned_ptr(py, cap))
         }
     }
 }
@@ -199,6 +323,15 @@ pub enum NamaError {
 
     #[error("nama: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+
+    #[error("nama: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("nama: Invalid range expansion: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("nama: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -751,9 +884,9 @@ pub fn nama_with_kernel(input: &NamaInput, kernel: Kernel) -> Result<NamaOutput,
 pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<(), NamaError> {
     let (src, period, first, chosen, ohlc) = nama_prepare(input, k)?;
     if dst.len() != src.len() {
-        return Err(NamaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: src.len(),
+        return Err(NamaError::OutputLengthMismatch {
+            expected: src.len(),
+            got: dst.len(),
         });
     }
     let warmup_end = (first + period - 1).min(dst.len());
@@ -1106,12 +1239,38 @@ impl NamaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &NamaBatchRange) -> Vec<NamaParams> {
     let (s, e, t) = r.period;
-    let v: Vec<usize> = if t == 0 || s == e {
-        vec![s]
+    let mut vals: Vec<usize> = Vec::new();
+    if t == 0 || s == e {
+        vals.push(s);
+    } else if s < e {
+        let mut cur = s;
+        while cur <= e {
+            vals.push(cur);
+            match cur.checked_add(t) {
+                Some(nxt) => {
+                    if nxt == cur { break; }
+                    cur = nxt;
+                }
+                None => break,
+            }
+        }
     } else {
-        (s..=e).step_by(t).collect()
-    };
-    v.into_iter()
+        // reversed bounds supported: descend by step
+        let mut cur = s;
+        while cur >= e {
+            vals.push(cur);
+            if cur < t { break; }
+            cur -= t;
+            if cur == 0 && e > 0 { break; }
+            if cur == vals.last().copied().unwrap_or(usize::MAX) { break; }
+        }
+        // ensure last element is e if aligned
+        if vals.last().copied() != Some(e) {
+            // leave as-is; alignment by step may not hit exactly e
+        }
+    }
+    vals
+        .into_iter()
         .map(|p| NamaParams { period: Some(p) })
         .collect()
 }
@@ -1121,6 +1280,13 @@ pub fn nama_batch_with_kernel(
     sweep: &NamaBatchRange,
     k: Kernel,
 ) -> Result<NamaBatchOutput, NamaError> {
+    // Reject explicit non-batch kernels to match other indicators' behavior
+    match k {
+        Kernel::Avx2 | Kernel::Avx512 | Kernel::Scalar => {
+            return Err(NamaError::InvalidKernelForBatch(k));
+        }
+        _ => {}
+    }
     let resolved = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other => other,
@@ -1146,6 +1312,21 @@ fn nama_batch_inner(
         return Err(NamaError::EmptyInputData);
     }
     let rows = combos.len();
+    // Guard allocation sizes (rows * cols)
+    if rows == 0 {
+        return Err(NamaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
+    }
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(NamaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
     let first = data
         .iter()
@@ -1328,7 +1509,7 @@ pub fn nama_cuda_batch_dev_py(
     data_f32: PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32PyNama> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1338,13 +1519,15 @@ pub fn nama_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaNama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.nama_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .nama_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32PyNama { inner, _ctx: ctx, _device_id: dev_id })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1355,7 +1538,7 @@ pub fn nama_cuda_many_series_one_param_dev_py(
     data_tm_f32: PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32PyNama> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1372,13 +1555,15 @@ pub fn nama_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaNama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.nama_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .nama_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32PyNama { inner, _ctx: ctx, _device_id: dev_id })
 }
 
 // ==================== WASM BINDINGS ====================

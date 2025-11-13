@@ -39,7 +39,7 @@ use crate::utilities::helpers::{
     make_uninit_matrix,
 };
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::{cuda::moving_averages::CudaHma, indicators::moving_averages::alma::DeviceArrayF32Py};
+use crate::cuda::moving_averages::CudaHma;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -1081,6 +1081,9 @@ fn hma_batch_inner(
         .collect();
 
     // -------- allocate rows×cols uninitialised -----------
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(HmaError::ArithmeticOverflow { what: "rows*cols" })?;
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
@@ -1361,7 +1364,7 @@ pub fn hma_cuda_batch_dev_py<'py>(
     data_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+) -> PyResult<(DeviceArrayF32HmaPy, Bound<'py, PyDict>)> {
     use crate::cuda::cuda_available;
     use numpy::IntoPyArray;
     use pyo3::types::PyDict;
@@ -1375,12 +1378,14 @@ pub fn hma_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos, stream_u64) = py.allow_threads(|| {
+    let (inner, combos, stream_u64, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaHma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.ctx();
+        let dev_id = cuda.device_id();
         let res = cuda
             .hma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((res.0, res.1, cuda.stream_handle_u64()))
+        Ok::<_, PyErr>((res.0, res.1, cuda.stream_handle_u64(), ctx, dev_id))
     })?;
 
     let dict = PyDict::new(py);
@@ -1393,7 +1398,7 @@ pub fn hma_cuda_batch_dev_py<'py>(
     dict.set_item("cai_strides_bytes", ((inner.cols as u64) * 4u64, 4u64))?;
     dict.set_item("stream", stream_u64)?; // non-zero CUstream per CAI v3
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((DeviceArrayF32HmaPy::new(inner, ctx, dev_id, stream_u64), dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1404,7 +1409,7 @@ pub fn hma_cuda_many_series_one_param_dev_py(
     data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32HmaPy> {
     use crate::cuda::cuda_available;
     use numpy::PyUntypedArrayMethods;
 
@@ -1419,13 +1424,17 @@ pub fn hma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id, stream_u64) = py.allow_threads(|| {
         let cuda = CudaHma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.hma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.ctx();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .hma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev_id, cuda.stream_handle_u64()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32HmaPy::new(inner, ctx, dev_id, stream_u64))
 }
 
 #[cfg(feature = "python")]
@@ -1449,6 +1458,130 @@ impl HmaStreamPy {
 
     fn update(&mut self, value: f64) -> Option<f64> {
         self.inner.update(value)
+    }
+}
+
+// ==================== PYTHON: Device handle with CAI v3 + DLPack ====================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Hma", unsendable)]
+pub struct DeviceArrayF32HmaPy {
+    pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
+    _ctx_guard: std::sync::Arc<cust::context::Context>,
+    _device_id: u32,
+    _stream: u64,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32HmaPy {
+    #[new]
+    fn py_new() -> PyResult<Self> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "use factory methods from CUDA functions",
+        ))
+    }
+
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
+        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        // Producer is async; include the actual stream handle per CAI v3
+        d.set_item("stream", self._stream)?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<usize>) -> PyResult<pyo3::PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: usize,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            _self_ref: pyo3::PyObject,
+        }
+        unsafe extern "C" fn deleter(self_ptr: *mut DLManagedTensor) {
+            if self_ptr.is_null() { return; }
+            let mt = Box::from_raw(self_ptr);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ctx = Box::from_raw(ctx_ptr);
+            }
+            drop(mt);
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
+        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
+        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape_box: shape_box, _strides_box: strides_box, _self_ref: self_ref });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let tensor = DLTensor {
+            data: slf.inner.buf.as_device_ptr().as_raw() as *mut c_void,
+            device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
+        let ptr = Box::into_raw(mt) as *mut c_void;
+        unsafe {
+            let name = CString::new("dltensor").unwrap();
+            let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+            if cap.is_null() {
+                let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl DeviceArrayF32HmaPy {
+    pub fn new(
+        inner: crate::cuda::moving_averages::DeviceArrayF32,
+        ctx_guard: std::sync::Arc<cust::context::Context>,
+        device_id: u32,
+        stream_u64: u64,
+    ) -> Self {
+        Self { inner, _ctx_guard: ctx_guard, _device_id: device_id, _stream: stream_u64 }
     }
 }
 
@@ -1706,7 +1839,7 @@ pub fn register_hma_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     m.add_class::<HmaStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
-        m.add_class::<DeviceArrayF32Py>()?;
+        m.add_class::<DeviceArrayF32HmaPy>()?;
         m.add_function(wrap_pyfunction!(hma_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(hma_cuda_many_series_one_param_dev_py, m)?)?;
     }

@@ -25,6 +25,7 @@ use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
@@ -45,6 +46,12 @@ pub enum CudaHmaError {
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
     #[error("arithmetic overflow when computing {what}")]
     ArithmeticOverflow { what: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("device mismatch: buf on {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
 
 /// Selected kernel variants (introspection only)
@@ -61,7 +68,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaHma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    ctx: Arc<Context>,
     device_id: u32,
     policy: CudaHmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -118,7 +125,7 @@ impl CudaHma {
         Ok(Self {
             module,
             stream,
-            _context: context,
+            ctx: Arc::new(context),
             device_id: device_id as u32,
             policy: CudaHmaPolicy::default(),
             last_batch: None,
@@ -139,6 +146,10 @@ impl CudaHma {
     pub fn policy(&self) -> &CudaHmaPolicy {
         &self.policy
     }
+    #[inline]
+    pub fn ctx(&self) -> Arc<Context> { Arc::clone(&self.ctx) }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch
     }
@@ -237,17 +248,23 @@ impl CudaHma {
 
     fn expand_range(range: &HmaBatchRange) -> Vec<HmaParams> {
         let (start, end, step) = range.period;
+        // zero step or identical bounds => singleton
         if step == 0 || start == end {
-            return vec![HmaParams {
-                period: Some(start),
-            }];
+            return vec![HmaParams { period: Some(start) }];
         }
-        (start..=end)
-            .step_by(step)
-            .map(|period| HmaParams {
-                period: Some(period),
-            })
-            .collect()
+        let s = step.max(1);
+        // support reversed bounds
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let mut out = Vec::new();
+        let mut x = lo;
+        while x <= hi {
+            out.push(HmaParams { period: Some(x) });
+            match x.checked_add(s) {
+                Some(nx) => x = nx,
+                None => break, // stop on overflow; accumulated values are valid
+            }
+        }
+        out
     }
 
     fn prepare_batch_inputs(
@@ -523,10 +540,13 @@ impl CudaHma {
                 "series dimensions must be positive".into(),
             ));
         }
-        if data_tm_f32.len() != cols * rows {
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or(CudaHmaError::ArithmeticOverflow { what: "cols * rows" })?;
+        if data_tm_f32.len() != expected {
             return Err(CudaHmaError::InvalidInput(format!(
                 "data length mismatch: expected {}, got {}",
-                cols * rows,
+                expected,
                 data_tm_f32.len()
             )));
         }

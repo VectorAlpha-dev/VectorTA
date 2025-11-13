@@ -19,6 +19,11 @@
 //! - **`Ok(AvslOutput)`** containing a `Vec<f64>` matching input length
 //! - Leading values are NaN during warmup (slow_period-1 values)
 //!
+//! ## Decision Log (2025-11-13)
+//! - SIMD enabled under `nightly-avx` with scalar as reference; small speedups on AVX2/AVX512.
+//! - CUDA wrappers present; Python VRAM handle implements CAI v3 + DLPack for interop.
+//! - Public API and numerics unchanged; tests reference values preserved.
+//!
 //! ## Developer Notes (Status)
 //! - Scalar: optimized to a single forward pass with rolling sums and tiny rings (≤200) for the
 //!   dynamic window; avoids large temporaries and extra series materialization.
@@ -296,6 +301,15 @@ pub enum AvslError {
     #[error("avsl: Invalid multiplier: {multiplier}")]
     InvalidMultiplier { multiplier: f64 },
 
+    #[error("avsl: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("avsl: Invalid range: start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("avsl: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
     #[error("avsl: {0}")]
     ComputationError(String),
 }
@@ -345,9 +359,9 @@ pub fn avsl_into_slice(dst: &mut [f64], input: &AvslInput, kern: Kernel) -> Resu
         avsl_prepare(input, kern)?;
 
     if dst.len() != close.len() {
-        return Err(AvslError::InvalidPeriod {
-            period: dst.len(),
-            data_len: close.len(),
+        return Err(AvslError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
         });
     }
 
@@ -1825,19 +1839,41 @@ fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
     if st == 0 || s == e {
         return vec![s];
     }
-    (s..=e).step_by(st).collect()
+    if s < e {
+        return (s..=e).step_by(st.max(1)).collect();
+    }
+    // reversed bounds
+    let mut v = Vec::new();
+    let step = st.max(1);
+    let mut cur = s;
+    while cur >= e {
+        v.push(cur);
+        if cur < step { break; }
+        cur -= step;
+        if cur == usize::MAX { break; }
+    }
+    v
 }
 
 #[inline(always)]
 fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
-    if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+    let step = if st.is_sign_negative() { -st } else { st };
+    if step.abs() < 1e-12 || (s - e).abs() < 1e-12 {
         return vec![s];
     }
     let mut v = Vec::new();
-    let mut x = s;
-    while x <= e + 1e-12 {
-        v.push(x);
-        x += st;
+    if s <= e {
+        let mut x = s;
+        while x <= e + 1e-12 {
+            v.push(x);
+            x += step;
+        }
+    } else {
+        let mut x = s;
+        while x + 1e-12 >= e {
+            v.push(x);
+            x -= step;
+        }
     }
     v
 }
@@ -1847,7 +1883,12 @@ fn expand_grid_avsl(r: &AvslBatchRange) -> Vec<AvslParams> {
     let fs = axis_usize(r.fast_period);
     let ss = axis_usize(r.slow_period);
     let ms = axis_f64(r.multiplier);
-    let mut out = Vec::with_capacity(fs.len() * ss.len() * ms.len());
+    let cap = fs
+        .len()
+        .checked_mul(ss.len())
+        .and_then(|x| x.checked_mul(ms.len()))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
     for &f in &fs {
         for &s in &ss {
             for &m in &ms {
@@ -1883,12 +1924,7 @@ pub fn avsl_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(AvslError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(AvslError::InvalidKernelForBatch(other)),
     };
 
     // We dispatch rows via Scalar compute, like alma.rs maps batch→SIMD choice.
@@ -1901,9 +1937,10 @@ pub fn avsl_batch_with_kernel(
 
     let combos = expand_grid_avsl(sweep);
     if combos.is_empty() {
-        return Err(AvslError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(AvslError::InvalidRange {
+            start: sweep.fast_period.0,
+            end: sweep.fast_period.1,
+            step: sweep.fast_period.2,
         });
     }
 
@@ -1990,12 +2027,7 @@ fn avsl_batch_inner(
     let kernel = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(AvslError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(AvslError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -2007,9 +2039,10 @@ fn avsl_batch_inner(
 
     let combos = expand_grid_avsl(sweep);
     if combos.is_empty() {
-        return Err(AvslError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(AvslError::InvalidRange {
+            start: sweep.fast_period.0,
+            end: sweep.fast_period.1,
+            step: sweep.fast_period.2,
         });
     }
 
@@ -2076,6 +2109,20 @@ fn avsl_batch_inner_into(
     let first = first_valid_max3(close, low, volume).ok_or(AvslError::AllValuesNaN)?;
     // Safety: out length is rows*cols laid out by caller.
     let rows = combos.len();
+    // length check and warmup prefix validation
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(AvslError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        })?;
+    if out.len() != expected {
+        return Err(AvslError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
     let out_rows: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -2256,7 +2303,123 @@ pub fn avsl_batch_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::avsl_wrapper::CudaAvsl;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+// AVSL-specific Python device handle with CAI v3 + DLPack and context guard
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Avsl", unsendable)]
+pub struct DeviceArrayF32AvslPy {
+    pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32AvslPy {
+    #[new]
+    fn py_new() -> PyResult<Self> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "use factory functions (avsl_cuda_*_dev) to create this type",
+        ))
+    }
+
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        let item = std::mem::size_of::<f32>();
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (self.inner.cols * item, item))?;
+        let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
+        d.set_item("data", (ptr_val, false))?;
+        // Producer stream is synchronized in wrapper before returning → omit 'stream'
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<usize>) -> PyResult<pyo3::PyObject> {
+        use std::ffi::{c_void, CString};
+        use pyo3::ffi as pyffi;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: usize,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            _self_ref: pyo3::PyObject,
+        }
+        unsafe extern "C" fn deleter(self_ptr: *mut DLManagedTensor) {
+            if self_ptr.is_null() { return; }
+            let mt = Box::from_raw(self_ptr);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() { let _ctx = Box::from_raw(ctx_ptr); }
+            drop(mt);
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
+        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
+        let self_ref = unsafe { pyo3::PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx { shape: shape_ptr, strides: strides_ptr, _shape_box: shape_box, _strides_box: strides_box, _self_ref: self_ref });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+        let tensor = DLTensor {
+            data: slf.inner.buf.as_device_ptr().as_raw() as *mut c_void,
+            device: DLDevice { device_type: 2, device_id: slf._device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor { dl_tensor: tensor, manager_ctx: mgr_ptr, deleter: Some(deleter) });
+        let ptr = Box::into_raw(mt) as *mut c_void;
+        unsafe {
+            let name = CString::new("dltensor").unwrap();
+            let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+            if cap.is_null() {
+                let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                return Err(pyo3::exceptions::PyRuntimeError::new_err("failed to create DLPack capsule"));
+            }
+            Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl DeviceArrayF32AvslPy {
+    pub fn new(inner: crate::cuda::moving_averages::DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self { inner, _ctx_guard: ctx_guard, _device_id: device_id }
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "avsl_cuda_batch_dev")]
@@ -2270,7 +2433,7 @@ pub fn avsl_cuda_batch_dev_py<'py>(
     slow_range: (usize, usize, usize),
     mult_range: (f64, f64, f64),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+) -> PyResult<(DeviceArrayF32AvslPy, Bound<'py, pyo3::types::PyDict>)> {
     use crate::cuda::cuda_available;
     use numpy::IntoPyArray;
     use pyo3::types::PyDict;
@@ -2285,10 +2448,14 @@ pub fn avsl_cuda_batch_dev_py<'py>(
         slow_period: slow_range,
         multiplier: mult_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, ctx, dev_id, combos) = py.allow_threads(|| {
         let cuda = CudaAvsl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.avsl_batch_dev(close, low, vol, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.ctx();
+        let dev_id = cuda.device_id();
+        let (arr, combos) = cuda
+            .avsl_batch_dev(close, low, vol, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id, combos))
     })?;
     let dict = PyDict::new(py);
     dict.set_item(
@@ -2315,7 +2482,7 @@ pub fn avsl_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((DeviceArrayF32AvslPy::new(inner, ctx, dev_id), dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2332,7 +2499,7 @@ pub fn avsl_cuda_many_series_one_param_dev_py(
     slow_period: usize,
     multiplier: f64,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32AvslPy> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2345,12 +2512,16 @@ pub fn avsl_cuda_many_series_one_param_dev_py(
         slow_period: Some(slow_period),
         multiplier: Some(multiplier),
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaAvsl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.avsl_many_series_one_param_time_major_dev(c, l, v, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.ctx();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .avsl_many_series_one_param_time_major_dev(c, l, v, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32AvslPy::new(inner, ctx, dev_id))
 }
 
 // ==================== WASM BINDINGS ====================

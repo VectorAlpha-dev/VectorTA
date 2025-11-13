@@ -24,6 +24,7 @@ use thiserror::Error;
 use std::env;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 // ---------------- Kernel policy & selection (mirrors ALMA structure) ----------------
 
@@ -80,8 +81,14 @@ pub enum CudaLinregError {
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf on {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
     #[error("arithmetic overflow when computing {what}")]
     ArithmeticOverflow { what: &'static str },
 }
@@ -89,7 +96,7 @@ pub enum CudaLinregError {
 pub struct CudaLinreg {
     module: Module,
     stream: Stream,
-    _context: Context,
+    ctx: Arc<Context>,
     device_id: u32,
     policy: CudaLinregPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -126,7 +133,7 @@ impl CudaLinreg {
         Ok(Self {
             module,
             stream,
-            _context: context,
+            ctx: Arc::new(context),
             device_id: device_id as u32,
             policy: CudaLinregPolicy::default(),
             last_batch: None,
@@ -151,6 +158,10 @@ impl CudaLinreg {
     pub fn set_policy(&mut self, policy: CudaLinregPolicy) {
         self.policy = policy;
     }
+    #[inline]
+    pub fn ctx(&self) -> Arc<Context> { Arc::clone(&self.ctx) }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
     #[inline]
     pub fn policy(&self) -> &CudaLinregPolicy {
         &self.policy
@@ -273,9 +284,11 @@ impl CudaLinreg {
 
         let combos = expand_grid_linreg(sweep);
         if combos.is_empty() {
-            return Err(CudaLinregError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
+            let (s, e, t) = sweep.period;
+            return Err(CudaLinregError::InvalidInput(format!(
+                "no parameter combinations (start={}, end={}, step={})",
+                s, e, t
+            )));
         }
 
         let mut periods_i32 = Vec::with_capacity(combos.len());
@@ -399,11 +412,25 @@ impl CudaLinreg {
         len: usize,
     ) -> Result<DeviceArrayF32, CudaLinregError> {
         // VRAM estimate and early check
-        let prices_bytes = len * std::mem::size_of::<f32>();
-        let params_bytes =
-            combos_len * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>() * 3);
-        let out_bytes = combos_len * len * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "len * sizeof(f32)" })?;
+        let per_combo = std::mem::size_of::<i32>()
+            .checked_add(std::mem::size_of::<f32>() * 3)
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "per_combo bytes" })?;
+        let params_bytes = combos_len
+            .checked_mul(per_combo)
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "combos_len * per_combo" })?;
+        let out_elems = combos_len
+            .checked_mul(len)
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "combos_len * len" })?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "out_elems * sizeof(f32)" })?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "total required bytes" })?;
         let headroom = 64 * 1024 * 1024; // 64MB safety margin
         Self::will_fit_checked(required, headroom)?;
 
@@ -413,7 +440,9 @@ impl CudaLinreg {
         let d_denom_invs = DeviceBuffer::from_slice(denom_invs)?;
         let d_inv_periods = DeviceBuffer::from_slice(inv_periods)?;
 
-        let elems = combos_len * len;
+        let elems = combos_len
+            .checked_mul(len)
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "combos_len * len" })?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
         self.launch_batch_kernel(
@@ -632,11 +661,22 @@ impl CudaLinreg {
         inv_period: f32,
     ) -> Result<DeviceArrayF32, CudaLinregError> {
         // VRAM estimate and check
-        let elems = cols * rows;
-        let prices_bytes = elems * std::mem::size_of::<f32>();
-        let first_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = elems * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_bytes + out_bytes;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "cols * rows" })?;
+        let prices_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "elems * sizeof(f32)" })?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "cols * sizeof(i32)" })?;
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "elems * sizeof(f32)" })?;
+        let required = prices_bytes
+            .checked_add(first_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or(CudaLinregError::ArithmeticOverflow { what: "total required bytes" })?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;

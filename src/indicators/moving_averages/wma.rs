@@ -21,7 +21,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaWma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::wma_wrapper::DeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -195,8 +195,17 @@ pub enum WmaError {
     #[error("wma: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 
-    #[error("wma: Invalid kernel - batch kernel required.")]
-    InvalidKernel,
+    #[error("wma: Non-batch kernel passed to batch path: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
+
+    #[error("wma: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("wma: Invalid range expansion: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("wma: size overflow computing rows*cols")]
+    SizeOverflow,
 }
 
 #[inline]
@@ -220,9 +229,9 @@ pub fn wma_into_slice(dst: &mut [f64], input: &WmaInput, kern: Kernel) -> Result
     let (data, period, first, chosen) = wma_prepare(input, kern)?;
 
     if dst.len() != data.len() {
-        return Err(WmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(WmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -383,7 +392,7 @@ pub fn wma_with_kernel_batch(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(WmaError::InvalidKernel),
+        _ => return Err(WmaError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
@@ -587,10 +596,30 @@ impl WmaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &WmaBatchRange) -> Vec<WmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // Robust expansion rules:
+        // - step == 0: static (single value)
+        // - start == end: single value
+        // - start < end and step > 0: increasing inclusive range
+        // - start > end and step > 0: decreasing inclusive range
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return (start..=end).step_by(step).collect();
+        }
+        // start > end: build a decreasing sequence without underflow
+        let mut v = start;
+        let mut out = Vec::new();
+        loop {
+            out.push(v);
+            if v <= end + step { break; }
+            v -= step;
+        }
+        if *out.last().unwrap() != end {
+            // ensure inclusive end if not hit exactly by stepping
+            out.push(end);
+        }
+        out
     }
 
     let periods = axis_usize(r.period);
@@ -702,6 +731,17 @@ fn wma_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+
+    // Guard output slice length and multiplication overflow
+    let needed = rows
+        .checked_mul(cols)
+        .ok_or(WmaError::SizeOverflow)?;
+    if out.len() != needed {
+        return Err(WmaError::OutputLengthMismatch {
+            expected: needed,
+            got: out.len(),
+        });
+    }
 
     // ---------- 1.  How many leading NaNs each row needs ----------
     let warm: Vec<usize> = combos
@@ -1419,13 +1459,13 @@ mod tests {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let sweep = WmaBatchRange { period: (2, 5, 1) };
 
-        // Test with non-batch kernels - should return InvalidKernel error
+        // Test with non-batch kernels - should return InvalidKernelForBatch error
         let non_batch_kernels = vec![Kernel::Scalar, Kernel::Avx2, Kernel::Avx512];
         for kernel in non_batch_kernels {
             let result = wma_with_kernel_batch(&data, &sweep, kernel);
             assert!(
-                matches!(result, Err(WmaError::InvalidKernel)),
-                "[{}] Expected InvalidKernel error for {:?}, got {:?}",
+                matches!(result, Err(WmaError::InvalidKernelForBatch(_))),
+                "[{}] Expected InvalidKernelForBatch error for {:?}, got {:?}",
                 test,
                 kernel,
                 result
@@ -1776,13 +1816,19 @@ pub fn wma_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaWma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.wma_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| {
+            let cuda = CudaWma::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let arr = cuda
+                .wma_batch_dev(slice_in, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
+        })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1807,13 +1853,19 @@ pub fn wma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda = CudaWma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.wma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| {
+            let cuda = CudaWma::new(device_id)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let arr = cuda
+                .wma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
+        })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(feature = "wasm")]
