@@ -22,16 +22,10 @@
 //! - **Ok(AlligatorOutput)** on success, with jaw/teeth/lips vectors (shifted)
 //! - **Err(AlligatorError)** otherwise
 //!
-//! ## Developer Notes
-//! - Decision: Streaming kernel uses O(1) SMMA recurrence with per-line seeding and optional forward shift; outputs match scalar numerics.
-//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar (AVX512 has conditional dispatch for short/long)
-//! - **Streaming update**: O(1) - maintains three SMMA states with simple update calculations
-//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
-//! - **Current status**: Scalar implementation complete with three SMMA lines and forward shifting
-//! - **Optimization opportunities**:
-//!   - Implement vectorized AVX2/AVX512 kernels for parallel SMMA calculations
-//!   - Consider SIMD for simultaneous processing of all three lines
-//!   - Optimize forward shifting operations with memory-efficient techniques
+//! ## Decision Log
+//! - SIMD: AVX2/AVX512 present but currently stubbed to scalar due to limited gains; selection short-circuits to scalar where applicable.
+//! - CUDA: Wrapper present; returns VRAM handles used by Python via CAI v3 + DLPack. Numerical outputs unchanged.
+//! - Performance: Scalar path optimized (O(1) SMMA recurrences). Batch/streaming preserve warmup/NaN semantics.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -271,6 +265,8 @@ impl AlligatorBuilder {
 
 #[derive(Debug, Error)]
 pub enum AlligatorError {
+    #[error("alligator: Input data slice is empty.")]
+    EmptyInputData,
     #[error("alligator: All values are NaN.")]
     AllValuesNaN,
     #[error("alligator: Invalid jaw period: period = {period}, data length = {data_len}")]
@@ -289,6 +285,14 @@ pub enum AlligatorError {
         "alligator: Invalid kernel for batch operation. Expected batch kernel, got: {kernel:?}"
     )]
     InvalidKernel { kernel: Kernel },
+    #[error("alligator: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("alligator: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("alligator: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("alligator: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: i64, end: i64, step: i64 },
 }
 
 #[inline]
@@ -303,6 +307,9 @@ pub fn alligator_with_kernel(
         AlligatorData::Candles { candles, source } => source_type(candles, source),
         AlligatorData::Slice(sl) => sl,
     };
+    if data.is_empty() {
+        return Err(AlligatorError::EmptyInputData);
+    }
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -349,6 +356,13 @@ pub fn alligator_with_kernel(
             offset: lips_offset,
             data_len: len,
         });
+    }
+
+    // Ensure enough valid data after first non-NaN to seed the largest period
+    let needed = jaw_period.max(teeth_period).max(lips_period);
+    let valid = len - first;
+    if valid < needed {
+        return Err(AlligatorError::NotEnoughValidData { needed, valid });
     }
 
     let chosen = match kernel {
@@ -915,7 +929,7 @@ pub fn alligator_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        non_batch => return Err(AlligatorError::InvalidKernel { kernel: non_batch }),
+        non_batch => return Err(AlligatorError::InvalidKernelForBatch(non_batch)),
     };
     // Pass the batch kernel through without conversion
     alligator_batch_par_slice(data, sweep, kernel)
@@ -954,28 +968,58 @@ impl AlligatorBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &AlligatorBatchRange) -> Vec<AlligatorParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &AlligatorBatchRange) -> Result<Vec<AlligatorParams>, AlligatorError> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, AlligatorError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step).collect();
+            if v.is_empty() {
+                return Err(AlligatorError::InvalidRange {
+                    start: start as i64,
+                    end: end as i64,
+                    step: step as i64,
+                });
+            }
+            Ok(v)
+        } else {
+            // reversed bounds
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                if cur - end < step {
+                    break;
+                }
+                cur -= step;
+            }
+            if v.is_empty() {
+                return Err(AlligatorError::InvalidRange {
+                    start: start as i64,
+                    end: end as i64,
+                    step: step as i64,
+                });
+            }
+            Ok(v)
+        }
     }
-    let jaw_periods = axis(r.jaw_period);
-    let jaw_offsets = axis(r.jaw_offset);
-    let teeth_periods = axis(r.teeth_period);
-    let teeth_offsets = axis(r.teeth_offset);
-    let lips_periods = axis(r.lips_period);
-    let lips_offsets = axis(r.lips_offset);
+    let jaw_periods = axis(r.jaw_period)?;
+    let jaw_offsets = axis(r.jaw_offset)?;
+    let teeth_periods = axis(r.teeth_period)?;
+    let teeth_offsets = axis(r.teeth_offset)?;
+    let lips_periods = axis(r.lips_period)?;
+    let lips_offsets = axis(r.lips_offset)?;
 
-    let mut out = Vec::with_capacity(
-        jaw_periods.len()
-            * jaw_offsets.len()
-            * teeth_periods.len()
-            * teeth_offsets.len()
-            * lips_periods.len()
-            * lips_offsets.len(),
-    );
+    let cap = jaw_periods
+        .len()
+        .checked_mul(jaw_offsets.len())
+        .and_then(|v| v.checked_mul(teeth_periods.len()))
+        .and_then(|v| v.checked_mul(teeth_offsets.len()))
+        .and_then(|v| v.checked_mul(lips_periods.len()))
+        .and_then(|v| v.checked_mul(lips_offsets.len()))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
     for &jp in &jaw_periods {
         for &jo in &jaw_offsets {
             for &tp in &teeth_periods {
@@ -996,7 +1040,14 @@ fn expand_grid(r: &AlligatorBatchRange) -> Vec<AlligatorParams> {
             }
         }
     }
-    out
+    if out.is_empty() {
+        return Err(AlligatorError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
+    }
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1022,13 +1073,7 @@ fn alligator_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<AlligatorBatchOutput, AlligatorError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(AlligatorError::InvalidJawPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1053,6 +1098,11 @@ fn alligator_batch_inner(
     let cols = data.len();
 
     // Allocate uninitialized matrices for zero-copy memory
+    let _rc = rows.checked_mul(cols).ok_or(AlligatorError::InvalidRange {
+        start: rows as i64,
+        end: cols as i64,
+        step: 1,
+    })?;
     let mut jaw_mu = make_uninit_matrix(rows, cols);
     let mut teeth_mu = make_uninit_matrix(rows, cols);
     let mut lips_mu = make_uninit_matrix(rows, cols);
@@ -1135,25 +1185,23 @@ fn alligator_batch_inner_into(
     jaw_out: &mut [f64],
     teeth_out: &mut [f64],
     lips_out: &mut [f64],
+
 ) -> Result<Vec<AlligatorParams>, AlligatorError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(AlligatorError::InvalidJawPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let cols = data.len();
     let rows = combos.len();
-    if jaw_out.len() != rows * cols
-        || teeth_out.len() != rows * cols
-        || lips_out.len() != rows * cols
-    {
-        return Err(AlligatorError::InvalidJawPeriod {
-            period: rows * cols,
-            data_len: cols,
-        });
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(AlligatorError::InvalidRange { start: rows as i64, end: cols as i64, step: 1 })?;
+    if jaw_out.len() != total {
+        return Err(AlligatorError::OutputLengthMismatch { expected: total, got: jaw_out.len() });
+    }
+    if teeth_out.len() != total {
+        return Err(AlligatorError::OutputLengthMismatch { expected: total, got: teeth_out.len() });
+    }
+    if lips_out.len() != total {
+        return Err(AlligatorError::OutputLengthMismatch { expected: total, got: lips_out.len() });
     }
 
     let first = data
@@ -2626,20 +2674,10 @@ mod tests {
 
         // Test that non-batch kernels are rejected with proper error
         let result = alligator_batch_with_kernel(&data, &sweep, Kernel::Scalar);
-        assert!(matches!(
-            result,
-            Err(AlligatorError::InvalidKernel {
-                kernel: Kernel::Scalar
-            })
-        ));
+        assert!(matches!(result, Err(AlligatorError::InvalidKernelForBatch(Kernel::Scalar))));
 
         let result = alligator_batch_with_kernel(&data, &sweep, Kernel::Avx2);
-        assert!(matches!(
-            result,
-            Err(AlligatorError::InvalidKernel {
-                kernel: Kernel::Avx2
-            })
-        ));
+        assert!(matches!(result, Err(AlligatorError::InvalidKernelForBatch(Kernel::Avx2))));
 
         // Test that batch kernels work
         let result = alligator_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch);
@@ -2755,7 +2793,7 @@ pub fn alligator_batch_py<'py>(
         lips_offset: lips_offset_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2953,6 +2991,18 @@ pub fn alligator_into_slice(
 use crate::cuda::{cuda_available, CudaAlligator};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "CudaContextGuard", unsendable)]
+struct CudaContextGuardPy {
+    #[pyo3(get)]
+    device_id: u32,
+    _ctx: Arc<Context>,
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "alligator_cuda_batch_dev")]
@@ -2980,34 +3030,40 @@ pub fn alligator_cuda_batch_dev_py<'py>(
         lips_period,
         lips_offset,
     };
-    let (jaw, teeth, lips, rows, cols, jp, jo, tp, to, lp, lo) = py.allow_threads(|| {
-        let cuda =
-            CudaAlligator::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let res = cuda
-            .alligator_batch_dev(slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let rows = res.outputs.rows();
-        let cols = res.outputs.cols();
-        let jp: Vec<usize> = res.combos.iter().map(|c| c.jaw_period.unwrap()).collect();
-        let jo: Vec<usize> = res.combos.iter().map(|c| c.jaw_offset.unwrap()).collect();
-        let tp: Vec<usize> = res.combos.iter().map(|c| c.teeth_period.unwrap()).collect();
-        let to: Vec<usize> = res.combos.iter().map(|c| c.teeth_offset.unwrap()).collect();
-        let lp: Vec<usize> = res.combos.iter().map(|c| c.lips_period.unwrap()).collect();
-        let lo: Vec<usize> = res.combos.iter().map(|c| c.lips_offset.unwrap()).collect();
-        Ok::<_, PyErr>((
-            res.outputs.jaw,
-            res.outputs.teeth,
-            res.outputs.lips,
-            rows,
-            cols,
-            jp,
-            jo,
-            tp,
-            to,
-            lp,
-            lo,
-        ))
-    })?;
+    let (jaw, teeth, lips, rows, cols, jp, jo, tp, to, lp, lo, guard_dev, guard_ctx) =
+        py.allow_threads(|| {
+            let cuda =
+                CudaAlligator::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let res = cuda
+                .alligator_batch_dev(slice, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let rows = res.outputs.rows();
+            let cols = res.outputs.cols();
+            let jp: Vec<usize> = res.combos.iter().map(|c| c.jaw_period.unwrap()).collect();
+            let jo: Vec<usize> = res.combos.iter().map(|c| c.jaw_offset.unwrap()).collect();
+            let tp: Vec<usize> = res.combos.iter().map(|c| c.teeth_period.unwrap()).collect();
+            let to: Vec<usize> = res.combos.iter().map(|c| c.teeth_offset.unwrap()).collect();
+            let lp: Vec<usize> = res.combos.iter().map(|c| c.lips_period.unwrap()).collect();
+            let lo: Vec<usize> = res.combos.iter().map(|c| c.lips_offset.unwrap()).collect();
+            Ok::<_, PyErr>(
+                (
+                    res.outputs.jaw,
+                    res.outputs.teeth,
+                    res.outputs.lips,
+                    rows,
+                    cols,
+                    jp,
+                    jo,
+                    tp,
+                    to,
+                    lp,
+                    lo,
+                    res.outputs.device_id,
+                    // retain context while Python holds buffers
+                    res.outputs._ctx.clone(),
+                ),
+            )
+        })?;
     use numpy::IntoPyArray;
     let d = PyDict::new(py);
     d.set_item("jaw", Py::new(py, DeviceArrayF32Py { inner: jaw })?)?;
@@ -3021,6 +3077,16 @@ pub fn alligator_cuda_batch_dev_py<'py>(
     d.set_item("teeth_offsets", to.into_pyarray(py))?;
     d.set_item("lips_periods", lp.into_pyarray(py))?;
     d.set_item("lips_offsets", lo.into_pyarray(py))?;
+    d.set_item(
+        "context_guard",
+        Py::new(
+            py,
+            CudaContextGuardPy {
+                device_id: guard_dev,
+                _ctx: guard_ctx,
+            },
+        )?,
+    )?;
     Ok(d)
 }
 
@@ -3057,13 +3123,13 @@ pub fn alligator_cuda_many_series_one_param_dev_py<'py>(
         lips_period: Some(lips_period),
         lips_offset: Some(lips_offset),
     };
-    let (jaw, teeth, lips) = py.allow_threads(|| {
+    let (jaw, teeth, lips, guard_dev, guard_ctx) = py.allow_threads(|| {
         let cuda =
             CudaAlligator::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
             .alligator_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((out.jaw, out.teeth, out.lips))
+        Ok::<_, PyErr>((out.jaw, out.teeth, out.lips, cuda.device_id(), cuda.context_arc()))
     })?;
     let d = PyDict::new(py);
     d.set_item("jaw", Py::new(py, DeviceArrayF32Py { inner: jaw })?)?;
@@ -3071,6 +3137,16 @@ pub fn alligator_cuda_many_series_one_param_dev_py<'py>(
     d.set_item("lips", Py::new(py, DeviceArrayF32Py { inner: lips })?)?;
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;
+    d.set_item(
+        "context_guard",
+        Py::new(
+            py,
+            CudaContextGuardPy {
+                device_id: guard_dev,
+                _ctx: guard_ctx,
+            },
+        )?,
+    )?;
     Ok(d)
 }
 
@@ -3084,6 +3160,9 @@ pub fn alligator_into_slices(
 ) -> Result<(), AlligatorError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
+    if len == 0 {
+        return Err(AlligatorError::EmptyInputData);
+    }
     if jaw_out.len() != len || teeth_out.len() != len || lips_out.len() != len {
         return Err(AlligatorError::InvalidJawPeriod {
             period: len,
@@ -3402,7 +3481,8 @@ pub fn alligator_batch_metadata_js(
         lips_offset: (lips_offset_start, lips_offset_end, lips_offset_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let mut metadata = Vec::with_capacity(combos.len() * 6);
 
     for combo in combos {
@@ -3453,7 +3533,7 @@ pub fn alligator_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsVal
         lips_period: config.lips_period_range,
         lips_offset: config.lips_offset_range,
     };
-    let rows = expand_grid(&sweep).len();
+    let rows = expand_grid(&sweep)?.len();
     let cols = data.len();
     let mut jaw = vec![f64::NAN; rows * cols];
     let mut teeth = vec![f64::NAN; rows * cols];
@@ -3528,7 +3608,7 @@ pub fn alligator_batch_into(
             lips_period: (lp_s, lp_e, lp_step),
             lips_offset: (lo_s, lo_e, lo_step),
         };
-        let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)?;
         let rows = combos.len();
         let cols = len;
 

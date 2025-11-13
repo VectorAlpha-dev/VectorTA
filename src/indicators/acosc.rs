@@ -16,6 +16,8 @@
 //!   (no per-tick `%` or `/`), matching batch/scalar numerics after warmup.
 //! - Memory: Zero-copy/uninitialized allocation with NaN warmup via `alloc_with_nan_prefix`.
 //! - Row-specific batch: Not applicable (no tunable params; single row). Keep batch helper for API parity.
+//! - Decision: CUDA wrappers present for one-series and many-series×one-param; producing stream synchronizes
+//!   before returning device handles. SIMD kept disabled by default due to limited wins.
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
@@ -80,6 +82,21 @@ pub enum AcoscError {
         "acosc: Mismatch in high/low candle data lengths: high_len={high_len}, low_len={low_len}"
     )]
     LengthMismatch { high_len: usize, low_len: usize },
+    #[error("acosc: Empty input data")]
+    EmptyInputData,
+    #[error("acosc: All values are NaN")]
+    AllValuesNaN,
+    #[error("acosc: Invalid period: period={period}, data_len={data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("acosc: Not enough valid data: needed={needed}, valid={valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("acosc: Output length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("acosc: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: i64, end: i64, step: i64 },
+    #[error("acosc: Invalid kernel for batch operation. Expected batch kernel, got: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    // Back-compat names (kept but no longer emitted from new code paths)
     #[error("acosc: Not enough data points: required={required}, actual={actual}")]
     NotEnoughData { required: usize, actual: usize },
     #[error("acosc: Invalid kernel for batch operation. Expected batch kernel, got: {kernel:?}")]
@@ -117,6 +134,9 @@ fn acosc_prepare<'a>(
     }
 
     let len = high.len();
+    if len == 0 {
+        return Err(AcoscError::EmptyInputData);
+    }
     const REQUIRED_LENGTH: usize = 39; // 34 + 5
 
     // first index where BOTH high and low are non-NaN
@@ -124,11 +144,11 @@ fn acosc_prepare<'a>(
         .find(|&i| !high[i].is_nan() && !low[i].is_nan())
         .unwrap_or(len);
     let valid = len.saturating_sub(first);
+    if valid == 0 {
+        return Err(AcoscError::AllValuesNaN);
+    }
     if valid < REQUIRED_LENGTH {
-        return Err(AcoscError::NotEnoughData {
-            required: REQUIRED_LENGTH,
-            actual: valid,
-        });
+        return Err(AcoscError::NotEnoughValidData { needed: REQUIRED_LENGTH, valid });
     }
 
     let chosen = match kernel {
@@ -497,7 +517,7 @@ pub fn acosc_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(AcoscError::InvalidBatchKernel { kernel: k }),
+        _ => return Err(AcoscError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -531,7 +551,11 @@ fn acosc_batch_inner(
     _parallel: bool,
 ) -> Result<AcoscBatchOutput, AcoscError> {
     let cols = high.len();
-    let rows = 1;
+    let rows: usize = 1;
+    // checked arithmetic: rows * cols
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(AcoscError::InvalidRange { start: 0, end: cols as i64, step: 0 })?;
 
     // find first valid pair
     let first = (0..cols)
@@ -539,11 +563,11 @@ fn acosc_batch_inner(
         .unwrap_or(cols);
     const REQUIRED_LENGTH: usize = 39;
     let valid = cols.saturating_sub(first);
+    if valid == 0 {
+        return Err(AcoscError::AllValuesNaN);
+    }
     if valid < REQUIRED_LENGTH {
-        return Err(AcoscError::NotEnoughData {
-            required: REQUIRED_LENGTH,
-            actual: valid,
-        });
+        return Err(AcoscError::NotEnoughValidData { needed: REQUIRED_LENGTH, valid });
     }
 
     // allocate uninit matrices and initialize NaN prefixes like alma.rs
@@ -873,7 +897,7 @@ pub fn acosc_cuda_batch_dev_py(
     high_f32: numpy::PyReadonlyArray1<'_, f32>,
     low_f32: numpy::PyReadonlyArray1<'_, f32>,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(AcoscDeviceArrayF32Py, AcoscDeviceArrayF32Py)> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -885,8 +909,8 @@ pub fn acosc_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.osc },
-        DeviceArrayF32Py { inner: pair.change },
+        AcoscDeviceArrayF32Py { inner: Some(pair.osc), device_id },
+        AcoscDeviceArrayF32Py { inner: Some(pair.change), device_id },
     ))
 }
 
@@ -898,7 +922,7 @@ pub fn acosc_cuda_many_series_one_param_dev_py(
     high_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(AcoscDeviceArrayF32Py, AcoscDeviceArrayF32Py)> {
     use numpy::PyUntypedArrayMethods;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -918,9 +942,147 @@ pub fn acosc_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.osc },
-        DeviceArrayF32Py { inner: pair.change },
+        AcoscDeviceArrayF32Py { inner: Some(pair.osc), device_id },
+        AcoscDeviceArrayF32Py { inner: Some(pair.change), device_id },
     ))
+}
+
+// ---------------- ACOSC Python device handle (CAI v3 + __dlpack_device__) ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::DeviceArrayF32Acosc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct AcoscDeviceArrayF32Py {
+    pub(crate) inner: Option<DeviceArrayF32Acosc>,
+    pub(crate) device_id: u32,
+}
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl AcoscDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Producing stream is synchronized before return; omit "stream" per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA
+        (2, self.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32Acosc, // owns VRAM buffer and Arc<Context>
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() { return; }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt); }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
+                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [inner.rows as i64, inner.cols as i64],
+            strides: [inner.cols as i64, 1],
+            arr: inner,
+        });
+
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
+
+        let _leaked = Box::into_raw(holder);
+
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut std::ffi::c_void,
+                name.as_ptr() as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe { dl_managed_deleter(mt_ptr) };
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -1014,11 +1176,11 @@ pub fn acosc_into_slice(
 ) -> Result<(), AcoscError> {
     let (high, low, first, kernel) = acosc_prepare(input, kern)?;
 
-    if osc_dst.len() != high.len() || change_dst.len() != high.len() {
-        return Err(AcoscError::LengthMismatch {
-            high_len: high.len(),
-            low_len: osc_dst.len(),
-        });
+    if osc_dst.len() != high.len() {
+        return Err(AcoscError::OutputLengthMismatch { expected: high.len(), got: osc_dst.len() });
+    }
+    if change_dst.len() != high.len() {
+        return Err(AcoscError::OutputLengthMismatch { expected: high.len(), got: change_dst.len() });
     }
 
     const WARMUP: usize = 38;

@@ -103,7 +103,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaMaaq;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::maaq_wrapper::DeviceArrayF32Maaq;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -281,13 +281,23 @@ impl MaaqBuilder {
 
 #[derive(Debug, Error)]
 pub enum MaaqError {
+    #[error("maaq: Input data slice is empty.")]
+    EmptyInputData,
     #[error("maaq: All values are NaN.")]
     AllValuesNaN,
     #[error("maaq: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("maaq: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("maaq: periods cannot be zero: period = {period}, fast = {fast_p}, slow = {slow_p}")]
+    #[error("maaq: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("maaq: Invalid range (start={start}, end={end}, step={step})")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("maaq: Non-batch kernel passed to batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error(
+        "maaq: periods cannot be zero: period = {period}, fast = {fast_p}, slow = {slow_p}"
+    )]
     ZeroPeriods {
         period: usize,
         fast_p: usize,
@@ -358,7 +368,7 @@ fn maaq_prepare<'a>(
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(MaaqError::AllValuesNaN);
+        return Err(MaaqError::EmptyInputData);
     }
 
     let first = data
@@ -871,10 +881,7 @@ pub fn maaq_batch_with_kernel(
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
-            return Err(MaaqError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(MaaqError::InvalidKernelForBatch(k))
         }
     };
 
@@ -914,10 +921,31 @@ impl MaaqBatchOutput {
 #[inline(always)]
 pub fn expand_grid(r: &MaaqBatchRange) -> Vec<MaaqParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
+        if start == end || step == 0 {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut v = Vec::new();
+        if start < end {
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                match x.checked_add(step) {
+                    Some(nx) if nx > x => x = nx,
+                    _ => break,
+                }
+            }
+        } else {
+            let mut x = start;
+            while x >= end {
+                v.push(x);
+                match x.checked_sub(step) {
+                    Some(nx) if nx < x => x = nx,
+                    _ => break,
+                }
+                if x == 0 { break; }
+            }
+        }
+        v
     }
     let periods = axis_usize(r.period);
     let fasts = axis_usize(r.fast_period);
@@ -964,10 +992,7 @@ fn maaq_batch_inner(
 ) -> Result<MaaqBatchOutput, MaaqError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(MaaqError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(MaaqError::InvalidRange { start: 0, end: 0, step: 0 });
     }
     let first = data
         .iter()
@@ -982,6 +1007,10 @@ fn maaq_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+
+    if rows.checked_mul(cols).is_none() {
+        return Err(MaaqError::InvalidRange { start: rows, end: cols, step: 0 });
+    }
 
     // Per-row warm prefix: first non-NaN + that row's period - 1
     let warm: Vec<usize> = combos
@@ -1063,10 +1092,7 @@ pub fn maaq_batch_inner_into(
 ) -> Result<Vec<MaaqParams>, MaaqError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(MaaqError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(MaaqError::InvalidRange { start: 0, end: 0, step: 0 });
     }
     let first = data
         .iter()
@@ -1083,11 +1109,11 @@ pub fn maaq_batch_inner_into(
     let cols = data.len();
 
     // Validate output slice size
-    if out.len() != rows * cols {
-        return Err(MaaqError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(MaaqError::InvalidRange { start: rows, end: cols, step: 0 })?;
+    if out.len() != expected {
+        return Err(MaaqError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     // Cast output slice to MaybeUninit
@@ -2070,6 +2096,152 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
+// --- Python CUDA interop (MAAQ-specific device handle) ---
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Maaq", unsendable)]
+pub struct DeviceArrayF32MaaqPy {
+    pub(crate) inner: Option<DeviceArrayF32Maaq>,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32MaaqPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Producing stream is synchronized before return; omit stream per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        Ok((2, inner.device_id as i32)) // 2 == kDLCUDA
+    }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        // Minimal DLPack C types (repr C) per v0.7
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32Maaq,
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() { return; }
+            unsafe {
+                // Reconstitute and drop the Holder, which drops the device buffer and context Arc
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt); }
+                // Clear pointer to avoid double free if GC runs again
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
+                    device: DLDevice { device_type: 2, device_id: inner.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [inner.rows as i64, inner.cols as i64],
+            strides: [inner.cols as i64, 1],
+            arr: inner,
+        });
+
+        // Wire shape/strides pointers and manager_ctx to the holder
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
+
+        // Leak the holder; the DLManagedTensor deleter will free it
+        let _leaked = Box::into_raw(holder);
+
+        // Create a PyCapsule named "dltensor" with our custom destructor
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut std::ffi::c_void,
+                name.as_ptr() as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            // If capsule creation failed, run the deleter to clean up
+            unsafe { dl_managed_deleter(mt_ptr) };
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "maaq")]
 #[pyo3(signature = (data, period, fast_period, slow_period, kernel=None))]
@@ -2197,7 +2369,7 @@ pub fn maaq_cuda_batch_dev_py(
     fast_period_range: (usize, usize, usize),
     slow_period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32MaaqPy> {
     use numpy::PyArrayMethods;
 
     if !cuda_available() {
@@ -2214,11 +2386,11 @@ pub fn maaq_cuda_batch_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaMaaq::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.maaq_batch_dev(&data_f32, &sweep)
+        cuda.maaq_batch_dev_ex(&data_f32, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32MaaqPy { inner: Some(inner) })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2231,7 +2403,7 @@ pub fn maaq_cuda_many_series_one_param_dev_py(
     fast_period: usize,
     slow_period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32MaaqPy> {
     use numpy::PyUntypedArrayMethods;
 
     if !cuda_available() {
@@ -2249,11 +2421,11 @@ pub fn maaq_cuda_many_series_one_param_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaMaaq::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.maaq_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+        cuda.maaq_multi_series_one_param_time_major_dev_ex(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32MaaqPy { inner: Some(inner) })
 }
 
 #[cfg(feature = "python")]
@@ -2417,10 +2589,7 @@ pub fn maaq_into_slice(dst: &mut [f64], input: &MaaqInput, kern: Kernel) -> Resu
 
     // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(MaaqError::InvalidPeriod {
-            period,
-            data_len: data.len(),
-        });
+        return Err(MaaqError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
     // Compute MAAQ values directly into dst

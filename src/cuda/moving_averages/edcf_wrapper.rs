@@ -17,6 +17,7 @@ use std::ffi::c_void;
 use std::fmt;
 use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Error)]
 pub enum CudaEdcfError {
@@ -24,12 +25,16 @@ pub enum CudaEdcfError {
     Cuda(#[from] CudaError),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("Out of memory on device: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Launch configuration too large for device: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
     NotImplemented,
 }
@@ -87,7 +92,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaEdcf {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaEdcfPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -101,7 +106,7 @@ impl CudaEdcf {
         cust::init(CudaFlags::empty())?;
 
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/edcf_kernel.ptx"));
         let jit_opts = &[
@@ -124,7 +129,7 @@ impl CudaEdcf {
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaEdcfPolicy::default(),
             last_batch: None,
@@ -159,6 +164,11 @@ impl CudaEdcf {
     pub fn synchronize(&self) -> Result<(), CudaEdcfError> {
         self.stream.synchronize().map_err(CudaEdcfError::Cuda)
     }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -303,6 +313,7 @@ impl CudaEdcf {
         let block_x = 128u32;
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        Self::validate_launch_dims(grid_x, 1, 1, block_x, 1, 1)?;
 
         // Shared memory: (TILE + period - 1) floats
         let sh_elems = (tile as usize + period - 1);
@@ -320,6 +331,15 @@ impl CudaEdcf {
                 )
             )?;
         }
+        Ok(())
+    }
+
+    #[inline]
+    fn validate_launch_dims(gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32) -> Result<(), CudaEdcfError> {
+        let threads = bx
+            .checked_mul(by).unwrap_or(u32::MAX)
+            .checked_mul(bz).unwrap_or(u32::MAX);
+        if threads > 1024 { return Err(CudaEdcfError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz }); }
         Ok(())
     }
 
@@ -668,6 +688,7 @@ impl CudaEdcf {
                 let block_x = 128u32;
                 let grid: GridSize = (grid_x, 1, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
+                Self::validate_launch_dims(grid_x, 1, 1, block_x, 1, 1)?;
                 // shared: prices + dist + wv + pref_w + pref_wv
                 let sh_elems = (tile as usize + period - 1) * 5;
                 let shared_bytes = (sh_elems * std::mem::size_of::<f32>()) as u32;
@@ -736,6 +757,8 @@ impl CudaEdcf {
         }
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        Self::validate_launch_dims(grid_x, 1, 1, block_x, 1, 1)?;
+        Self::validate_launch_dims(grid_x, 1, 1, block_x, 1, 1)?;
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -844,22 +867,21 @@ impl CudaEdcf {
     }
 
     fn expand_range(sweep: &EdcfBatchRange) -> Vec<EdcfParams> {
-        let (start, end, step) = sweep.period;
+        let (mut start, mut end, step) = sweep.period;
+        // Treat zero step as static; support reversed bounds by normalizing
         if step == 0 || start == end {
-            return vec![EdcfParams {
-                period: Some(start),
-            }];
+            return vec![EdcfParams { period: Some(start) }];
         }
+        if start > end { core::mem::swap(&mut start, &mut end); }
+
         let mut periods = Vec::new();
         let mut value = start;
         while value <= end {
-            periods.push(EdcfParams {
-                period: Some(value),
-            });
-            value = match value.checked_add(step) {
-                Some(v) => v,
-                None => break,
-            };
+            periods.push(EdcfParams { period: Some(value) });
+            match value.checked_add(step) {
+                Some(next) => { if next == value { break; } value = next; }
+                None => break, // overflow -> stop expansion
+            }
         }
         periods
     }

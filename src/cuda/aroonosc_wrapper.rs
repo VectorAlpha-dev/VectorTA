@@ -12,8 +12,6 @@
 //! - "aroonosc_many_series_one_param_f32"
 
 #![cfg(feature = "cuda")]
-
-use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::aroonosc::{AroonOscBatchRange, AroonOscParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -24,25 +22,28 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaAroonOscError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
     NotImplemented,
 }
-
-impl fmt::Display for CudaAroonOscError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaAroonOscError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaAroonOscError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-            CudaAroonOscError::NotImplemented => write!(f, "CUDA AroonOsc not implemented"),
-        }
-    }
-}
-
-impl std::error::Error for CudaAroonOscError {}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -73,18 +74,32 @@ impl Default for CudaAroonOscPolicy {
 pub struct CudaAroonOsc {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaAroonOscPolicy,
     last_batch_block: Option<u32>,
     last_many_block: Option<u32>,
 }
 
+pub struct DeviceArrayF32Aroonosc {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+impl DeviceArrayF32Aroonosc {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
+}
+
 impl CudaAroonOsc {
     pub fn new(device_id: usize) -> Result<Self, CudaAroonOscError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/aroonosc_kernel.ptx"));
         // Prefer context target + O2; retry with simpler options if needed
@@ -96,16 +111,15 @@ impl CudaAroonOsc {
             ],
         )
         .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+        .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaAroonOscPolicy::default(),
             last_batch_block: None,
             last_many_block: None,
@@ -119,6 +133,21 @@ impl CudaAroonOsc {
         &self.policy
     }
 
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaAroonOscError> {
+        if let Ok((free, _)) = mem_get_info() {
+            let need = required_bytes.saturating_add(headroom_bytes);
+            if need > free {
+                return Err(CudaAroonOscError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
+        }
+        Ok(())
+    }
+
     // ---------- Batch: one-series × many-params ----------
 
     pub fn aroonosc_batch_dev(
@@ -126,7 +155,7 @@ impl CudaAroonOsc {
         high_f32: &[f32],
         low_f32: &[f32],
         sweep: &AroonOscBatchRange,
-    ) -> Result<DeviceArrayF32, CudaAroonOscError> {
+    ) -> Result<DeviceArrayF32Aroonosc, CudaAroonOscError> {
         let (combos, first_valid, series_len) =
             Self::prepare_batch_inputs(high_f32, low_f32, sweep)?;
         let n_combos = combos.len();
@@ -136,29 +165,24 @@ impl CudaAroonOsc {
             .collect();
 
         // VRAM estimate with 64 MB headroom
-        let bytes = high_f32.len() * 4
-            + low_f32.len() * 4
-            + lengths_i32.len() * 4
-            + n_combos * series_len * 4
-            + 64 * 1024 * 1024;
-        if let Ok((free, _)) = mem_get_info() {
-            if bytes > free {
-                return Err(CudaAroonOscError::InvalidInput(format!(
-                    "estimated device memory {:.2} MB exceeds free VRAM",
-                    (bytes as f64) / (1024.0 * 1024.0)
-                )));
-            }
-        }
+        let in_bytes = high_f32.len().saturating_mul(4) + low_f32.len().saturating_mul(4);
+        let param_bytes = lengths_i32.len().saturating_mul(4);
+        let out_bytes = n_combos
+            .checked_mul(series_len)
+            .and_then(|x| x.checked_mul(4))
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("byte size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(param_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        let d_high = DeviceBuffer::from_slice(high_f32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_f32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
-        let d_lengths = DeviceBuffer::from_slice(&lengths_i32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaAroonOscError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaAroonOscError::Cuda)?;
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32).map_err(CudaAroonOscError::Cuda)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(series_len * n_combos)
-                .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?
+                .map_err(CudaAroonOscError::Cuda)?
         };
 
         let avg_len: f32 = lengths_i32
@@ -177,12 +201,10 @@ impl CudaAroonOsc {
             &mut d_out,
             avg_len,
         )?;
+        // Ensure producing stream is synchronized before handing off VRAM handle
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: series_len,
-        })
+        Ok(DeviceArrayF32Aroonosc { buf: d_out, rows: n_combos, cols: series_len, ctx: self.context.clone(), device_id: self.device_id })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -209,7 +231,7 @@ impl CudaAroonOsc {
             let func = self
                 .module
                 .get_function("aroonosc_batch_f32")
-                .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaAroonOscError::MissingKernelSymbol { name: "aroonosc_batch_f32" })?;
             let mut high_ptr = d_high.as_device_ptr().as_raw();
             let mut low_ptr = d_low.as_device_ptr().as_raw();
             let mut lengths_ptr = d_lengths.as_device_ptr().as_raw();
@@ -230,7 +252,7 @@ impl CudaAroonOsc {
 
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+                .map_err(CudaAroonOscError::Cuda)?;
         }
         // For debug logging parity; print once per process when BENCH_DEBUG=1
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
@@ -287,11 +309,9 @@ impl CudaAroonOsc {
             ));
         }
 
-        let combos = expand_lengths(sweep);
+        let combos = expand_lengths(sweep)?;
         if combos.is_empty() {
-            return Err(CudaAroonOscError::InvalidInput(
-                "no length combinations".into(),
-            ));
+            return Err(CudaAroonOscError::InvalidInput("no length combinations".into()));
         }
 
         let first_valid = (0..len)
@@ -328,7 +348,7 @@ impl CudaAroonOsc {
         cols: usize,
         rows: usize,
         length: usize,
-    ) -> Result<DeviceArrayF32, CudaAroonOscError> {
+    ) -> Result<DeviceArrayF32Aroonosc, CudaAroonOscError> {
         if high_tm_f32.len() != low_tm_f32.len() {
             return Err(CudaAroonOscError::InvalidInput("mismatched inputs".into()));
         }
@@ -371,15 +391,11 @@ impl CudaAroonOsc {
             }
         }
 
-        let d_high = DeviceBuffer::from_slice(high_tm_f32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_tm_f32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high_tm_f32).map_err(CudaAroonOscError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low_tm_f32).map_err(CudaAroonOscError::Cuda)?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids).map_err(CudaAroonOscError::Cuda)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(rows * cols)
-                .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized(rows * cols).map_err(CudaAroonOscError::Cuda)?
         };
 
         self.launch_many_series_kernel(
@@ -391,12 +407,10 @@ impl CudaAroonOsc {
             length as i32,
             &mut d_out,
         )?;
+        // Ensure producing stream is synchronized before handing off VRAM handle
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32Aroonosc { buf: d_out, rows, cols, ctx: self.context.clone(), device_id: self.device_id })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -421,7 +435,7 @@ impl CudaAroonOsc {
             let func = self
                 .module
                 .get_function("aroonosc_many_series_one_param_f32")
-                .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaAroonOscError::MissingKernelSymbol { name: "aroonosc_many_series_one_param_f32" })?;
             let mut high_ptr = d_high_tm.as_device_ptr().as_raw();
             let mut low_ptr = d_low_tm.as_device_ptr().as_raw();
             let mut fv_ptr = d_first_valids.as_device_ptr().as_raw();
@@ -440,7 +454,7 @@ impl CudaAroonOsc {
             ];
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+                .map_err(CudaAroonOscError::Cuda)?;
         }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if self.last_many_block != Some(block_x) {
@@ -470,19 +484,16 @@ impl CudaAroonOsc {
                 combos.len() * series_len
             )));
         }
-        let d_high = DeviceBuffer::from_slice(high_f32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_f32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaAroonOscError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaAroonOscError::Cuda)?;
         let lengths_i32: Vec<i32> = combos
             .iter()
             .map(|p| p.length.unwrap_or(0) as i32)
             .collect();
-        let d_lengths = DeviceBuffer::from_slice(&lengths_i32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32).map_err(CudaAroonOscError::Cuda)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(series_len * combos.len())
-                .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?
+                .map_err(CudaAroonOscError::Cuda)?
         };
 
         let avg_len: f32 = lengths_i32
@@ -502,12 +513,8 @@ impl CudaAroonOsc {
             avg_len,
         )?;
         // Ensure the kernel finished, then single D2H copy
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
-        d_out
-            .copy_to(out)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+        self.stream.synchronize().map_err(CudaAroonOscError::Cuda)?;
+        d_out.copy_to(out).map_err(CudaAroonOscError::Cuda)?;
         Ok((combos.len(), series_len, combos))
     }
 
@@ -529,19 +536,16 @@ impl CudaAroonOsc {
             )));
         }
 
-        let d_high = DeviceBuffer::from_slice(high_f32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_f32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+        let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaAroonOscError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaAroonOscError::Cuda)?;
         let lengths_i32: Vec<i32> = combos
             .iter()
             .map(|p| p.length.unwrap_or(0) as i32)
             .collect();
-        let d_lengths = DeviceBuffer::from_slice(&lengths_i32)
-            .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32).map_err(CudaAroonOscError::Cuda)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized(series_len * combos.len())
-                .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?
+                .map_err(CudaAroonOscError::Cuda)?
         };
 
         let avg_len: f32 = lengths_i32
@@ -564,26 +568,37 @@ impl CudaAroonOsc {
         unsafe {
             d_out
                 .async_copy_to(pinned_out.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaAroonOscError::Cuda(e.to_string()))?;
+                .map_err(CudaAroonOscError::Cuda)?;
         }
         Ok((combos.len(), series_len, combos))
     }
 }
 
-fn expand_lengths(range: &AroonOscBatchRange) -> Vec<AroonOscParams> {
+fn expand_lengths(range: &AroonOscBatchRange) -> Result<Vec<AroonOscParams>, CudaAroonOscError> {
     let (start, end, step) = range.length;
-    if step == 0 || start == end {
-        return vec![AroonOscParams {
-            length: Some(start),
-        }];
-    }
-    let mut v = Vec::new();
-    let mut cur = start;
-    while cur <= end {
-        v.push(AroonOscParams { length: Some(cur) });
-        cur = cur.saturating_add(step);
-    }
-    v
+    let v: Vec<usize> = if step == 0 || start == end {
+        vec![start]
+    } else if start < end {
+        let v: Vec<usize> = (start..=end).step_by(step).collect();
+        if v.is_empty() {
+            return Err(CudaAroonOscError::InvalidInput("invalid length range".into()));
+        }
+        v
+    } else {
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            let next = cur.saturating_sub(step);
+            if next == cur { break; }
+            cur = next;
+        }
+        if v.is_empty() {
+            return Err(CudaAroonOscError::InvalidInput("invalid length range".into()));
+        }
+        v
+    };
+    Ok(v.into_iter().map(|l| AroonOscParams { length: Some(l) }).collect())
 }
 
 // ---------- Bench profiles ----------

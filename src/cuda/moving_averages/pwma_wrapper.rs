@@ -7,7 +7,7 @@
 
 #![cfg(feature = "cuda")]
 
-use super::alma_wrapper::DeviceArrayF32;
+use std::sync::Arc;
 use super::cwma_wrapper::{BatchKernelPolicy, BatchThreadsPerOutput, ManySeriesKernelPolicy};
 use crate::indicators::moving_averages::pwma::{expand_grid, PwmaBatchRange, PwmaParams};
 use cust::context::Context;
@@ -20,32 +20,51 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::{c_void, CStr};
 use std::fmt;
+use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const PWMA_MAX_PERIOD_CONST: usize = 4096; // must match kernel constant
 const BATCH_TX: u32 = 128; // must match async tiled kernel
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaPwmaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("launch config too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("out of memory: required={required}B, free={free}B, headroom={headroom}B")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("device mismatch: buf={buf}, current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
 
-impl fmt::Display for CudaPwmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaPwmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaPwmaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
+/// VRAM-backed array for PWMA results with context lifetime and device id.
+pub struct DeviceArrayF32Pwma {
+    pub buf: DeviceBuffer<f32>,
+    pub rows: usize,
+    pub cols: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
 }
-
-impl std::error::Error for CudaPwmaError {}
+impl DeviceArrayF32Pwma {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    #[inline]
+    pub fn len(&self) -> usize { self.rows * self.cols }
+}
 
 pub struct CudaPwma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaPwmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -60,10 +79,9 @@ pub struct CudaPwma {
 
 impl CudaPwma {
     pub fn new(device_id: usize) -> Result<Self, CudaPwmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/pwma_kernel.ptx"));
         let jit_opts = &[
@@ -73,16 +91,14 @@ impl CudaPwma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         // Resolve optional __constant__ symbol availability for weights
         let name = unsafe { CStr::from_bytes_with_nul_unchecked(b"pwma_const_w\0") };
@@ -178,7 +194,10 @@ impl CudaPwma {
         }
 
         let n_combos = combos.len();
-        let mut weights_flat = vec![0.0f32; n_combos * max_period];
+        let n_weights = n_combos
+            .checked_mul(max_period)
+            .ok_or_else(|| CudaPwmaError::InvalidInput("n_combos*max_period overflows".into()))?;
+        let mut weights_flat = vec![0.0f32; n_weights];
         for (row, prm) in combos.iter().enumerate() {
             let weights = Self::pascal_weights_f32(prm.period.unwrap())?;
             let base = row * max_period;
@@ -283,7 +302,7 @@ impl CudaPwma {
         let func = self
             .module
             .get_function("pwma_batch_f32")
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPwmaError::MissingKernelSymbol { name: "pwma_batch_f32" })?;
 
         unsafe {
             let this = self as *const _ as *mut CudaPwma;
@@ -321,9 +340,7 @@ impl CudaPwma {
                     &mut max_period_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, shared_bytes, args)
-                    .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, shared_bytes, args)?;
             }
         }
 
@@ -350,7 +367,7 @@ impl CudaPwma {
         &self,
         data_f32: &[f32],
         sweep: &PwmaBatchRange,
-    ) -> Result<DeviceArrayF32, CudaPwmaError> {
+    ) -> Result<DeviceArrayF32Pwma, CudaPwmaError> {
         let (combos, first_valid, series_len, max_period, weights_flat) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
@@ -362,43 +379,44 @@ impl CudaPwma {
             .collect();
 
         // VRAM estimate and guard (prices + weights + periods + warms + out)
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let weights_bytes = n_combos * max_period * std::mem::size_of::<f32>();
-        let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let warms_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + weights_bytes + periods_bytes + warms_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaPwmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        let szf = std::mem::size_of::<f32>();
+        let szi = std::mem::size_of::<i32>();
+        let prices_bytes = series_len.checked_mul(szf)
+            .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
+        let weights_bytes = n_combos.checked_mul(max_period)
+            .and_then(|v| v.checked_mul(szf))
+            .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
+        let periods_bytes = n_combos.checked_mul(szi)
+            .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
+        let warms_bytes = n_combos.checked_mul(szi)
+            .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = n_combos.checked_mul(series_len)
+            .and_then(|v| v.checked_mul(szf))
+            .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(weights_bytes).and_then(|v| v.checked_add(periods_bytes))
+            .and_then(|v| v.checked_add(warms_bytes)).and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
+        Self::ensure_fit(required, 64 * 1024 * 1024)?;
 
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
-        let d_weights = DeviceBuffer::from_slice(&weights_flat)
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
-        let d_warms =
-            DeviceBuffer::from_slice(&warms_i32).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-                .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
+        let d_weights = DeviceBuffer::from_slice(&weights_flat)?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let d_warms = DeviceBuffer::from_slice(&warms_i32)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
 
         self.launch_batch_kernel(
             &d_prices, &d_weights, &d_periods, &d_warms, series_len, n_combos, max_period,
             &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
+        Ok(DeviceArrayF32Pwma {
             buf: d_out,
             rows: n_combos,
             cols: series_len,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
         })
     }
 
@@ -540,7 +558,7 @@ impl CudaPwma {
                 ];
                 self.stream
                     .launch(&func, grid, block, shared_bytes, args)
-                    .map_err(|e| CudaPwmaError::Cuda(e.to_string()))
+                    .map_err(|e| CudaPwmaError::Cuda(e))
                     .ok()?;
             }
             unsafe {
@@ -610,9 +628,7 @@ impl CudaPwma {
                             &mut first_valids_ptr as *mut _ as *mut c_void,
                             &mut out_ptr as *mut _ as *mut c_void,
                         ];
-                        self.stream
-                            .launch(&func, grid, block, shared_bytes, args)
-                            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+                        self.stream.launch(&func, grid, block, shared_bytes, args)?;
                     }
                     unsafe {
                         let this = self as *const _ as *mut CudaPwma;
@@ -628,7 +644,7 @@ impl CudaPwma {
         let func = self
             .module
             .get_function("pwma_multi_series_one_param_f32")
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaPwmaError::MissingKernelSymbol { name: "pwma_multi_series_one_param_f32" })?;
 
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -658,9 +674,7 @@ impl CudaPwma {
                 &mut first_valids_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, shared_bytes, args)?;
         }
         unsafe {
             let this = self as *const _ as *mut CudaPwma;
@@ -703,46 +717,44 @@ impl CudaPwma {
         cols: usize,
         rows: usize,
         params: &PwmaParams,
-    ) -> Result<DeviceArrayF32, CudaPwmaError> {
+    ) -> Result<DeviceArrayF32Pwma, CudaPwmaError> {
         let (first_valids, weights, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         // VRAM estimate: prices + (weights if not const) + first_valids + out
-        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
+        let prices_bytes = cols.checked_mul(rows)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
         let use_const = self.cmem_available
             && self.module.get_function("pwma_ms1p_const_f32").is_ok()
             && period <= PWMA_MAX_PERIOD_CONST;
-        let weights_bytes = if use_const {
-            0
-        } else {
-            period * std::mem::size_of::<f32>()
+        let weights_bytes = if use_const { 0 } else {
+            period.checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?
         };
-        let fv_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
-        let required = prices_bytes + weights_bytes + fv_bytes + out_bytes;
-        if !Self::will_fit(required, 64 * 1024 * 1024) {
-            return Err(CudaPwmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        let fv_bytes = cols.checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = cols.checked_mul(rows)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(weights_bytes).and_then(|v| v.checked_add(fv_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
+        Self::ensure_fit(required, 64 * 1024 * 1024)?;
 
-        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
         let use_const = self.cmem_available
             && self.module.get_function("pwma_ms1p_const_f32").is_ok()
             && period <= PWMA_MAX_PERIOD_CONST;
         let d_weights = if use_const {
             // no device weights needed when using constant memory
-            unsafe { DeviceBuffer::uninitialized(0) }
-                .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?
+            unsafe { DeviceBuffer::uninitialized(0) }?
         } else {
-            DeviceBuffer::from_slice(&weights).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(&weights)?
         };
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
         // Populate constant memory when used
         if use_const {
             let name = unsafe { CStr::from_bytes_with_nul_unchecked(b"pwma_const_w\0") };
@@ -752,7 +764,7 @@ impl CudaPwma {
                     *v = 0.0;
                 }
                 arr[..period].copy_from_slice(&weights);
-                unsafe { sym.copy_from(&arr) }.map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+                unsafe { sym.copy_from(&arr) }?;
             }
         }
 
@@ -766,14 +778,14 @@ impl CudaPwma {
             &mut d_out_tm,
             use_const,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
+        Ok(DeviceArrayF32Pwma {
             buf: d_out_tm,
             rows,
             cols,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
         })
     }
 
@@ -795,21 +807,17 @@ impl CudaPwma {
         let (first_valids, weights, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
         let use_const = self.cmem_available
             && self.module.get_function("pwma_ms1p_const_f32").is_ok()
             && period <= PWMA_MAX_PERIOD_CONST;
         let d_weights = if use_const {
-            unsafe { DeviceBuffer::uninitialized(0) }
-                .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?
+            unsafe { DeviceBuffer::uninitialized(0) }?
         } else {
-            DeviceBuffer::from_slice(&weights).map_err(|e| CudaPwmaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice(&weights)?
         };
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
         if use_const {
             let name = unsafe { CStr::from_bytes_with_nul_unchecked(b"pwma_const_w\0") };
             if let Ok(mut sym) = self.module.get_global::<[f32; PWMA_MAX_PERIOD_CONST]>(name) {
@@ -818,7 +826,7 @@ impl CudaPwma {
                     *v = 0.0;
                 }
                 arr[..period].copy_from_slice(&weights);
-                unsafe { sym.copy_from(&arr) }.map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+                unsafe { sym.copy_from(&arr) }?;
             }
         }
 
@@ -832,20 +840,13 @@ impl CudaPwma {
             &mut d_out_tm,
             use_const,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         // Use pinned host memory for the device->host copy to avoid extra staging
-        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }?;
         unsafe {
-            d_out_tm
-                .async_copy_to(&mut pinned, &self.stream)
-                .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        d_out_tm.async_copy_to(&mut pinned, &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaPwmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         out_tm.copy_from_slice(pinned.as_slice());
         Ok(())
     }
@@ -980,6 +981,23 @@ impl CudaPwma {
         } else {
             true
         }
+    }
+
+    #[inline]
+    fn ensure_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaPwmaError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        if let Some((free, _total)) = Self::device_mem_info() {
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaPwmaError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
+        }
+        Ok(())
     }
 
     #[inline]

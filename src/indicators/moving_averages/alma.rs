@@ -1,5 +1,7 @@
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 /// # ALMA - Arnaud Legoux Moving Average
 ///
 /// A Gaussian-weighted moving average designed to reduce lag while maintaining smoothness.
@@ -20,6 +22,8 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 ///   buffer to make the active window contiguous and enable SIMD dot products.
 /// - **Decision**: Streaming uses a mirrored buffer + AVX2/AVX512 contiguous dot for speed; scalar
 ///   path remains safe and exact. Outputs match batch ALMA (tests unchanged).
+/// - **Decision log**: SIMD enabled (AVX2/AVX512) and fastest by >5% at 100k; CUDA wrapper present
+///   and returns VRAM handles; Python interop provides CAI v3 + DLPack. Numerical outputs unchanged.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -41,30 +45,151 @@ pub struct DeviceArrayF32Py {
 impl DeviceArrayF32Py {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner;
         let d = PyDict::new(py);
         // shape: (rows, cols)
-        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("shape", (inner.rows, inner.cols))?;
         // typestr: little-endian float32
         d.set_item("typestr", "<f4")?;
         // Explicit strides for row-major FP32: (row stride in bytes, item stride in bytes)
         d.set_item(
             "strides",
             (
-                self.inner.cols * std::mem::size_of::<f32>(),
+                inner.cols * std::mem::size_of::<f32>(),
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
         // Stream is omitted because producing kernels synchronize before returning
         // the VRAM handle; consumers need no additional synchronization per CAI v3.
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack__<'py>(&self, _py: Python<'py>) -> PyResult<PyObject> {
-        Err(pyo3::exceptions::PyNotImplementedError::new_err(
-            "__dlpack__ not implemented yet",
-        ))
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        #[allow(unused_mut)]
+        let mut dev: i32 = 0;
+        unsafe {
+            let _ = cust::sys::cuCtxGetDevice(&mut dev);
+        }
+        Ok((2, dev))
+    }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32,
+            _ctx_guard: cust::sys::CUcontext, // retained CUDA context to keep allocations alive
+            _device_id: u32,
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() { return; }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    // Release retained CUDA context if any
+                    if !(*holder_ptr)._ctx_guard.is_null() {
+                        let _ = cust::sys::cuCtxRelease((*holder_ptr)._ctx_guard);
+                    }
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt); }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        // Move the VRAM handle into the DLManagedTensor holder to guarantee lifetime.
+        // Retain current CUDA context to keep it alive while the DL capsule exists.
+        let mut retained_ctx: cust::sys::CUcontext = std::ptr::null_mut();
+        unsafe {
+            let _ = cust::sys::cuCtxGetCurrent(&mut retained_ctx);
+            if !retained_ctx.is_null() {
+                let _ = cust::sys::cuCtxRetain(&mut retained_ctx);
+            }
+        }
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+        );
+
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
+                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [inner.rows as i64, inner.cols as i64],
+            strides: [inner.cols as i64, 1],
+            arr: inner,
+            _ctx_guard: retained_ctx,
+            _device_id: 0,
+        });
+
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
+
+        let _leaked = Box::into_raw(holder);
+
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut std::ffi::c_void,
+                name.as_ptr() as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe { dl_managed_deleter(mt_ptr) };
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
     }
 }
 
@@ -272,6 +397,15 @@ pub enum AlmaError {
 
     #[error("alma: Invalid offset: {offset}")]
     InvalidOffset { offset: f64 },
+
+    #[error("alma: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("alma: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+
+    #[error("alma: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 #[inline]
@@ -399,10 +533,7 @@ pub fn alma_into_slice(dst: &mut [f64], input: &AlmaInput, kern: Kernel) -> Resu
     let (data, weights, period, first, inv_n, chosen) = alma_prepare(input, kern)?;
 
     if dst.len() != data.len() {
-        return Err(AlmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
+        return Err(AlmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
     alma_compute_into(data, &weights, period, first, inv_n, chosen, dst);
@@ -425,10 +556,7 @@ pub fn alma_into(input: &AlmaInput, out: &mut [f64]) -> Result<(), AlmaError> {
     let (data, weights, period, first, inv_n, chosen) = alma_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(AlmaError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
-        });
+        return Err(AlmaError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
     // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
@@ -1164,12 +1292,7 @@ pub fn alma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(AlmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        _ => return Err(AlmaError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
@@ -1206,43 +1329,59 @@ impl AlmaBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
+fn expand_grid(r: &AlmaBatchRange) -> Result<Vec<AlmaParams>, AlmaError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, AlmaError> {
+        if step == 0 || start == end { return Ok(vec![start]); }
+        if start < end {
+            return Ok((start..=end).step_by(step.max(1)).collect());
         }
-        (start..=end).step_by(step).collect()
+        // reversed bounds
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i { v.push(x as usize); x -= st; }
+        if v.is_empty() {
+            return Err(AlmaError::InvalidRange { start: start.to_string(), end: end.to_string(), step: step.to_string() });
+        }
+        Ok(v)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, AlmaError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return Ok(vec![start]); }
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.abs();
+            while x <= end + 1e-12 { v.push(x); x += st; }
+            if v.is_empty() { return Err(AlmaError::InvalidRange { start: start.to_string(), end: end.to_string(), step: step.to_string() }); }
+            return Ok(v);
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
-        }
-        v
+        let st = step.abs();
+        while x + 1e-12 >= end { v.push(x); x -= st; }
+        if v.is_empty() { return Err(AlmaError::InvalidRange { start: start.to_string(), end: end.to_string(), step: step.to_string() }); }
+        Ok(v)
     }
 
-    let periods = axis_usize(r.period);
-    let offsets = axis_f64(r.offset);
-    let sigmas = axis_f64(r.sigma);
+    let periods = axis_usize(r.period)?;
+    let offsets = axis_f64(r.offset)?;
+    let sigmas = axis_f64(r.sigma)?;
 
-    let mut out = Vec::with_capacity(periods.len() * offsets.len() * sigmas.len());
+    let cap = periods.len()
+        .checked_mul(offsets.len())
+        .and_then(|x| x.checked_mul(sigmas.len()))
+        .ok_or_else(|| AlmaError::InvalidRange { start: "cap".into(), end: "overflow".into(), step: "mul".into() })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &o in &offsets {
             for &s in &sigmas {
-                out.push(AlmaParams {
-                    period: Some(p),
-                    offset: Some(o),
-                    sigma: Some(s),
-                });
+                out.push(AlmaParams { period: Some(p), offset: Some(o), sigma: Some(s) });
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1275,7 +1414,7 @@ fn alma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<AlmaBatchOutput, AlmaError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let cols = data.len();
     let rows = combos.len();
 
@@ -1283,6 +1422,10 @@ fn alma_batch_inner(
         return Err(AlmaError::AllValuesNaN);
     }
 
+    // Guard rows*cols overflow
+    let _ = rows.checked_mul(cols).ok_or_else(|| AlmaError::InvalidRange {
+        start: rows.to_string(), end: cols.to_string(), step: "rows*cols".into()
+    })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     let warm: Vec<usize> = combos
@@ -1322,12 +1465,9 @@ fn alma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<AlmaParams>, AlmaError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(AlmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(AlmaError::InvalidRange { start: "range".into(), end: "range".into(), step: "empty".into() });
     }
 
     let first = data
@@ -2652,7 +2792,7 @@ pub fn alma_batch_py<'py>(
         sigma: sigma_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2735,7 +2875,8 @@ pub fn alma_cuda_batch_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.alma_batch_dev(slice_in, &sweep)
+        cuda
+            .alma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
@@ -2772,7 +2913,8 @@ pub fn alma_cuda_many_series_one_param_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.alma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+        cuda
+            .alma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
@@ -3062,11 +3204,13 @@ pub fn alma_batch_into(
             sigma: (sigma_start, sigma_end, sigma_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
+        let total = rows.checked_mul(cols).ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         alma_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

@@ -20,6 +20,8 @@
 //! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
 //! - **SIMD note**: The SMMA recurrence is sequential; SIMD provides little gain without
 //!   changing the algorithm and may change rounding. Stubs keep scalar for bit‑consistency.
+//! - **CUDA wrapper**: Typed errors (OOM, missing symbol, launch config) and checked sizes; Python interop via
+//!   shared DeviceArrayF32Py exposes CUDA Array Interface v3.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
@@ -39,7 +41,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaSmma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::smma_wrapper::DeviceArrayF32Smma;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -192,7 +194,9 @@ pub enum SmmaError {
     #[error("smma: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("smma: Invalid kernel for batch operation: {kernel:?} (expected batch kernel)")]
-    InvalidKernel { kernel: Kernel },
+    InvalidKernelForBatch { kernel: Kernel },
+    #[error("smma: Invalid range expansion: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
     #[error("smma: Output buffer length mismatch: expected = {expected}, actual = {actual}")]
     OutputLenMismatch { expected: usize, actual: usize },
 }
@@ -473,12 +477,40 @@ fn smma_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, 
 
 #[inline]
 pub fn expand_grid(r: &SmmaBatchRange) -> Vec<SmmaParams> {
-    let axis_usize = |(start, end, step): (usize, usize, usize)| {
-        if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
+    let axis_usize = |(start, end, step): (usize, usize, usize)| -> Vec<usize> {
+        // Zero step → static; single value regardless of bounds
+        if step == 0 {
+            return vec![start];
         }
+        if start == end {
+            return vec![start];
+        }
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) => {
+                        if next == v { break; }
+                        v = next;
+                    }
+                    None => break, // stop on overflow
+                }
+            }
+        } else {
+            // reversed bounds supported
+            let mut v = start;
+            while v >= end {
+                out.push(v);
+                // step > 0 by construction; use saturating_sub guard + break
+                let next = v.saturating_sub(step);
+                if next == v { break; }
+                v = next;
+                if v == 0 { if end > 0 { break; } }
+            }
+        }
+        out
     };
     axis_usize(r.period)
         .into_iter()
@@ -642,7 +674,7 @@ pub fn smma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        other => return Err(SmmaError::InvalidKernel { kernel: other }),
+        other => return Err(SmmaError::InvalidKernelForBatch { kernel: other }),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -704,10 +736,8 @@ fn smma_batch_inner(
 
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(SmmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, st) = sweep.period;
+        return Err(SmmaError::InvalidRange { start: s, end: e, step: st });
     }
     let first = data
         .iter()
@@ -819,10 +849,8 @@ fn smma_batch_inner_into(
 
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(SmmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, st) = sweep.period;
+        return Err(SmmaError::InvalidRange { start: s, end: e, step: st });
     }
     let first = data
         .iter()
@@ -1729,13 +1757,22 @@ pub fn smma_batch_py<'py>(
         period: period_range,
     };
 
-    // Calculate dimensions
+    // Calculate dimensions (with robust expansion)
     let combos = expand_grid(&sweep);
+    if combos.is_empty() {
+        return Err(PyValueError::new_err(format!(
+            "invalid period range: start={}, end={}, step={}",
+            sweep.period.0, sweep.period.1, sweep.period.2
+        )));
+    }
     let rows = combos.len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
 
     // Pre-allocate output array (OK for batch operations)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Compute without GIL
@@ -1780,7 +1817,7 @@ pub fn smma_cuda_batch_dev_py(
     data: numpy::PyReadonlyArray1<'_, f64>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32SmmaPy> {
     use numpy::PyArrayMethods;
 
     if !cuda_available() {
@@ -1799,7 +1836,7 @@ pub fn smma_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32SmmaPy { inner: Some(inner) })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1810,7 +1847,7 @@ pub fn smma_cuda_many_series_one_param_dev_py(
     data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32SmmaPy> {
     use numpy::PyUntypedArrayMethods;
 
     if !cuda_available() {
@@ -1830,7 +1867,145 @@ pub fn smma_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32SmmaPy { inner: Some(inner) })
+}
+
+// ---------------- SMMA Python device handle (CAI v3 + DLPack) ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Smma", unsendable)]
+pub struct DeviceArrayF32SmmaPy {
+    pub(crate) inner: Option<DeviceArrayF32Smma>,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32SmmaPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        d.set_item("version", 3)?; // producing stream synchronized
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        Ok((2, inner.device_id as i32))
+    }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32Smma,
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() { return; }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt); }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
+                    device: DLDevice { device_type: 2, device_id: inner.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [inner.rows as i64, inner.cols as i64],
+            strides: [inner.cols as i64, 1],
+            arr: inner,
+        });
+
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
+
+        let _leaked = Box::into_raw(holder);
+
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut std::ffi::c_void,
+                name.as_ptr() as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe { dl_managed_deleter(mt_ptr) };
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 /// Write SMMA values directly to output slice - no allocations
@@ -2073,10 +2248,14 @@ pub fn smma_batch_into(
         };
 
         let combos = expand_grid(&sweep);
+        if combos.is_empty() {
+            return Err(JsValue::from_str("invalid period range"));
+        }
         let rows = combos.len();
         let cols = len;
+        let total = rows.checked_mul(cols).ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         // Resolve Auto kernel to concrete batch kernel, then map to non-batch
         let batch = detect_best_batch_kernel();

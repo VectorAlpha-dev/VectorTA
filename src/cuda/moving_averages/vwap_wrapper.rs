@@ -11,29 +11,35 @@ use cust::launch;
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
+use cust::error::CudaError;
 use cust::stream::{Stream, StreamFlags};
 use std::convert::TryFrom;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaVwapError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required}B, free={free}B, headroom={headroom}B")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buffer device={buf}, current device={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaVwapError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaVwapError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaVwapError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaVwapError {}
 
 // -------- Kernel selection policy (parity with ALMA/CWMA, simplified for VWAP) --------
 
@@ -82,7 +88,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaVwap {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaVwapPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -103,11 +109,10 @@ struct PreparedBatch {
 
 impl CudaVwap {
     pub fn new(device_id: usize) -> Result<Self, CudaVwapError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
 
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vwap_kernel.ptx"));
         // Prefer highest optimization; O4 is default "most optimized" in cust docs
@@ -117,8 +122,7 @@ impl CudaVwap {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
         // Bias L1 over shared (kernels do not use dynamic shared memory)
         if let Ok(mut f) = module.get_function("vwap_batch_f32") {
             let _ = f.set_cache_config(CacheConfig::PreferL1);
@@ -127,8 +131,7 @@ impl CudaVwap {
             let _ = f.set_cache_config(CacheConfig::PreferL1);
         }
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
@@ -143,9 +146,7 @@ impl CudaVwap {
         })
     }
 
-    pub fn synchronize(&self) -> Result<(), CudaVwapError> {
-        Ok(())
-    }
+    pub fn synchronize(&self) -> Result<(), CudaVwapError> { Ok(()) }
 
     pub fn set_policy(&mut self, policy: CudaVwapPolicy) {
         self.policy = policy;
@@ -153,6 +154,8 @@ impl CudaVwap {
     pub fn policy(&self) -> &CudaVwapPolicy {
         &self.policy
     }
+    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch
     }
@@ -211,19 +214,16 @@ impl CudaVwap {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
+    fn ensure_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaVwapError> {
+        if !Self::mem_check_enabled() { return Ok(()); }
         if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
-        } else {
-            true
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaVwapError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes });
+            }
         }
+        Ok(())
     }
 
     fn prepare_batch_inputs(
@@ -359,7 +359,7 @@ impl CudaVwap {
         let func = self
             .module
             .get_function("vwap_batch_f32")
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVwapError::MissingKernelSymbol { name: "vwap_batch_f32" })?;
 
         // Occupancy-aware suggestion; default to 128 if unavailable
         let (_grid_suggest, block_suggest) = func
@@ -377,6 +377,9 @@ impl CudaVwap {
 
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        if block_x > 1024 {
+            return Err(CudaVwapError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         unsafe {
             let mut ts_ptr = d_timestamps.as_device_ptr().as_raw();
             let mut vol_ptr = d_volumes.as_device_ptr().as_raw();
@@ -404,9 +407,7 @@ impl CudaVwap {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         // Introspection
@@ -446,41 +447,34 @@ impl CudaVwap {
                 + std::mem::size_of::<i64>()
                 + std::mem::size_of::<i32>());
         let month_bytes = month_ids.as_ref().map(|v| v.len() * 4).unwrap_or(0);
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = in_bytes + param_bytes + month_bytes + out_bytes;
+        let out_bytes = n_combos
+            .checked_mul(series_len)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(param_bytes)
+            .and_then(|v| v.checked_add(month_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaVwapError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::ensure_fit(required, headroom)?;
 
-        let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_volumes = unsafe { DeviceBuffer::from_slice_async(&volumes_f32, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(&prices_f32, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_counts = unsafe { DeviceBuffer::from_slice_async(&counts, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_unit_codes = unsafe { DeviceBuffer::from_slice_async(&unit_codes, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_divisors = unsafe { DeviceBuffer::from_slice_async(&divisors, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }?;
+        let d_volumes = unsafe { DeviceBuffer::from_slice_async(&volumes_f32, &self.stream) }?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(&prices_f32, &self.stream) }?;
+        let d_counts = unsafe { DeviceBuffer::from_slice_async(&counts, &self.stream) }?;
+        let d_unit_codes = unsafe { DeviceBuffer::from_slice_async(&unit_codes, &self.stream) }?;
+        let d_divisors = unsafe { DeviceBuffer::from_slice_async(&divisors, &self.stream) }?;
+        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
         let mut d_month_ids = if let Some(ids) = month_ids {
             Some(
-                unsafe { DeviceBuffer::from_slice_async(&ids, &self.stream) }
-                    .map_err(|e| CudaVwapError::Cuda(e.to_string()))?,
+                unsafe { DeviceBuffer::from_slice_async(&ids, &self.stream) }?,
             )
         } else {
             None
         };
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
-                .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
 
         let month_ptr = d_month_ids
             .as_mut()
@@ -525,7 +519,9 @@ impl CudaVwap {
             series_len,
         } = Self::prepare_batch_inputs(timestamps, volumes, prices, sweep)?;
         let n_combos = combos.len();
-        let expected = n_combos * series_len;
+        let expected = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaVwapError::InvalidInput("rows*cols overflow".into()))?;
         if out.len() != expected {
             return Err(CudaVwapError::InvalidInput(format!(
                 "output slice wrong length: got {}, expected {}",
@@ -537,31 +533,20 @@ impl CudaVwap {
         let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
         let volumes_f32: Vec<f32> = volumes.iter().map(|&v| v as f32).collect();
 
-        let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_volumes = unsafe { DeviceBuffer::from_slice_async(&volumes_f32, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_prices = unsafe { DeviceBuffer::from_slice_async(&prices_f32, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_counts = unsafe { DeviceBuffer::from_slice_async(&counts, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_unit_codes = unsafe { DeviceBuffer::from_slice_async(&unit_codes, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_divisors = unsafe { DeviceBuffer::from_slice_async(&divisors, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }?;
+        let d_volumes = unsafe { DeviceBuffer::from_slice_async(&volumes_f32, &self.stream) }?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(&prices_f32, &self.stream) }?;
+        let d_counts = unsafe { DeviceBuffer::from_slice_async(&counts, &self.stream) }?;
+        let d_unit_codes = unsafe { DeviceBuffer::from_slice_async(&unit_codes, &self.stream) }?;
+        let d_divisors = unsafe { DeviceBuffer::from_slice_async(&divisors, &self.stream) }?;
+        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
         let mut d_month_ids = if let Some(ids) = month_ids {
-            Some(
-                unsafe { DeviceBuffer::from_slice_async(&ids, &self.stream) }
-                    .map_err(|e| CudaVwapError::Cuda(e.to_string()))?,
-            )
+            Some(unsafe { DeviceBuffer::from_slice_async(&ids, &self.stream) }?)
         } else {
             None
         };
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(expected, &self.stream) }
-                .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(expected, &self.stream) }?;
 
         let month_ptr = d_month_ids
             .as_mut()
@@ -582,16 +567,11 @@ impl CudaVwap {
             n_combos,
         )?;
         // Async D->H into pinned host memory for throughput, then single sync
-        let mut pinned_out = unsafe { LockedBuffer::<f32>::uninitialized(expected) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let mut pinned_out = unsafe { LockedBuffer::<f32>::uninitialized(expected) }?;
         unsafe {
-            d_out
-                .async_copy_to(pinned_out.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+            d_out.async_copy_to(pinned_out.as_mut_slice(), &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         out.copy_from_slice(pinned_out.as_slice());
 
         Ok((n_combos, series_len, combos))
@@ -611,14 +591,10 @@ impl CudaVwap {
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaVwapError> {
         let n_combos = counts.len();
-        let d_counts = unsafe { DeviceBuffer::from_slice_async(counts, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_unit_codes = unsafe { DeviceBuffer::from_slice_async(unit_codes, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_divisors = unsafe { DeviceBuffer::from_slice_async(divisors, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(first_valids, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let d_counts = unsafe { DeviceBuffer::from_slice_async(counts, &self.stream) }?;
+        let d_unit_codes = unsafe { DeviceBuffer::from_slice_async(unit_codes, &self.stream) }?;
+        let d_divisors = unsafe { DeviceBuffer::from_slice_async(divisors, &self.stream) }?;
+        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(first_valids, &self.stream) }?;
 
         self.vwap_batch_device_with_params(
             d_timestamps,
@@ -658,11 +634,14 @@ impl CudaVwap {
                 "parameter buffer length mismatch".into(),
             ));
         }
-        if d_out.len() != n_combos * series_len {
+        let expected = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaVwapError::InvalidInput("rows*cols overflow".into()))?;
+        if d_out.len() != expected {
             return Err(CudaVwapError::InvalidInput(format!(
                 "output buffer wrong length: got {}, expected {}",
                 d_out.len(),
-                n_combos * series_len
+                expected
             )));
         }
 
@@ -683,9 +662,8 @@ impl CudaVwap {
             series_len,
             n_combos,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     // ---------------- Many-series × one-param (time-major) ----------------
@@ -829,9 +807,20 @@ impl CudaVwap {
         let volumes_tm_f32: Vec<f32> = volumes_tm_f64.iter().map(|&v| v as f32).collect();
 
         // VRAM estimate
-        let in_bytes = rows * std::mem::size_of::<i64>()
-            + 2 * rows * cols * std::mem::size_of::<f32>()
-            + cols * std::mem::size_of::<i32>();
+        let in_bytes_ts = rows
+            .checked_mul(std::mem::size_of::<i64>())
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let in_bytes_floats = rows
+            .checked_mul(cols)
+            .and_then(|v| v.checked_mul(2 * std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let in_bytes_first_valids = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let in_bytes = in_bytes_ts
+            .checked_add(in_bytes_floats)
+            .and_then(|v| v.checked_add(in_bytes_first_valids))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
         let month_bytes = if unit_char == 'M' {
             rows * std::mem::size_of::<i32>()
         } else {
@@ -842,37 +831,30 @@ impl CudaVwap {
         } else {
             0
         };
-        let out_bytes = rows * cols * std::mem::size_of::<f32>();
-        let required = in_bytes + month_bytes + out_bytes;
+        let out_bytes = rows
+            .checked_mul(cols)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(month_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaVwapError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::ensure_fit(required, headroom)?;
 
         // Upload
-        let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_volumes_tm = unsafe { DeviceBuffer::from_slice_async(&volumes_tm_f32, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(&prices_tm_f32, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
-        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+        let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }?;
+        let d_volumes_tm = unsafe { DeviceBuffer::from_slice_async(&volumes_tm_f32, &self.stream) }?;
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(&prices_tm_f32, &self.stream) }?;
+        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
         let mut d_month_ids = if unit_char == 'M' {
             let ids = Self::compute_month_ids(timestamps)?;
-            Some(
-                unsafe { DeviceBuffer::from_slice_async(&ids, &self.stream) }
-                    .map_err(|e| CudaVwapError::Cuda(e.to_string()))?,
-            )
+            Some(unsafe { DeviceBuffer::from_slice_async(&ids, &self.stream) }?)
         } else {
             None
         };
         let mut d_out_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(rows * cols, &self.stream) }
-                .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(rows * cols, &self.stream) }?;
 
         // Launch
         self.launch_many_series_kernel(
@@ -910,20 +892,26 @@ impl CudaVwap {
         if cols == 0 || rows == 0 {
             return Err(CudaVwapError::InvalidInput("empty matrix".into()));
         }
-        if d_out_tm.len() != rows * cols {
+        let expected = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaVwapError::InvalidInput("rows*cols overflow".into()))?;
+        if d_out_tm.len() != expected {
             return Err(CudaVwapError::InvalidInput("out buf wrong length".into()));
         }
         if cols == 0 || rows == 0 {
             return Err(CudaVwapError::InvalidInput("empty matrix".into()));
         }
-        if d_out_tm.len() != rows * cols {
+        let expected2 = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaVwapError::InvalidInput("rows*cols overflow".into()))?;
+        if d_out_tm.len() != expected2 {
             return Err(CudaVwapError::InvalidInput("out buf wrong length".into()));
         }
 
         let func = self
             .module
             .get_function("vwap_multi_series_one_param_f32")
-            .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaVwapError::MissingKernelSymbol { name: "vwap_multi_series_one_param_f32" })?;
 
         // unit codes: 0=m,1=h,2=d,3=M
         let (unit_code, divisor_ms, month_ptr): (i32, i64, u64) = match unit_char {
@@ -959,6 +947,9 @@ impl CudaVwap {
 
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        if block_x > 1024 {
+            return Err(CudaVwapError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         unsafe {
             let mut ts_ptr = d_timestamps.as_device_ptr().as_raw();
             let mut vol_ptr = d_volumes_tm.as_device_ptr().as_raw();
@@ -986,9 +977,7 @@ impl CudaVwap {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaVwapError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         unsafe {

@@ -16,13 +16,15 @@
 //! - Streaming update: O(1) via two rolling sums; no full-size temporaries.
 //! - Memory: uses zero-copy helpers for outputs; tiny O(period) ring buffer only.
 //! - Decision: Streaming kernel tightened (no modulo; precomputed reciprocals; NaN semantics preserved).
+//! - CUDA wrapper: typed errors, VRAM checks via will_fit, CAI v3 + DLPack in Python; device context held until
+//!   buffers are freed.
 //! - Rationale: TRIMA = SMA(SMA(x, m1), m2); SIMD helps initial sums; main loop is sequential.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaTrima;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::trima_wrapper::DeviceArrayF32Trima;
 use crate::indicators::sma::{sma, SmaData, SmaInput, SmaParams};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -168,6 +170,8 @@ impl TrimaBuilder {
 
 #[derive(Debug, Error)]
 pub enum TrimaError {
+    #[error("trima: Input data slice is empty.")]
+    EmptyInputData,
     #[error("trima: All values are NaN.")]
     AllValuesNaN,
 
@@ -180,8 +184,18 @@ pub enum TrimaError {
     #[error("trima: Period too small: {period}")]
     PeriodTooSmall { period: usize },
 
+    // Kept for backward compatibility in other call sites
     #[error("trima: No data provided.")]
     NoData,
+
+    #[error("trima: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("trima: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("trima: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -213,7 +227,7 @@ fn trima_prepare<'a>(
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
-        return Err(TrimaError::NoData);
+        return Err(TrimaError::EmptyInputData);
     }
     let first = data
         .iter()
@@ -479,6 +493,13 @@ pub fn trima_into_slice(
 ) -> Result<(), TrimaError> {
     let (data, period, m1, m2, first, chosen) = trima_prepare(input, kernel)?;
 
+    if output.len() != data.len() {
+        return Err(TrimaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: output.len(),
+        });
+    }
+
     // Compute TRIMA values first
     trima_compute_into(data, period, m1, m2, first, chosen, output);
 
@@ -495,16 +516,16 @@ pub fn trima_into_slice(
 ///
 /// - Preserves the NaN warmup prefix exactly like the Vec-returning API
 ///   (uses the same quiet-NaN pattern as `alloc_with_nan_prefix`).
-/// - `out.len()` must equal the input length; returns `InvalidPeriod` on mismatch.
+/// - `out.len()` must equal the input length; returns `OutputLengthMismatch` on mismatch.
 #[cfg(not(feature = "wasm"))]
 #[inline(always)]
 pub fn trima_into(input: &TrimaInput, out: &mut [f64]) -> Result<(), TrimaError> {
     let (data, period, m1, m2, first, chosen) = trima_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(TrimaError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
+        return Err(TrimaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
         });
     }
 
@@ -1071,7 +1092,7 @@ pub fn trima_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        other => other, // allow explicit per-row kernels for tests
+        other => return Err(TrimaError::InvalidKernelForBatch(other)),
     };
 
     // Map batch selector to per-row compute kernel (ALMA pattern)
@@ -1110,14 +1131,32 @@ impl TrimaBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &TrimaBatchRange) -> Vec<TrimaParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TrimaError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let mut v = Vec::new();
+        let mut cur = lo;
+        while cur <= hi {
+            v.push(cur);
+            cur = cur
+                .checked_add(step)
+                .ok_or(TrimaError::InvalidRange { start, end, step })?;
+            if cur == *v.last().unwrap() {
+                break;
+            }
+        }
+        if v.is_empty() {
+            return Err(TrimaError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
 
-    let periods = axis_usize(r.period);
+    let periods = match axis_usize(r.period) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(TrimaParams { period: Some(p) });
@@ -1152,9 +1191,10 @@ fn trima_batch_inner(
 ) -> Result<TrimaBatchOutput, TrimaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(TrimaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(TrimaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -1178,6 +1218,13 @@ fn trima_batch_inner(
         .collect();
 
     // ---------- 2. allocate rows×cols buffer and stamp NaN prefixes ----------
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(TrimaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
@@ -1252,9 +1299,10 @@ pub fn trima_batch_inner_into(
 ) -> Result<Vec<TrimaParams>, TrimaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(TrimaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(TrimaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
 
@@ -1272,6 +1320,19 @@ pub fn trima_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(TrimaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(TrimaError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Stamp warm prefixes via helper on the destination buffer
     let warm: Vec<usize> = combos
@@ -1485,7 +1546,7 @@ pub fn trima_cuda_batch_dev_py(
     data: numpy::PyReadonlyArray1<'_, f64>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32TrimaPy> {
     use numpy::PyArrayMethods;
 
     if !cuda_available() {
@@ -1505,7 +1566,7 @@ pub fn trima_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32TrimaPy { inner: Some(inner) })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1516,7 +1577,7 @@ pub fn trima_cuda_many_series_one_param_dev_py(
     data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DeviceArrayF32TrimaPy> {
     use numpy::PyUntypedArrayMethods;
 
     if !cuda_available() {
@@ -1536,7 +1597,147 @@ pub fn trima_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32TrimaPy { inner: Some(inner) })
+}
+
+// ---------------- TRIMA Python device handle (CAI v3 + DLPack) ----------------
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Trima", unsendable)]
+pub struct DeviceArrayF32TrimaPy {
+    pub(crate) inner: Option<DeviceArrayF32Trima>,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32TrimaPy {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        use pyo3::types::PyDict;
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing stream synchronized before handle is returned
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        Ok((2, inner.device_id as i32)) // 2 == kDLCUDA
+    }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32Trima,
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() { return; }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() {
+                    drop(Box::from_raw(holder_ptr));
+                }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt); }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
+                    device: DLDevice { device_type: 2, device_id: inner.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [inner.rows as i64, inner.cols as i64],
+            strides: [inner.cols as i64, 1],
+            arr: inner,
+        });
+
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
+
+        let _leaked = Box::into_raw(holder);
+
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut std::ffi::c_void,
+                name.as_ptr() as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe { dl_managed_deleter(mt_ptr) };
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 // WASM bindings

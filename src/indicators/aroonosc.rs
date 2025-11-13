@@ -188,23 +188,23 @@ impl AroonOscBuilder {
 
 #[derive(Debug, Error)]
 pub enum AroonOscError {
-    #[error("aroonosc: Invalid length: {length}")]
-    InvalidLength { length: usize },
-
-    #[error("aroonosc: Mismatched array lengths: high_len={high_len}, low_len={low_len}")]
-    MismatchedArrayLengths { high_len: usize, low_len: usize },
-
-    #[error("aroonosc: Not enough data points: required={required}, found={found}")]
-    NotEnoughData { required: usize, found: usize },
-
-    #[error("aroonosc: Empty data")]
-    EmptyData,
-
-    #[error("aroonosc: Invalid kernel")]
-    InvalidKernel,
-
-    #[error("aroonosc: Invalid output length: expected={expected}, got={got}")]
-    InvalidOutputLen { expected: usize, got: usize },
+    #[error("aroonosc: All values are NaN.")]
+    AllValuesNaN,
+    #[error("aroonosc: Input data slice is empty.")]
+    EmptyInputData,
+    #[error("aroonosc: Invalid length: length = {length}, data length = {data_len}")]
+    InvalidLength { length: usize, data_len: usize },
+    #[error("aroonosc: Not enough data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("aroonosc: Mismatch in high/low slice length: high_len={high_len}, low_len={low_len}")]
+    MismatchSliceLength { high_len: usize, low_len: usize },
+    #[error("aroonosc: Output length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    // Batch-specific
+    #[error("aroonosc: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("aroonosc: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 #[inline]
@@ -218,29 +218,29 @@ fn aroon_osc_prepare<'a>(
     kernel: Kernel,
 ) -> Result<(&'a [f64], &'a [f64], usize, usize, Kernel), AroonOscError> {
     let length = input.get_length();
-    if length == 0 {
-        return Err(AroonOscError::InvalidLength { length });
-    }
-
     let high = input.get_high();
     let low = input.get_low();
+    let len = low.len();
+    if length == 0 || length > len {
+        return Err(AroonOscError::InvalidLength { length, data_len: len });
+    }
+
     if high.is_empty() || low.is_empty() {
-        return Err(AroonOscError::EmptyData);
+        return Err(AroonOscError::EmptyInputData);
     }
     if high.len() != low.len() {
-        return Err(AroonOscError::MismatchedArrayLengths {
+        return Err(AroonOscError::MismatchSliceLength {
             high_len: high.len(),
             low_len: low.len(),
         });
     }
 
-    let len = low.len();
-    let first = first_valid_hilo(high, low).ok_or(AroonOscError::EmptyData)?;
+    let first = first_valid_hilo(high, low).ok_or(AroonOscError::AllValuesNaN)?;
     // Need at least (length+1) values after `first`
     if len.saturating_sub(first) < length + 1 {
-        return Err(AroonOscError::NotEnoughData {
-            required: length + 1,
-            found: len.saturating_sub(first),
+        return Err(AroonOscError::NotEnoughValidData {
+            needed: length + 1,
+            valid: len.saturating_sub(first),
         });
     }
 
@@ -281,7 +281,7 @@ pub fn aroon_osc_into(input: &AroonOscInput, out: &mut [f64]) -> Result<(), Aroo
     let (high, low, length, first, chosen) = aroon_osc_prepare(input, Kernel::Auto)?;
 
     if out.len() != high.len() {
-        return Err(AroonOscError::InvalidOutputLen {
+        return Err(AroonOscError::OutputLengthMismatch {
             expected: high.len(),
             got: out.len(),
         });
@@ -519,7 +519,7 @@ pub fn aroon_osc_into_slice(
 ) -> Result<(), AroonOscError> {
     let (high, low, length, first, chosen) = aroon_osc_prepare(input, kern)?;
     if dst.len() != high.len() {
-        return Err(AroonOscError::InvalidLength { length: dst.len() });
+        return Err(AroonOscError::OutputLengthMismatch { expected: high.len(), got: dst.len() });
     }
 
     match chosen {
@@ -551,7 +551,7 @@ pub fn aroon_osc_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(AroonOscError::InvalidKernel);
+            return Err(AroonOscError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -639,10 +639,10 @@ impl AroonOscBatchBuilder {
     pub fn apply_candles(self, c: &Candles) -> Result<AroonOscBatchOutput, AroonOscError> {
         let high = c
             .select_candle_field("high")
-            .map_err(|_| AroonOscError::EmptyData)?;
+            .map_err(|_| AroonOscError::EmptyInputData)?;
         let low = c
             .select_candle_field("low")
-            .map_err(|_| AroonOscError::EmptyData)?;
+            .map_err(|_| AroonOscError::EmptyInputData)?;
         self.apply_slices(high, low)
     }
     pub fn with_default_candles(c: &Candles) -> Result<AroonOscBatchOutput, AroonOscError> {
@@ -653,19 +653,34 @@ impl AroonOscBatchBuilder {
 }
 
 #[inline(always)]
-fn expand_grid(r: &AroonOscBatchRange) -> Vec<AroonOscParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &AroonOscBatchRange) -> Result<Vec<AroonOscParams>, AroonOscError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, AroonOscError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step).collect();
+            if v.is_empty() { return Err(AroonOscError::InvalidRange { start, end, step }); }
+            Ok(v)
+        } else {
+            // reversed bounds supported
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                let next = cur.saturating_sub(step);
+                if next == cur { break; }
+                cur = next;
+            }
+            if v.is_empty() { return Err(AroonOscError::InvalidRange { start, end, step }); }
+            Ok(v)
+        }
     }
-    let lengths = axis_usize(r.length);
-    let mut out = Vec::with_capacity(lengths.len());
-    for &l in &lengths {
-        out.push(AroonOscParams { length: Some(l) });
-    }
-    out
+    let lengths = axis_usize(r.length)?;
+    Ok(lengths
+        .into_iter()
+        .map(|l| AroonOscParams { length: Some(l) })
+        .collect())
 }
 
 #[inline(always)]
@@ -695,27 +710,31 @@ fn aroon_osc_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<AroonOscBatchOutput, AroonOscError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(AroonOscError::InvalidLength { length: 0 });
+        return Err(AroonOscError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
+        });
     }
     if high.len() != low.len() {
-        return Err(AroonOscError::MismatchedArrayLengths {
+        return Err(AroonOscError::MismatchSliceLength {
             high_len: high.len(),
             low_len: low.len(),
         });
     }
 
     let len = high.len();
-    let first = first_valid_hilo(high, low).ok_or(AroonOscError::EmptyData)?;
+    let first = first_valid_hilo(high, low).ok_or(AroonOscError::AllValuesNaN)?;
 
     // largest window = length + 1; first must allow that
     let max_len = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
     let needed = max_len + 1;
     if len.saturating_sub(first) < needed {
-        return Err(AroonOscError::NotEnoughData {
-            required: needed,
-            found: len.saturating_sub(first),
+        return Err(AroonOscError::NotEnoughValidData {
+            needed,
+            valid: len.saturating_sub(first),
         });
     }
 
@@ -787,25 +806,29 @@ fn aroon_osc_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<AroonOscParams>, AroonOscError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(AroonOscError::InvalidLength { length: 0 });
+        return Err(AroonOscError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
+        });
     }
     if high.len() != low.len() {
-        return Err(AroonOscError::MismatchedArrayLengths {
+        return Err(AroonOscError::MismatchSliceLength {
             high_len: high.len(),
             low_len: low.len(),
         });
     }
 
     let len = high.len();
-    let first = first_valid_hilo(high, low).ok_or(AroonOscError::EmptyData)?;
+    let first = first_valid_hilo(high, low).ok_or(AroonOscError::AllValuesNaN)?;
     let max_len = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
     let needed = max_len + 1;
     if len.saturating_sub(first) < needed {
-        return Err(AroonOscError::NotEnoughData {
-            required: needed,
-            found: len.saturating_sub(first),
+        return Err(AroonOscError::NotEnoughValidData {
+            needed,
+            valid: len.saturating_sub(first),
         });
     }
 
@@ -929,25 +952,33 @@ pub fn aroon_osc_batch_into_slice(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<AroonOscParams>, AroonOscError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(AroonOscError::InvalidLength { length: 0 });
+        return Err(AroonOscError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
+        });
     }
 
     let len = high.len();
     if high.len() != low.len() {
-        return Err(AroonOscError::MismatchedArrayLengths {
+        return Err(AroonOscError::MismatchSliceLength {
             high_len: high.len(),
             low_len: low.len(),
         });
     }
 
-    let expected_len = combos.len() * len;
+    let expected_len = combos
+        .len()
+        .checked_mul(len)
+        .ok_or(AroonOscError::InvalidRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
+        })?;
     if out.len() != expected_len {
-        return Err(AroonOscError::InvalidOutputLen {
-            expected: expected_len,
-            got: out.len(),
-        });
+        return Err(AroonOscError::OutputLengthMismatch { expected: expected_len, got: out.len() });
     }
 
     // Use the existing inner function
@@ -981,7 +1012,7 @@ impl AroonOscStream {
     pub fn try_new(params: AroonOscParams) -> Result<Self, AroonOscError> {
         let length = params.length.unwrap_or(14);
         if length == 0 {
-            return Err(AroonOscError::InvalidLength { length });
+            return Err(AroonOscError::InvalidLength { length, data_len: 0 });
         }
         let cap = length + 1; // inclusive window [t-length, t]
         Ok(Self {
@@ -1904,7 +1935,7 @@ pub fn aroon_osc_batch_py<'py>(
     };
 
     // Calculate dimensions for pre-allocation
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
 
@@ -1948,6 +1979,134 @@ pub fn aroon_osc_batch_py<'py>(
 
 // ---------------- Python CUDA bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::DeviceArrayF32Aroonosc;
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct AroonOscDeviceArrayF32Py {
+    inner: Option<DeviceArrayF32Aroonosc>,
+    device_id: u32,
+}
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl AroonOscDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        use pyo3::types::PyDict;
+        let inner = self.inner.as_ref().ok_or_else(|| PyValueError::new_err("buffer already exported"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use std::os::raw::c_char;
+        use std::ptr::null_mut;
+
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+
+        struct Holder {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            arr: DeviceArrayF32Aroonosc, // owns VRAM and Arc<Context>
+        }
+
+        extern "C" fn dl_managed_deleter(mt: *mut DLManagedTensor) {
+            if mt.is_null() { return; }
+            unsafe {
+                let holder_ptr = (*mt).manager_ctx as *mut Holder;
+                if !holder_ptr.is_null() { drop(Box::from_raw(holder_ptr)); }
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char);
+            if !ptr.is_null() {
+                let mt = ptr as *mut DLManagedTensor;
+                if let Some(del) = (*mt).deleter { del(mt); }
+                pyo3::ffi::PyCapsule_SetPointer(capsule, null_mut());
+            }
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+
+        let mut holder = Box::new(Holder {
+            managed: DLManagedTensor {
+                dl_tensor: DLTensor {
+                    data: inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
+                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                    ndim: 2,
+                    dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                    shape: std::ptr::null_mut(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: Some(dl_managed_deleter),
+            },
+            shape: [inner.rows as i64, inner.cols as i64],
+            strides: [inner.cols as i64, 1],
+            arr: inner,
+        });
+        holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+        holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+        let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+        holder.managed.manager_ctx = &mut *holder as *mut Holder as *mut std::ffi::c_void;
+        let _ = Box::into_raw(holder);
+        let name = b"dltensor\0";
+        let capsule = unsafe {
+            pyo3::ffi::PyCapsule_New(
+                mt_ptr as *mut std::ffi::c_void,
+                name.as_ptr() as *const c_char,
+                Some(capsule_destructor),
+            )
+        };
+        if capsule.is_null() {
+            unsafe { dl_managed_deleter(mt_ptr) };
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "aroonosc_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, length_range, device_id=0))]
 pub fn aroonosc_cuda_batch_dev_py(
@@ -1956,7 +2115,7 @@ pub fn aroonosc_cuda_batch_dev_py(
     low_f32: numpy::PyReadonlyArray1<'_, f32>,
     length_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<AroonOscDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use pyo3::exceptions::PyValueError;
 
@@ -1980,7 +2139,7 @@ pub fn aroonosc_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(AroonOscDeviceArrayF32Py { inner: Some(inner), device_id: device_id as u32 })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1992,7 +2151,7 @@ pub fn aroonosc_cuda_many_series_one_param_dev_py(
     low_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     length: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<AroonOscDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use numpy::PyUntypedArrayMethods;
     use pyo3::exceptions::PyValueError;
@@ -2015,7 +2174,7 @@ pub fn aroonosc_cuda_many_series_one_param_dev_py(
         cuda.aroonosc_many_series_one_param_time_major_dev(h, l, cols, rows, length)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(AroonOscDeviceArrayF32Py { inner: Some(inner), device_id: device_id as u32 })
 }
 
 #[cfg(feature = "wasm")]
@@ -2078,7 +2237,7 @@ pub fn aroonosc_batch_metadata_js(
         length: (length_start, length_end, length_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let mut metadata = Vec::with_capacity(combos.len());
 
     for combo in combos {
@@ -2225,7 +2384,7 @@ pub fn aroonosc_batch_into(
             length: (length_start, length_end, length_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let expected_len = rows * len;
         let out = std::slice::from_raw_parts_mut(out_ptr, expected_len);

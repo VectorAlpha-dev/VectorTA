@@ -24,6 +24,7 @@ use std::ffi::c_void;
 use std::fmt;
 use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Error)]
 pub enum CudaEhmaError {
@@ -31,12 +32,18 @@ pub enum CudaEhmaError {
     Cuda(#[from] cust::error::CudaError),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Out of memory on device: required={required} bytes (including headroom={headroom}), free={free} bytes")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("Launch configuration too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -93,7 +100,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaEhma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
     device_id: u32,
     policy: CudaEhmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -106,7 +113,7 @@ impl CudaEhma {
     pub fn new(device_id: usize) -> Result<Self, CudaEhmaError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehma_kernel.ptx"));
         // Prefer O2 and target-from-context for stability across drivers
@@ -123,7 +130,7 @@ impl CudaEhma {
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaEhmaPolicy::default(),
             last_batch: None,
@@ -132,6 +139,9 @@ impl CudaEhma {
             debug_many_logged: false,
         })
     }
+
+    /// Clone of the underlying CUDA context to help ensure VRAM lifetime when needed by callers.
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
 
     /// Create with an explicit policy.
     pub fn new_with_policy(

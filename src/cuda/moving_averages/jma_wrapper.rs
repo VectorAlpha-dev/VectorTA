@@ -399,18 +399,37 @@ impl CudaJma {
         let n_combos = inputs.combos.len();
         let series_len = inputs.series_len;
 
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let alpha_bytes = n_combos * std::mem::size_of::<f32>();
-        let beta_bytes = n_combos * std::mem::size_of::<f32>();
-        let phase_bytes = n_combos * std::mem::size_of::<f32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + alpha_bytes + beta_bytes + phase_bytes + out_bytes;
+        // Checked arithmetic for byte sizing to avoid overflow
+        let sz_f32 = std::mem::size_of::<f32>();
+        let prices_bytes = series_len
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaJmaError::InvalidInput("byte size overflow".into()))?;
+        let alpha_bytes = n_combos
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaJmaError::InvalidInput("byte size overflow".into()))?;
+        let beta_bytes = n_combos
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaJmaError::InvalidInput("byte size overflow".into()))?;
+        let phase_bytes = n_combos
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaJmaError::InvalidInput("byte size overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaJmaError::InvalidInput("rows * cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaJmaError::InvalidInput("byte size overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(alpha_bytes)
+            .and_then(|v| v.checked_add(beta_bytes))
+            .and_then(|v| v.checked_add(phase_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaJmaError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024; // 64 MB safety margin
 
         if !Self::will_fit(required, headroom) {
-            return Err(CudaJmaError::InvalidInput(
-                "insufficient device memory for JMA batch launch".into(),
-            ));
+            let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
+            return Err(CudaJmaError::OutOfMemory { required, free, headroom });
         }
 
         // Async allocations/copies (reduce host stalls)
@@ -425,7 +444,7 @@ impl CudaJma {
             unsafe { DeviceBuffer::from_slice_async(&inputs.phase_ratios, &self.stream) }
                 .map_err(|e| CudaJmaError::Cuda(e))?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(series_len * n_combos, &self.stream) }
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
                 .map_err(|e| CudaJmaError::Cuda(e))?;
 
         // Select block size and record selection
@@ -565,6 +584,10 @@ impl CudaJma {
             return Err(CudaJmaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
         }
 
+        let out_offset = start_combo
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaJmaError::InvalidInput("output offset overflow".into()))?;
+
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
             // Offset per-combo arrays by start_combo
@@ -575,7 +598,7 @@ impl CudaJma {
             let mut combos_i = len_combos as i32;
             let mut first_valid_i = first_valid as i32;
             // Offset output by start_combo * series_len
-            let mut out_ptr = d_out.as_device_ptr().add(start_combo * series_len).as_raw();
+            let mut out_ptr = d_out.as_device_ptr().add(out_offset).as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
                 &mut alphas_ptr as *mut _ as *mut c_void,

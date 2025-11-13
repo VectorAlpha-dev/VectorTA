@@ -1423,6 +1423,9 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
             acosc_cuda_many_series_one_param_dev_py,
             m
         )?)?;
+        // Ensure ACOSC device array class is exported (CAI v3 + __dlpack_device__)
+        use crate::indicators::acosc::AcoscDeviceArrayF32Py;
+        m.add_class::<AcoscDeviceArrayF32Py>()?;
     }
 
     // Register APO functions with their user-facing names
@@ -1557,6 +1560,9 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
             aroonosc_cuda_many_series_one_param_dev_py,
             m
         )?)?;
+        // Export AroonOsc device array class (CAI v3 + DLPack)
+        use crate::indicators::aroonosc::AroonOscDeviceArrayF32Py;
+        m.add_class::<AroonOscDeviceArrayF32Py>()?;
     }
 
     // Register Bollinger Bands functions with their user-facing names

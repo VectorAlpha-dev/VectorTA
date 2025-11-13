@@ -939,7 +939,7 @@ fn ehma_batch_inner(
 
     let cols = data.len();
     if cols == 0 {
-        return Err(EhmaError::AllValuesNaN);
+        return Err(EhmaError::EmptyInputData);
     }
 
     let first = data
@@ -1034,6 +1034,9 @@ pub fn ehma_batch_inner_into(
     }
 
     let cols = data.len();
+    if cols == 0 {
+        return Err(EhmaError::EmptyInputData);
+    }
     let rows = combos.len();
     let expected = rows
         .checked_mul(cols)
@@ -1069,7 +1072,10 @@ pub fn ehma_batch_inner_into(
     init_matrix_prefixes(out_mu, cols, &warm);
 
     // 2) Precompute weights (flat) + inv norms once (phasor recursion)
-    let cap = rows * max_p;
+    // Guard rows*max_p to avoid overflow in capacity calculations
+    let cap = rows
+        .checked_mul(max_p)
+        .ok_or(EhmaError::SizeOverflow { what: "rows*max_period" })?;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
     let mut inv_norms = vec![0.0f64; rows];

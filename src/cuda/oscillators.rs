@@ -147,12 +147,12 @@ pub mod rsi_wrapper;
 pub mod srsi_wrapper;
 
 // Re-exports
-pub use acosc_wrapper::{CudaAcosc, CudaAcoscError};
+pub use acosc_wrapper::{CudaAcosc, CudaAcoscError, DeviceArrayF32Acosc};
 #[cfg(feature = "cuda")]
 pub use adosc_wrapper::{CudaAdosc, CudaAdoscError};
 #[cfg(feature = "cuda")]
 pub use ao_wrapper::{CudaAo, CudaAoError};
-pub use aroonosc_wrapper::{CudaAroonOsc, CudaAroonOscError};
+pub use aroonosc_wrapper::{CudaAroonOsc, CudaAroonOscError, DeviceArrayF32Aroonosc};
 #[cfg(feature = "cuda")]
 pub use aso_wrapper::{CudaAso, CudaAsoError};
 #[cfg(feature = "cuda")]

@@ -95,23 +95,25 @@ pub enum ManySeriesKernelSelected {
     Tiled2D { tx: u32, ty: u32 },
 }
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CudaAlmaError {
-    Cuda(String),
-    NotImplemented,
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaAlmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaAlmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaAlmaError::NotImplemented => write!(f, "CUDA ALMA not implemented yet"),
-            CudaAlmaError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaAlmaError {}
 
 /// VRAM-backed array handle returned to higher layers (Python bindings, etc.).
 pub struct DeviceArrayF32 {
@@ -133,7 +135,7 @@ impl DeviceArrayF32 {
 pub struct CudaAlma {
     module: Module,
     stream: Stream,
-    _context: Context, // keep context alive
+    context: std::sync::Arc<Context>, // keep context alive and clonable
     device_id: u32,
     policy: CudaAlmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -146,10 +148,9 @@ pub struct CudaAlma {
 impl CudaAlma {
     /// Create a new `CudaAlma` on `device_id` and load the ALMA PTX module.
     pub fn new(device_id: usize) -> Result<Self, CudaAlmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = std::sync::Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/alma_kernel.ptx"));
         // High optimization, target from current context
@@ -167,18 +168,17 @@ impl CudaAlma {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[]).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
             device_id: device_id as u32,
             policy: CudaAlmaPolicy::default(),
             last_batch: None,
@@ -191,10 +191,11 @@ impl CudaAlma {
     /// Expose a simple synchronize for callers (e.g., benches) that manage
     /// their own device buffers and want deterministic timing.
     pub fn synchronize(&self) -> Result<(), CudaAlmaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))
+        self.stream.synchronize().map_err(Into::into)
     }
+
+    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     /// Best-effort: request an L2 persisting cache window for read-mostly spans.
     /// Enabled by default; opt-out via ALMA_L2_PERSIST=0.
@@ -392,6 +393,38 @@ impl CudaAlma {
         })
     }
 
+    #[inline]
+    fn validate_launch(&self, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32) -> Result<(), CudaAlmaError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
+        let max_bx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        let max_by = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimY)
+            .unwrap_or(1024) as u32;
+        let max_bz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimZ)
+            .unwrap_or(64) as u32;
+        let max_gx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let max_gy = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let max_gz = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
+
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
+        if threads > max_threads || bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
+            return Err(CudaAlmaError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        }
+        Ok(())
+    }
+
     // ---------- Host helpers ----------
 
     fn prepare_batch_inputs(
@@ -406,7 +439,7 @@ impl CudaAlma {
             .position(|x| !x.is_nan())
             .ok_or_else(|| CudaAlmaError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = expand_grid(sweep);
+        let combos = expand_grid(sweep)?;
         if combos.is_empty() {
             return Err(CudaAlmaError::InvalidInput(
                 "no parameter combinations".into(),
@@ -451,7 +484,7 @@ impl CudaAlma {
         if series_len == 0 {
             return Err(CudaAlmaError::InvalidInput("series_len is zero".into()));
         }
-        let combos = expand_grid(sweep);
+        let combos = expand_grid(sweep)?;
         if combos.is_empty() {
             return Err(CudaAlmaError::InvalidInput(
                 "no parameter combinations".into(),
@@ -492,11 +525,11 @@ impl CudaAlma {
         if cols == 0 || rows == 0 {
             return Err(CudaAlmaError::InvalidInput("cols or rows is zero".into()));
         }
-        if data_tm_f32.len() != cols * rows {
+        if cols.checked_mul(rows).map(|n| n != data_tm_f32.len()).unwrap_or(true) {
             return Err(CudaAlmaError::InvalidInput(format!(
                 "data length {} != cols*rows {}",
                 data_tm_f32.len(),
-                cols * rows
+                cols.checked_mul(rows).unwrap_or(usize::MAX)
             )));
         }
 
@@ -585,16 +618,16 @@ impl CudaAlma {
         let required = prices_bytes + weights_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024; // 64MB safety
         if !Self::will_fit(required, headroom) {
-            return Err(CudaAlmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaAlmaError::OutOfMemory { required, free, headroom });
+            } else {
+                return Err(CudaAlmaError::InvalidInput("insufficient device memory".into()));
+            }
         }
 
         // H2D async copy for prices
         let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_f32, &self.stream)
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?
+            DeviceBuffer::from_slice_async(data_f32, &self.stream)?
         };
 
         self.run_batch_with_prices_device(&d_prices, series_len, first_valid, &combos, max_period)
@@ -632,8 +665,7 @@ impl CudaAlma {
 
         // Output buffer
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?
+            DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)?
         };
 
         // Prefer precomputed host weights for large sweeps; allow opt-in to on-device
@@ -676,12 +708,9 @@ impl CudaAlma {
                 weights_flat[base..base + period].copy_from_slice(&weights);
             }
 
-            let d_weights = DeviceBuffer::from_slice(&weights_flat)
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-            let d_periods = DeviceBuffer::from_slice(&periods_i32)
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-            let d_inv_norms = DeviceBuffer::from_slice(&inv_norms)
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+            let d_weights = DeviceBuffer::from_slice(&weights_flat)?;
+            let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+            let d_inv_norms = DeviceBuffer::from_slice(&inv_norms)?;
 
             self.launch_batch_kernel_precomputed(
                 d_prices,
@@ -709,15 +738,9 @@ impl CudaAlma {
         }
 
         // Ensure completion for VRAM handle consistency.
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: series_len,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
     }
 
     /// Host-copy helper that writes into `out` (FP32) while returning metadata.
@@ -737,10 +760,7 @@ impl CudaAlma {
             )));
         }
         let arr = self.run_batch_with_prices_device(
-            &unsafe {
-                DeviceBuffer::from_slice_async(data_f32, &self.stream)
-                    .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?
-            },
+            &unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? },
             series_len,
             first_valid,
             &combos,
@@ -749,17 +769,13 @@ impl CudaAlma {
 
         // Pinned buffer for faster D2H
         let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(arr.len())
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?
+            LockedBuffer::uninitialized(arr.len())?
         };
         unsafe {
             arr.buf
-                .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+                .async_copy_to(pinned.as_mut_slice(), &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         out.copy_from_slice(pinned.as_slice());
         Ok((arr.rows, arr.cols, combos))
     }
@@ -783,22 +799,18 @@ impl CudaAlma {
         let required = prices_bytes + weights_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaAlmaError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaAlmaError::OutOfMemory { required, free, headroom });
+            } else {
+                return Err(CudaAlmaError::InvalidInput("insufficient device memory".into()));
+            }
         }
 
-        let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?
-        };
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)? };
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
 
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream)? };
 
         // Best-effort: persist the time-major price matrix in L2 for this stream
         self.try_enable_persisting_l2(
@@ -815,8 +827,7 @@ impl CudaAlma {
                 *w *= inv_norm;
             }
         }
-        let d_weights = DeviceBuffer::from_slice(&weights_host)
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let d_weights = DeviceBuffer::from_slice(&weights_host)?;
         self.launch_many_series_kernel_precomputed(
             &d_prices,
             &d_weights,
@@ -828,15 +839,9 @@ impl CudaAlma {
             &mut d_out,
         )?;
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows,
-            cols,
-        })
+        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }
 
     /// Host-copy helper for many-series × one-param (FP32 output).
@@ -857,18 +862,11 @@ impl CudaAlma {
         }
         let arr =
             self.alma_multi_series_one_param_time_major_dev(data_tm_f32, cols, rows, params)?;
-        let mut pinned: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(arr.len())
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?
-        };
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(arr.len())? };
         unsafe {
-            arr.buf
-                .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+            arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         out_tm.copy_from_slice(pinned.as_slice());
         Ok(())
     }
@@ -890,26 +888,24 @@ impl CudaAlma {
         let offsets: Vec<f32> = combos.iter().map(|c| c.offset.unwrap() as f32).collect();
         let sigmas: Vec<f32> = combos.iter().map(|c| c.sigma.unwrap() as f32).collect();
 
-        let d_periods =
-            DeviceBuffer::from_slice(&periods).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-        let d_offsets =
-            DeviceBuffer::from_slice(&offsets).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
-        let d_sigmas =
-            DeviceBuffer::from_slice(&sigmas).map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+            let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let d_offsets = DeviceBuffer::from_slice(&offsets)?;
+        let d_sigmas = DeviceBuffer::from_slice(&sigmas)?;
 
-        let func = self
-            .module
-            .get_function("alma_batch_f32_ondev")
-            .or_else(|_| self.module.get_function("alma_batch_f32_onthefly"))
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+        let func = match self.module.get_function("alma_batch_f32_ondev") {
+            Ok(f) => f,
+            Err(_) => self
+                .module
+                .get_function("alma_batch_f32_onthefly")
+                .map_err(|_| CudaAlmaError::MissingKernelSymbol { name: "alma_batch_f32_ondev/alma_batch_f32_onthefly" })?,
+        };
 
         // Shared memory needed for weights (dynamic) ~ max_period * sizeof(f32)
         let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
 
         // Ask occupancy for a good block size
         let (_, suggested_block) = func
-            .suggested_launch_configuration(shared_bytes as usize, BlockSize::xyz(0, 0, 0))
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+            .suggested_launch_configuration(shared_bytes as usize, BlockSize::xyz(0, 0, 0))?;
         let block_x = if suggested_block > 0 {
             suggested_block
         } else {
@@ -928,6 +924,7 @@ impl CudaAlma {
             let grid_x = ((series_len as u32) + block_x - 1) / block_x;
             let grid: GridSize = (grid_x, len as u32, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
+            self.validate_launch(grid_x, len as u32, 1, block_x, 1, 1)?;
 
             // Offset output pointer by start * series_len elements
             let out_ptr = unsafe { d_out.as_device_ptr().add(start * series_len) };
@@ -945,8 +942,7 @@ impl CudaAlma {
                         (first_valid as i32),
                         out_ptr
                     )
-                )
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+                )?;
             }
         }
 
@@ -1042,7 +1038,7 @@ impl CudaAlma {
             let func = self
                 .module
                 .get_function(base)
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaAlmaError::MissingKernelSymbol { name: base })?;
 
             // Introspection
             unsafe {
@@ -1059,6 +1055,7 @@ impl CudaAlma {
                 let grid_x = ((series_len as u32) + (block_x - 1)) / block_x; // divide by outputs per block
                 let grid: GridSize = (grid_x, len as u32, 1).into();
                 let block: BlockSize = (threads_x, 1, 1).into();
+                self.validate_launch(grid_x, len as u32, 1, threads_x, 1, 1)?;
                 let out_ptr = unsafe { d_out.as_device_ptr().add(start * series_len) };
 
                 let stream = &self.stream;
@@ -1075,8 +1072,7 @@ impl CudaAlma {
                             (first_valid as i32),
                             out_ptr
                         )
-                    )
-                    .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+                    )?;
                 }
             }
         } else {
@@ -1085,7 +1081,7 @@ impl CudaAlma {
             let func = self
                 .module
                 .get_function("alma_batch_f32")
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaAlmaError::MissingKernelSymbol { name: "alma_batch_f32" })?;
 
             // Fixed block size; allow override when Auto only.
             block_x = match self.policy.batch {
@@ -1110,6 +1106,7 @@ impl CudaAlma {
                 let grid_x = ((series_len as u32) + block_x - 1) / block_x;
                 let grid: GridSize = (grid_x, len as u32, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
+                self.validate_launch(grid_x, len as u32, 1, block_x, 1, 1)?;
                 let out_ptr = unsafe { d_out.as_device_ptr().add(start * series_len) };
 
                 let stream = &self.stream;
@@ -1126,8 +1123,7 @@ impl CudaAlma {
                             (first_valid as i32),
                             out_ptr
                         )
-                    )
-                    .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+                    )?;
                 }
             }
         }
@@ -1185,6 +1181,12 @@ impl CudaAlma {
             let grid_y = ((cols as u32) + ty - 1) / ty;
             let grid: GridSize = (grid_x, grid_y, 1).into();
             let block: BlockSize = (tx, ty, 1).into();
+            if self
+                .validate_launch(grid_x, grid_y, 1, tx, ty, 1)
+                .is_err()
+            {
+                return None;
+            }
             let stream = &self.stream;
             unsafe {
                 launch!(
@@ -1199,7 +1201,7 @@ impl CudaAlma {
                         d_out.as_device_ptr()
                     )
                 )
-                .map_err(|e| CudaAlmaError::Cuda(e.to_string()))
+                .map_err(CudaAlmaError::from)
                 .ok()?;
             }
             // Introspection
@@ -1259,7 +1261,7 @@ impl CudaAlma {
         let func = self
             .module
             .get_function("alma_multi_series_one_param_f32")
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaAlmaError::MissingKernelSymbol { name: "alma_multi_series_one_param_f32" })?;
 
         let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
         let block_x: u32 = match self.policy.many_series {
@@ -1269,6 +1271,7 @@ impl CudaAlma {
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x, cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(grid_x, cols as u32, 1, block_x, 1, 1)?;
         let stream = &self.stream;
         unsafe {
             launch!(
@@ -1282,8 +1285,7 @@ impl CudaAlma {
                     d_first_valids.as_device_ptr(),
                     d_out.as_device_ptr()
                 )
-            )
-            .map_err(|e| CudaAlmaError::Cuda(e.to_string()))?;
+            )?;
         }
         // Introspection
         unsafe {
@@ -1326,43 +1328,40 @@ impl CudaAlma {
 
 // ---------- Grid expansion + CPU weights (fallback) ----------
 
-fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
-    }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
-        }
+fn expand_grid(r: &AlmaBatchRange) -> Result<Vec<AlmaParams>, CudaAlmaError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaAlmaError> {
+        if step == 0 || start == end { return Ok(vec![start]); }
+        if start < end { return Ok((start..=end).step_by(step.max(1)).collect()); }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        let mut x = start as isize; let end_i = end as isize; let st = (step as isize).max(1);
+        while x >= end_i { v.push(x as usize); x -= st; }
+        if v.is_empty() { return Err(CudaAlmaError::InvalidInput(format!("Invalid range: start={}, end={}, step={}", start, end, step))); }
+        Ok(v)
+    }
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaAlmaError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return Ok(vec![start]); }
+        if start < end {
+            let mut v = Vec::new(); let mut x = start; let st = step.abs();
+            while x <= end + 1e-12 { v.push(x); x += st; }
+            if v.is_empty() { return Err(CudaAlmaError::InvalidInput(format!("Invalid range: start={}, end={}, step={}", start, end, step))); }
+            return Ok(v);
         }
-        v
+        let mut v = Vec::new(); let mut x = start; let st = step.abs();
+        while x + 1e-12 >= end { v.push(x); x -= st; }
+        if v.is_empty() { return Err(CudaAlmaError::InvalidInput(format!("Invalid range: start={}, end={}, step={}", start, end, step))); }
+        Ok(v)
     }
 
-    let periods = axis_usize(r.period);
-    let offsets = axis_f64(r.offset);
-    let sigmas = axis_f64(r.sigma);
-
-    let mut out = Vec::with_capacity(periods.len() * offsets.len() * sigmas.len());
-    for &p in &periods {
-        for &o in &offsets {
-            for &s in &sigmas {
-                out.push(AlmaParams {
-                    period: Some(p),
-                    offset: Some(o),
-                    sigma: Some(s),
-                });
-            }
-        }
-    }
-    out
+    let periods = axis_usize(r.period)?;
+    let offsets = axis_f64(r.offset)?;
+    let sigmas = axis_f64(r.sigma)?;
+    let cap = periods.len().checked_mul(offsets.len()).and_then(|x| x.checked_mul(sigmas.len()))
+        .ok_or_else(|| CudaAlmaError::InvalidInput("range size overflow".into()))?;
+    let mut out = Vec::with_capacity(cap);
+    for &p in &periods { for &o in &offsets { for &s in &sigmas {
+        out.push(AlmaParams { period: Some(p), offset: Some(o), sigma: Some(s) });
+    }}}
+    Ok(out)
 }
 
 fn compute_weights_cpu_f32(period: usize, offset: f64, sigma: f64) -> (Vec<f32>, f32) {
@@ -1484,7 +1483,7 @@ pub mod benches {
         let first_valid = price.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
         // Expand combos and host-precompute weights once
-        let combos = super::expand_grid(&sweep);
+        let combos = super::expand_grid(&sweep).expect("expand_grid");
         let n_combos = combos.len();
         let max_period = combos
             .iter()
@@ -1557,7 +1556,7 @@ pub mod benches {
             sigma: (6.0, 6.0, 0.0),
         };
         let first_valid = price.iter().position(|x| !x.is_nan()).unwrap_or(0);
-        let combos = super::expand_grid(&sweep);
+        let combos = super::expand_grid(&sweep).expect("expand_grid");
         let n_combos = combos.len();
         let max_period = combos
             .iter()
@@ -1624,7 +1623,7 @@ pub mod benches {
             sigma: (6.0, 6.0, 0.0),
         };
         let first_valid = price.iter().position(|x| !x.is_nan()).unwrap_or(0);
-        let combos = super::expand_grid(&sweep);
+        let combos = super::expand_grid(&sweep).expect("expand_grid");
         let n_combos = combos.len();
         let max_period = combos
             .iter()
