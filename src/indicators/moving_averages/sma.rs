@@ -36,7 +36,7 @@ use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::{cuda::moving_averages::CudaSma, indicators::moving_averages::alma::DeviceArrayF32Py};
+use crate::cuda::moving_averages::CudaSma;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
@@ -45,6 +45,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -188,6 +192,10 @@ pub enum SmaError {
     AllValuesNaN,
     #[error("sma: Output buffer size mismatch: expected = {expected}, got = {got}")]
     OutputLenMismatch { expected: usize, got: usize },
+    #[error("sma: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("sma: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -723,12 +731,7 @@ pub fn sma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(SmaError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(SmaError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -761,19 +764,51 @@ impl SmaBatchOutput {
 }
 
 #[inline(always)]
-pub fn expand_grid_sma(r: &SmaBatchRange) -> Vec<SmaParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
+pub fn expand_grid_sma(r: &SmaBatchRange) -> Result<Vec<SmaParams>, SmaError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, SmaError> {
+        // Treat zero step as static; allow reversed bounds; error on empty.
+        if step == 0 {
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start == end {
+            return Ok(vec![start]);
+        }
+        let mut vals = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                vals.push(v);
+                match v.checked_add(step) {
+                    Some(next) => {
+                        if next == v { break; }
+                        v = next;
+                    }
+                    None => break,
+                }
+            }
+        } else {
+            // reversed bounds: count down by step
+            let mut v = start;
+            while v >= end {
+                vals.push(v);
+                if v == 0 { break; }
+                let next = v.saturating_sub(step);
+                if next == v { break; }
+                v = next;
+                if v < end { break; }
+            }
+        }
+        if vals.is_empty() {
+            return Err(SmaError::InvalidRange { start, end, step });
+        }
+        Ok(vals)
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(SmaParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -801,13 +836,7 @@ fn sma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<SmaBatchOutput, SmaError> {
-    let combos = expand_grid_sma(sweep);
-    if combos.is_empty() {
-        return Err(SmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_sma(sweep)?;
     if data.is_empty() {
         return Err(SmaError::EmptyData);
     }
@@ -826,6 +855,14 @@ fn sma_batch_inner(
     }
 
     let rows = combos.len();
+    // Checked arithmetic for rows * cols to avoid overflow in downstream alloc
+    rows
+        .checked_mul(cols)
+        .ok_or(SmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
     // 1) allocate rows×cols uninit
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -870,13 +907,7 @@ fn sma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<SmaParams>, SmaError> {
-    let combos = expand_grid_sma(sweep);
-    if combos.is_empty() {
-        return Err(SmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_sma(sweep)?;
     if data.is_empty() {
         return Err(SmaError::EmptyData);
     }
@@ -895,6 +926,13 @@ fn sma_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    rows
+        .checked_mul(cols)
+        .ok_or(SmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
     // Map Auto and Batch to a concrete non-batch kernel (ALMA parity)
     let actual_kern = match kern {
@@ -1102,10 +1140,8 @@ pub fn sma_batch_py<'py>(
     };
 
     // Validate and prepare
-    let combos = expand_grid_sma(&range);
-    if combos.is_empty() {
-        return Err(PyValueError::new_err("Invalid period range"));
-    }
+    let combos = expand_grid_sma(&range)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     if data_slice.is_empty() {
         return Err(PyValueError::new_err("Empty data"));
     }
@@ -1160,7 +1196,7 @@ pub fn sma_cuda_batch_dev_py<'py>(
     data_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, PyDict>)> {
+) -> PyResult<(SmaDeviceArrayF32Py, Bound<'py, PyDict>)> {
     use crate::cuda::cuda_available;
     use numpy::IntoPyArray;
     use pyo3::types::PyDict;
@@ -1174,17 +1210,22 @@ pub fn sma_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = CudaSma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.sma_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let dev = cuda
+            .sma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((dev, combos, cuda.context_arc_clone(), cuda.device_id()))
     })?;
 
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((SmaDeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1195,7 +1236,7 @@ pub fn sma_cuda_many_series_one_param_dev_py(
     data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<SmaDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use numpy::PyUntypedArrayMethods;
 
@@ -1210,13 +1251,137 @@ pub fn sma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = CudaSma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.sma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let dev = cuda
+            .sma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda
+            .synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((dev, cuda.context_arc_clone(), cuda.device_id()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(SmaDeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id })
+}
+
+// Python wrapper that keeps the CUDA context alive for returned VRAM handles
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "SmaDeviceArrayF32", unsendable)]
+pub struct SmaDeviceArrayF32Py {
+    pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl SmaDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        // shape: (rows, cols)
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing kernels synchronize before return
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA
+        (2, self.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use pyo3::ffi;
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_void};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct Manager {
+            py_self: *mut ffi::PyObject,
+            shape: *mut [i64; 2],
+        }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            unsafe {
+                let mgr = (*p).manager_ctx as *mut Manager;
+                if !mgr.is_null() {
+                    let mgr_box = Box::from_raw(mgr);
+                    let g = ffi::PyGILState_Ensure();
+                    ffi::Py_DECREF(mgr_box.py_self);
+                    ffi::PyGILState_Release(g);
+                    if !mgr_box.shape.is_null() {
+                        let _ = Box::from_raw(mgr_box.shape);
+                    }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape = Box::new([rows, cols]);
+        let shape_ptr: *mut [i64; 2] = &mut *shape;
+
+        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
+        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
+        let dl = DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr as *mut i64,
+                strides: std::ptr::null_mut(),
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(dlpack_deleter),
+        };
+
+        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
+        let name = CString::new("dltensor").unwrap();
+        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
+        if capsule.is_null() {
+            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 #[cfg(feature = "python")]
@@ -1368,7 +1533,7 @@ pub fn sma_batch_metadata_js(
     let range = SmaBatchRange {
         period: (period_start, period_end, period_step),
     };
-    let combos = expand_grid_sma(&range);
+    let combos = expand_grid_sma(&range).unwrap_or_default();
     combos.iter().map(|c| c.period.unwrap_or(9)).collect()
 }
 
@@ -1384,7 +1549,7 @@ pub fn sma_batch_rows_cols_js(
     let range = SmaBatchRange {
         period: (period_start, period_end, period_step),
     };
-    let combos = expand_grid_sma(&range);
+    let combos = expand_grid_sma(&range).unwrap_or_default();
     vec![combos.len(), data_len]
 }
 
@@ -1477,7 +1642,7 @@ pub fn sma_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid_sma(&sweep);
+        let combos = expand_grid_sma(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let total_size = rows * len;
 

@@ -13,44 +13,51 @@ use crate::indicators::moving_averages::supersmoother::{
 use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, Function, GridSize};
-use cust::memory::{AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::mem::size_of;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaSuperSmootherError {
-    Cuda(String),
+    #[error("CUDA error: {0}")]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("CUDA supersmoother not implemented")]
+    NotImplemented,
+    #[error("out of device memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("output slice length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx}, {gy}, {gz}), block=({bx}, {by}, {bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buffer on device {buf}, current device {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
 }
-
-impl fmt::Display for CudaSuperSmootherError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaSuperSmootherError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaSuperSmootherError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaSuperSmootherError {}
 
 pub struct CudaSuperSmoother {
     module: Module,
     stream: Stream,
-    _context: Context,
+    ctx: Arc<Context>,
+    device_id: u32,
 }
 
 impl CudaSuperSmoother {
     pub fn new(device_id: usize) -> Result<Self, CudaSuperSmootherError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
-        let context =
-            Context::new(device).map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
+        let ctx = Arc::new(context);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/supersmoother_kernel.ptx"));
 
@@ -68,24 +75,37 @@ impl CudaSuperSmoother {
         let module = match Module::from_ptx(ptx, &jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-        })
+        Ok(Self { module, stream, ctx, device_id: device_id as u32 })
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self.ctx.clone() }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
+    }
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+        if !Self::mem_check_enabled() { return true; }
+        if let Some((free, _)) = Self::device_mem_info() { required_bytes.saturating_add(headroom_bytes) <= free } else { true }
     }
 
     fn prepare_batch_inputs(
@@ -145,7 +165,7 @@ impl CudaSuperSmoother {
         let mut func: Function = self
             .module
             .get_function("supersmoother_batch_f32")
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaSuperSmootherError::MissingKernelSymbol { name: "supersmoother_batch_f32" })?;
 
         // Prefer L1 (no dynamic shared memory in kernel)
         let _ = func.set_cache_config(CacheConfig::PreferL1);
@@ -158,6 +178,14 @@ impl CudaSuperSmoother {
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+
+        // Simple launch config validation against device caps
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev.get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        let max_grid_x = dev.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as u32;
+        if block_x > max_threads || grid_x > max_grid_x {
+            return Err(CudaSuperSmootherError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -176,9 +204,7 @@ impl CudaSuperSmoother {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -191,15 +217,18 @@ impl CudaSuperSmoother {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaSuperSmootherError> {
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
 
-        let elems = combos.len() * len;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let elems = combos.len().checked_mul(len).ok_or_else(|| CudaSuperSmootherError::InvalidInput("size overflow (rows*cols)".into()))?;
+        let needed = elems.checked_mul(size_of::<f32>()).ok_or_else(|| CudaSuperSmootherError::InvalidInput("size overflow (bytes)".into()))?;
+        if !Self::will_fit(needed, 4 * 1024 * 1024) {
+            let (free, _) = mem_get_info().unwrap_or((0, 0));
+            return Err(CudaSuperSmootherError::OutOfMemory { required: needed, free, headroom: 4 * 1024 * 1024 });
+        }
+
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -209,6 +238,9 @@ impl CudaSuperSmoother {
             first_valid,
             &mut d_out,
         )?;
+
+        // Ensure producer stream is done so CAI v3 can omit stream field safely
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -234,18 +266,12 @@ impl CudaSuperSmoother {
         out: &mut [f32],
     ) -> Result<(usize, usize, Vec<SuperSmootherParams>), CudaSuperSmootherError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        let expected = combos.len() * len;
+        let expected = combos.len().checked_mul(len).ok_or_else(|| CudaSuperSmootherError::InvalidInput("size overflow (rows*cols)".into()))?;
         if out.len() != expected {
-            return Err(CudaSuperSmootherError::InvalidInput(format!(
-                "output slice length mismatch: expected {}, got {}",
-                expected,
-                out.len()
-            )));
+            return Err(CudaSuperSmootherError::OutputLengthMismatch { expected, got: out.len() });
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len)?;
-        dev.buf
-            .copy_to(out)
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        dev.buf.copy_to(out)?;
         Ok((combos.len(), len, combos))
     }
 
@@ -321,7 +347,7 @@ impl CudaSuperSmoother {
         let mut func: Function = self
             .module
             .get_function("supersmoother_many_series_one_param_f32")
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaSuperSmootherError::MissingKernelSymbol { name: "supersmoother_many_series_one_param_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let (_min_grid, block_x) = func
@@ -331,6 +357,14 @@ impl CudaSuperSmoother {
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        let dev = Device::get_device(self.device_id).map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let max_threads = dev.get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
+            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))? as u32;
+        let max_grid_x = dev.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))? as u32;
+        if block_x > max_threads || grid_x > max_grid_x {
+            return Err(CudaSuperSmootherError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -365,15 +399,19 @@ impl CudaSuperSmoother {
         first_valids: &[i32],
         period: usize,
     ) -> Result<DeviceArrayF32, CudaSuperSmootherError> {
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(first_valids)
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
-        let elems = cols * rows;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first_valids = DeviceBuffer::from_slice(first_valids)?;
+        let elems = cols.checked_mul(rows).ok_or_else(|| CudaSuperSmootherError::InvalidInput("size overflow (rows*cols)".into()))?;
+        let needed = elems.checked_mul(size_of::<f32>()).ok_or_else(|| CudaSuperSmootherError::InvalidInput("size overflow (bytes)".into()))?;
+        if !Self::will_fit(needed, 4 * 1024 * 1024) {
+            let (free, _) = mem_get_info().unwrap_or((0, 0));
+            return Err(CudaSuperSmootherError::OutOfMemory { required: needed, free, headroom: 4 * 1024 * 1024 });
+        }
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_many_series_kernel(&d_prices, &d_first_valids, cols, rows, period, &mut d_out)?;
+
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -412,9 +450,7 @@ impl CudaSuperSmoother {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period)?;
-        dev.buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))
+        dev.buf.copy_to(out_tm)
     }
 
     // -------- Optional fast-paths: device-resident input & pinned host I/O --------
@@ -439,11 +475,9 @@ impl CudaSuperSmoother {
             ));
         }
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
         let elems = combos.len() * len;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
         self.launch_batch_kernel(
             d_prices,
             &d_periods,

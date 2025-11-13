@@ -37,9 +37,11 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::{
-    cuda::moving_averages::CudaSuperSmoother, indicators::moving_averages::alma::DeviceArrayF32Py,
-};
+use crate::cuda::moving_averages::{CudaSuperSmoother, DeviceArrayF32};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -186,6 +188,14 @@ pub enum SuperSmootherError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("supersmoother: Empty data provided.")]
     EmptyData,
+    #[error("supersmoother: Output slice length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("supersmoother: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("supersmoother: non-batch kernel passed to batch API: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("supersmoother: size computation overflow during allocation ({what})")]
+    SizeOverflow { what: &'static str },
 }
 
 #[inline]
@@ -289,10 +299,7 @@ pub fn supersmoother_into_slice(
         });
     }
     if dst.len() != len {
-        return Err(SuperSmootherError::InvalidPeriod {
-            period: dst.len(),
-            data_len: len,
-        });
+        return Err(SuperSmootherError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
     let chosen = match kernel {
@@ -353,8 +360,7 @@ pub fn supersmoother_compute_into(
         return Err(SuperSmootherError::NotEnoughValidData { needed: period, valid: len - first });
     }
     if out.len() != len {
-        // Mirror existing pattern for length mismatch by reusing InvalidPeriod
-        return Err(SuperSmootherError::InvalidPeriod { period: out.len(), data_len: len });
+        return Err(SuperSmootherError::OutputLengthMismatch { expected: len, got: out.len() });
     }
 
     // Match with_kernel dispatch semantics
@@ -675,12 +681,7 @@ pub fn supersmoother_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(SuperSmootherError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(SuperSmootherError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -718,7 +719,19 @@ pub fn expand_grid_supersmoother(r: &SuperSmootherBatchRange) -> Vec<SuperSmooth
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return (start..=end).step_by(step).collect();
+        }
+        // reversed bounds supported
+        let mut v = Vec::new();
+        let mut cur = start;
+        loop {
+            v.push(cur);
+            if cur == end { break; }
+            cur = match cur.checked_sub(step) { Some(n) => n, None => break };
+            if cur < end { break; }
+        }
+        v
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -755,10 +768,7 @@ fn supersmoother_batch_inner(
 ) -> Result<SuperSmootherBatchOutput, SuperSmootherError> {
     let combos = expand_grid_supersmoother(sweep);
     if combos.is_empty() {
-        return Err(SuperSmootherError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(SuperSmootherError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
     }
 
     let first = data
@@ -775,6 +785,9 @@ fn supersmoother_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    let _expected = rows
+        .checked_mul(cols)
+        .ok_or(SuperSmootherError::SizeOverflow { what: "rows*cols" })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos
@@ -815,10 +828,7 @@ pub fn supersmoother_batch_inner_into(
 ) -> Result<Vec<SuperSmootherParams>, SuperSmootherError> {
     let combos = expand_grid_supersmoother(sweep);
     if combos.is_empty() {
-        return Err(SuperSmootherError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(SuperSmootherError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
     }
 
     let first = data
@@ -835,7 +845,12 @@ pub fn supersmoother_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    debug_assert_eq!(out.len(), rows * cols, "out buffer must be rows*cols");
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(SuperSmootherError::SizeOverflow { what: "rows*cols" })?;
+    if out.len() != expected {
+        return Err(SuperSmootherError::OutputLengthMismatch { expected, got: out.len() });
+    }
 
     // 1) Treat caller's buffer as MaybeUninit and initialize NaN prefixes in one pass
     let warm: Vec<usize> = combos
@@ -1782,6 +1797,129 @@ impl SuperSmootherStreamPy {
     }
 }
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "SuperSmootherDeviceArrayF32", unsendable)]
+pub struct SuperSmootherDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    ctx_guard: Arc<Context>,
+    device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl SuperSmootherDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted: producing stream is synchronized before returning
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use pyo3::ffi;
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_void};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct Manager {
+            py_self: *mut ffi::PyObject,
+            shape: *mut [i64; 2],
+            // Keep CUDA context alive while the consumer holds the tensor
+            _ctx_guard: *mut c_void,
+        }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            let mgr = unsafe { (*p).manager_ctx as *mut Manager };
+            if !mgr.is_null() {
+                // Reclaim manager and associated allocations
+                unsafe {
+                    let mgr_box = Box::from_raw(mgr);
+                    let g = ffi::PyGILState_Ensure();
+                    ffi::Py_DECREF(mgr_box.py_self);
+                    ffi::PyGILState_Release(g);
+                    if !mgr_box.shape.is_null() { let _ = Box::from_raw(mgr_box.shape); }
+                    if !mgr_box._ctx_guard.is_null() { let _ = Arc::from_raw(mgr_box._ctx_guard as *const cust::context::Context); }
+                }
+            }
+            unsafe { let _ = Box::from_raw(p); }
+        }
+
+        // Build shape (rows, cols)
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape = Box::new([rows, cols]);
+        let shape_ptr: *mut [i64; 2] = &mut *shape;
+
+        // Hold a strong ref to this Python object and the CUDA context while the consumer owns it
+        let py_self = slf.as_ptr();
+        unsafe { ffi::Py_INCREF(py_self); }
+        let ctx_guard_raw = Arc::into_raw(slf.ctx_guard.clone()) as *mut c_void;
+        let mgr = Box::new(Manager { py_self, shape: shape_ptr, _ctx_guard: ctx_guard_raw });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        // Build DLManagedTensor capsule
+        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
+        let dl = DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr as *mut i64,
+                strides: std::ptr::null_mut(),
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(dlpack_deleter),
+        };
+
+        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
+        let name = CString::new("dltensor").unwrap();
+        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
+        if capsule.is_null() {
+            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "supersmoother_batch")]
 #[pyo3(signature = (data, period_start, period_end, period_step, kernel=None))]
@@ -1879,7 +2017,7 @@ pub fn supersmoother_cuda_batch_dev_py<'py>(
     data_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+) -> PyResult<(SuperSmootherDeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
     use crate::cuda::cuda_available;
     use numpy::IntoPyArray;
     use pyo3::types::PyDict;
@@ -1893,18 +2031,22 @@ pub fn supersmoother_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos) = py.allow_threads(|| {
-        let cuda =
-            CudaSuperSmoother::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.supersmoother_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, combos, ctx_guard, dev_id) = py.allow_threads(|| {
+        let cuda = CudaSuperSmoother::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (dev, combos) = cuda
+            .supersmoother_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        // Keep context alive by cloning it out of the wrapper
+        let ctx = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((dev, combos, ctx, cuda.device_id()))
     })?;
 
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((SuperSmootherDeviceArrayF32Py { inner, ctx_guard, device_id: dev_id }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1915,7 +2057,7 @@ pub fn supersmoother_cuda_many_series_one_param_dev_py(
     data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<SuperSmootherDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use numpy::PyUntypedArrayMethods;
 
@@ -1930,14 +2072,17 @@ pub fn supersmoother_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda =
-            CudaSuperSmoother::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.supersmoother_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx_guard, dev_id) = py.allow_threads(|| {
+        let cuda = CudaSuperSmoother::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev = cuda
+            .supersmoother_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        Ok::<_, pyo3::PyErr>((dev, ctx, cuda.device_id()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(SuperSmootherDeviceArrayF32Py { inner, ctx_guard, device_id: dev_id })
 }
 
 #[cfg(feature = "wasm")]

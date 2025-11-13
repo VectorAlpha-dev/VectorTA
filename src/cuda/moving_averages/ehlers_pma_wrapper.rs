@@ -24,6 +24,7 @@ use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 // -------- Kernel selection policy (parity with ALMA) --------
@@ -122,7 +123,7 @@ impl DeviceEhlersPmaPair {
 pub struct CudaEhlersPma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaEhlersPmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -136,7 +137,7 @@ impl CudaEhlersPma {
         cust::init(CudaFlags::empty())?;
 
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_pma_kernel.ptx"));
         // Prefer determining target from current context and a moderate opt level.
@@ -186,6 +187,13 @@ impl CudaEhlersPma {
     pub fn policy(&self) -> &CudaEhlersPmaPolicy {
         &self.policy
     }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { Arc::clone(&self._context) }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+    #[inline]
+    pub fn stream_handle(&self) -> usize { self.stream.as_inner() as usize }
 
     /// Expose the producing CUDA stream handle for CUDA Array Interface 'stream'.
     /// Return a real handle; omit the key at the caller if you synchronously wait.

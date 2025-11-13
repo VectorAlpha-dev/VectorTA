@@ -10,6 +10,7 @@
 use super::DeviceArrayF32;
 use crate::indicators::moving_averages::dma::{DmaBatchRange, DmaParams};
 use cust::context::Context;
+use cust::error::CudaError;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
@@ -23,6 +24,8 @@ use std::ffi::c_void;
 use std::fmt;
 use std::mem::{size_of, zeroed};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
 // -------- Kernel selection policy (mirrors ALMA shape) --------
 
@@ -82,50 +85,32 @@ pub enum ManySeriesKernelSelected {
     Tiled2D { tx: u32, ty: u32 },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaDmaError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("not implemented")]
     NotImplemented,
+    #[error("out of device memory: required={required} free={free} headroom={headroom}")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
+    #[error("output slice length mismatch: expected={expected}, got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },
+    #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buffer on device {buf}, current device {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
 }
-
-impl fmt::Display for CudaDmaError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaDmaError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaDmaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-            CudaDmaError::NotImplemented => write!(f, "CUDA DMA not implemented"),
-            CudaDmaError::OutOfMemory { required, free, headroom } => write!(
-                f,
-                "out of device memory: required={} free={} headroom={}",
-                required, free, headroom
-            ),
-            CudaDmaError::MissingKernelSymbol { name } => write!(f, "missing kernel symbol: {}", name),
-            CudaDmaError::OutputLengthMismatch { expected, got } => write!(
-                f,
-                "output slice length mismatch: expected={}, got={}",
-                expected, got
-            ),
-            CudaDmaError::InvalidPolicy(msg) => write!(f, "invalid policy: {}", msg),
-            CudaDmaError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
-                f,
-                "launch config too large: grid=({}, {}, {}), block=({}, {}, {})",
-                gx, gy, gz, bx, by, bz
-            ),
-        }
-    }
-}
-impl std::error::Error for CudaDmaError {}
 
 pub struct CudaDma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    ctx: Arc<Context>,
     device_id: u32,
     policy: CudaDmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -137,10 +122,9 @@ pub struct CudaDma {
 impl CudaDma {
     /// Create a new `CudaDma` on `device_id` and load the PTX module.
     pub fn new(device_id: usize) -> Result<Self, CudaDmaError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/dma_kernel.ptx"));
         let jit_opts = &[
@@ -149,15 +133,13 @@ impl CudaDma {
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            ctx: Arc::new(context),
             device_id: device_id as u32,
             policy: CudaDmaPolicy::default(),
             last_batch: None,
@@ -188,10 +170,17 @@ impl CudaDma {
 
     /// Synchronize the stream (deterministic timings in benches/tests).
     pub fn synchronize(&self) -> Result<(), CudaDmaError> {
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))
+        self.stream.synchronize()?;
+        Ok(())
     }
+
+    /// Clone of the underlying CUDA context to keep it alive alongside VRAM handles.
+    #[inline]
+    pub fn context(&self) -> Arc<Context> { self.ctx.clone() }
+
+    /// Device id for interop (__dlpack_device__).
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
     fn maybe_enable_l2_persist_for_prices(
@@ -303,18 +292,18 @@ impl CudaDma {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
+    fn ensure_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaDmaError> {
+        if !Self::mem_check_enabled() { return Ok(()); }
         if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            if required_bytes.checked_add(headroom_bytes).unwrap_or(usize::MAX) <= free {
+                Ok(())
+            } else {
+                Err(CudaDmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+            }
         } else {
-            true
+            Ok(())
         }
     }
     #[inline]
@@ -370,11 +359,8 @@ impl CudaDma {
             });
         }
         let arr = self.run_batch_with_prices_host(data_f32, &inputs)?;
-        unsafe { arr.buf.async_copy_to(out, &self.stream) }
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+        unsafe { arr.buf.async_copy_to(out, &self.stream) }?;
+        self.stream.synchronize()?;
         Ok((arr.rows, arr.cols, inputs.combos))
     }
 
@@ -516,11 +502,9 @@ impl CudaDma {
             hull_type,
             sqrt_len,
         )?;
-        unsafe { arr.buf.async_copy_to(out_tm, &self.stream) }
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))
+        unsafe { arr.buf.async_copy_to(out_tm, &self.stream) }?;
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     // ---------- Internal runners ----------
@@ -535,47 +519,36 @@ impl CudaDma {
         let first_valid = inputs.first_valid;
         let max_sqrt_len = inputs.max_sqrt_len;
 
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let hull_bytes = n_combos * std::mem::size_of::<i32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + 3 * hull_bytes + out_bytes + 64 * 1024 * 1024;
-        if Self::mem_check_enabled() {
-            if let Some((free, _)) = Self::device_mem_info() {
-                if required > free {
-                    return Err(CudaDmaError::OutOfMemory { required, free, headroom: 0 });
-                }
-            }
-        }
+        let prices_bytes = series_len
+            .checked_mul(size_of::<f32>())
+            .ok_or_else(|| CudaDmaError::InvalidInput("series_len bytes overflow".into()))?;
+        let hull_bytes = n_combos
+            .checked_mul(size_of::<i32>())
+            .ok_or_else(|| CudaDmaError::InvalidInput("param bytes overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaDmaError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(size_of::<f32>())
+            .ok_or_else(|| CudaDmaError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(hull_bytes.checked_mul(3).ok_or_else(|| CudaDmaError::InvalidInput("param bytes overflow".into()))?)
+            .and_then(|v| v.checked_add(out_bytes))
+            .and_then(|v| v.checked_add(64 * 1024 * 1024))
+            .ok_or_else(|| CudaDmaError::InvalidInput("required bytes overflow".into()))?;
+        Self::ensure_fit(required, 0)?;
 
-        let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_f32, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
-        };
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
         // Enable L2 persisting cache hint for prices (best-effort)
         let _ = self.maybe_enable_l2_persist_for_prices(
             series_len * size_of::<f32>(),
             d_prices.as_device_ptr().as_raw(),
         );
-        let d_hulls = unsafe {
-            DeviceBuffer::from_slice_async(&inputs.hull_lengths, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
-        };
-        let d_emas = unsafe {
-            DeviceBuffer::from_slice_async(&inputs.ema_lengths, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
-        };
-        let d_gains = unsafe {
-            DeviceBuffer::from_slice_async(&inputs.ema_gain_limits, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
-        };
-        let d_types = unsafe {
-            DeviceBuffer::from_slice_async(&inputs.hull_types, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
-        };
+        let d_hulls = unsafe { DeviceBuffer::from_slice_async(&inputs.hull_lengths, &self.stream)? };
+        let d_emas = unsafe { DeviceBuffer::from_slice_async(&inputs.ema_lengths, &self.stream)? };
+        let d_gains = unsafe { DeviceBuffer::from_slice_async(&inputs.ema_gain_limits, &self.stream)? };
+        let d_types = unsafe { DeviceBuffer::from_slice_async(&inputs.hull_types, &self.stream)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
 
         self.launch_batch_kernels(
             &d_prices,
@@ -589,9 +562,7 @@ impl CudaDma {
             max_sqrt_len,
             &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -609,16 +580,21 @@ impl CudaDma {
     ) -> Result<DeviceArrayF32, CudaDmaError> {
         let n_combos = combos.len();
         // VRAM check: output + parameter vectors + headroom (input already resident)
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let param_bytes = 4 * n_combos * std::mem::size_of::<i32>();
-        let required = out_bytes + param_bytes + 64 * 1024 * 1024;
-        if Self::mem_check_enabled() {
-            if let Some((free, _)) = Self::device_mem_info() {
-                if required > free {
-                    return Err(CudaDmaError::OutOfMemory { required, free, headroom: 0 });
-                }
-            }
-        }
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaDmaError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(size_of::<f32>())
+            .ok_or_else(|| CudaDmaError::InvalidInput("output bytes overflow".into()))?;
+        let param_bytes = 4usize
+            .checked_mul(n_combos)
+            .and_then(|v| v.checked_mul(size_of::<i32>()))
+            .ok_or_else(|| CudaDmaError::InvalidInput("param bytes overflow".into()))?;
+        let required = out_bytes
+            .checked_add(param_bytes)
+            .and_then(|v| v.checked_add(64 * 1024 * 1024))
+            .ok_or_else(|| CudaDmaError::InvalidInput("required bytes overflow".into()))?;
+        Self::ensure_fit(required, 0)?;
         let mut hulls = Vec::with_capacity(n_combos);
         let mut emas = Vec::with_capacity(n_combos);
         let mut gains = Vec::with_capacity(n_combos);
@@ -643,26 +619,11 @@ impl CudaDma {
                 }
             });
         }
-        let d_hulls = unsafe {
-            DeviceBuffer::from_slice_async(&hulls, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
-        };
-        let d_emas = unsafe {
-            DeviceBuffer::from_slice_async(&emas, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
-        };
-        let d_gains = unsafe {
-            DeviceBuffer::from_slice_async(&gains, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
-        };
-        let d_types = unsafe {
-            DeviceBuffer::from_slice_async(&types, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
-        };
+        let d_hulls = unsafe { DeviceBuffer::from_slice_async(&hulls, &self.stream) }?;
+        let d_emas = unsafe { DeviceBuffer::from_slice_async(&emas, &self.stream) }?;
+        let d_gains = unsafe { DeviceBuffer::from_slice_async(&gains, &self.stream) }?;
+        let d_types = unsafe { DeviceBuffer::from_slice_async(&types, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
         // Hint L2 persistence for device-resident prices
         let _ = self.maybe_enable_l2_persist_for_prices(
             series_len * size_of::<f32>(),
@@ -680,9 +641,7 @@ impl CudaDma {
             max_sqrt_len,
             &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -771,7 +730,7 @@ impl CudaDma {
                     ];
                     self.stream
                         .launch(&func, grid, block, shared_bytes, args)
-                        .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+                        .map_err(|e| CudaDmaError::Cuda(e))?;
                 }
             }
 
@@ -810,7 +769,7 @@ impl CudaDma {
                             out_ptr
                         )
                     )
-                    .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+                    .map_err(|e| CudaDmaError::Cuda(e))?;
                 }
             }
             unsafe {
@@ -837,15 +796,15 @@ impl CudaDma {
         let elems = num_series * series_len;
         let in_bytes = elems * std::mem::size_of::<f32>();
         let out_bytes = in_bytes;
-        if !Self::will_fit(in_bytes + out_bytes + 64 * 1024 * 1024, 0) {
-            return Err(CudaDmaError::InvalidInput(
-                "not enough device memory for DMA many-series".into(),
-            ));
+        if let Some((free, _)) = mem_get_info().ok() {
+            if in_bytes + out_bytes + 64 * 1024 * 1024 > free {
+                return Err(CudaDmaError::OutOfMemory { required: in_bytes + out_bytes + 64 * 1024 * 1024, free, headroom: 0 });
+            }
         }
 
         let d_prices = unsafe {
             DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+                .map_err(|e| CudaDmaError::Cuda(e))?
         };
         // Hint L2 persist for entire slab (time-major)
         let _ = self.maybe_enable_l2_persist_for_prices(
@@ -854,11 +813,11 @@ impl CudaDma {
         );
         let d_first = unsafe {
             DeviceBuffer::from_slice_async(first_valids, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+                .map_err(|e| CudaDmaError::Cuda(e))?
         };
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(elems, &self.stream)
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?
+                .map_err(|e| CudaDmaError::Cuda(e))?
         };
         self.launch_many_series_kernels(
             &d_prices,
@@ -872,9 +831,7 @@ impl CudaDma {
             sqrt_len,
             &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: series_len,
@@ -946,8 +903,7 @@ impl CudaDma {
                         sqrt_len as i32,
                         d_out_tm.as_device_ptr()
                     )
-                )
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+                )?;
             }
             unsafe {
                 (*(self as *const _ as *mut CudaDma)).last_many =
@@ -981,8 +937,7 @@ impl CudaDma {
                         sqrt_len as i32,
                         d_out_tm.as_device_ptr()
                     )
-                )
-                .map_err(|e| CudaDmaError::Cuda(e.to_string()))?;
+                )?;
             }
             unsafe {
                 (*(self as *const _ as *mut CudaDma)).last_many =

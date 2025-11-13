@@ -112,7 +112,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaFwma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::utilities::aligned_vector::AlignedVec;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -132,6 +132,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+// FWMA-specific CUDA Python handle (keeps context alive; CAI v3 + DLPack)
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 #[cfg(feature = "wasm")]
@@ -142,6 +147,117 @@ use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
+
+// FWMA CUDA device handle for Python that carries a context guard
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "FwmaDeviceArrayF32", unsendable)]
+pub struct DeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+    pub(crate) stream: usize,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * core::mem::size_of::<f32>(),
+                core::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // We synchronize before returning handles, so omit stream per CAI v3 guidance.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+
+    fn __dlpack__<'py>(slf: PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use pyo3::ffi;
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_void};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct Manager { py_self: *mut ffi::PyObject, shape: *mut [i64; 2] }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            unsafe {
+                let mgr = (*p).manager_ctx as *mut Manager;
+                if !mgr.is_null() {
+                    let mgr_box = Box::from_raw(mgr);
+                    let g = ffi::PyGILState_Ensure();
+                    ffi::Py_DECREF(mgr_box.py_self);
+                    ffi::PyGILState_Release(g);
+                    if !mgr_box.shape.is_null() { let _ = Box::from_raw(mgr_box.shape); }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape = Box::new([rows, cols]);
+        let shape_ptr: *mut [i64; 2] = &mut *shape;
+
+        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
+        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
+        let dl = DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr as *mut i64,
+                strides: core::ptr::null_mut(),
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(dlpack_deleter),
+        };
+
+        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
+        let name = CString::new("dltensor").unwrap();
+        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
+        if capsule.is_null() {
+            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
 
 impl<'a> AsRef<[f64]> for FwmaInput<'a> {
     #[inline(always)]
@@ -2276,13 +2392,17 @@ pub fn fwma_cuda_batch_dev_py(
     };
     let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaFwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.fwma_batch_dev(&data_f32, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc_clone();
+        let dev = cuda.device_id();
+        let arr = cuda
+            .fwma_batch_dev(&data_f32, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id, stream: 0 })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2307,13 +2427,17 @@ pub fn fwma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaFwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.fwma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc_clone();
+        let dev = cuda.device_id();
+        let arr = cuda
+            .fwma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id, stream: 0 })
 }
 
 #[cfg(feature = "python")]

@@ -28,6 +28,7 @@ use cust::stream::{Stream, StreamFlags};
 use cust::sys as cuda_sys;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
 use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -78,6 +79,8 @@ pub enum CudaFwmaError {
     Cuda(#[from] cust::error::CudaError),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("Missing kernel symbol: {name}")]
@@ -86,6 +89,8 @@ pub enum CudaFwmaError {
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
     #[error("arithmetic overflow while computing {context}")]
     ArithmeticOverflow { context: &'static str },
+    #[error("Device mismatch: buffer device {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
     NotImplemented,
 }
@@ -93,7 +98,7 @@ pub enum CudaFwmaError {
 pub struct CudaFwma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaFwmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -136,7 +141,7 @@ impl CudaFwma {
     pub fn new(device_id: usize) -> Result<Self, CudaFwmaError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        let context = Context::new(device)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/fwma_kernel.ptx"));
         // Try with target-from-context and O2, then relax progressively
@@ -189,6 +194,10 @@ impl CudaFwma {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
+    #[inline]
+    pub fn context_arc_clone(&self) -> Arc<Context> { self._context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
     pub fn synchronize(&self) -> Result<(), CudaFwmaError> {
         self.stream.synchronize().map_err(Into::into)
     }
@@ -630,6 +639,10 @@ impl CudaFwma {
             / Self::FWMA_TIME_STEPS_PER_BLOCK_HOST;
         let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        // Conservative launch validation (optional): ensure dims are non-zero and within typical limits
+        if grid_x == 0 || grid_y == 0 || block_x == 0 {
+            return Err(CudaFwmaError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         let shared_bytes = (period * std::mem::size_of::<f32>()) as u32; // weights only
         self.set_kernel_smem_prefs(&mut func, shared_bytes as usize)?;
 

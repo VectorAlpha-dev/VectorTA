@@ -19,63 +19,80 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaAdxrError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buffer on {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaAdxrError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaAdxrError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaAdxrError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaAdxrError {}
 
 pub struct CudaAdxr {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
+    device_id: u32,
 }
 
 impl CudaAdxr {
     pub fn new(device_id: usize) -> Result<Self, CudaAdxrError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/adxr_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O4),
+            ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
+        };
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        Ok(Self {
-            module,
-            stream,
-            _context: context,
-        })
+        Ok(Self { module, stream, _context: context, device_id: device_id as u32 })
     }
 
     #[inline]
-    fn will_fit(bytes_needed: usize, headroom: usize) -> bool {
+    pub fn context_arc_clone(&self) -> Arc<Context> { self._context.clone() }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaAdxrError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    #[inline]
+    fn will_fit(bytes_needed: usize, headroom: usize) -> Result<(), CudaAdxrError> {
         if let Ok((free, _total)) = mem_get_info() {
-            let free = free.saturating_sub(headroom);
-            (bytes_needed as u64) <= (free as u64)
-        } else {
-            true
-        }
+            let adj_free = free.saturating_sub(headroom);
+            if bytes_needed <= adj_free { Ok(()) } else { Err(CudaAdxrError::OutOfMemory { required: bytes_needed, free, headroom }) }
+        } else { Ok(()) }
     }
 
     #[inline]
@@ -87,12 +104,20 @@ impl CudaAdxr {
         let (start, end, step) = sweep.period;
         let ps: Vec<usize> = if step == 0 || start == end {
             vec![start]
-        } else {
+        } else if start < end {
             (start..=end).step_by(step).collect()
+        } else {
+            // reversed bounds
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                if let Some(next) = cur.checked_sub(step) { cur = next; } else { break; }
+                if cur < end { break; }
+            }
+            v
         };
-        ps.into_iter()
-            .map(|p| AdxrParams { period: Some(p) })
-            .collect()
+        ps.into_iter().map(|p| AdxrParams { period: Some(p) }).collect()
     }
 
     fn find_first_valid_close(close: &[f32]) -> Option<usize> {
@@ -115,25 +140,26 @@ impl CudaAdxr {
     ) -> Result<(DeviceArrayF32, Vec<AdxrParams>), CudaAdxrError> {
         let n = close_f32.len();
         if n == 0 || high_f32.len() != n || low_f32.len() != n {
-            return Err(CudaAdxrError::InvalidInput(
-                "input slices are empty or mismatched".into(),
-            ));
+            return Err(CudaAdxrError::InvalidInput("input slices are empty or mismatched".into()));
         }
         let combos = Self::expand_periods(sweep);
-        if combos.is_empty() {
-            return Err(CudaAdxrError::InvalidInput("no period combinations".into()));
-        }
+        if combos.is_empty() { return Err(CudaAdxrError::InvalidInput("no period combinations".into())); }
 
-        let first = Self::find_first_valid_close(close_f32)
-            .ok_or_else(|| CudaAdxrError::InvalidInput("all values are NaN".into()))?;
+        let first = Self::find_first_valid_close(close_f32).ok_or_else(|| CudaAdxrError::InvalidInput("all values are NaN".into()))?;
         let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-        if n - first < max_p + 1 {
-            return Err(CudaAdxrError::InvalidInput(format!(
-                "not enough valid data: needed >= {}, have {}",
-                max_p + 1,
-                n - first
-            )));
-        }
+        if n - first < max_p + 1 { return Err(CudaAdxrError::InvalidInput(format!("not enough valid data: needed >= {}, have {}", max_p + 1, n - first))); }
+
+        // Memory estimate with headroom
+        let headroom = 64 * 1024 * 1024;
+        let out_elems = n
+            .checked_mul(combos.len())
+            .ok_or_else(|| CudaAdxrError::InvalidInput("rows*cols overflow".into()))?;
+        let bytes = (high_f32.len() + low_f32.len() + close_f32.len())
+            .checked_mul(4)
+            .and_then(|b| b.checked_add(combos.len().saturating_mul(core::mem::size_of::<i32>())))
+            .and_then(|b| b.checked_add(out_elems.saturating_mul(4)))
+            .ok_or_else(|| CudaAdxrError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(bytes, headroom)?;
 
         // Periods -> i32, async copy
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
@@ -147,44 +173,44 @@ impl CudaAdxr {
         if use_opt {
             // Global ring workspace sizing (n_combos × padded period)
             let ring_pitch = Self::round_up(max_p, 32);
-            let ring_elems = ring_pitch * n_combos;
+            let ring_elems = ring_pitch
+                .checked_mul(n_combos)
+                .ok_or_else(|| CudaAdxrError::InvalidInput("ring workspace overflow".into()))?;
 
             // Memory fit check includes inputs + periods + ring + outputs
             let headroom = 64 * 1024 * 1024;
-            let bytes = (high_f32.len() + low_f32.len() + close_f32.len()) * 4
-                + periods_i32.len() * 4
-                + ring_elems * 4
-                + (n_combos * n) * 4;
-            if !Self::will_fit(bytes, headroom) {
-                return Err(CudaAdxrError::InvalidInput("insufficient device memory".into()));
-            }
+            let out_elems2 = n_combos
+                .checked_mul(n)
+                .ok_or_else(|| CudaAdxrError::InvalidInput("rows*cols overflow".into()))?;
+            let bytes = (high_f32.len() + low_f32.len() + close_f32.len())
+                .checked_mul(4)
+                .and_then(|b| b.checked_add(periods_i32.len().saturating_mul(4)))
+                .and_then(|b| b.checked_add(ring_elems.saturating_mul(4)))
+                .and_then(|b| b.checked_add(out_elems2.saturating_mul(4)))
+                .ok_or_else(|| CudaAdxrError::InvalidInput("byte size overflow".into()))?;
+            Self::will_fit(bytes, headroom)?;
 
             // Upload inputs (async)
-            let d_high  = unsafe { DeviceBuffer::from_slice_async(high_f32,  &self.stream) }
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-            let d_low   = unsafe { DeviceBuffer::from_slice_async(low_f32,   &self.stream) }
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-            let d_close = unsafe { DeviceBuffer::from_slice_async(close_f32, &self.stream) }
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-            let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let d_high  = unsafe { DeviceBuffer::from_slice_async(high_f32,  &self.stream) }?;
+            let d_low   = unsafe { DeviceBuffer::from_slice_async(low_f32,   &self.stream) }?;
+            let d_close = unsafe { DeviceBuffer::from_slice_async(close_f32, &self.stream) }?;
+            let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
 
             let mut d_ring: DeviceBuffer<f32> =
                 unsafe { DeviceBuffer::uninitialized_async(ring_elems, &self.stream) }
-                    .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                    .map_err(|e| CudaAdxrError::Cuda(e))?;
             let mut d_out: DeviceBuffer<f32> =
-                unsafe { DeviceBuffer::uninitialized_async(n_combos * n, &self.stream) }
-                    .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                unsafe { DeviceBuffer::uninitialized_async(out_elems2, &self.stream) }
+                    .map_err(|e| CudaAdxrError::Cuda(e))?;
 
             // Optimized kernel with shared tiling
             let mut func = self
                 .module
                 .get_function("adxr_one_series_many_params_f32_opt")
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaAdxrError::MissingKernelSymbol { name: "adxr_one_series_many_params_f32_opt" })?;
 
             // Hint: prefer shared memory over L1 for this kernel
-            func.set_cache_config(CacheConfig::PreferShared)
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            func.set_cache_config(CacheConfig::PreferShared)?;
 
             // Dynamic shared memory for two f32 tiles of length 256
             let shmem_bytes: usize = 2 * 256 * core::mem::size_of::<f32>();
@@ -215,41 +241,37 @@ impl CudaAdxr {
                         ring_pitch as i32,
                         d_out.as_device_ptr()
                     )
-                )
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                )?;
             }
 
-            self.stream
-                .synchronize()
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            self.stream.synchronize()?;
 
             Ok((DeviceArrayF32 { buf: d_out, rows: n_combos, cols: n }, combos))
         } else {
             // Legacy kernel path (no shared tiles, no global ring required)
             let headroom = 64 * 1024 * 1024;
-            let bytes = (high_f32.len() + low_f32.len() + close_f32.len()) * 4
-                + periods_i32.len() * 4
-                + (n_combos * n) * 4;
-            if !Self::will_fit(bytes, headroom) {
-                return Err(CudaAdxrError::InvalidInput("insufficient device memory".into()));
-            }
+            let out_elems3 = n_combos
+                .checked_mul(n)
+                .ok_or_else(|| CudaAdxrError::InvalidInput("rows*cols overflow".into()))?;
+            let bytes = (high_f32.len() + low_f32.len() + close_f32.len())
+                .checked_mul(4)
+                .and_then(|b| b.checked_add(periods_i32.len().saturating_mul(4)))
+                .and_then(|b| b.checked_add(out_elems3.saturating_mul(4)))
+                .ok_or_else(|| CudaAdxrError::InvalidInput("byte size overflow".into()))?;
+            Self::will_fit(bytes, headroom)?;
 
-            let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-            let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-            let d_close = unsafe { DeviceBuffer::from_slice_async(close_f32, &self.stream) }
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-            let d_periods = DeviceBuffer::from_slice(&periods_i32)
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }?;
+            let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }?;
+            let d_close = unsafe { DeviceBuffer::from_slice_async(close_f32, &self.stream) }?;
+            let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
             let mut d_out: DeviceBuffer<f32> =
-                unsafe { DeviceBuffer::uninitialized_async(n_combos * n, &self.stream) }
-                    .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                unsafe { DeviceBuffer::uninitialized_async(out_elems3, &self.stream) }
+                    .map_err(|e| CudaAdxrError::Cuda(e))?;
 
             let func = self
                 .module
                 .get_function("adxr_batch_f32")
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                .map_err(|_| CudaAdxrError::MissingKernelSymbol { name: "adxr_batch_f32" })?;
 
             // Ask occupancy for a suggested block size; fall back to 128
             let (_, suggested) = func
@@ -280,15 +302,12 @@ impl CudaAdxr {
                             chunk as i32,
                             d_out_off
                         )
-                    )
-                    .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                    )?;
                 }
                 launched += chunk;
             }
 
-            self.stream
-                .synchronize()
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            self.stream.synchronize()?;
 
             Ok((DeviceArrayF32 { buf: d_out, rows: n_combos, cols: n }, combos))
         }
@@ -304,18 +323,16 @@ impl CudaAdxr {
         rows: usize,
         period: usize,
     ) -> Result<DeviceArrayF32, CudaAdxrError> {
-        if cols == 0 || rows == 0 {
-            return Err(CudaAdxrError::InvalidInput("empty matrix".into()));
-        }
-        let n = cols * rows;
+        if cols == 0 || rows == 0 { return Err(CudaAdxrError::InvalidInput("empty matrix".into())); }
+        let n = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAdxrError::InvalidInput("rows*cols overflow".into()))?;
         if high_tm_f32.len() != n || low_tm_f32.len() != n || close_tm_f32.len() != n {
             return Err(CudaAdxrError::InvalidInput(
                 "matrix inputs must have identical length".into(),
             ));
         }
-        if period == 0 || period > rows {
-            return Err(CudaAdxrError::InvalidInput("invalid period".into()));
-        }
+        if period == 0 || period > rows { return Err(CudaAdxrError::InvalidInput("invalid period".into())); }
 
         // First-valid per series uses close only (match scalar semantics)
         let mut first_valids: Vec<i32> = vec![0; cols];
@@ -332,36 +349,27 @@ impl CudaAdxr {
         }
 
         let headroom = 64 * 1024 * 1024;
-        let bytes = (high_tm_f32.len() + low_tm_f32.len() + close_tm_f32.len()) * 4
-            + first_valids.len() * 4
-            + n * 4;
-        if !Self::will_fit(bytes, headroom) {
-            return Err(CudaAdxrError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
-            return Err(CudaAdxrError::InvalidInput(
-                "insufficient device memory".into(),
-            ));
-        }
+        let bytes = (high_tm_f32.len() + low_tm_f32.len() + close_tm_f32.len())
+            .checked_mul(4)
+            .and_then(|b| b.checked_add(first_valids.len().saturating_mul(4)))
+            .and_then(|b| b.checked_add(n.saturating_mul(4)))
+            .ok_or_else(|| CudaAdxrError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(bytes, headroom)?;
 
-        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm_f32, &self.stream) }
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-        let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm_f32, &self.stream) }
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm_f32, &self.stream) }?;
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm_f32, &self.stream) }?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaAdxrError::Cuda(e))?;
 
         // Try optimized time-major kernel first; fall back to legacy signature if missing
         if let Ok(func_opt) = self.module.get_function("adxr_many_series_one_param_time_major_f32_opt") {
             let ring_pitch = Self::round_up(period, 32);
             let mut d_ring: DeviceBuffer<f32> =
                 unsafe { DeviceBuffer::uninitialized_async(cols * ring_pitch, &self.stream) }
-                    .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                    .map_err(|e| CudaAdxrError::Cuda(e))?;
 
             let grid: GridSize = (cols as u32, 1u32, 1u32).into();
             let block: BlockSize = (1u32, 1u32, 1u32).into();
@@ -381,13 +389,13 @@ impl CudaAdxr {
                         d_out.as_device_ptr()
                     )
                 )
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaAdxrError::Cuda(e))?;
             }
         } else {
             let func = self
                 .module
                 .get_function("adxr_many_series_one_param_f32")
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaAdxrError::Cuda(e))?;
             let grid: GridSize = (cols as u32, 1u32, 1u32).into();
             let block: BlockSize = (1u32, 1u32, 1u32).into();
             let stream = &self.stream;
@@ -404,13 +412,13 @@ impl CudaAdxr {
                         d_out.as_device_ptr()
                     )
                 )
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaAdxrError::Cuda(e))?;
             }
         }
 
         self.stream
             .synchronize()
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+            .map_err(|e| CudaAdxrError::Cuda(e))?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -429,21 +437,17 @@ impl CudaAdxr {
         out: &mut [f32],
     ) -> Result<(usize, usize, Vec<AdxrParams>), CudaAdxrError> {
         let (arr, combos) = self.adxr_batch_dev(high_f32, low_f32, close_f32, sweep)?;
-        if out.len() != arr.len() {
-            return Err(CudaAdxrError::InvalidInput("out length mismatch".into()));
-        }
+        if out.len() != arr.len() { return Err(CudaAdxrError::InvalidInput("out length mismatch".into())); }
         let mut pinned: LockedBuffer<f32> = unsafe {
             LockedBuffer::uninitialized(arr.len())
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?
+                .map_err(|e| CudaAdxrError::Cuda(e))?
         };
         unsafe {
             arr.buf
                 .async_copy_to(pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+                .map_err(|e| CudaAdxrError::Cuda(e))?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaAdxrError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         out.copy_from_slice(pinned.as_slice());
         Ok((arr.rows, arr.cols, combos))
     }

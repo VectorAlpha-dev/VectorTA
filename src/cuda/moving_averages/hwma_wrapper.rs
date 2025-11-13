@@ -23,6 +23,7 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
@@ -32,12 +33,16 @@ pub enum CudaHwmaError {
     Cuda(#[from] cust::error::CudaError),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("Out of memory on device (required={required} bytes, free={free} bytes, headroom={headroom} bytes)")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Launch configuration too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Device buffer context/device mismatch (buf device={buf}, current={current})")]
+    DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
     NotImplemented,
 }
@@ -82,7 +87,7 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaHwma {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaHwmaPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -96,6 +101,7 @@ impl CudaHwma {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
         let context = Context::new(device)?;
+        let context = Arc::new(context);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/hwma_kernel.ptx"));
         // Prefer DetermineTargetFromContext + O2 for stability; fall back to simpler modes.
@@ -145,6 +151,9 @@ impl CudaHwma {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
+
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
     pub fn synchronize(&self) -> Result<(), CudaHwmaError> {
         self.stream.synchronize().map_err(|e| CudaHwmaError::Cuda(e))
     }
@@ -342,6 +351,11 @@ impl CudaHwma {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
+        // Optional sanity: ensure we do not exceed zero/absurd launch sizes
+        if block_x == 0 || grid_x == 0 {
+            return Err(CudaHwmaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
+
         // Introspection
         unsafe {
             (*(self as *const _ as *mut CudaHwma)).last_batch =
@@ -410,10 +424,24 @@ impl CudaHwma {
         let n_combos = combos.len();
 
         // VRAM estimate: prices + 3 param arrays + output
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let params_bytes = 3 * n_combos * std::mem::size_of::<f32>();
-        let out_bytes = n_combos * series_len * std::mem::size_of::<f32>();
-        let required = prices_bytes + params_bytes + out_bytes;
+        let sz_f32 = std::mem::size_of::<f32>();
+        let prices_bytes = series_len
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaHwmaError::InvalidInput("series_len bytes overflow".into()))?;
+        let params_bytes = 3usize
+            .checked_mul(n_combos)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f64>()))
+            .ok_or_else(|| CudaHwmaError::InvalidInput("params bytes overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaHwmaError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaHwmaError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaHwmaError::InvalidInput("total bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
@@ -646,10 +674,23 @@ impl CudaHwma {
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         // VRAM: prices + first_valids + output
-        let prices_bytes = cols * rows * std::mem::size_of::<f32>();
-        let first_bytes = cols * std::mem::size_of::<i32>();
-        let out_bytes = cols * rows * std::mem::size_of::<f32>();
-        let required = prices_bytes + first_bytes + out_bytes;
+        let sz_f32 = std::mem::size_of::<f32>();
+        let prices_elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaHwmaError::InvalidInput("rows*cols overflow".into()))?;
+        let prices_bytes = prices_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaHwmaError::InvalidInput("prices bytes overflow".into()))?;
+        let first_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaHwmaError::InvalidInput("first_valids bytes overflow".into()))?;
+        let out_bytes = prices_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaHwmaError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(first_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaHwmaError::InvalidInput("total bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
