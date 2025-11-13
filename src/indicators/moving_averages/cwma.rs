@@ -1833,9 +1833,6 @@ pub fn cwma_batch_py<'py>(
     Ok(dict)
 }
 
-#[cfg(all(feature = "python", feature = "cuda"))]
-#[pyfunction(name = "cwma_cuda_batch_dev")]
-#[pyo3(signature = (data_f32, period_range, device_id=0))]
 // CWMA-specific CUDA device handle with CAI v3 and DLPack, context-guarded
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -1958,6 +1955,8 @@ impl DeviceArrayF32CwmaPy {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "cwma_cuda_batch_dev")]
+#[pyo3(signature = (data_f32, period_range, device_id=0))]
 pub fn cwma_cuda_batch_dev_py(
     py: Python<'_>,
     data_f32: numpy::PyReadonlyArray1<'_, f32>,

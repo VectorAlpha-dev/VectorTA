@@ -113,13 +113,13 @@ impl DeviceArrayF32Py {
             if mt.is_null() { return; }
             unsafe {
                 let holder_ptr = (*mt).manager_ctx as *mut Holder;
-                if !holder_ptr.is_null() {
-                    // Release retained CUDA context if any
-                    if !(*holder_ptr)._ctx_guard.is_null() {
-                        let _ = cust::sys::cuCtxRelease((*holder_ptr)._ctx_guard);
-                    }
-                    drop(Box::from_raw(holder_ptr));
+            if !holder_ptr.is_null() {
+                // Release retained CUDA context if any
+                if !(*holder_ptr)._ctx_guard.is_null() {
+                    let _ = cust::sys::cuCtxDetach((*holder_ptr)._ctx_guard);
                 }
+                drop(Box::from_raw(holder_ptr));
+            }
             }
         }
 
@@ -139,7 +139,8 @@ impl DeviceArrayF32Py {
         unsafe {
             let _ = cust::sys::cuCtxGetCurrent(&mut retained_ctx);
             if !retained_ctx.is_null() {
-                let _ = cust::sys::cuCtxRetain(&mut retained_ctx);
+                // Duplicate a reference to the current context; detach in deleter
+                let _ = cust::sys::cuCtxAttach(&mut retained_ctx, 0);
             }
         }
         let dummy = DeviceBuffer::from_slice(&[])
@@ -149,11 +150,15 @@ impl DeviceArrayF32Py {
             DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
         );
 
+        // Query device id from current context for DLPack device tag
+        let mut current_dev: i32 = 0;
+        unsafe { let _ = cust::sys::cuCtxGetDevice(&mut current_dev); }
+
         let mut holder = Box::new(Holder {
             managed: DLManagedTensor {
                 dl_tensor: DLTensor {
                     data: inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
-                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
+                    device: DLDevice { device_type: 2, device_id: current_dev },
                     ndim: 2,
                     dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
                     shape: std::ptr::null_mut(),

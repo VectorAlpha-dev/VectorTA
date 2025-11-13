@@ -2163,15 +2163,15 @@ pub fn swma_cuda_batch_dev_py(
     };
     let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
 
-    let (inner, ctx, dev) = py.allow_threads(|| {
-        let cuda = CudaSwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let arr = cuda
-            .swma_batch_dev(&data_f32, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let ctx = cuda.context_arc();
-        let dev = cuda.device_id() as u32;
-        Ok((arr, ctx, dev))
-    })?;
+    let (inner, ctx, dev) = py
+        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::swma_wrapper::CudaSwmaError> {
+            let cuda = CudaSwma::new(device_id)?;
+            let arr = cuda.swma_batch_dev(&data_f32, &sweep)?;
+            let ctx = cuda.context_arc();
+            let dev = cuda.device_id() as u32;
+            Ok((arr, ctx, dev))
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(DeviceArrayF32SwmaPy { inner: Some(inner), ctx: Some(ctx), device_id: dev })
 }
@@ -2198,15 +2198,16 @@ pub fn swma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (inner, ctx, dev) = py.allow_threads(|| {
-        let cuda = CudaSwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let arr = cuda
-            .swma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let ctx = cuda.context_arc();
-        let dev = cuda.device_id() as u32;
-        Ok((arr, ctx, dev))
-    })?;
+    let (inner, ctx, dev) = py
+        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::swma_wrapper::CudaSwmaError> {
+            let cuda = CudaSwma::new(device_id)?;
+            let arr =
+                cuda.swma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)?;
+            let ctx = cuda.context_arc();
+            let dev = cuda.device_id() as u32;
+            Ok((arr, ctx, dev))
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(DeviceArrayF32SwmaPy { inner: Some(inner), ctx: Some(ctx), device_id: dev })
 }
@@ -2314,7 +2315,7 @@ impl DeviceArrayF32SwmaPy {
             managed: DLManagedTensor {
                 dl_tensor: DLTensor {
                     data: inner.buf.as_device_ptr().as_raw() as *mut std::ffi::c_void,
-                    device: DLDevice { device_type: 2, device_id: inner.device_id as i32 },
+                    device: DLDevice { device_type: 2, device_id: self.device_id as i32 },
                     ndim: 2,
                     dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
                     shape: std::ptr::null_mut(),

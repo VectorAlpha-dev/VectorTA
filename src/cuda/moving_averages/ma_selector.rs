@@ -260,7 +260,9 @@ impl CudaMaSelector {
                 };
                 let cuda = CudaSmma::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.smma_batch_dev(ensure_prices!(), &sweep)
+                cuda
+                    .smma_batch_dev(ensure_prices!(), &sweep)
+                    .map(|h| super::alma_wrapper::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
             }
             "trima" => {
@@ -269,7 +271,9 @@ impl CudaMaSelector {
                 };
                 let cuda = CudaTrima::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.trima_batch_dev(ensure_prices!(), &sweep)
+                cuda
+                    .trima_batch_dev(ensure_prices!(), &sweep)
+                    .map(|h| super::alma_wrapper::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
             }
             "tema" => {
@@ -288,7 +292,9 @@ impl CudaMaSelector {
                 };
                 let cuda = CudaTilson::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.tilson_batch_dev(ensure_prices!(), &sweep)
+                cuda
+                    .tilson_batch_dev(ensure_prices!(), &sweep)
+                    .map(|h| super::alma_wrapper::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
             }
             "wilders" => {
@@ -297,7 +303,9 @@ impl CudaMaSelector {
                 };
                 let cuda = CudaWilders::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.wilders_batch_dev(ensure_prices!(), &sweep)
+                cuda
+                    .wilders_batch_dev(ensure_prices!(), &sweep)
+                    .map(|h| super::alma_wrapper::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
             }
             "cwma" => {
@@ -346,7 +354,9 @@ impl CudaMaSelector {
                 };
                 let cuda = CudaSrwma::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.srwma_batch_dev(ensure_prices!(), &sweep)
+                cuda
+                    .srwma_batch_dev(ensure_prices!(), &sweep)
+                    .map(|h| super::alma_wrapper::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
             }
             "sinwma" => {
@@ -424,7 +434,9 @@ impl CudaMaSelector {
                 };
                 let cuda = CudaHighpass::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.highpass_batch_dev(ensure_prices!(), &sweep)
+                cuda
+                    .highpass_batch_dev(ensure_prices!(), &sweep)
+                    .map(|h| super::alma_wrapper::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
             }
             "highpass2" | "highpass_2_pole" => {
@@ -546,7 +558,9 @@ impl CudaMaSelector {
                 };
                 let cuda = CudaSama::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.sama_batch_dev(ensure_prices!(), &sweep)
+                cuda
+                    .sama_batch_dev(ensure_prices!(), &sweep)
+                    .map(|h| super::alma_wrapper::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
             }
             "ehlers_kama" => {
@@ -626,7 +640,9 @@ impl CudaMaSelector {
                 };
                 let cuda = CudaPwma::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.pwma_batch_dev(ensure_prices!(), &sweep)
+                cuda
+                    .pwma_batch_dev(ensure_prices!(), &sweep)
+                    .map(|h| super::alma_wrapper::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
             }
             "maaq" => {
@@ -646,7 +662,9 @@ impl CudaMaSelector {
                 };
                 let cuda = CudaMwdx::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.mwdx_batch_dev(ensure_prices!(), &sweep)
+                cuda
+                    .mwdx_batch_dev(ensure_prices!(), &sweep)
+                    .map(|h| super::alma_wrapper::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
             }
             "reflex" => {
@@ -667,7 +685,9 @@ impl CudaMaSelector {
                     };
                 let cuda = CudaVama::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                cuda.vama_batch_dev(ensure_prices!(), &sweep)
+                cuda
+                    .vama_batch_dev(ensure_prices!(), &sweep)
+                    .map(|h| super::alma_wrapper::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))
             }
             "trendflex" => {

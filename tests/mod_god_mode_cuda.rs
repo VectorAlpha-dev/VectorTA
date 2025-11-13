@@ -254,15 +254,6 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
             rows,
             &ModGodModeParams::default(),
         )
-        .mod_god_mode_many_series_one_param_time_major_dev(
-            &h_tm_f32,
-            &l_tm_f32,
-            &c_tm_f32,
-            None,
-            cols,
-            rows,
-            &ModGodModeParams::default(),
-        )
         .expect("cuda many-series");
     assert_eq!(out.rows(), rows);
     assert_eq!(out.cols(), cols);

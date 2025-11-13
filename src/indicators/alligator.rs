@@ -2793,7 +2793,8 @@ pub fn alligator_batch_py<'py>(
         lips_offset: lips_offset_range,
     };
 
-    let combos = expand_grid(&sweep)?;
+    // Map domain errors to Python exceptions to satisfy PyResult
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -3533,7 +3534,9 @@ pub fn alligator_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsVal
         lips_period: config.lips_period_range,
         lips_offset: config.lips_offset_range,
     };
-    let rows = expand_grid(&sweep)?.len();
+    let rows = expand_grid(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?
+        .len();
     let cols = data.len();
     let mut jaw = vec![f64::NAN; rows * cols];
     let mut teeth = vec![f64::NAN; rows * cols];
@@ -3608,7 +3611,7 @@ pub fn alligator_batch_into(
             lips_period: (lp_s, lp_e, lp_step),
             lips_offset: (lo_s, lo_e, lo_step),
         };
-    let combos = expand_grid(&sweep)?;
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 

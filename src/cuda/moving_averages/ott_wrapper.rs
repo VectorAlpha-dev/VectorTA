@@ -478,6 +478,7 @@ impl CudaOtt {
                 CudaWilders::new(self.device_id as usize)
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
                     .wilders_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, &p)
+                    .map(|h| super::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
             } else if ma_type.eq_ignore_ascii_case("KAMA") {
                 let p = crate::indicators::moving_averages::kama::KamaParams {
@@ -501,6 +502,7 @@ impl CudaOtt {
                 CudaVpwma::new(self.device_id as usize)
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
                     .vpwma_multi_series_one_param_time_major_dev(data_tm_f32, cols, rows, &p)
+                    .map(|h| super::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
             } else if ma_type.eq_ignore_ascii_case("NAMA") {
                 let p = crate::indicators::moving_averages::nama::NamaParams {

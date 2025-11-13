@@ -2447,15 +2447,13 @@ pub fn vwap_cuda_batch_dev_py(
         anchor: (start, end, step),
     };
 
-    let (inner, ctx, dev) = py.allow_threads(|| {
-        let cuda = CudaVwap::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let arr = cuda
-            .vwap_batch_dev(ts_slice, vol_slice, price_slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let ctx = cuda.context_arc();
-        let dev = cuda.device_id();
-        Ok((arr, ctx, dev))
-    })?;
+    let (inner, ctx, dev) = py
+        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::vwap_wrapper::CudaVwapError> {
+            let cuda = CudaVwap::new(device_id)?;
+            let arr = cuda.vwap_batch_dev(ts_slice, vol_slice, price_slice, &sweep)?;
+            Ok((arr, cuda.context_arc(), cuda.device_id()))
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(DeviceArrayF32VwapPy { inner: Some(inner), ctx: Some(ctx), device_id: dev })
 }
@@ -2496,22 +2494,20 @@ pub fn vwap_cuda_many_series_one_param_dev_py(
     let prices_flat = prices_tm.as_slice()?;
     let volumes_flat = volumes_tm.as_slice()?;
 
-    let (inner, ctx, dev) = py.allow_threads(|| {
-        let cuda = CudaVwap::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let arr = cuda
-            .vwap_many_series_one_param_time_major_dev(
+    let (inner, ctx, dev) = py
+        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::vwap_wrapper::CudaVwapError> {
+            let cuda = CudaVwap::new(device_id)?;
+            let arr = cuda.vwap_many_series_one_param_time_major_dev(
                 ts_slice,
                 volumes_flat,
                 prices_flat,
                 cols,
                 rows,
                 &anchor,
-            )
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let ctx = cuda.context_arc();
-        let dev = cuda.device_id();
-        Ok((arr, ctx, dev))
-    })?;
+            )?;
+            Ok((arr, cuda.context_arc(), cuda.device_id()))
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(DeviceArrayF32VwapPy { inner: Some(inner), ctx: Some(ctx), device_id: dev })
 }

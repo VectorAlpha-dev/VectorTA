@@ -1031,7 +1031,7 @@ unsafe fn nma_batch_avx512_optimized(
     use aligned_vec::AVec;
     use core::arch::x86_64::*;
 
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(NmaError::InvalidPeriod {
             period: 0,
@@ -2496,11 +2496,10 @@ pub fn nma_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep);
-    let metadata: Vec<f64> = combos
-        .iter()
-        .map(|combo| combo.period.unwrap() as f64)
-        .collect();
+    let combos = expand_grid(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let metadata: Vec<f64> =
+        combos.iter().map(|combo| combo.period.unwrap() as f64).collect();
 
     Ok(metadata)
 }
@@ -2516,7 +2515,7 @@ pub fn nma_batch_rows_cols_js(
     let sweep = NmaBatchRange {
         period: (period_start, period_end, period_step),
     };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).unwrap_or_else(|_| Vec::new());
     vec![combos.len(), data_len]
 }
 
@@ -2613,7 +2612,8 @@ pub fn nma_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 

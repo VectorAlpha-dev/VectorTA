@@ -8,8 +8,6 @@ use my_project::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use cust::memory::CopyDestination;
-#[cfg(feature = "cuda")]
 use my_project::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use my_project::cuda::oscillators::CudaSrsi;

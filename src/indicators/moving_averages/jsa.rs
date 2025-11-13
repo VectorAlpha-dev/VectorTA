@@ -1167,15 +1167,15 @@ pub fn jsa_cuda_batch_dev_py(
         period: period_range,
     };
 
+    use crate::cuda::moving_averages::CudaJsaError;
     let handle: JsaDeviceHandle = py
-        .allow_threads(|| {
-            let cuda =
-                CudaJsa::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        .allow_threads(|| -> Result<_, CudaJsaError> {
+            let cuda = CudaJsa::new(device_id)?;
             cuda.jsa_batch_dev_handle(slice_in, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(JsaDeviceArrayF32Py::from_handle(handle))
+    Ok(JsaDeviceArrayF32Py::from_handle_rust(handle))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1205,20 +1205,20 @@ pub fn jsa_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
+    use crate::cuda::moving_averages::CudaJsaError;
     let handle: JsaDeviceHandle = py
-        .allow_threads(|| {
-            let cuda =
-                CudaJsa::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        .allow_threads(|| -> Result<_, CudaJsaError> {
+            let cuda = CudaJsa::new(device_id)?;
             cuda.jsa_many_series_one_param_time_major_dev_handle(
                 flat,
                 num_series,
                 series_len,
                 &params,
             )
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-        })?;
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(JsaDeviceArrayF32Py::from_handle(handle))
+    Ok(JsaDeviceArrayF32Py::from_handle_rust(handle))
 }
 
 // Note: jsa_batch_with_metadata_py is no longer needed since jsa_batch_py now returns metadata in the dictionary
@@ -1501,16 +1501,7 @@ impl JsaDeviceArrayF32Py {
         Ok(d)
     }
 
-    #[staticmethod]
-    fn from_handle(handle: JsaDeviceHandle) -> Self {
-        JsaDeviceArrayF32Py {
-            buf: Some(handle.buf),
-            rows: handle.rows,
-            cols: handle.cols,
-            _ctx: handle._ctx,
-            device_id: handle.device_id,
-        }
-    }
+    // No Python-exposed constructor from raw handle; use Rust-only helper below.
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
@@ -1605,6 +1596,19 @@ impl JsaDeviceArrayF32Py {
             return Err(PyValueError::new_err("failed to create DLPack capsule"));
         }
         Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl JsaDeviceArrayF32Py {
+    pub(crate) fn from_handle_rust(handle: JsaDeviceHandle) -> Self {
+        JsaDeviceArrayF32Py {
+            buf: Some(handle.buf),
+            rows: handle.rows,
+            cols: handle.cols,
+            _ctx: handle._ctx,
+            device_id: handle.device_id,
+        }
     }
 }
 

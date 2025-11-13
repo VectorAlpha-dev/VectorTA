@@ -30,7 +30,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub enum CudaReflexError {
     #[allow(dead_code)]
-    Cuda(#[from] cust::error::CudaError),
+    Cuda(cust::error::CudaError),
     InvalidInput(String),
     OutOfMemory { required: usize, free: usize, headroom: usize },
     MissingKernelSymbol { name: &'static str },
@@ -60,12 +60,24 @@ impl fmt::Display for CudaReflexError {
                 "launch config too large (grid=({}, {}, {}), block=({}, {}, {}))",
                 gx, gy, gz, bx, by, bz
             ),
+            CudaReflexError::InvalidPolicy(p) => write!(f, "invalid policy: {}", p),
+            CudaReflexError::DeviceMismatch { buf, current } => write!(
+                f,
+                "device mismatch: buffer on device {} but current device {}",
+                buf, current
+            ),
             CudaReflexError::NotImplemented => write!(f, "not implemented"),
         }
     }
 }
 
 impl std::error::Error for CudaReflexError {}
+
+impl From<cust::error::CudaError> for CudaReflexError {
+    fn from(e: cust::error::CudaError) -> Self {
+        CudaReflexError::Cuda(e)
+    }
+}
 
 pub struct CudaReflex {
     module: Module,
@@ -229,7 +241,7 @@ impl CudaReflex {
         let arr = self.run_batch_kernel(prices, &inputs)?;
         arr.buf
             .copy_to(out)
-            .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
+            .map_err(CudaReflexError::Cuda)?;
         Ok((arr.rows, arr.cols, inputs.combos))
     }
 
@@ -334,7 +346,7 @@ impl CudaReflex {
         let arr = self.run_many_series_kernel(prices_tm_f32, cols, rows, period, &prepared)?;
         arr.buf
             .copy_to(out_tm)
-            .map_err(|e| CudaReflexError::Cuda(e.to_string()))?;
+            .map_err(CudaReflexError::Cuda)?;
         Ok(())
     }
 

@@ -357,11 +357,11 @@ impl CudaSuperSmoother {
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let dev = Device::get_device(self.device_id).map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+        let dev = Device::get_device(self.device_id).map_err(CudaSuperSmootherError::Cuda)?;
         let max_threads = dev.get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))? as u32;
+            .map_err(CudaSuperSmootherError::Cuda)? as u32;
         let max_grid_x = dev.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))? as u32;
+            .map_err(CudaSuperSmootherError::Cuda)? as u32;
         if block_x > max_threads || grid_x > max_grid_x {
             return Err(CudaSuperSmootherError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
         }
@@ -385,7 +385,7 @@ impl CudaSuperSmoother {
 
             self.stream
                 .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+                .map_err(CudaSuperSmootherError::Cuda)?;
         }
 
         Ok(())
@@ -450,7 +450,7 @@ impl CudaSuperSmoother {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period)?;
-        dev.buf.copy_to(out_tm)
+        Ok(dev.buf.copy_to(out_tm)?)
     }
 
     // -------- Optional fast-paths: device-resident input & pinned host I/O --------
@@ -513,11 +513,11 @@ impl CudaSuperSmoother {
         unsafe {
             dev.buf
                 .async_copy_to(out_pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+                .map_err(CudaSuperSmootherError::Cuda)?;
         }
         self.stream
             .synchronize()
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+            .map_err(CudaSuperSmootherError::Cuda)?;
         Ok((combos.len(), len, combos))
     }
 
@@ -543,11 +543,11 @@ impl CudaSuperSmoother {
         unsafe {
             dev.buf
                 .async_copy_to(out_tm_pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))?;
+                .map_err(CudaSuperSmootherError::Cuda)?;
         }
         self.stream
             .synchronize()
-            .map_err(|e| CudaSuperSmootherError::Cuda(e.to_string()))
+            .map_err(CudaSuperSmootherError::Cuda)
     }
 }
 

@@ -774,15 +774,15 @@ impl CudaNma {
         )?;
         let expected = cols.checked_mul(rows).ok_or_else(|| CudaNmaError::InvalidInput("rows*cols overflow".into()))?;
         let mut h_out = unsafe { cust::memory::LockedBuffer::<f32>::uninitialized(expected) }
-            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+            .map_err(CudaNmaError::Cuda)?;
         unsafe {
             dev.buf
                 .async_copy_to(h_out.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+                .map_err(CudaNmaError::Cuda)?;
         }
         self.stream
             .synchronize()
-            .map_err(|e| CudaNmaError::Cuda(e.to_string()))?;
+            .map_err(CudaNmaError::Cuda)?;
         out_tm.copy_from_slice(h_out.as_slice());
         Ok(())
     }

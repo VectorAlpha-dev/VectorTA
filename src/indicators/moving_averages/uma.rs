@@ -2021,7 +2021,7 @@ pub fn uma_cuda_batch_dev_py(
     smooth_length_range: (usize, usize, usize),
     volume_f32: Option<numpy::PyReadonlyArray1<'_, f32>>,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<UmaDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2035,13 +2035,13 @@ pub fn uma_cuda_batch_dev_py(
         smooth_length: smooth_length_range,
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaUma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let out = cuda
-            .uma_batch_dev(slice_in, volume_slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
-    })?;
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::uma_wrapper::CudaUmaError> {
+            let cuda = CudaUma::new(device_id)?;
+            let out = cuda.uma_batch_dev(slice_in, volume_slice, &sweep)?;
+            Ok((out, cuda.context_arc(), cuda.device_id()))
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let crate::cuda::DeviceArrayF32 { buf, rows, cols } = inner;
     Ok(UmaDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })
@@ -2059,7 +2059,7 @@ pub fn uma_cuda_many_series_one_param_dev_py(
     smooth_length: usize,
     volume_tm_f32: Option<PyReadonlyArray2<'_, f32>>,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<UmaDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2090,13 +2090,19 @@ pub fn uma_cuda_many_series_one_param_dev_py(
         smooth_length: Some(smooth_length),
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaUma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let out = cuda
-            .uma_many_series_one_param_time_major_dev(prices_flat, volume_flat, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
-    })?;
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::uma_wrapper::CudaUmaError> {
+            let cuda = CudaUma::new(device_id)?;
+            let out = cuda.uma_many_series_one_param_time_major_dev(
+                prices_flat,
+                volume_flat,
+                cols,
+                rows,
+                &params,
+            )?;
+            Ok((out, cuda.context_arc(), cuda.device_id()))
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let crate::cuda::DeviceArrayF32 { buf, rows, cols } = inner;
     Ok(UmaDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })

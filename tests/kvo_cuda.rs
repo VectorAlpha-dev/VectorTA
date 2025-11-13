@@ -178,18 +178,6 @@ fn kvo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
                 long_period: Some(long),
             },
         )
-        .kvo_many_series_one_param_time_major_dev(
-            &h_f32,
-            &l_f32,
-            &c_f32,
-            &v_f32,
-            cols,
-            rows,
-            &KvoParams {
-                short_period: Some(short),
-                long_period: Some(long),
-            },
-        )
         .expect("kvo many series");
     assert_eq!(dev.rows, rows);
     assert_eq!(dev.cols, cols);

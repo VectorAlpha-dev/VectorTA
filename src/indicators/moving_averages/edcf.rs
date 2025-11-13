@@ -1060,7 +1060,7 @@ pub fn edcf_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(EdcfError::InvalidKernelForBatch(k)),
+        _ => return Err(EdcfError::InvalidKernel),
     };
     let simd = match kernel {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

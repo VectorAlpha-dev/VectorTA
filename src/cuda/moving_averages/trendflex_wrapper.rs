@@ -455,9 +455,9 @@ impl CudaTrendflex {
         }
         let elems = combos.len() * len;
         let mut d_ssf = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+            .map_err(CudaTrendflexError::Cuda)?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+            .map_err(CudaTrendflexError::Cuda)?;
 
         self.trendflex_batch_dev_with_device_prices_into(
             d_prices,

@@ -2381,7 +2381,7 @@ pub fn epma_cuda_batch_dev_py(
         let arr = cuda
             .epma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((arr, ctx, dev))
+        Ok::<_, PyErr>((arr, ctx, device_id as u32))
     })?;
 
     Ok(EpmaDeviceArrayF32Py { inner, _ctx_guard: ctx_guard, device_id: dev_id as u32 })
@@ -2416,7 +2416,7 @@ pub fn epma_cuda_many_series_one_param_dev_py(
         let arr = cuda
             .epma_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((arr, ctx, dev))
+        Ok::<_, PyErr>((arr, ctx, device_id as u32))
     })?;
 
     Ok(EpmaDeviceArrayF32Py { inner, _ctx_guard: ctx_guard, device_id: dev_id as u32 })

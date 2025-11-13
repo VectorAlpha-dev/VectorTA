@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "cuda")]
-use crate::cuda::moving_averages::CudaEhlersKama;
+use crate::cuda::moving_averages::{CudaEhlersKama, ehlers_kama_wrapper::CudaEhlersKamaError};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -1212,14 +1212,13 @@ pub fn ehlers_kama_cuda_batch_dev_py(
     };
     let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda =
-            CudaEhlersKama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let arr = cuda
-            .ehlers_kama_batch_dev(&data_f32, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyValueError>((arr, cuda.context_arc(), cuda.device_id()))
-    })?;
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| -> Result<_, CudaEhlersKamaError> {
+            let cuda = CudaEhlersKama::new(device_id)?;
+            let arr = cuda.ehlers_kama_batch_dev(&data_f32, &sweep)?;
+            Ok((arr, cuda.context_arc(), cuda.device_id()))
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(DeviceArrayF32KamaPy::new_from_rust(inner, ctx, dev_id))
 }
@@ -1246,14 +1245,14 @@ pub fn ehlers_kama_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda =
-            CudaEhlersKama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let arr = cuda
-            .ehlers_kama_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyValueError>((arr, cuda.context_arc(), cuda.device_id()))
-    })?;
+    let (inner, ctx, dev_id) = py
+        .allow_threads(|| -> Result<_, CudaEhlersKamaError> {
+            let cuda = CudaEhlersKama::new(device_id)?;
+            let arr = cuda
+                .ehlers_kama_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)?;
+            Ok((arr, cuda.context_arc(), cuda.device_id()))
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(DeviceArrayF32KamaPy::new_from_rust(inner, ctx, dev_id))
 }

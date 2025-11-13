@@ -575,7 +575,7 @@ impl CudaSma {
         let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period)?;
         dev.buf
             .copy_to(out_tm)
-            .map_err(|e| CudaSmaError::Cuda(e.to_string()))
+            .map_err(CudaSmaError::Cuda)
     }
 
     // -------- Optional pinned output helpers (no extra host memcpy) --------
@@ -621,7 +621,7 @@ impl CudaSma {
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period)?;
         unsafe { dev.buf.async_copy_to(out_tm_pinned, &self.stream)?; }
-        self.stream.synchronize()
+        Ok(self.stream.synchronize()?)
     }
 
     // -------- Device-resident input variants to avoid re-uploading --------

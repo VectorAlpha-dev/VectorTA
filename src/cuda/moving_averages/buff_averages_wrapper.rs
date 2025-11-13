@@ -1038,7 +1038,8 @@ impl CudaBuffAverages {
                     &mut outf_ptr as *mut _ as *mut c_void,
                     &mut outs_ptr as *mut _ as *mut c_void,
                 ];
-                self.validate_launch(grid, block)?;
+                // Convert launch validation Result to Option in this Option-returning closure
+                self.validate_launch(grid, block).ok()?;
                 self.stream
                     .launch(&func, grid, block, 0, args)
                     .map_err(|e| CudaBuffAveragesError::Cuda(e))

@@ -869,7 +869,7 @@ impl CudaVama {
             ];
             self.stream
                 .launch(&func, grid, block, smem_bytes2, args)
-                .map_err(|e| CudaVamaError::Cuda(e.to_string()))?;
+                .map_err(CudaVamaError::Cuda)?;
         }
 
         Ok(())

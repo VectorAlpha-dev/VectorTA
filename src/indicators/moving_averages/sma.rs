@@ -1212,7 +1212,7 @@ pub fn sma_cuda_batch_dev_py<'py>(
 
     let (inner, combos, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = CudaSma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let dev = cuda
+        let (dev, combos) = cuda
             .sma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda

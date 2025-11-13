@@ -255,7 +255,7 @@ impl CudaVwma {
         )?;
         arr.buf
             .copy_to(out_tm)
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))
+            .map_err(CudaVwmaError::Cuda)
     }
 
     fn run_batch_kernel(
@@ -287,11 +287,11 @@ impl CudaVwma {
 
         // Pinned host buffers and async H2D copies on our stream
         let h_pv =
-            LockedBuffer::from_slice(&pv_prefix).map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+            LockedBuffer::from_slice(&pv_prefix).map_err(CudaVwmaError::Cuda)?;
         let h_vol = LockedBuffer::from_slice(&vol_prefix)
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+            .map_err(CudaVwmaError::Cuda)?;
         let h_periods = LockedBuffer::from_slice(&inputs.periods)
-            .map_err(|e| CudaVwmaError::Cuda(e.to_string()))?;
+            .map_err(CudaVwmaError::Cuda)?;
 
         let d_pv: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }?;
         let d_vol: DeviceBuffer<f64> = unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }?;

@@ -2158,7 +2158,8 @@ pub fn tema_batch_into(
     };
 
     // Get the number of parameter combinations
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = data.len();
     let total_size = rows * cols;

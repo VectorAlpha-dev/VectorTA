@@ -517,7 +517,7 @@ pub fn acosc_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(AcoscError::InvalidKernelForBatch(k)),
+        _ => return Err(AcoscError::InvalidBatchKernel { kernel: k }),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -909,8 +909,8 @@ pub fn acosc_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        AcoscDeviceArrayF32Py { inner: Some(pair.osc), device_id },
-        AcoscDeviceArrayF32Py { inner: Some(pair.change), device_id },
+        AcoscDeviceArrayF32Py { inner: Some(pair.osc), device_id: device_id as u32 },
+        AcoscDeviceArrayF32Py { inner: Some(pair.change), device_id: device_id as u32 },
     ))
 }
 
@@ -942,8 +942,8 @@ pub fn acosc_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        AcoscDeviceArrayF32Py { inner: Some(pair.osc), device_id },
-        AcoscDeviceArrayF32Py { inner: Some(pair.change), device_id },
+        AcoscDeviceArrayF32Py { inner: Some(pair.osc), device_id: device_id as u32 },
+        AcoscDeviceArrayF32Py { inner: Some(pair.change), device_id: device_id as u32 },
     ))
 }
 

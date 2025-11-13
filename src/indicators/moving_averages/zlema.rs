@@ -1975,16 +1975,13 @@ pub fn zlema_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos, ctx_arc, dev_id, stream_handle) = py.allow_threads(|| {
-        let cuda = CudaZlema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let (dev, combos) = cuda
-            .zlema_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let ctx = cuda.context_arc();
-        let did = cuda.device_id();
-        let sh = cuda.stream_handle();
-        Ok::<_, pyo3::exceptions::PyValueError>((dev, combos, ctx, did, sh))
-    })?;
+    let (inner, combos, ctx_arc, dev_id, stream_handle) = py
+        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::zlema_wrapper::CudaZlemaError> {
+            let cuda = CudaZlema::new(device_id)?;
+            let (dev, combos) = cuda.zlema_batch_dev(slice_in, &sweep)?;
+            Ok((dev, combos, cuda.context_arc(), cuda.device_id(), cuda.stream_handle()))
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
@@ -2013,17 +2010,14 @@ pub fn zlema_cuda_many_series_one_param_dev_py(
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
 
-    let (inner, ctx_arc, dev_id, stream_handle) = py.allow_threads(|| {
-        let cuda = CudaZlema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let params = ZlemaParams { period: Some(period) };
-        let dev = cuda
-            .zlema_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let ctx = cuda.context_arc();
-        let did = cuda.device_id();
-        let sh = cuda.stream_handle();
-        Ok::<_, pyo3::exceptions::PyValueError>((dev, ctx, did, sh))
-    })?;
+    let (inner, ctx_arc, dev_id, stream_handle) = py
+        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::zlema_wrapper::CudaZlemaError> {
+            let cuda = CudaZlema::new(device_id)?;
+            let params = ZlemaParams { period: Some(period) };
+            let dev = cuda.zlema_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)?;
+            Ok((dev, cuda.context_arc(), cuda.device_id(), cuda.stream_handle()))
+        })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(DeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id, stream: stream_handle })
 }

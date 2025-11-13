@@ -475,16 +475,16 @@ impl CudaZlema {
         // Stage Device -> Host into pinned memory asynchronously, then memcpy to out
         let mut pinned = unsafe {
             LockedBuffer::<f32>::uninitialized(expected)
-                .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?
+                .map_err(CudaZlemaError::Cuda)?
         };
         unsafe {
             dev.buf
                 .async_copy_to(&mut pinned.as_mut_slice(), &self.stream)
-                .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+                .map_err(CudaZlemaError::Cuda)?;
         }
         self.stream
             .synchronize()
-            .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+            .map_err(CudaZlemaError::Cuda)?;
         out.copy_from_slice(pinned.as_slice());
         Ok((combos.len(), len, combos))
     }
@@ -586,7 +586,7 @@ impl CudaZlema {
         } else {
             let (min_grid, block_size) = func
                 .suggested_launch_configuration(0, (0, 0, 0).into())
-                .map_err(|e| CudaZlemaError::Cuda(e.to_string()))?;
+                .map_err(CudaZlemaError::Cuda)?;
             let bx = block_size.clamp(64, 1024);
             let grid_x = ((cols as u32) + bx - 1) / bx;
             let gx = grid_x.max(min_grid);

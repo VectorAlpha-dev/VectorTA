@@ -433,7 +433,7 @@ impl CudaVpwma {
 
         if let Ok(avail) = func.available_dynamic_shared_memory_per_block(grid, block) {
             if (smem_bytes_u32 as usize) > avail {
-                return Err(CudaVpwmaError::LaunchConfigTooLarge { gx: grid.0, gy: grid.1, gz: grid.2, bx: block.0, by: block.1, bz: block.2 });
+                return Err(CudaVpwmaError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: block.x, by: block.y, bz: block.z });
             }
         }
 
@@ -507,7 +507,7 @@ impl CudaVpwma {
 
         if let Ok(avail) = func.available_dynamic_shared_memory_per_block(grid, block) {
             if (smem_bytes_u32 as usize) > avail {
-                return Err(CudaVpwmaError::LaunchConfigTooLarge { gx: grid.0, gy: grid.1, gz: grid.2, bx: block.0, by: block.1, bz: block.2 });
+                return Err(CudaVpwmaError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: block.x, by: block.y, bz: block.z });
             }
         }
 

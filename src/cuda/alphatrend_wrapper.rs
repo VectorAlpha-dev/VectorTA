@@ -422,7 +422,7 @@ impl CudaAlphaTrend {
         let func_atr = self
             .module
             .get_function("atr_table_from_tr_f32")
-            .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+            .map_err(CudaAlphaTrendError::Cuda)?;
 
         let n_pr = unique_periods.len();
         let len_i = len as i32;
@@ -431,10 +431,10 @@ impl CudaAlphaTrend {
 
         let periods_i32: Vec<i32> = unique_periods.iter().map(|&p| p as i32).collect();
         let d_periods_u = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+            .map_err(CudaAlphaTrendError::Cuda)?;
 
         let mut d_atr_table: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_pr * len) }
-            .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+            .map_err(CudaAlphaTrendError::Cuda)?;
 
         unsafe {
             let mut tr_ptr = d_tr.as_device_ptr().as_raw();
@@ -457,14 +457,14 @@ impl CudaAlphaTrend {
             let block_atr: BlockSize = (bx, 1, 1).into();
             self.stream
                 .launch(&func_atr, grid_atr, block_atr, 0, args)
-                .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+                .map_err(CudaAlphaTrendError::Cuda)?;
         }
 
         // Main fast-path kernel
         let func = self
             .module
             .get_function("alphatrend_batch_from_precomputed_f32")
-            .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+            .map_err(CudaAlphaTrendError::Cuda)?;
 
         let block_x = match policy { BatchKernelPolicy::OneD { block_x } => block_x, _ => 128 };
         let needed_x = ((n_combos_chunk as u32) + block_x - 1) / block_x;
@@ -515,7 +515,7 @@ impl CudaAlphaTrend {
             let block_main: BlockSize = (block_x, 1, 1).into();
             self.stream
                 .launch(&func, grid_main, block_main, 0, args)
-                .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+                .map_err(CudaAlphaTrendError::Cuda)?;
         }
         Ok(())
     }
@@ -535,7 +535,7 @@ impl CudaAlphaTrend {
             ));
         }
         let (tr, first) = Self::build_tr_f32(high_f32, low_f32, close_f32)?;
-        let combos = Self::expand_grid(sweep);
+        let combos = Self::expand_grid(sweep)?;
         if combos.is_empty() {
             return Err(CudaAlphaTrendError::InvalidInput(
                 "no parameter combinations".into(),
@@ -860,20 +860,20 @@ impl CudaAlphaTrend {
 
         // Upload
         let d_high_tm = DeviceBuffer::from_slice(high_tm_f32)
-            .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+            .map_err(CudaAlphaTrendError::Cuda)?;
         let d_low_tm = DeviceBuffer::from_slice(low_tm_f32)
-            .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+            .map_err(CudaAlphaTrendError::Cuda)?;
         let d_tr_tm = DeviceBuffer::from_slice(&tr_tm)
-            .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+            .map_err(CudaAlphaTrendError::Cuda)?;
         let d_mom_tm = DeviceBuffer::from_slice(&momentum_tm)
-            .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+            .map_err(CudaAlphaTrendError::Cuda)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+            .map_err(CudaAlphaTrendError::Cuda)?;
 
         let mut d_k1_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+            .map_err(CudaAlphaTrendError::Cuda)?;
         let mut d_k2_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(|e| CudaAlphaTrendError::Cuda(e.to_string()))?;
+            .map_err(CudaAlphaTrendError::Cuda)?;
 
         // Launch
         let func = self

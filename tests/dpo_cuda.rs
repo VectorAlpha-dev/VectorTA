@@ -146,14 +146,6 @@ fn dpo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
                 period: Some(period),
             },
         )
-        .dpo_many_series_one_param_time_major_dev(
-            &data_tm_f32,
-            cols,
-            rows,
-            &DpoParams {
-                period: Some(period),
-            },
-        )
         .expect("dpo_many_series_one_param_time_major_dev");
     assert_eq!(dev.rows, rows);
     assert_eq!(dev.cols, cols);

@@ -188,25 +188,25 @@ impl CudaAso {
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
         // Upload
-        let d_open = DeviceBuffer::from_slice(open_f32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_high = DeviceBuffer::from_slice(high_f32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_f32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_f32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_periods = DeviceBuffer::from_slice(&periods).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_modes = DeviceBuffer::from_slice(&modes).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_log2 = DeviceBuffer::from_slice(&tables.log2).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_offsets = DeviceBuffer::from_slice(&tables.level_offsets).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_st_max = DeviceBuffer::from_slice(&tables.st_max).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_st_min = DeviceBuffer::from_slice(&tables.st_min).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
+        let d_open = DeviceBuffer::from_slice(open_f32).map_err(CudaAsoError::Cuda)?;
+        let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaAsoError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaAsoError::Cuda)?;
+        let d_close = DeviceBuffer::from_slice(close_f32).map_err(CudaAsoError::Cuda)?;
+        let d_periods = DeviceBuffer::from_slice(&periods).map_err(CudaAsoError::Cuda)?;
+        let d_modes = DeviceBuffer::from_slice(&modes).map_err(CudaAsoError::Cuda)?;
+        let d_log2 = DeviceBuffer::from_slice(&tables.log2).map_err(CudaAsoError::Cuda)?;
+        let d_offsets = DeviceBuffer::from_slice(&tables.level_offsets).map_err(CudaAsoError::Cuda)?;
+        let d_st_max = DeviceBuffer::from_slice(&tables.st_max).map_err(CudaAsoError::Cuda)?;
+        let d_st_min = DeviceBuffer::from_slice(&tables.st_min).map_err(CudaAsoError::Cuda)?;
         // Stream-pooled async allocations; ordered before the kernel in this stream
         let mut d_bulls: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
         }
-        .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
+        .map_err(CudaAsoError::Cuda)?;
         let mut d_bears: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
         }
-        .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
+        .map_err(CudaAsoError::Cuda)?;
 
         self.launch_batch_kernel(
             &d_open,
@@ -359,19 +359,19 @@ impl CudaAso {
             first_valids[s] = fv;
         }
 
-        let d_open = DeviceBuffer::from_slice(open_tm_f32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_high = DeviceBuffer::from_slice(high_tm_f32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_low = DeviceBuffer::from_slice(low_tm_f32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_close = DeviceBuffer::from_slice(close_tm_f32).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
+        let d_open = DeviceBuffer::from_slice(open_tm_f32).map_err(CudaAsoError::Cuda)?;
+        let d_high = DeviceBuffer::from_slice(high_tm_f32).map_err(CudaAsoError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low_tm_f32).map_err(CudaAsoError::Cuda)?;
+        let d_close = DeviceBuffer::from_slice(close_tm_f32).map_err(CudaAsoError::Cuda)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(CudaAsoError::Cuda)?;
         let mut d_bulls: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(expected, &self.stream)
         }
-        .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
+        .map_err(CudaAsoError::Cuda)?;
         let mut d_bears: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(expected, &self.stream)
         }
-        .map_err(|e| CudaAsoError::Cuda(e.to_string()))?;
+        .map_err(CudaAsoError::Cuda)?;
 
         self.launch_many_series_kernel(
             &d_open,

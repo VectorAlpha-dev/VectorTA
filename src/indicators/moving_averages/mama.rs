@@ -2980,6 +2980,9 @@ mod python_bindings {
     use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
     use pyo3::exceptions::PyValueError;
     use pyo3::prelude::*;
+    use pyo3::types::PyDictMethods;
+    // Bring attribute macros into scope explicitly to avoid resolution issues
+    use pyo3::{pyclass, pymethods};
     use pyo3::types::PyDict;
     use std::collections::HashMap;
 
@@ -3431,25 +3434,26 @@ pub fn mama_batch_into(
     }
 }
     // MAMA-specific VRAM-backed Python handle with CAI v3 + DLPack
-    #[cfg(feature = "cuda")]
-    #[pyclass(module = "ta_indicators.cuda", unsendable)]
+    #[cfg(all(feature = "python", feature = "cuda"))]
+    #[pyo3::pyclass(module = "ta_indicators.cuda", unsendable)]
     pub struct DeviceArrayF32Py {
-        pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+        pub(crate) buf: Option<cust::memory::DeviceBuffer<f32>>, // moved into DLPack once exported
         pub(crate) rows: usize,
         pub(crate) cols: usize,
-        pub(crate) _ctx: Arc<Context>,
+        pub(crate) _ctx: std::sync::Arc<cust::context::Context>,
         pub(crate) device_id: u32,
     }
 
-    #[cfg(feature = "cuda")]
-    #[pymethods]
+    #[cfg(all(feature = "python", feature = "cuda"))]
+    #[pyo3::pymethods]
     impl DeviceArrayF32Py {
         #[getter]
-        fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-            let d = PyDict::new(py);
-            d.set_item("shape", (self.rows, self.cols))?;
-            d.set_item("typestr", "<f4")?;
-            d.set_item(
+        fn __cuda_array_interface__<'py>(&self, py: pyo3::Python<'py>) -> pyo3::PyResult<pyo3::prelude::Bound<'py, pyo3::types::PyDict>> {
+            let d = pyo3::types::PyDict::new(py);
+            pyo3::types::PyDictMethods::set_item(&d, "shape", (self.rows, self.cols))?;
+            pyo3::types::PyDictMethods::set_item(&d, "typestr", "<f4")?;
+            pyo3::types::PyDictMethods::set_item(
+                &d,
                 "strides",
                 (
                     self.cols * std::mem::size_of::<f32>(),
@@ -3459,11 +3463,11 @@ pub fn mama_batch_into(
             let ptr = self
                 .buf
                 .as_ref()
-                .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("buffer already exported via __dlpack__"))?
                 .as_device_ptr()
                 .as_raw() as usize;
-            d.set_item("data", (ptr, false))?;
-            d.set_item("version", 3)?; // producer stream synchronized before return
+            pyo3::types::PyDictMethods::set_item(&d, "data", (ptr, false))?;
+            pyo3::types::PyDictMethods::set_item(&d, "version", 3)?; // producer stream synchronized before return
             Ok(d)
         }
 
@@ -3471,12 +3475,12 @@ pub fn mama_batch_into(
             (2, self.device_id as i32) // 2 == kDLCUDA
         }
 
-        fn __dlpack__<'py>(&mut self, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        fn __dlpack__<'py>(&mut self, py: pyo3::Python<'py>, _stream: Option<i64>) -> pyo3::PyResult<pyo3::PyObject> {
             // Move ownership of the device buffer into the DLManagedTensor
             let buf = self
                 .buf
                 .take()
-                .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("__dlpack__ may only be called once"))?;
 
             // DLPack FFI structs (minimal subset)
             #[repr(C)]
@@ -3485,7 +3489,7 @@ pub fn mama_batch_into(
             struct DLDataType { code: u8, bits: u8, lanes: u16 }
             #[repr(C)]
             struct DLTensor {
-                data: *mut c_void,
+                data: *mut std::ffi::c_void,
                 device: DLDevice,
                 ndim: i32,
                 dtype: DLDataType,
@@ -3496,14 +3500,14 @@ pub fn mama_batch_into(
             #[repr(C)]
             struct DLManagedTensor {
                 dl_tensor: DLTensor,
-                manager_ctx: *mut c_void,
+                manager_ctx: *mut std::ffi::c_void,
                 deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
             }
 
             // Keep buffer/context and shape/strides alive until consumer calls deleter.
             struct Manager {
-                _ctx: Arc<Context>,
-                _buf: DeviceBuffer<f32>,
+                _ctx: std::sync::Arc<cust::context::Context>,
+                _buf: cust::memory::DeviceBuffer<f32>,
                 _shape: Box<[i64; 2]>,
                 _strides: Box<[i64; 2]>,
             }
@@ -3531,7 +3535,7 @@ pub fn mama_batch_into(
             let shape = Box::new([rows, cols]);
             let strides = Box::new([cols, 1]); // element strides (row-major)
 
-            let data_ptr = buf.as_device_ptr().as_raw() as *mut c_void;
+            let data_ptr = buf.as_device_ptr().as_raw() as *mut std::ffi::c_void;
             let mgr = Box::new(Manager { _ctx: self._ctx.clone(), _buf: buf, _shape: shape, _strides: strides });
 
             // Pointers that live until deleter runs
@@ -3549,18 +3553,18 @@ pub fn mama_batch_into(
                     strides: strides_ptr,
                     byte_offset: 0,
                 },
-                manager_ctx: mgr_ptr as *mut c_void,
+                manager_ctx: mgr_ptr as *mut std::ffi::c_void,
                 deleter: Some(dlpack_deleter),
             });
 
             // Wrap in a PyCapsule named "dltensor"
             let raw_capsule = unsafe {
                 let name = std::ffi::CString::new("dltensor").unwrap();
-                pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut c_void, name.as_ptr(), Some(capsule_destructor))
+                pyo3::ffi::PyCapsule_New(Box::into_raw(mt) as *mut std::ffi::c_void, name.as_ptr(), Some(capsule_destructor))
             };
             if raw_capsule.is_null() {
-                return Err(PyValueError::new_err("failed to create DLPack capsule"));
+                return Err(pyo3::exceptions::PyValueError::new_err("failed to create DLPack capsule"));
             }
-            Ok(unsafe { PyObject::from_owned_ptr(py, raw_capsule) })
+            Ok(unsafe { pyo3::PyObject::from_owned_ptr(py, raw_capsule) })
         }
     }
