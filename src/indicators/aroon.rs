@@ -187,6 +187,12 @@ pub enum AroonError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("aroon: Mismatch in high/low slice length: high_len={high_len}, low_len={low_len}")]
     MismatchSliceLength { high_len: usize, low_len: usize },
+    #[error("aroon: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("aroon: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("aroon: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline(always)]
@@ -902,6 +908,44 @@ impl Default for AroonBatchRange {
     }
 }
 
+#[inline(always)]
+fn expand_grid_aroon(r: &AroonBatchRange) -> Result<Vec<AroonParams>, AroonError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, AroonError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        let mut vals = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                vals.push(v);
+                match v.checked_add(step) {
+                    Some(next) => { if next == v { break; } v = next; }
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            loop {
+                vals.push(v);
+                if v == end { break; }
+                let next = v.saturating_sub(step);
+                if next == v { break; }
+                v = next;
+                if v < end { break; }
+            }
+        }
+        if vals.is_empty() { return Err(AroonError::InvalidRange { start, end, step }); }
+        Ok(vals)
+    }
+    let lengths = axis_usize(r.length)?;
+    let mut out = Vec::with_capacity(lengths.len());
+    for &l in &lengths {
+        out.push(AroonParams { length: Some(l) });
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct AroonBatchBuilder {
     range: AroonBatchRange,
@@ -997,12 +1041,7 @@ pub fn aroon_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(AroonError::InvalidLength {
-                length: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(AroonError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1039,13 +1078,7 @@ fn aroon_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<AroonBatchOutput, AroonError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(AroonError::InvalidLength {
-            length: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_aroon(sweep)?;
     if high.len() != low.len() {
         return Err(AroonError::MismatchSliceLength {
             high_len: high.len(),
@@ -1053,12 +1086,10 @@ fn aroon_batch_inner(
         });
     }
     let len = high.len();
+    let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
     let max_l = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
-    if len < max_l {
-        return Err(AroonError::NotEnoughValidData {
-            needed: max_l,
-            valid: len,
-        });
+    if len.saturating_sub(first) < max_l {
+        return Err(AroonError::NotEnoughValidData { needed: max_l, valid: len.saturating_sub(first) });
     }
     let rows = combos.len();
     let cols = len;
@@ -1067,11 +1098,10 @@ fn aroon_batch_inner(
     let mut buf_up_mu = make_uninit_matrix(rows, cols);
     let mut buf_down_mu = make_uninit_matrix(rows, cols);
 
-    // Step 2: Find first valid pair for leading NaN handling
-    let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
+    // Step 2: `first` already computed above
 
     // Step 3: Calculate warmup periods for each row (honoring leading NaNs)
-    let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.length.unwrap()).collect();
+    let warmup_periods: Vec<usize> = combos.iter().map(|c| first.saturating_add(c.length.unwrap())).collect();
 
     // Step 4: Initialize NaN prefixes for each row
     init_matrix_prefixes(&mut buf_up_mu, cols, &warmup_periods);
@@ -1139,13 +1169,7 @@ fn aroon_batch_inner_into(
     out_up: &mut [f64],
     out_down: &mut [f64],
 ) -> Result<Vec<AroonParams>, AroonError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(AroonError::InvalidLength {
-            length: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_aroon(sweep)?;
     if high.len() != low.len() {
         return Err(AroonError::MismatchSliceLength {
             high_len: high.len(),
@@ -1153,12 +1177,10 @@ fn aroon_batch_inner_into(
         });
     }
     let len = high.len();
+    let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
     let max_l = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
-    if len < max_l {
-        return Err(AroonError::NotEnoughValidData {
-            needed: max_l,
-            valid: len,
-        });
+    if len.saturating_sub(first) < max_l {
+        return Err(AroonError::NotEnoughValidData { needed: max_l, valid: len.saturating_sub(first) });
     }
 
     let rows = combos.len();
@@ -1251,7 +1273,7 @@ pub fn aroon_cuda_batch_dev_py<'py>(
     low_f32: numpy::PyReadonlyArray1<'py, f32>,
     length_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(AroonDeviceArrayF32Py, AroonDeviceArrayF32Py)> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1260,16 +1282,16 @@ pub fn aroon_cuda_batch_dev_py<'py>(
     let sweep = AroonBatchRange {
         length: length_range,
     };
-    let (up_dev, dn_dev) = py.allow_threads(|| {
+    let (up_dev, dn_dev, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = CudaAroon::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let res = cuda
             .aroon_batch_dev(h, l, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((res.outputs.first, res.outputs.second))
+        Ok::<_, PyErr>((res.outputs.first, res.outputs.second, cuda.context_arc_clone(), cuda.device_id()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: up_dev },
-        DeviceArrayF32Py { inner: dn_dev },
+        AroonDeviceArrayF32Py { inner: up_dev, _ctx: ctx_arc.clone(), device_id: dev_id },
+        AroonDeviceArrayF32Py { inner: dn_dev, _ctx: ctx_arc, device_id: dev_id },
     ))
 }
 
@@ -1282,7 +1304,7 @@ pub fn aroon_cuda_many_series_one_param_dev_py<'py>(
     low_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
     length: usize,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(AroonDeviceArrayF32Py, AroonDeviceArrayF32Py)> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1294,17 +1316,123 @@ pub fn aroon_cuda_many_series_one_param_dev_py<'py>(
     let cols = shape[1];
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
-    let (up_dev, dn_dev) = py.allow_threads(|| {
+    let (up_dev, dn_dev, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = CudaAroon::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let pair = cuda
             .aroon_many_series_one_param_time_major_dev(h, l, cols, rows, length)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((pair.first, pair.second))
+        Ok::<_, PyErr>((pair.first, pair.second, cuda.context_arc_clone(), cuda.device_id()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: up_dev },
-        DeviceArrayF32Py { inner: dn_dev },
+        AroonDeviceArrayF32Py { inner: up_dev, _ctx: ctx_arc.clone(), device_id: dev_id },
+        AroonDeviceArrayF32Py { inner: dn_dev, _ctx: ctx_arc, device_id: dev_id },
     ))
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "AroonDeviceArrayF32", unsendable)]
+pub struct AroonDeviceArrayF32Py {
+    pub(crate) inner: crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32,
+    pub(crate) _ctx: std::sync::Arc<cust::context::Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl AroonDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use pyo3::ffi;
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_void};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct Manager { py_self: *mut ffi::PyObject, shape: *mut [i64; 2] }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            unsafe {
+                let mgr = (*p).manager_ctx as *mut Manager;
+                if !mgr.is_null() {
+                    let mgr_box = Box::from_raw(mgr);
+                    let g = ffi::PyGILState_Ensure();
+                    ffi::Py_DECREF(mgr_box.py_self);
+                    ffi::PyGILState_Release(g);
+                    if !mgr_box.shape.is_null() { let _ = Box::from_raw(mgr_box.shape); }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape = Box::new([rows, cols]);
+        let shape_ptr: *mut [i64; 2] = &mut *shape;
+        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
+        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
+        let dl = DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr as *mut i64,
+                strides: std::ptr::null_mut(),
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(dlpack_deleter),
+        };
+        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
+        let name = CString::new("dltensor").unwrap();
+        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
+        if capsule.is_null() {
+            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 #[inline(always)]
@@ -2586,10 +2714,7 @@ pub fn aroon_into_slice(
         });
     }
     if dst_up.len() != len || dst_down.len() != len {
-        return Err(AroonError::InvalidLength {
-            length: dst_up.len(),
-            data_len: len,
-        });
+        return Err(AroonError::OutputLengthMismatch { expected: len, got: dst_up.len().max(dst_down.len()) });
     }
 
     let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
@@ -2713,12 +2838,15 @@ pub fn aroon_batch_py<'py>(
     let sweep = AroonBatchRange {
         length: length_range,
     };
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid_aroon(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = h.len();
 
-    let up_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let down_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
+    let up_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let down_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let up_slice = unsafe { up_arr.as_slice_mut()? };
     let down_slice = unsafe { down_arr.as_slice_mut()? };
 

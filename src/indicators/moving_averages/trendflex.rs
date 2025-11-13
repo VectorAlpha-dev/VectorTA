@@ -26,9 +26,13 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::{
-    cuda::moving_averages::CudaTrendflex, indicators::moving_averages::alma::DeviceArrayF32Py,
-};
+use crate::cuda::moving_averages::CudaTrendflex;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use aligned_vec::{AVec, ConstAlign, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -81,6 +85,121 @@ impl Default for TrendFlexParams {
 pub struct TrendFlexInput<'a> {
     pub data: TrendFlexData<'a>,
     pub params: TrendFlexParams,
+}
+
+// Python CUDA handle for TrendFlex: keeps CUDA context alive and exposes CAI v3 + DLPack
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyo3::prelude::pyclass(module = "ta_indicators.cuda", name = "TrendFlexDeviceArrayF32", unsendable)]
+pub struct TrendFlexDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyo3::prelude::pymethods]
+impl TrendFlexDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: pyo3::prelude::Python<'py>) -> pyo3::PyResult<pyo3::prelude::Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producing stream synchronized before return; omit 'stream' per CAI v3
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: pyo3::prelude::Python<'py>, _stream: Option<i64>) -> pyo3::PyResult<pyo3::prelude::PyObject> {
+        use pyo3::ffi;
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_void};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct Manager {
+            py_self: *mut ffi::PyObject,
+            shape: *mut [i64; 2],
+        }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            unsafe {
+                let mgr = (*p).manager_ctx as *mut Manager;
+                if !mgr.is_null() {
+                    let mgr_box = Box::from_raw(mgr);
+                    let g = ffi::PyGILState_Ensure();
+                    ffi::Py_DECREF(mgr_box.py_self);
+                    ffi::PyGILState_Release(g);
+                    if !mgr_box.shape.is_null() {
+                        let _ = Box::from_raw(mgr_box.shape);
+                    }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape = Box::new([rows, cols]);
+        let shape_ptr: *mut [i64; 2] = &mut *shape;
+
+        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
+        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
+        let dl = DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr as *mut i64,
+                strides: std::ptr::null_mut(),
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(dlpack_deleter),
+        };
+
+        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
+        let name = CString::new("dltensor").unwrap();
+        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
+        if capsule.is_null() {
+            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
+            return Err(pyo3::exceptions::PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { pyo3::prelude::PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 impl<'a> TrendFlexInput<'a> {
@@ -182,6 +301,16 @@ pub enum TrendFlexError {
         "trendflex: smoother period > data len: ss_period = {ss_period}, data_len = {data_len}"
     )]
     SmootherPeriodExceedsData { ss_period: usize, data_len: usize },
+    #[error("trendflex: output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("trendflex: not enough valid data: needed {needed}, valid {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("trendflex: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("trendflex: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("trendflex: dimensions overflow: rows={rows}, cols={cols}")]
+    DimensionsOverflow { rows: usize, cols: usize },
 }
 
 // Main entrypoint
@@ -264,10 +393,7 @@ pub fn trendflex_into_slice(
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if dst.len() != len {
-        return Err(TrendFlexError::TrendFlexPeriodExceedsData {
-            period: dst.len(),
-            data_len: len,
-        });
+        return Err(TrendFlexError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
     if len == 0 {
         return Err(TrendFlexError::NoDataProvided);
@@ -1022,9 +1148,13 @@ pub fn trendflex_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<TrendFlexParams>, TrendFlexError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(TrendFlexError::NoDataProvided);
+        return Err(TrendFlexError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
     }
 
     let first = data
@@ -1041,9 +1171,12 @@ pub fn trendflex_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-
-    // Ensure output buffer is the right size
-    assert_eq!(out.len(), rows * cols, "Output buffer size mismatch");
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(TrendFlexError::DimensionsOverflow { rows, cols })?;
+    if out.len() != expected {
+        return Err(TrendFlexError::OutputLengthMismatch { expected, got: out.len() });
+    }
 
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
@@ -1217,26 +1350,40 @@ impl TrendFlexBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &TrendFlexBatchRange) -> Vec<TrendFlexParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &TrendFlexBatchRange) -> Result<Vec<TrendFlexParams>, TrendFlexError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TrendFlexError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step).collect();
+            if v.is_empty() { return Err(TrendFlexError::InvalidRange { start, end, step }); }
+            return Ok(v);
+        }
+        // reversed bounds supported
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            if let Some(next) = cur.checked_sub(step) { cur = next; } else { break; }
+            if cur == usize::MAX { break; }
+        }
+        if v.is_empty() { return Err(TrendFlexError::InvalidRange { start, end, step }); }
+        Ok(v)
     }
 
-    let periods = axis_usize(r.period);
-
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(TrendFlexParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
 pub fn expand_grid_trendflex(r: &TrendFlexBatchRange) -> Vec<TrendFlexParams> {
-    expand_grid(r)
+    // Keep external signature stable for CUDA wrapper; fall back to empty on error.
+    expand_grid(r).unwrap_or_default()
 }
 
 #[inline(always)]
@@ -1263,9 +1410,13 @@ fn trendflex_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<TrendFlexBatchOutput, TrendFlexError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(TrendFlexError::NoDataProvided);
+        return Err(TrendFlexError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
     }
     let first = data
         .iter()
@@ -1280,6 +1431,9 @@ fn trendflex_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
+
+    // Guard multiplication overflow (rows * cols)
+    rows.checked_mul(cols).ok_or(TrendFlexError::DimensionsOverflow { rows, cols })?;
 
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     let mut raw = make_uninit_matrix(rows, cols);
@@ -2277,7 +2431,7 @@ pub fn trendflex_batch_py<'py>(
     };
 
     // Calculate dimensions
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2330,7 +2484,7 @@ pub fn trendflex_cuda_batch_dev_py<'py>(
     data_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
+) -> PyResult<(TrendFlexDeviceArrayF32Py, Bound<'py, pyo3::types::PyDict>)> {
     use crate::cuda::cuda_available;
     use numpy::IntoPyArray;
     use pyo3::types::PyDict;
@@ -2344,18 +2498,21 @@ pub fn trendflex_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos) = py.allow_threads(|| {
-        let cuda =
-            CudaTrendflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.trendflex_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, combos, ctx_arc, dev_id) = py.allow_threads(|| {
+        let cuda = CudaTrendflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (dev, combos) = cuda
+            .trendflex_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        // Synchronize producing stream so CAI v3 can omit 'stream'
+        cuda.synchronize().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((dev, combos, cuda.context_arc_clone(), cuda.device_id()))
     })?;
 
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((TrendFlexDeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2366,7 +2523,7 @@ pub fn trendflex_cuda_many_series_one_param_dev_py(
     data_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<TrendFlexDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     use numpy::PyUntypedArrayMethods;
 
@@ -2381,14 +2538,16 @@ pub fn trendflex_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
-        let cuda =
-            CudaTrendflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.trendflex_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
+        let cuda = CudaTrendflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev = cuda
+            .trendflex_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.synchronize().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((dev, cuda.context_arc_clone(), cuda.device_id()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(TrendFlexDeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id })
 }
 
 #[cfg(feature = "wasm")]
@@ -2476,7 +2635,7 @@ pub fn trendflex_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let metadata: Vec<f64> = combos
         .iter()
         .map(|combo| combo.period.unwrap_or(20) as f64)
@@ -2587,9 +2746,11 @@ pub fn trendflex_batch_into(
         };
 
         // Calculate the number of combinations
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let n_combos = combos.len();
-        let total_size = n_combos * len;
+        let total_size = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("dimensions overflow"))?;
 
         // Get output slice
         let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_size);

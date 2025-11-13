@@ -25,9 +25,7 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::{
-    cuda::moving_averages::CudaZlema, indicators::moving_averages::alma::DeviceArrayF32Py,
-};
+use crate::cuda::moving_averages::{alma_wrapper::DeviceArrayF32, CudaZlema};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -46,6 +44,127 @@ use thiserror::Error;
 use wasm_bindgen::prelude::*;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::JsValue;
+
+// Python CUDA handle for ZLEMA: keeps CUDA context alive and exposes CAI v3 + DLPack
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "ZlemaDeviceArrayF32", unsendable)]
+pub struct DeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+    pub(crate) stream: usize,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * core::mem::size_of::<f32>(),
+                core::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Kernels are launched on a non-default stream and not synchronized here; include stream per CAI v3.
+        if self.stream != 0 {
+            d.set_item("stream", self.stream)?;
+        }
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<pyo3::PyObject> {
+        use pyo3::ffi;
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_void};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct Manager { py_self: *mut ffi::PyObject, shape: *mut [i64; 2] }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            unsafe {
+                let mgr = (*p).manager_ctx as *mut Manager;
+                if !mgr.is_null() {
+                    let mgr_box = Box::from_raw(mgr);
+                    let g = ffi::PyGILState_Ensure();
+                    ffi::Py_DECREF(mgr_box.py_self);
+                    ffi::PyGILState_Release(g);
+                    if !mgr_box.shape.is_null() {
+                        let _ = Box::from_raw(mgr_box.shape);
+                    }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape = Box::new([rows, cols]);
+        let shape_ptr: *mut [i64; 2] = &mut *shape;
+
+        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
+        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
+        let dl = DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr as *mut i64,
+                strides: core::ptr::null_mut(),
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(dlpack_deleter),
+        };
+
+        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
+        let name = CString::new("dltensor").unwrap();
+        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
+        if capsule.is_null() {
+            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { pyo3::prelude::PyObject::from_owned_ptr(py, capsule) })
+    }
+}
 
 impl<'a> AsRef<[f64]> for ZlemaInput<'a> {
     #[inline(always)]
@@ -182,6 +301,12 @@ pub enum ZlemaError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("zlema: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("zlema: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("zlema: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("zlema: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline(always)]
@@ -725,7 +850,27 @@ fn expand_grid(r: &ZlemaBatchRange) -> Vec<ZlemaParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut vals = Vec::new();
+        if start <= end {
+            for v in (start..=end).step_by(step) {
+                vals.push(v);
+            }
+        } else {
+            // Support reversed bounds using descending sequence
+            let mut v = start;
+            loop {
+                vals.push(v);
+                if v <= end { break; }
+                match v.checked_sub(step) {
+                    Some(nx) => {
+                        if nx == v { break; }
+                        v = nx;
+                    }
+                    None => break,
+                }
+            }
+        }
+        vals
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -760,13 +905,22 @@ fn zlema_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<ZlemaBatchOutput, ZlemaError> {
+    // Select batch kernel (require batch or Auto)
+    let simd = match kern {
+        Kernel::Auto => match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => Kernel::Scalar,
+        },
+        k if k.is_batch() => k.to_non_batch(),
+        other => return Err(ZlemaError::InvalidKernelForBatch(other)),
+    };
+
     // grid
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(ZlemaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(ZlemaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
     }
 
     if data.is_empty() {
@@ -786,6 +940,10 @@ fn zlema_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    // checked multiplication for allocation sizes
+    let _cap = rows
+        .checked_mul(cols)
+        .ok_or(ZlemaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
 
     // allocate uninit and stamp only warm prefixes
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -803,7 +961,7 @@ fn zlema_batch_inner(
     // write rows without touching the warm prefix
     let do_row = |row: usize, dst: &mut [f64]| {
         let p = combos[row].period.unwrap();
-        match kern {
+        match simd {
             Kernel::Scalar => zlema_row_scalar(data, first, p, 0, core::ptr::null(), 0.0, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => zlema_row_avx2(data, first, p, 0, core::ptr::null(), 0.0, dst),
@@ -859,12 +1017,21 @@ pub fn zlema_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<ZlemaParams>, ZlemaError> {
+    // Select batch kernel (require batch or Auto)
+    let simd = match kern {
+        Kernel::Auto => match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx512,
+            Kernel::Avx2Batch => Kernel::Avx2,
+            Kernel::ScalarBatch => Kernel::Scalar,
+            _ => Kernel::Scalar,
+        },
+        k if k.is_batch() => k.to_non_batch(),
+        other => return Err(ZlemaError::InvalidKernelForBatch(other)),
+    };
+
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(ZlemaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(ZlemaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
     }
     if data.is_empty() {
         return Err(ZlemaError::EmptyInputData);
@@ -884,6 +1051,12 @@ pub fn zlema_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(ZlemaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    if out.len() != total {
+        return Err(ZlemaError::OutputLengthMismatch { expected: total, got: out.len() });
+    }
 
     // Reinterpret the target as MaybeUninit and stamp ONLY warm prefixes once.
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
@@ -901,7 +1074,7 @@ pub fn zlema_batch_inner_into(
         let dst = unsafe {
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
         };
-        match kern {
+        match simd {
             Kernel::Scalar => zlema_row_scalar(data, first, p, 0, core::ptr::null(), 0.0, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => zlema_row_avx2(data, first, p, 0, core::ptr::null(), 0.0, dst),
@@ -1563,10 +1736,7 @@ pub fn zlema_into_slice(
 ) -> Result<(), ZlemaError> {
     let (data, first, period, warm) = zlema_validate(input)?;
     if dst.len() != data.len() {
-        return Err(ZlemaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
+        return Err(ZlemaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
     // Initialize only the prefix, zero-copy style, with quiet-NaN to match Vec API
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -1764,23 +1934,7 @@ pub fn zlema_batch_py<'py>(
 
     // Compute without GIL
     let combos = py
-        .allow_threads(|| {
-            // Handle kernel selection for batch operations
-            let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
-                k => k,
-            };
-
-            // Map batch kernels to regular kernels for ZLEMA
-            let simd = match kernel {
-                Kernel::Avx512Batch => Kernel::Avx512,
-                Kernel::Avx2Batch => Kernel::Avx2,
-                Kernel::ScalarBatch => Kernel::Scalar,
-                _ => kernel,
-            };
-
-            zlema_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
-        })
+        .allow_threads(|| zlema_batch_inner_into(slice_in, &sweep, kern, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     // Build result dictionary
@@ -1821,17 +1975,22 @@ pub fn zlema_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos, ctx_arc, dev_id, stream_handle) = py.allow_threads(|| {
         let cuda = CudaZlema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.zlema_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let (dev, combos) = cuda
+            .zlema_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let did = cuda.device_id();
+        let sh = cuda.stream_handle();
+        Ok::<_, pyo3::exceptions::PyValueError>((dev, combos, ctx, did, sh))
     })?;
 
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner }, dict))
+    Ok((DeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id, stream: stream_handle }, dict))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1854,16 +2013,19 @@ pub fn zlema_cuda_many_series_one_param_dev_py(
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id, stream_handle) = py.allow_threads(|| {
         let cuda = CudaZlema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let params = ZlemaParams {
-            period: Some(period),
-        };
-        cuda.zlema_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let params = ZlemaParams { period: Some(period) };
+        let dev = cuda
+            .zlema_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let did = cuda.device_id();
+        let sh = cuda.stream_handle();
+        Ok::<_, pyo3::exceptions::PyValueError>((dev, ctx, did, sh))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id, stream: stream_handle })
 }
 
 #[cfg(feature = "wasm")]

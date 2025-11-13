@@ -44,8 +44,14 @@
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaEhlersPma};
+// For CUDA Python interop we provide an ehlers-specific handle implementing
+// CAI v3 + DLPack and keeping the CUDA context alive.
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -119,10 +125,11 @@ impl Default for EhlersPmaBatchRange {
 
 #[inline]
 pub fn expand_grid(range: &EhlersPmaBatchRange) -> Vec<EhlersPmaParams> {
-    let count = range.combos.max(1);
-    core::iter::repeat(EhlersPmaParams::default())
-        .take(count)
-        .collect()
+    let count = range.combos;
+    if count == 0 {
+        return Vec::new();
+    }
+    core::iter::repeat(EhlersPmaParams::default()).take(count).collect()
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +161,125 @@ impl<'a> EhlersPmaInput<'a> {
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
         Self::from_candles(c, "close", EhlersPmaParams::default())
+    }
+}
+
+// ---------------- Python CUDA handle (CAI v3 + DLPack) -----------------
+// Only compiled when python + cuda are enabled together.
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyo3::pyclass(module = "ta_indicators.cuda", name = "EhlersPmaDeviceArrayF32", unsendable)]
+pub struct EhlersPmaDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+    pub(crate) stream: usize,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyo3::pymethods]
+impl EhlersPmaDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * core::mem::size_of::<f32>(),
+                core::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Async semantics: kernels are not synchronized here; include real stream handle per CAI v3.
+        if self.stream != 0 {
+            d.set_item("stream", self.stream)?;
+        }
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<pyo3::PyObject> {
+        use pyo3::ffi;
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_void};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct Manager { py_self: *mut ffi::PyObject, shape: *mut [i64; 2] }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            unsafe {
+                let mgr = (*p).manager_ctx as *mut Manager;
+                if !mgr.is_null() {
+                    let mgr_box = Box::from_raw(mgr);
+                    let g = ffi::PyGILState_Ensure();
+                    ffi::Py_DECREF(mgr_box.py_self);
+                    ffi::PyGILState_Release(g);
+                    if !mgr_box.shape.is_null() {
+                        let _ = Box::from_raw(mgr_box.shape);
+                    }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape = Box::new([rows, cols]);
+        let shape_ptr: *mut [i64; 2] = &mut *shape;
+
+        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
+        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
+        let dl = DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr as *mut i64,
+                strides: core::ptr::null_mut(),
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(dlpack_deleter),
+        };
+
+        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
+        let name = CString::new("dltensor").unwrap();
+        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
+        if capsule.is_null() {
+            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { pyo3::prelude::PyObject::from_owned_ptr(py, capsule) })
     }
 }
 
@@ -232,6 +358,9 @@ pub enum EhlersPmaError {
 
     #[error("ehlers_pma: invalid kernel for batch API: {0:?}")]
     InvalidKernelForBatch(Kernel),
+
+    #[error("ehlers_pma: size overflow computing rows*cols: rows = {rows}, cols = {cols}")]
+    SizeOverflow { rows: usize, cols: usize },
 }
 
 /// Computes the Ehlers Predictive Moving Average with automatic kernel selection.
@@ -512,14 +641,11 @@ pub fn ehlers_pma_into_flat_with_kernel(
     let cols = len;
     let expected = rows
         .checked_mul(cols)
-        .ok_or(EhlersPmaError::InvalidPeriod {
-            period: rows.saturating_mul(cols),
-            data_len: out.len(),
-        })?;
+        .ok_or(EhlersPmaError::SizeOverflow { rows, cols })?;
     if out.len() != expected {
-        return Err(EhlersPmaError::InvalidPeriod {
-            period: expected,
-            data_len: out.len(),
+        return Err(EhlersPmaError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
         });
     }
 
@@ -632,9 +758,9 @@ pub fn ehlers_pma_into_slices_with_kernel(
         return Err(EhlersPmaError::EmptyInputData);
     }
     if predict.len() != len || trigger.len() != len {
-        return Err(EhlersPmaError::InvalidPeriod {
-            period: len,
-            data_len: predict.len().min(trigger.len()),
+        return Err(EhlersPmaError::OutputLengthMismatch {
+            expected: len,
+            got: predict.len().min(trigger.len()),
         });
     }
 
@@ -1163,7 +1289,7 @@ pub fn ehlers_pma_cuda_batch_dev_py(
     offset_range: (f64, f64, f64),
     sigma_range: (f64, f64, f64),
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(EhlersPmaDeviceArrayF32Py, EhlersPmaDeviceArrayF32Py)> {
     let _ = offset_range;
     let _ = sigma_range;
     if !cuda_available() {
@@ -1175,17 +1301,22 @@ pub fn ehlers_pma_cuda_batch_dev_py(
         .map_err(|_| PyValueError::new_err("invalid period sweep for ehlers_pma"))?;
 
     let sweep = EhlersPmaBatchRange { combos };
-    let pair = py.allow_threads(|| {
-        let cuda =
-            CudaEhlersPma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ehlers_pma_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (predict, trigger, ctx_arc, dev_id, stream_handle) = py.allow_threads(|| {
+        let cuda = CudaEhlersPma::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let pair = cuda
+            .ehlers_pma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let did = cuda.device_id();
+        let sh = cuda.stream_handle();
+        let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger } = pair;
+        Ok::<_, PyValueError>((predict, trigger, ctx, did, sh))
     })?;
 
-    let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger } = pair;
     Ok((
-        DeviceArrayF32Py { inner: predict },
-        DeviceArrayF32Py { inner: trigger },
+        EhlersPmaDeviceArrayF32Py { inner: predict, _ctx: ctx_arc.clone(), device_id: dev_id, stream: stream_handle },
+        EhlersPmaDeviceArrayF32Py { inner: trigger, _ctx: ctx_arc, device_id: dev_id, stream: stream_handle },
     ))
 }
 
@@ -1196,7 +1327,7 @@ pub fn ehlers_pma_cuda_many_series_one_param_dev_py(
     py: Python<'_>,
     data_tm_f32: PyReadonlyArray2<'_, f32>,
     device_id: usize,
-) -> PyResult<(DeviceArrayF32Py, DeviceArrayF32Py)> {
+) -> PyResult<(EhlersPmaDeviceArrayF32Py, EhlersPmaDeviceArrayF32Py)> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -1209,17 +1340,22 @@ pub fn ehlers_pma_cuda_many_series_one_param_dev_py(
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
 
-    let pair = py.allow_threads(|| {
-        let cuda =
-            CudaEhlersPma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.ehlers_pma_many_series_one_param_time_major_dev(flat, cols, rows)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (predict, trigger, ctx_arc, dev_id, stream_handle) = py.allow_threads(|| {
+        let cuda = CudaEhlersPma::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let pair = cuda
+            .ehlers_pma_many_series_one_param_time_major_dev(flat, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let did = cuda.device_id();
+        let sh = cuda.stream_handle();
+        let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger } = pair;
+        Ok::<_, PyValueError>((predict, trigger, ctx, did, sh))
     })?;
 
-    let crate::cuda::moving_averages::DeviceEhlersPmaPair { predict, trigger } = pair;
     Ok((
-        DeviceArrayF32Py { inner: predict },
-        DeviceArrayF32Py { inner: trigger },
+        EhlersPmaDeviceArrayF32Py { inner: predict, _ctx: ctx_arc.clone(), device_id: dev_id, stream: stream_handle },
+        EhlersPmaDeviceArrayF32Py { inner: trigger, _ctx: ctx_arc, device_id: dev_id, stream: stream_handle },
     ))
 }
 

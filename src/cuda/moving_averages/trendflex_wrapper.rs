@@ -13,6 +13,7 @@ use crate::indicators::moving_averages::trendflex::{
 };
 use cust::context::CacheConfig;
 use cust::context::Context;
+use cust::error::CudaError;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
@@ -22,29 +23,34 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use thiserror::Error;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaTrendflexError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+    #[error("out of memory: required={required}B, free={free}B, headroom={headroom}B")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buffer on {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaTrendflexError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaTrendflexError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaTrendflexError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for CudaTrendflexError {}
 
 pub struct CudaTrendflex {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaTrendflexPolicy,
     last_batch: Option<BatchKernelSelected>,
@@ -96,10 +102,9 @@ pub enum ManySeriesKernelSelected {
 
 impl CudaTrendflex {
     pub fn new(device_id: usize) -> Result<Self, CudaTrendflexError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/trendflex_kernel.ptx"));
         // Prefer context-targeted JIT with explicit O4; fall back gracefully.
@@ -114,8 +119,7 @@ impl CudaTrendflex {
                 {
                     m
                 } else {
-                    Module::from_ptx(ptx, &[])
-                        .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?
+                    Module::from_ptx(ptx, &[])?
                 }
             }
         };
@@ -123,8 +127,7 @@ impl CudaTrendflex {
         let stream_priority = std::env::var("CUDA_STREAM_PRIORITY")
             .ok()
             .and_then(|s| s.parse::<i32>().ok());
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, stream_priority)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, stream_priority)?;
 
         Ok(Self {
             module,
@@ -153,6 +156,12 @@ impl CudaTrendflex {
     pub fn policy(&self) -> &CudaTrendflexPolicy {
         &self.policy
     }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+    #[inline]
+    pub fn context_arc_clone(&self) -> Arc<Context> { Arc::clone(&self._context) }
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaTrendflexError> { self.stream.synchronize().map_err(Into::into) }
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch
     }
@@ -211,19 +220,19 @@ impl CudaTrendflex {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> {
-        mem_get_info().ok()
-    }
+    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
 
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() {
-            return true;
-        }
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaTrendflexError> {
+        if !Self::mem_check_enabled() { return Ok(()); }
         if let Some((free, _total)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaTrendflexError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+            }
         } else {
-            true
+            Ok(())
         }
     }
 
@@ -292,18 +301,15 @@ impl CudaTrendflex {
         let mut func = self
             .module
             .get_function("trendflex_batch_f32")
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTrendflexError::MissingKernelSymbol { name: "trendflex_batch_f32" })?;
         // Prefer L1 when possible; driver may ignore on unsupported arch
-        func.set_cache_config(CacheConfig::PreferL1)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+        func.set_cache_config(CacheConfig::PreferL1)?;
 
         // Auto block size via occupancy; otherwise honor explicit
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => {
-                let (_min_grid, block) = func
-                    .suggested_launch_configuration(0, (0, 0, 0).into())
-                    .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+                let (_min_grid, block) = func.suggested_launch_configuration(0, (0, 0, 0).into())?;
                 if block == 0 {
                     128
                 } else {
@@ -318,6 +324,9 @@ impl CudaTrendflex {
         while launched < n_combos {
             let chunk = (n_combos - launched).min(chunk_cap);
             let grid_x = ((chunk as u32) + block_x - 1) / block_x;
+            if block_x > 1024 || grid_x == 0 || grid_x > 65_535 {
+                return Err(CudaTrendflexError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            }
             let grid: GridSize = (grid_x.max(1), 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
 
@@ -340,9 +349,7 @@ impl CudaTrendflex {
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
 
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
             launched += chunk;
         }
@@ -370,24 +377,15 @@ impl CudaTrendflex {
         let out_bytes = n_combos * len * std::mem::size_of::<f32>();
         let required = prices_bytes + periods_bytes + scratch_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024; // ~64MB
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaTrendflexError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
 
-        let elems = combos.len() * len;
-        let mut d_ssf = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+        let elems = combos.len().checked_mul(len).ok_or_else(|| CudaTrendflexError::InvalidInput("size overflow".into()))?;
+        let mut d_ssf = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -432,8 +430,7 @@ impl CudaTrendflex {
         }
         // Upload small periods list only
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
         self.launch_batch_kernel(
             d_prices,
             &d_periods,
@@ -494,12 +491,8 @@ impl CudaTrendflex {
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len)?;
         // Ensure kernels finished, then single D2H copy straight to caller's buffer
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-        dev.buf
-            .copy_to(out)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
+        dev.buf.copy_to(out)?;
         Ok((combos.len(), len, combos))
     }
 
@@ -586,15 +579,12 @@ impl CudaTrendflex {
         let mut func = self
             .module
             .get_function("trendflex_many_series_one_param_f32")
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-        func.set_cache_config(CacheConfig::PreferL1)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaTrendflexError::MissingKernelSymbol { name: "trendflex_many_series_one_param_f32" })?;
+        func.set_cache_config(CacheConfig::PreferL1)?;
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Auto => {
-                let (_min_grid, block) = func
-                    .suggested_launch_configuration(0, (0, 0, 0).into())
-                    .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+                let (_min_grid, block) = func.suggested_launch_configuration(0, (0, 0, 0).into())?;
                 if block == 0 {
                     128
                 } else {
@@ -603,6 +593,9 @@ impl CudaTrendflex {
             }
         };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        if block_x > 1024 || grid_x == 0 || grid_x > 65_535 {
+            return Err(CudaTrendflexError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -625,9 +618,7 @@ impl CudaTrendflex {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         // Introspection + optional debug log
         unsafe {
@@ -653,22 +644,13 @@ impl CudaTrendflex {
         let out_bytes = cols * rows * std::mem::size_of::<f32>();
         let required = prices_bytes + firsts_bytes + scratch_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaTrendflexError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
-        }
+        Self::will_fit(required, headroom)?;
 
-        let d_prices = DeviceBuffer::from_slice(data_tm_f32)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-        let d_first_valids = DeviceBuffer::from_slice(first_valids)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-        let elems = cols * rows;
-        let mut d_ssf = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+        let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
+        let d_first_valids = DeviceBuffer::from_slice(first_valids)?;
+        let elems = cols.checked_mul(rows).ok_or_else(|| CudaTrendflexError::InvalidInput("size overflow".into()))?;
+        let mut d_ssf = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
         self.launch_many_series_kernel(
             &d_prices,
@@ -730,13 +712,10 @@ impl CudaTrendflex {
         first_valids_host: &[i32],
         period: usize,
     ) -> Result<DeviceArrayF32, CudaTrendflexError> {
-        let d_first_valids = DeviceBuffer::from_slice(first_valids_host)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-        let elems = cols * rows;
-        let mut d_ssf = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+        let d_first_valids = DeviceBuffer::from_slice(first_valids_host)?;
+        let elems = cols.checked_mul(rows).ok_or_else(|| CudaTrendflexError::InvalidInput("size overflow".into()))?;
+        let mut d_ssf = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
         self.trendflex_many_series_one_param_on_device_into(
             d_prices_tm,
             cols,
@@ -761,7 +740,7 @@ impl CudaTrendflex {
         params: &TrendFlexParams,
         out_tm: &mut [f32],
     ) -> Result<(), CudaTrendflexError> {
-        if out_tm.len() != cols * rows {
+        if out_tm.len() != cols.checked_mul(rows).ok_or_else(|| CudaTrendflexError::InvalidInput("size overflow".into()))? {
             return Err(CudaTrendflexError::InvalidInput(format!(
                 "output slice mismatch: expected {}, got {}",
                 cols * rows,
@@ -771,12 +750,8 @@ impl CudaTrendflex {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period)?;
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
-        dev.buf
-            .copy_to(out_tm)
-            .map_err(|e| CudaTrendflexError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
+        dev.buf.copy_to(out_tm)?;
         Ok(())
     }
 }

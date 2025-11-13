@@ -44,7 +44,11 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaDma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -337,7 +341,7 @@ pub fn dma_with_kernel(input: &DmaInput, kernel: Kernel) -> Result<DmaOutput, Dm
 ///
 /// - Preserves the NaN warmup prefix exactly like the Vec-returning API
 ///   (uses the same quiet-NaN pattern).
-/// - `out.len()` must equal the input length; returns `InvalidPeriod` on mismatch.
+/// - `out.len()` must equal the input length; returns `OutputLengthMismatch` on mismatch.
 #[cfg(not(feature = "wasm"))]
 #[inline(always)]
 pub fn dma_into(input: &DmaInput, out: &mut [f64]) -> Result<(), DmaError> {
@@ -345,10 +349,7 @@ pub fn dma_into(input: &DmaInput, out: &mut [f64]) -> Result<(), DmaError> {
         dma_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(DmaError::OutputLengthMismatch {
-            expected: data.len(),
-            got: out.len(),
-        });
+        return Err(DmaError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
     // Prefill warmup prefix using the same quiet-NaN as alloc_with_nan_prefix
@@ -380,10 +381,7 @@ pub fn dma_into_slice(dst: &mut [f64], input: &DmaInput, kern: Kernel) -> Result
         dma_prepare(input, kern)?;
 
     if dst.len() != data.len() {
-        return Err(DmaError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
-        });
+        return Err(DmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
     dma_compute_into(
@@ -2574,7 +2572,7 @@ pub fn dma_cuda_batch_dev_py(
     ema_gain_limit_range: (usize, usize, usize),
     hull_ma_type: &str,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DmaDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2587,13 +2585,16 @@ pub fn dma_cuda_batch_dev_py(
     };
 
     let slice_in = data_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaDma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.dma_batch_dev(slice_in, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context();
+        let dev_id = cuda.device_id();
+        let arr = cuda.dma_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DmaDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2607,7 +2608,7 @@ pub fn dma_cuda_many_series_one_param_dev_py(
     ema_gain_limit: usize,
     hull_ma_type: &str,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DmaDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2622,13 +2623,17 @@ pub fn dma_cuda_many_series_one_param_dev_py(
         hull_ma_type: Some(hull_ma_type.to_string()),
     };
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaDma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.dma_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .dma_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DmaDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id })
 }
 
 #[cfg(feature = "wasm")]
@@ -3407,5 +3412,116 @@ mod tests {
             assert!(both_nan || a == b, "mismatch: got {b:?}, expected {a:?}");
         }
         Ok(())
+    }
+}
+// Python CUDA handle for DMA: CAI v3 and DLPack. Keeps CUDA context alive.
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DmaDeviceArrayF32", unsendable)]
+pub struct DmaDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DmaDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream key omitted: producing kernels synchronize before returning.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<pyo3::PyObject> {
+        use pyo3::ffi;
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_void};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct Manager { py_self: *mut ffi::PyObject, shape: *mut [i64; 2] }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            unsafe {
+                let mgr = (*p).manager_ctx as *mut Manager;
+                if !mgr.is_null() {
+                    let mgr_box = Box::from_raw(mgr);
+                    let g = ffi::PyGILState_Ensure();
+                    ffi::Py_DECREF(mgr_box.py_self);
+                    ffi::PyGILState_Release(g);
+                    if !mgr_box.shape.is_null() {
+                        let _ = Box::from_raw(mgr_box.shape);
+                    }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape = Box::new([rows, cols]);
+        let shape_ptr: *mut [i64; 2] = &mut *shape;
+
+        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
+        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
+        let dl = DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr as *mut i64,
+                strides: core::ptr::null_mut(),
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(dlpack_deleter),
+        };
+
+        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
+        let name = CString::new("dltensor").unwrap();
+        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
+        if capsule.is_null() {
+            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { pyo3::prelude::PyObject::from_owned_ptr(py, capsule) })
     }
 }

@@ -177,6 +177,25 @@ pub enum MaError {
     RequiresVolume { indicator: &'static str },
     #[error("{indicator} returns dual outputs, use the indicator directly")]
     DualOutputNotSupported { indicator: &'static str },
+    // Additional errors for dispatcher-level validation and parity with per-indicator enums
+    #[error("input data is empty")]
+    EmptyInputData,
+    #[error("all input values are NaN")]
+    AllValuesNaN,
+    #[error("invalid period {period} for data length {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("not enough valid data: needed {needed}, found {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("invalid sigma value: {sigma}")]
+    InvalidSigma { sigma: f64 },
+    #[error("invalid offset value: {offset}")]
+    InvalidOffset { offset: f64 },
+    #[error("invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: f64, end: f64, step: f64 },
+    #[error("invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -545,13 +564,17 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "maaq" => {
+            // Guard potential overflow when doubling period
+            let slow = period
+                .checked_mul(2)
+                .ok_or(MaError::InvalidPeriod { period, data_len: 0 })?;
             let input = match data {
                 MaData::Candles { candles, source } => MaaqInput {
                     data: MaaqData::Candles { candles, source },
                     params: MaaqParams {
                         period: Some(period),
                         fast_period: Some(period / 2),
-                        slow_period: Some(period * 2),
+                        slow_period: Some(slow),
                     },
                 },
                 MaData::Slice(s) => MaaqInput {
@@ -559,7 +582,7 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
                     params: MaaqParams {
                         period: Some(period),
                         fast_period: Some(period / 2),
-                        slow_period: Some(period * 2),
+                        slow_period: Some(slow),
                     },
                 },
             };

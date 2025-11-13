@@ -161,7 +161,7 @@ impl CudaMaSelector {
                 let (dev, _combos) = cuda
                     .vpwma_batch_dev(&prices_f32, &sweep)
                     .map_err(|e| CudaMaSelectorError::Cuda(e.to_string()))?;
-                return Ok(dev);
+                return Ok(super::DeviceArrayF32 { buf: dev.buf, rows: dev.rows, cols: dev.cols });
             } else {
                 return Err(CudaMaSelectorError::Unsupported(
                     "vpwma requires candles with volume; pass CudaMaData::Candles".into(),

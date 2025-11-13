@@ -57,9 +57,13 @@ use wasm_bindgen::prelude::*;
 use crate::cuda::bandpass_wrapper::CudaBandpass;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::highpass::{highpass, HighPassError, HighPassInput, HighPassParams};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -217,18 +221,26 @@ impl BandPassBuilder {
 
 #[derive(Debug, Error)]
 pub enum BandPassError {
-    #[error("bandpass: Not enough data, data_len={data_len}, period={period}")]
-    NotEnoughData { data_len: usize, period: usize },
-    #[error("bandpass: Invalid period={period}")]
-    InvalidPeriod { period: usize },
-    #[error("bandpass: invalid bandwidth={bandwidth}")]
+    #[error("bandpass: Input data slice is empty.")]
+    EmptyInputData,
+    #[error("bandpass: All values are NaN.")]
+    AllValuesNaN,
+    #[error("bandpass: Invalid period: period={period}, data_len={data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("bandpass: Not enough valid data: needed={needed}, valid={valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("bandpass: Invalid bandwidth={bandwidth}")]
     InvalidBandwidth { bandwidth: f64 },
     #[error("bandpass: hp_period too small ({hp_period})")]
     HpPeriodTooSmall { hp_period: usize },
     #[error("bandpass: trigger_period too small ({trigger_period})")]
     TriggerPeriodTooSmall { trigger_period: usize },
-    #[error("bandpass: Destination slice length mismatch")]
-    DestLenMismatch,
+    #[error("bandpass: Output length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("bandpass: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("bandpass: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error(transparent)]
     HighPassError(#[from] HighPassError),
 }
@@ -256,14 +268,18 @@ fn bandpass_prepare<'a>(
     let period = input.get_period();
     let bandwidth = input.get_bandwidth();
 
-    if len < period || len == 0 {
-        return Err(BandPassError::NotEnoughData {
-            data_len: len,
-            period,
-        });
+    if len == 0 {
+        return Err(BandPassError::EmptyInputData);
     }
-    if period < 2 {
-        return Err(BandPassError::InvalidPeriod { period });
+    let first_valid = data
+        .iter()
+        .position(|x| x.is_finite())
+        .ok_or(BandPassError::AllValuesNaN)?;
+    if period == 0 || period > len {
+        return Err(BandPassError::InvalidPeriod { period, data_len: len });
+    }
+    if len - first_valid < period {
+        return Err(BandPassError::NotEnoughValidData { needed: period, valid: len - first_valid });
     }
     if !(0.0..=1.0).contains(&bandwidth) || !bandwidth.is_finite() {
         return Err(BandPassError::InvalidBandwidth { bandwidth });
@@ -436,7 +452,7 @@ pub fn bandpass_into_slice(
         bandpass_prepare(input, kernel)?;
     if bp_dst.len() != len || bpn_dst.len() != len || sig_dst.len() != len || trig_dst.len() != len
     {
-        return Err(BandPassError::DestLenMismatch);
+        return Err(BandPassError::OutputLengthMismatch { expected: len, got: *[bp_dst.len(), bpn_dst.len(), sig_dst.len(), trig_dst.len()].iter().min().unwrap_or(&0) });
     }
 
     // workspace: hp
@@ -670,7 +686,7 @@ impl BandPassStream {
     pub fn try_new(params: BandPassParams) -> Result<Self, BandPassError> {
         let period = params.period.unwrap_or(20);
         if period < 2 {
-            return Err(BandPassError::InvalidPeriod { period });
+            return Err(BandPassError::InvalidPeriod { period, data_len: 0 });
         }
         let bandwidth = params.bandwidth.unwrap_or(0.3);
         if !(0.0..=1.0).contains(&bandwidth) || !bandwidth.is_finite() {
@@ -874,26 +890,65 @@ impl BandPassBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &BandPassBatchRange) -> Vec<BandPassParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, BandPassError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        let mut vals = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                vals.push(v);
+                match v.checked_add(step) {
+                    Some(next) => { if next == v { break; } v = next; }
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            loop {
+                vals.push(v);
+                if v == end { break; }
+                let next = v.saturating_sub(step);
+                if next == v { break; }
+                v = next;
+                if v < end { break; }
+            }
+        }
+        if vals.is_empty() { return Err(BandPassError::InvalidRange { start, end, step }); }
+        Ok(vals)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, BandPassError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        let mut vals = Vec::new();
+        if start <= end {
+            let mut x = start;
+            loop {
+                vals.push(x);
+                if x >= end { break; }
+                let next = x + step;
+                if !next.is_finite() || next == x { break; }
+                x = next;
+                if x > end + 1e-12 { break; }
+            }
+        } else {
+            let mut x = start;
+            loop {
+                vals.push(x);
+                if x <= end { break; }
+                let next = x - step.abs();
+                if !next.is_finite() || next == x { break; }
+                x = next;
+                if x < end - 1e-12 { break; }
+            }
         }
-        v
+        if vals.is_empty() { return Err(BandPassError::InvalidRange { start: start as usize, end: end as usize, step: step.abs() as usize }); }
+        Ok(vals)
     }
-    let periods = axis_usize(r.period);
-    let bandwidths = axis_f64(r.bandwidth);
+    let periods = match axis_usize(r.period) { Ok(v) => v, Err(_) => return Vec::new() };
+    let bandwidths = match axis_f64(r.bandwidth) { Ok(v) => v, Err(_) => return Vec::new() };
     let mut out = Vec::with_capacity(periods.len() * bandwidths.len());
     for &p in &periods {
         for &b in &bandwidths {
@@ -906,6 +961,115 @@ fn expand_grid(r: &BandPassBatchRange) -> Vec<BandPassParams> {
     out
 }
 
+// ========================= Python CUDA VRAM handle (CAI v3 + DLPack) =========================
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "BandPassDeviceArrayF32", unsendable)]
+pub struct BandPassDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+    pub(crate) stream: usize,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl BandPassDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        if self.stream != 0 { d.set_item("stream", self.stream)?; }
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use pyo3::ffi;
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_void};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct Manager { py_self: *mut ffi::PyObject, shape: *mut [i64; 2] }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            unsafe {
+                let mgr = (*p).manager_ctx as *mut Manager;
+                if !mgr.is_null() {
+                    let mgr_box = Box::from_raw(mgr);
+                    let g = ffi::PyGILState_Ensure();
+                    ffi::Py_DECREF(mgr_box.py_self);
+                    ffi::PyGILState_Release(g);
+                    if !mgr_box.shape.is_null() { let _ = Box::from_raw(mgr_box.shape); }
+                }
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape = Box::new([rows, cols]);
+        let shape_ptr: *mut [i64; 2] = &mut *shape;
+        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
+        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
+        let dl = DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr as *mut i64,
+                strides: std::ptr::null_mut(),
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(dlpack_deleter),
+        };
+        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
+        let name = CString::new("dltensor").unwrap();
+        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
+        if capsule.is_null() {
+            unsafe { let _ = Box::from_raw(m_ptr as *mut DLManagedTensor); }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
+}
+
 pub fn bandpass_batch_with_kernel(
     data: &[f64],
     sweep: &BandPassBatchRange,
@@ -914,9 +1078,7 @@ pub fn bandpass_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(BandPassError::InvalidPeriod { period: 0 });
-        }
+        other => return Err(BandPassError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -951,17 +1113,13 @@ fn bandpass_batch_inner(
 ) -> Result<BandPassBatchOutput, BandPassError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(BandPassError::InvalidPeriod { period: 0 });
+        return Err(BandPassError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
     }
 
     let cols = data.len();
-    if cols == 0 {
-        return Err(BandPassError::NotEnoughData {
-            data_len: 0,
-            period: 1,
-        });
-    }
+    if cols == 0 { return Err(BandPassError::EmptyInputData); }
     let rows = combos.len();
+    rows.checked_mul(cols).ok_or(BandPassError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
 
     // Allocate 4 matrices uninitialized
     let mut bp_mu = make_uninit_matrix(rows, cols);
@@ -2855,50 +3013,32 @@ pub fn bandpass_cuda_batch_dev_py<'py>(
         period: period_range,
         bandwidth: bandwidth_range,
     };
-    let (outputs, combos) = py.allow_threads(|| {
-        let cuda =
-            CudaBandpass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (outputs, combos, dev_id, stream_h, ctx) = py.allow_threads(|| {
+        let cuda = CudaBandpass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev_id = cuda.device_id();
+        let stream_h = cuda.stream_handle_usize();
+        let ctx = cuda.context_arc();
         cuda.bandpass_batch_dev(slice, &sweep)
-            .map(|r| (r.outputs, r.combos))
+            .map(|r| (r.outputs, r.combos, dev_id, stream_h, ctx))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let d = PyDict::new(py);
     d.set_item(
         "bp",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: outputs.first,
-            },
-        )?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.first, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
     )?;
     d.set_item(
         "bp_normalized",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: outputs.second,
-            },
-        )?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.second, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
     )?;
     d.set_item(
         "signal",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: outputs.third,
-            },
-        )?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.third, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
     )?;
     d.set_item(
         "trigger",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: outputs.fourth,
-            },
-        )?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.fourth, _ctx: ctx, device_id: dev_id, stream: stream_h })?,
     )?;
 
     let periods: Vec<usize> = combos.iter().map(|p| p.period.unwrap()).collect();
@@ -2935,49 +3075,32 @@ pub fn bandpass_cuda_many_series_one_param_dev_py<'py>(
         bandwidth: Some(bandwidth),
     };
 
-    let outputs = py.allow_threads(|| {
-        let cuda =
-            CudaBandpass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let (outputs, dev_id, stream_h, ctx) = py.allow_threads(|| {
+        let cuda = CudaBandpass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev_id = cuda.device_id();
+        let stream_h = cuda.stream_handle_usize();
+        let ctx = cuda.context_arc();
         cuda.bandpass_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+            .map(|o| (o, dev_id, stream_h, ctx))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     let d = PyDict::new(py);
     d.set_item(
         "bp",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: outputs.first,
-            },
-        )?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.first, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
     )?;
     d.set_item(
         "bp_normalized",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: outputs.second,
-            },
-        )?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.second, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
     )?;
     d.set_item(
         "signal",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: outputs.third,
-            },
-        )?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.third, _ctx: ctx.clone(), device_id: dev_id, stream: stream_h })?,
     )?;
     d.set_item(
         "trigger",
-        Py::new(
-            py,
-            DeviceArrayF32Py {
-                inner: outputs.fourth,
-            },
-        )?,
+        Py::new(py, BandPassDeviceArrayF32Py { inner: outputs.fourth, _ctx: ctx, device_id: dev_id, stream: stream_h })?,
     )?;
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;

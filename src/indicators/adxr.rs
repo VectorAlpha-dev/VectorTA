@@ -15,7 +15,7 @@
 //! - **HlcLengthMismatch**: ADXR: Provided slices are of different lengths.
 //! - **AllValuesNaN**: ADXR: All input values are `NaN`.
 //! - **InvalidPeriod**: ADXR: period is zero or exceeds data length.
-//! - **NotEnoughData**: ADXR: Insufficient data for requested period.
+//! - **NotEnoughValidData**: ADXR: Insufficient valid data for requested period.
 //!
 //! ## Returns
 //! - **`Ok(AdxrOutput)`** on success, else **`Err(AdxrError)`**.
@@ -31,7 +31,11 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaAdxr;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -189,6 +193,8 @@ impl AdxrBuilder {
 pub enum AdxrError {
     #[error("adxr: Candle field error: {0}")]
     CandleFieldError(String),
+    #[error("adxr: Empty input data")]
+    EmptyInputData,
     #[error("adxr: HLC data length mismatch: high={high_len}, low={low_len}, close={close_len}")]
     HlcLengthMismatch {
         high_len: usize,
@@ -199,12 +205,17 @@ pub enum AdxrError {
     AllValuesNaN,
     #[error("adxr: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
+    // Keep message text stable for existing tests that expect "Not enough data"
     #[error("adxr: Not enough data: needed = {needed}, valid = {valid}")]
-    NotEnoughData { needed: usize, valid: usize },
+    NotEnoughValidData { needed: usize, valid: usize },
     #[error("adxr: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("adxr: Invalid kernel type - expected batch kernel, got {kernel:?}")]
     InvalidKernel { kernel: Kernel },
+    #[error("adxr: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("adxr: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -268,6 +279,8 @@ fn adxr_prepare<'a>(
     };
 
     let len = close.len();
+    // Preserve historical behavior for empty inputs (tests expect AllValuesNaN),
+    // but keep a dedicated variant available for future call-sites.
     if high.len() != len || low.len() != len {
         return Err(AdxrError::HlcLengthMismatch {
             high_len: high.len(),
@@ -290,7 +303,7 @@ fn adxr_prepare<'a>(
     // Need at least period + 1 bars of valid data to compute anything
     // (The actual warmup is longer but we handle that with NaN values)
     if len - first < period + 1 {
-        return Err(AdxrError::NotEnoughData {
+        return Err(AdxrError::NotEnoughValidData {
             needed: period + 1,
             valid: len - first,
         });
@@ -756,7 +769,7 @@ pub fn adxr_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(AdxrError::InvalidKernel { kernel: k }),
+        _ => return Err(AdxrError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -765,7 +778,7 @@ pub fn adxr_batch_with_kernel(
         _ => unreachable!(),
     };
     // allocate once with helpers, then reuse into
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let rows = combos.len();
     let cols = c.len();
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -871,19 +884,40 @@ impl AdxrBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &AdxrBatchRange) -> Vec<AdxrParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &AdxrBatchRange) -> Result<Vec<AdxrParams>, AdxrError> {
+    fn axis((start, end, step): (usize, usize, usize)) -> Option<Vec<usize>> {
+        // Zero step or equal bounds => static
         if step == 0 || start == end {
-            return vec![start];
+            return Some(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            return Some((start..=end).step_by(step).collect());
+        }
+        // Reversed bounds: walk down using `step`
+        if step == 0 { return Some(vec![start]); }
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            if let Some(next) = cur.checked_sub(step) { cur = next; } else { break; }
+            if cur == usize::MAX { break; }
+            if cur < end { break; }
+        }
+        Some(v)
     }
-    let periods = axis(r.period);
+    let periods = axis(r.period).unwrap_or_default();
+    if periods.is_empty() {
+        return Err(AdxrError::InvalidRange {
+            start: r.period.0,
+            end: r.period.1,
+            step: r.period.2,
+        });
+    }
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(AdxrParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 // Shared precomputation reused by all rows in batch ADXR.
@@ -1081,13 +1115,7 @@ fn adxr_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<AdxrBatchOutput, AdxrError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(AdxrError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let len = close.len();
     let first = close
         .iter()
@@ -1096,7 +1124,7 @@ fn adxr_batch_inner(
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     // Need at least period + 1 bars of valid data to compute anything
     if len - first < max_p + 1 {
-        return Err(AdxrError::NotEnoughData {
+        return Err(AdxrError::NotEnoughValidData {
             needed: max_p + 1,
             valid: len - first,
         });
@@ -1222,13 +1250,7 @@ pub fn adxr_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<AdxrParams>, AdxrError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(AdxrError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let len = close.len();
     if high.len() != len || low.len() != len {
@@ -1246,7 +1268,7 @@ pub fn adxr_batch_inner_into(
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     // Need at least period + 1 bars of valid data to compute anything
     if len - first < max_p + 1 {
-        return Err(AdxrError::NotEnoughData {
+        return Err(AdxrError::NotEnoughValidData {
             needed: max_p + 1,
             valid: len - first,
         });
@@ -1254,7 +1276,13 @@ pub fn adxr_batch_inner_into(
 
     let rows = combos.len();
     let cols = len;
-    debug_assert_eq!(out.len(), rows * cols, "out must be rows*cols");
+    if let Some(expected) = rows.checked_mul(cols) {
+        if out.len() != expected {
+            return Err(AdxrError::OutputLengthMismatch { expected, got: out.len() });
+        }
+    } else {
+        return Err(AdxrError::InvalidRange { start: rows, end: cols, step: 0 });
+    }
 
     // Warmup = first + 2*period per row
     // (ADX appears at first + 2*period, then ADXR averages current and period-ago ADX)
@@ -2271,15 +2299,17 @@ pub fn adxr_batch_py<'py>(
         )));
     }
 
-    let sweep = AdxrBatchRange {
-        period: period_range,
-    };
-    let combos_probe = expand_grid(&sweep);
+    let sweep = AdxrBatchRange { period: period_range };
+    let combos_probe = expand_grid(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos_probe.len();
     let cols = c.len();
 
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
     // Pre-allocate NumPy array and fill it in-place without extra copies.
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     // Resolve to non-batch kernel before releasing the GIL.
@@ -2324,7 +2354,7 @@ pub fn adxr_cuda_batch_dev_py<'py>(
     close_f32: numpy::PyReadonlyArray1<'py, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<AdxrDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2334,14 +2364,14 @@ pub fn adxr_cuda_batch_dev_py<'py>(
     let sweep = AdxrBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = CudaAdxr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, _combos) = cuda
             .adxr_batch_dev(h, l, c, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>(dev)
+        Ok::<_, PyErr>((dev, cuda.context_arc_clone(), cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(AdxrDeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2354,7 +2384,7 @@ pub fn adxr_cuda_many_series_one_param_dev_py<'py>(
     close_tm_f32: numpy::PyReadonlyArray2<'py, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<AdxrDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2367,12 +2397,142 @@ pub fn adxr_cuda_many_series_one_param_dev_py<'py>(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = CudaAdxr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.adxr_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let dev = cuda
+            .adxr_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((dev, cuda.context_arc_clone(), cuda.device_id()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(AdxrDeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id })
+}
+
+// Python wrapper that keeps the CUDA context alive for returned VRAM handles
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "AdxrDeviceArrayF32", unsendable)]
+pub struct AdxrDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl AdxrDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producing stream is synchronized before return; omit "stream" per CAI v3
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA
+        (2, self.device_id as i32)
+    }
+
+    fn __dlpack__<'py>(slf: pyo3::PyRef<'py, Self>, py: Python<'py>, _stream: Option<i64>) -> PyResult<PyObject> {
+        use pyo3::ffi;
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_void};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct Manager {
+            // Keep the producing Python object alive until the consumer calls deleter
+            py_self: *mut ffi::PyObject,
+            // Own the shape buffer
+            shape: *mut [i64; 2],
+        }
+
+        unsafe extern "C" fn dlpack_deleter(p: *mut DLManagedTensor) {
+            if p.is_null() { return; }
+            // Reclaim manager + shape and DECREF the Python object under the GIL
+            unsafe {
+                let mgr = (*p).manager_ctx as *mut Manager;
+                if !mgr.is_null() {
+                    let mgr_box = Box::from_raw(mgr);
+                    let g = ffi::PyGILState_Ensure();
+                    ffi::Py_DECREF(mgr_box.py_self);
+                    ffi::PyGILState_Release(g);
+                    if !mgr_box.shape.is_null() {
+                        let _ = Box::from_raw(mgr_box.shape);
+                    }
+                }
+                // Free the DLManagedTensor itself
+                let _ = Box::from_raw(p);
+            }
+        }
+
+        // Build shape (rows, cols)
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let mut shape = Box::new([rows, cols]);
+        let shape_ptr: *mut [i64; 2] = &mut *shape;
+
+        // Prepare manager context holding a strong ref to this Python object
+        let mgr = Box::new(Manager { py_self: slf.as_ptr(), shape: shape_ptr });
+        unsafe { ffi::Py_INCREF(mgr.py_self); }
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        // Build DLManagedTensor
+        let data_ptr = slf.inner.device_ptr() as usize as *mut c_void;
+        let dl = DLManagedTensor {
+            dl_tensor: DLTensor {
+                data: data_ptr,
+                device: DLDevice { device_type: 2, device_id: slf.device_id as i32 },
+                ndim: 2,
+                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                shape: shape_ptr as *mut i64,
+                strides: std::ptr::null_mut(), // contiguous row-major
+                byte_offset: 0,
+            },
+            manager_ctx: mgr_ptr,
+            deleter: Some(dlpack_deleter),
+        };
+
+        let m_ptr = Box::into_raw(Box::new(dl)) as *mut c_void;
+        let name = CString::new("dltensor").unwrap();
+        let capsule = unsafe { ffi::PyCapsule_New(m_ptr, name.as_ptr() as *const c_char, None) };
+        if capsule.is_null() {
+            // Reclaim in case of failure
+            unsafe {
+                let _ = Box::from_raw(m_ptr as *mut DLManagedTensor);
+            }
+            return Err(PyValueError::new_err("failed to create DLPack capsule"));
+        }
+        Ok(unsafe { PyObject::from_owned_ptr(py, capsule) })
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -2427,7 +2587,7 @@ pub fn adxr_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let mut metadata = Vec::with_capacity(combos.len());
 
     for combo in combos {
@@ -2576,7 +2736,8 @@ pub fn adxr_batch_into(
         let sweep = AdxrBatchRange {
             period: (period_start, period_end, period_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
