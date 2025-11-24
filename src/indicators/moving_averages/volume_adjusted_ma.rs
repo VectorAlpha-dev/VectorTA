@@ -1194,8 +1194,30 @@ fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
     if st == 0 || s == e {
         return vec![s];
     }
-    let (lo, hi) = if s <= e { (s, e) } else { (e, s) };
-    (lo..=hi).step_by(st).collect()
+    if s < e {
+        let mut v = Vec::new();
+        let mut x = s;
+        while x <= e {
+            v.push(x);
+            match x.checked_add(st) {
+                Some(nx) if nx > x => x = nx,
+                _ => break,
+            }
+        }
+        v
+    } else {
+        // Support reversed bounds: descending sequence with positive step
+        let mut v = Vec::new();
+        let mut x = s;
+        while x >= e {
+            v.push(x);
+            match x.checked_sub(st) {
+                Some(nx) => x = nx,
+                None => break,
+            }
+        }
+        v
+    }
 }
 
 #[inline(always)]

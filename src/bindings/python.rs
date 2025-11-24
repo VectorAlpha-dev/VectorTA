@@ -2900,6 +2900,9 @@ fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         m.add_function(wrap_pyfunction!(dx_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(dx_cuda_many_series_one_param_dev_py, m)?)?;
+        // Export DX device array class (with CAI v3 + DLPack + context guard)
+        use crate::indicators::dx::DxDeviceArrayF32Py;
+        m.add_class::<DxDeviceArrayF32Py>()?;
     }
 
     // Register Fisher functions

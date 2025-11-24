@@ -21,6 +21,7 @@
 //! - Batch: shares fixed-design (LU, binom, n^r) across rows with same (period, order).
 //! - Memory: Good — uses `alloc_with_nan_prefix` and `make_uninit_matrix`.
 //! - Streaming: enabled — ring buffer + binomial shift of RHS moments; O(k²) per bar; matches scalar outputs.
+//! - CUDA: batch + many-series kernels enabled; GPU path matches scalar within tolerance and exposes VRAM handles with CAI v3 + DLPack v1.x for Python.
 
 // ==================== IMPORTS SECTION ====================
 // Feature-gated imports for Python bindings
@@ -336,6 +337,15 @@ pub enum PrbError {
 
     #[error("prb: Matrix is singular and cannot be decomposed")]
     SingularMatrix,
+
+    #[error("prb: Output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("prb: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: String, end: String, step: String },
+
+    #[error("prb: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 // ==================== STREAMING SUPPORT ====================
@@ -1567,9 +1577,9 @@ pub fn prb_into_slice(
         return Err(PrbError::EmptyInputData);
     }
     if dst_main.len() != len || dst_upper.len() != len || dst_lower.len() != len {
-        return Err(PrbError::InvalidPeriod {
-            period: dst_main.len(),
-            data_len: len,
+        return Err(PrbError::OutputLengthMismatch {
+            expected: len,
+            got: dst_main.len().max(dst_upper.len()).max(dst_lower.len()),
         });
     }
 
@@ -1765,10 +1775,7 @@ pub fn prb_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(PrbError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(PrbError::InvalidKernelForBatch(kernel));
         }
     };
 
@@ -1811,11 +1818,27 @@ fn prb_batch_inner(
     parallel: bool,
 ) -> Result<PrbBatchOutput, PrbError> {
     use core::mem::ManuallyDrop;
-    let combos = expand_grid(sweep, smooth_data);
+    let combos = expand_grid(sweep, smooth_data)?;
     let cols = data.len();
     let rows = combos.len();
     if cols == 0 {
         return Err(PrbError::AllValuesNaN);
+    }
+
+    let _ = rows.checked_mul(cols).ok_or_else(|| PrbError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
+
+    for c in &combos {
+        let n = c.regression_period.unwrap_or(100);
+        if n == 0 || n > cols {
+            return Err(PrbError::InvalidPeriod {
+                period: n,
+                data_len: cols,
+            });
+        }
     }
 
     let first = data
@@ -2046,32 +2069,105 @@ fn prb_batch_inner(
 }
 
 #[inline(always)]
-fn expand_grid(r: &PrbBatchRange, smooth_flag: bool) -> Vec<PrbParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &PrbBatchRange, smooth_flag: bool) -> Result<Vec<PrbParams>, PrbError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, PrbError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            let st = step.max(1);
+            while x <= end {
+                v.push(x);
+                let next = match x.checked_add(st) {
+                    Some(n) if n != x => n,
+                    _ => break,
+                };
+                x = next;
+            }
+            if v.is_empty() {
+                return Err(PrbError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
+            return Ok(v);
+        }
+        // reversed bounds
+        let mut v = Vec::new();
+        let mut x = start as isize;
+        let end_i = end as isize;
+        let st = (step as isize).max(1);
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(PrbError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
-    fn axis_i32((start, end, step): (i32, i32, i32)) -> Vec<i32> {
+    fn axis_i32((start, end, step): (i32, i32, i32)) -> Result<Vec<i32>, PrbError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end {
-            v.push(x);
-            x += step;
+        if start < end {
+            let mut x = start;
+            let st = step.max(1);
+            while x <= end {
+                v.push(x);
+                let next = match x.checked_add(st) {
+                    Some(n) if n != x => n,
+                    _ => break,
+                };
+                x = next;
+            }
+        } else {
+            let mut x = start;
+            let st = step.abs().max(1);
+            while x >= end {
+                v.push(x);
+                let next = match x.checked_sub(st) {
+                    Some(n) if n != x => n,
+                    _ => break,
+                };
+                x = next;
+            }
         }
-        v
+        if v.is_empty() {
+            return Err(PrbError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
+        Ok(v)
     }
 
-    let sps = axis_usize(r.smooth_period);
-    let rps = axis_usize(r.regression_period);
-    let pos = axis_usize(r.polynomial_order);
-    let ros = axis_i32(r.regression_offset);
+    let sps = axis_usize(r.smooth_period)?;
+    let rps = axis_usize(r.regression_period)?;
+    let pos = axis_usize(r.polynomial_order)?;
+    let ros = axis_i32(r.regression_offset)?;
 
-    let mut out = Vec::with_capacity(sps.len() * rps.len() * pos.len() * ros.len());
+    let cap = sps
+        .len()
+        .checked_mul(rps.len())
+        .and_then(|x| x.checked_mul(pos.len()))
+        .and_then(|x| x.checked_mul(ros.len()))
+        .ok_or_else(|| PrbError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
+
+    let mut out = Vec::with_capacity(cap);
     for &sp in &sps {
         for &rp in &rps {
             for &po in &pos {
@@ -2089,7 +2185,14 @@ fn expand_grid(r: &PrbBatchRange, smooth_flag: bool) -> Vec<PrbParams> {
             }
         }
     }
-    out
+    if out.is_empty() {
+        return Err(PrbError::InvalidRange {
+            start: "range".into(),
+            end: "range".into(),
+            step: "empty".into(),
+        });
+    }
+    Ok(out)
 }
 
 // ==================== PYTHON BINDINGS ====================
@@ -2540,15 +2643,19 @@ pub fn prb_cuda_batch_dev_py(
         polynomial_order: polynomial_order_range,
         regression_offset: regression_offset_range,
     };
-    let (main_d, up_d, lo_d) = py.allow_threads(|| {
+    let (main_d, up_d, lo_d, ctx, dev) = py.allow_threads(|| {
         let cuda = CudaPrb::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.prb_batch_dev(slice, &sweep, smooth_data)
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
+        cuda
+            .prb_batch_dev(slice, &sweep, smooth_data)
+            .map(|(m, u, l)| (m, u, l, ctx, dev))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: main_d },
-        DeviceArrayF32Py { inner: up_d },
-        DeviceArrayF32Py { inner: lo_d },
+        DeviceArrayF32Py { inner: main_d, _ctx: Some(ctx.clone()), device_id: Some(dev) },
+        DeviceArrayF32Py { inner: up_d, _ctx: Some(ctx.clone()), device_id: Some(dev) },
+        DeviceArrayF32Py { inner: lo_d, _ctx: Some(ctx), device_id: Some(dev) },
     ))
 }
 
@@ -2581,15 +2688,19 @@ pub fn prb_cuda_many_series_one_param_dev_py(
         ndev: Some(ndev),
         equ_from: Some(0),
     };
-    let (m_d, u_d, l_d) = py.allow_threads(|| {
+    let (m_d, u_d, l_d, ctx, dev) = py.allow_threads(|| {
         let cuda = CudaPrb::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.prb_many_series_one_param_time_major_dev(tm, cols, rows, &params)
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
+        cuda
+            .prb_many_series_one_param_time_major_dev(tm, cols, rows, &params)
+            .map(|(m, u, l)| (m, u, l, ctx, dev))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: m_d },
-        DeviceArrayF32Py { inner: u_d },
-        DeviceArrayF32Py { inner: l_d },
+        DeviceArrayF32Py { inner: m_d, _ctx: Some(ctx.clone()), device_id: Some(dev) },
+        DeviceArrayF32Py { inner: u_d, _ctx: Some(ctx.clone()), device_id: Some(dev) },
+        DeviceArrayF32Py { inner: l_d, _ctx: Some(ctx), device_id: Some(dev) },
     ))
 }
 

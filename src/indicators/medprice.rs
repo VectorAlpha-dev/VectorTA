@@ -14,6 +14,7 @@
 //! **AVX512**: Stub (calls scalar)
 //! **Streaming**: O(1) - Simple calculation
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
+//! **Decision log**: SIMD paths are stubs delegating to the scalar implementation; CUDA wrapper is present with VRAM-backed handles; Python interop follows CAI v3 and DLPack v1.x with scalar-identical outputs.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -171,11 +172,21 @@ impl MedpriceBuilder {
 #[derive(Debug, Error)]
 pub enum MedpriceError {
     #[error("medprice: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
     #[error("medprice: Different lengths for high ({high_len}) and low ({low_len}).")]
     DifferentLength { high_len: usize, low_len: usize },
     #[error("medprice: All values are NaN.")]
     AllValuesNaN,
+    #[error("medprice: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("medprice: Not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("medprice: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("medprice: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("medprice: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -190,7 +201,7 @@ pub fn medprice_with_kernel(
     let (high, low) = input.get_high_low();
 
     if high.is_empty() || low.is_empty() {
-        return Err(MedpriceError::EmptyData);
+        return Err(MedpriceError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MedpriceError::DifferentLength {
@@ -248,7 +259,7 @@ pub fn medprice_compute_into(
     out: &mut [f64],
 ) -> Result<(), MedpriceError> {
     if high.is_empty() || low.is_empty() {
-        return Err(MedpriceError::EmptyData);
+        return Err(MedpriceError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MedpriceError::DifferentLength {
@@ -257,9 +268,9 @@ pub fn medprice_compute_into(
         });
     }
     if out.len() != high.len() {
-        return Err(MedpriceError::DifferentLength {
-            high_len: high.len(),
-            low_len: out.len(),
+        return Err(MedpriceError::OutputLengthMismatch {
+            expected: high.len(),
+            got: out.len(),
         });
     }
 
@@ -391,11 +402,16 @@ impl MedpriceBatchBuilder {
         self.kernel = k;
         self
     }
+    pub fn dummy_range(mut self, range: (usize, usize, usize)) -> Self {
+        self.range.dummy = range;
+        self
+    }
     pub fn apply_slice(
         self,
         high: &[f64],
         low: &[f64],
     ) -> Result<MedpriceBatchOutput, MedpriceError> {
+        let _ = expand_grid(&self.range)?;
         medprice_batch_with_kernel(high, low, self.kernel)
     }
     pub fn apply_candles(
@@ -415,17 +431,16 @@ pub fn medprice_batch_with_kernel(
     low: &[f64],
     k: Kernel,
 ) -> Result<MedpriceBatchOutput, MedpriceError> {
-    let simd = match k {
-        Kernel::Auto => match detect_best_batch_kernel() {
-            Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Avx2Batch => Kernel::Avx2,
-            Kernel::ScalarBatch => Kernel::Scalar,
-            _ => unreachable!(),
-        },
+    let kernel = match k {
+        Kernel::Auto => detect_best_batch_kernel(),
+        other if other.is_batch() => other,
+        other => return Err(MedpriceError::InvalidKernelForBatch(other)),
+    };
+    let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        other => other, // allow direct simd or scalar for tests
+        _ => unreachable!(),
     };
     medprice_batch_par_slice(high, low, simd)
 }
@@ -438,8 +453,50 @@ pub struct MedpriceBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(_r: &MedpriceBatchRange) -> Vec<MedpriceParams> {
-    vec![MedpriceParams::default()]
+fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, MedpriceError> {
+    if step == 0 || start == end {
+        return Ok(vec![start]);
+    }
+    let mut out = Vec::new();
+    if start < end {
+        let mut v = start;
+        while v <= end {
+            out.push(v);
+            match v.checked_add(step) {
+                Some(next) if next != v => v = next,
+                _ => break,
+            }
+        }
+    } else {
+        let mut v = start;
+        loop {
+            out.push(v);
+            if v <= end {
+                break;
+            }
+            let dec = v.saturating_sub(step);
+            if dec == v {
+                break;
+            }
+            v = dec;
+        }
+        out.sort_unstable();
+    }
+    if out.is_empty() {
+        return Err(MedpriceError::InvalidRange { start, end, step });
+    }
+    Ok(out)
+}
+
+#[inline(always)]
+fn expand_grid(range: &MedpriceBatchRange) -> Result<Vec<MedpriceParams>, MedpriceError> {
+    let rows_axis = axis_usize(range.dummy)?;
+    // MEDPRICE has no tunable parameters; we just validate the range and
+    // emit one default parameter set per expanded row.
+    Ok(rows_axis
+        .into_iter()
+        .map(|_| MedpriceParams::default())
+        .collect())
 }
 
 #[inline(always)]
@@ -468,7 +525,7 @@ fn medprice_batch_inner(
     _parallel: bool,
 ) -> Result<MedpriceBatchOutput, MedpriceError> {
     if high.is_empty() || low.is_empty() {
-        return Err(MedpriceError::EmptyData);
+        return Err(MedpriceError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MedpriceError::DifferentLength {
@@ -482,8 +539,15 @@ fn medprice_batch_inner(
         None => return Err(MedpriceError::AllValuesNaN),
     };
 
-    let rows = 1;
-    let cols = high.len();
+    let rows: usize = 1;
+    let cols: usize = high.len();
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(MedpriceError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warmup_periods = vec![first];
@@ -524,7 +588,7 @@ fn medprice_batch_inner_into(
     let combos = vec![MedpriceParams::default()];
 
     if high.is_empty() || low.is_empty() {
-        return Err(MedpriceError::EmptyData);
+        return Err(MedpriceError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MedpriceError::DifferentLength {
@@ -578,7 +642,7 @@ pub fn medprice_into_slice(
     let (high, low) = input.get_high_low();
 
     if high.is_empty() || low.is_empty() {
-        return Err(MedpriceError::EmptyData);
+        return Err(MedpriceError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(MedpriceError::DifferentLength {
@@ -587,9 +651,9 @@ pub fn medprice_into_slice(
         });
     }
     if dst.len() != high.len() {
-        return Err(MedpriceError::DifferentLength {
-            high_len: high.len(),
-            low_len: dst.len(),
+        return Err(MedpriceError::OutputLengthMismatch {
+            expected: high.len(),
+            got: dst.len(),
         });
     }
 
@@ -690,15 +754,20 @@ pub fn medprice_batch_py<'py>(
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    // Since medprice has no parameters, we just use a dummy range
-    let _range = dummy_range.unwrap_or((0, 0, 0));
+    // Since medprice has no parameters, we just use a dummy range for validation
+    let range_tuple = dummy_range.unwrap_or((0, 0, 0));
+    let range = MedpriceBatchRange { dummy: range_tuple };
+    let _ = expand_grid(&range).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Always 1 row for medprice
-    let rows = 1;
-    let cols = high_slice.len();
+    // Always 1 row for medprice in this API, regardless of dummy_range
+    let rows: usize = 1;
+    let cols: usize = high_slice.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("medprice_batch: rows*cols overflow"))?;
 
     // Pre-allocate output array for batch operations
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -1168,14 +1237,18 @@ pub fn medprice_cuda_dev_py(
     let hs = high.as_slice()?;
     let ls = low.as_slice()?;
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.medprice_dev(hs, ls)
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .medprice_dev(hs, ls)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1192,13 +1265,17 @@ pub fn medprice_cuda_batch_dev_py(
     }
     let hs = high.as_slice()?;
     let ls = low.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.medprice_batch_dev(hs, ls)
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .medprice_batch_dev(hs, ls)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1217,11 +1294,15 @@ pub fn medprice_cuda_many_series_one_param_dev_py(
     }
     let hs = high_tm.as_slice()?;
     let ls = low_tm.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.medprice_many_series_one_param_time_major_dev(hs, ls, cols, rows)
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .medprice_many_series_one_param_time_major_dev(hs, ls, cols, rows)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }

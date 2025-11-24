@@ -87,6 +87,8 @@ pub enum CudaEhlersKamaError {
     NotImplemented,
     #[error("device mismatch: buf on {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
+    #[error("invalid range: start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
 }
 
 /// CUDA Ehlers KAMA launcher and VRAM handle utilities.
@@ -305,9 +307,8 @@ impl CudaEhlersKama {
 
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
-            return Err(CudaEhlersKamaError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
+            let (s, e, st) = sweep.period;
+            return Err(CudaEhlersKamaError::InvalidRange { start: s, end: e, step: st });
         }
 
         let len = data_f32.len();

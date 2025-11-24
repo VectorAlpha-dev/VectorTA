@@ -222,19 +222,30 @@ impl CudaDema {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        // VRAM estimate and guard (add ~64MB headroom like ALMA)
-        let prices_bytes = series_len * std::mem::size_of::<f32>();
-        let periods_bytes = periods.len() * std::mem::size_of::<i32>();
-        let out_bytes = series_len * periods.len() * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + out_bytes;
+        // VRAM estimate and guard (add ~64MB headroom like ALMA) with checked arithmetic
+        let prices_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(CudaDemaError::InvalidInput("size overflow computing prices_bytes".into()))?;
+        let periods_bytes = periods.len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or(CudaDemaError::InvalidInput("size overflow computing periods_bytes".into()))?;
+        let out_elems = series_len
+            .checked_mul(combos.len())
+            .ok_or(CudaDemaError::InvalidInput("size overflow computing output elements".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(CudaDemaError::InvalidInput("size overflow computing output bytes".into()))?;
+        let required = prices_bytes
+            .checked_add(periods_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or(CudaDemaError::InvalidInput("size overflow summing required bytes".into()))?;
         // VRAM guard with ~64MB headroom (mirrors ALMA wrapper semantics)
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
         let d_periods = DeviceBuffer::from_slice(&periods)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(series_len * combos.len())?
-        };
+        let out_len = out_elems;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len)? };
 
         self.launch_batch_kernel(
             &d_prices,
@@ -315,16 +326,23 @@ impl CudaDema {
             )));
         }
 
-        // VRAM guard (prices already on device, so only periods + output + headroom)
-        let periods_bytes = periods.len() * std::mem::size_of::<i32>();
-        let out_bytes = series_len * periods.len() * std::mem::size_of::<f32>();
-        let required = periods_bytes + out_bytes;
+        // VRAM guard (prices already on device, so only periods + output + headroom) with checked math
+        let periods_bytes = periods.len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or(CudaDemaError::InvalidInput("size overflow computing periods_bytes".into()))?;
+        let out_elems = series_len
+            .checked_mul(combos.len())
+            .ok_or(CudaDemaError::InvalidInput("size overflow computing output elements".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(CudaDemaError::InvalidInput("size overflow computing output bytes".into()))?;
+        let required = periods_bytes
+            .checked_add(out_bytes)
+            .ok_or(CudaDemaError::InvalidInput("size overflow summing required bytes".into()))?;
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_periods = DeviceBuffer::from_slice(&periods)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(series_len * combos.len())?
-        };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
 
         self.launch_batch_kernel(
             d_prices,

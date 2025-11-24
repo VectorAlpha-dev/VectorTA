@@ -5,34 +5,46 @@ use crate::cuda::DeviceArrayF32Triplet; // shared 3-output handle
 use crate::indicators::mod_god_mode::{ModGodModeBatchRange, ModGodModeMode, ModGodModeParams};
 use cust::context::Context;
 use cust::device::Device;
+use cust::device::DeviceAttribute as DevAttr;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{CopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
-use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
 // Must match the kernel's MGM_RING_KCAP (power-of-two, default 64)
 const MGM_RING_KCAP: i32 = 64;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaModGodModeError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
+    #[error("device mismatch: buffer device {buf}, current {current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaModGodModeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaModGodModeError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaModGodModeError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaModGodModeError {}
 
 pub struct CudaModGodModeBatchResult {
     pub outputs: DeviceArrayF32Triplet,
@@ -68,17 +80,17 @@ impl Default for CudaModGodModePolicy {
 pub struct CudaModGodMode {
     module: Module,
     stream: Stream,
-    _context: Context,
+    _context: Arc<Context>,
+    device_id: u32,
     policy: CudaModGodModePolicy,
     debug_logged: bool,
 }
 
 impl CudaModGodMode {
     pub fn new(device_id: usize) -> Result<Self, CudaModGodModeError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let device = Device::get_device(device_id as u32)
-            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mod_god_mode_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -86,32 +98,33 @@ impl CudaModGodMode {
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => {
-                Module::from_ptx(ptx, &[]).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?
-            }
+            Err(_) => Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                .or_else(|_| Module::from_ptx(ptx, &[]))?,
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,
             stream,
             _context: context,
+            device_id: device_id as u32,
             policy: CudaModGodModePolicy::default(),
             debug_logged: false,
         })
     }
 
+    #[inline]
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
     fn device_mem_info() -> Option<(usize, usize)> {
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-            let res = cu::cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize);
-            if res == cu::CUresult::CUDA_SUCCESS {
-                Some((free, total))
-            } else {
-                None
-            }
-        }
+        mem_get_info().ok()
     }
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -119,30 +132,65 @@ impl CudaModGodMode {
             Err(_) => true,
         }
     }
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
+    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaModGodModeError> {
         if !Self::mem_check_enabled() {
-            return true;
+            return Ok(());
         }
         if let Some((free, _)) = Self::device_mem_info() {
-            required_bytes.saturating_add(headroom_bytes) <= free
+            if required_bytes.saturating_add(headroom_bytes) > free {
+                return Err(CudaModGodModeError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn axis_usize_cuda(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, CudaModGodModeError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let v: Vec<_> = (start..=end).step_by(step).collect();
+            if v.is_empty() {
+                return Err(CudaModGodModeError::InvalidInput(format!(
+                    "invalid range expansion: start={start}, end={end}, step={step}"
+                )));
+            }
+            Ok(v)
         } else {
-            true
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                if cur - end < step {
+                    break;
+                }
+                cur -= step;
+            }
+            if v.is_empty() {
+                return Err(CudaModGodModeError::InvalidInput(format!(
+                    "invalid range expansion: start={start}, end={end}, step={step}"
+                )));
+            }
+            Ok(v)
         }
     }
 
-    fn expand_range(r: &ModGodModeBatchRange) -> Vec<ModGodModeParams> {
-        fn axis(a: (usize, usize, usize)) -> Vec<usize> {
-            let (s, e, st) = a;
-            if st == 0 || s == e {
-                vec![s]
-            } else {
-                (s..=e).step_by(st).collect::<Vec<usize>>()
-            }
-        }
-        let n1s = axis(r.n1);
-        let n2s = axis(r.n2);
-        let n3s = axis(r.n3);
-        let mut v = Vec::with_capacity(n1s.len() * n2s.len() * n3s.len());
+    fn expand_range(r: &ModGodModeBatchRange) -> Result<Vec<ModGodModeParams>, CudaModGodModeError> {
+        let n1s = Self::axis_usize_cuda(r.n1)?;
+        let n2s = Self::axis_usize_cuda(r.n2)?;
+        let n3s = Self::axis_usize_cuda(r.n3)?;
+        let cap = n1s
+            .len()
+            .checked_mul(n2s.len())
+            .and_then(|v| v.checked_mul(n3s.len()))
+            .ok_or_else(|| CudaModGodModeError::InvalidInput("batch grid size overflow".into()))?;
+        let mut v = Vec::with_capacity(cap);
         for &a in &n1s {
             for &b in &n2s {
                 for &c in &n3s {
@@ -156,7 +204,12 @@ impl CudaModGodMode {
                 }
             }
         }
-        v
+        if v.is_empty() {
+            return Err(CudaModGodModeError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        Ok(v)
     }
 
     #[inline]
@@ -173,6 +226,35 @@ impl CudaModGodMode {
             + 2 * std::mem::size_of::<i32>()
             + std::mem::size_of::<i8>()) * cap; // = 17*cap
         per_thread * (block_x as usize)
+    }
+
+    #[inline]
+    fn validate_launch(&self, grid: GridSize, block: BlockSize) -> Result<(), CudaModGodModeError> {
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev.get_attribute(DevAttr::MaxThreadsPerBlock)? as u32;
+        let block_threads = block.x * block.y * block.z;
+        if block_threads > max_threads {
+            return Err(CudaModGodModeError::LaunchConfigTooLarge {
+                gx: grid.x,
+                gy: grid.y,
+                gz: grid.z,
+                bx: block.x,
+                by: block.y,
+                bz: block.z,
+            });
+        }
+        let max_grid_x = dev.get_attribute(DevAttr::MaxGridDimX)? as u32;
+        if grid.x > max_grid_x {
+            return Err(CudaModGodModeError::LaunchConfigTooLarge {
+                gx: grid.x,
+                gy: grid.y,
+                gz: grid.z,
+                bx: block.x,
+                by: block.y,
+                bz: block.z,
+            });
+        }
+        Ok(())
     }
 
     pub fn mod_god_mode_batch_dev(
@@ -214,12 +296,7 @@ impl CudaModGodMode {
                 ));
             }
         }
-        let combos = Self::expand_range(sweep);
-        if combos.is_empty() {
-            return Err(CudaModGodModeError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = Self::expand_range(sweep)?;
         let rows = combos.len();
 
         // First valid index
@@ -263,36 +340,80 @@ impl CudaModGodMode {
 
         // VRAM estimation (skip H/L when volume is unused)
         let use_vol = volume.is_some();
-        let in_bytes = (if use_vol { 3 * n } else { 1 * n }) * std::mem::size_of::<f32>()
-            + volume.map(|_| n * std::mem::size_of::<f32>()).unwrap_or(0);
-        let param_bytes = 4 * rows * std::mem::size_of::<i32>();
-        let out_bytes = 3 * rows * n * std::mem::size_of::<f32>();
-        let required = in_bytes + param_bytes + out_bytes;
+        let elem_f32 = std::mem::size_of::<f32>();
+        let base_scalars = if use_vol {
+            n.checked_mul(3)
+                .ok_or_else(|| CudaModGodModeError::InvalidInput("input size overflow".into()))?
+        } else {
+            n
+        };
+        let in_bytes_base = base_scalars
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaModGodModeError::InvalidInput("input size overflow".into()))?;
+        let vol_bytes = if volume.is_some() {
+            n.checked_mul(elem_f32)
+                .ok_or_else(|| CudaModGodModeError::InvalidInput("volume size overflow".into()))?
+        } else {
+            0
+        };
+        let in_bytes = in_bytes_base
+            .checked_add(vol_bytes)
+            .ok_or_else(|| CudaModGodModeError::InvalidInput("input size overflow".into()))?;
+        let param_bytes = rows
+            .checked_mul(4)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or_else(|| CudaModGodModeError::InvalidInput("param size overflow".into()))?;
+        let out_elems = rows
+            .checked_mul(n)
+            .ok_or_else(|| CudaModGodModeError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(elem_f32))
+            .ok_or_else(|| CudaModGodModeError::InvalidInput("output size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(param_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaModGodModeError::InvalidInput("total size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
-        if !Self::will_fit(required, headroom) {
-            return Err(CudaModGodModeError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                required as f64 / (1024.0 * 1024.0)
-            )));
+        if let Err(e @ CudaModGodModeError::OutOfMemory { .. }) =
+            Self::will_fit(required, headroom)
+        {
+            return Err(e);
         }
 
         // Upload inputs (skip high/low if volume is unused)
-        let d_close = DeviceBuffer::from_slice(close).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_high = if use_vol { Some(DeviceBuffer::from_slice(high).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?) } else { None };
-        let d_low  = if use_vol { Some(DeviceBuffer::from_slice(low).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?) } else { None };
-        let d_volume = if let Some(v) = volume { Some(DeviceBuffer::from_slice(v).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?) } else { None };
-        let d_n1s = DeviceBuffer::from_slice(&n1s).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_n2s = DeviceBuffer::from_slice(&n2s).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_n3s = DeviceBuffer::from_slice(&n3s).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_modes = DeviceBuffer::from_slice(&modes).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close)?;
+        let d_high = if use_vol {
+            Some(DeviceBuffer::from_slice(high)?)
+        } else {
+            None
+        };
+        let d_low = if use_vol {
+            Some(DeviceBuffer::from_slice(low)?)
+        } else {
+            None
+        };
+        let d_volume = if let Some(v) = volume {
+            Some(DeviceBuffer::from_slice(v)?)
+        } else {
+            None
+        };
+        let d_n1s = DeviceBuffer::from_slice(&n1s)?;
+        let d_n2s = DeviceBuffer::from_slice(&n2s)?;
+        let d_n3s = DeviceBuffer::from_slice(&n3s)?;
+        let d_modes = DeviceBuffer::from_slice(&modes)?;
 
-        let mut d_wt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * n) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let mut d_wt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
+        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
+        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
         // A) Fast shared-memory kernel over ALL rows
         {
-            let func_fast = self.module.get_function("mod_god_mode_batch_f32_shared_fast")
-                .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+            let func_fast = self
+                .module
+                .get_function("mod_god_mode_batch_f32_shared_fast")
+                .map_err(|_| CudaModGodModeError::MissingKernelSymbol {
+                    name: "mod_god_mode_batch_f32_shared_fast",
+                })?;
             let mut block_x = Self::fast_block_x();
             let mut shmem_bytes = Self::fast_shared_bytes(block_x);
             let max_dyn_default: usize = 48 * 1024; // conservative default if opt-in not set
@@ -343,11 +464,12 @@ impl CudaModGodMode {
                     &mut hist_ptr as *mut _ as *mut c_void,
                 ];
                 let grid_x = ((chunk as u32) + block_x - 1) / block_x;
-                let grid: GridSize  = (grid_x.max(1), 1, 1).into();
+                let grid: GridSize = (grid_x.max(1), 1, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
+                self.validate_launch(grid, block)?;
                 unsafe {
-                    self.stream.launch(&func_fast, grid, block, (shmem_bytes as u32), args)
-                        .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+                    self.stream
+                        .launch(&func_fast, grid, block, (shmem_bytes as u32), args)?;
                 }
                 launched += chunk;
             }
@@ -355,11 +477,19 @@ impl CudaModGodMode {
 
         // B) Fallback kernel for large rows only (per-row launch)
         if !large_idxs.is_empty() {
-            let func_fallback = self.module.get_function("mod_god_mode_batch_f32")
-                .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-            let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Auto => 128, BatchKernelPolicy::Plain { block_x } => block_x.max(32) };
+            let func_fallback = self
+                .module
+                .get_function("mod_god_mode_batch_f32")
+                .map_err(|_| CudaModGodModeError::MissingKernelSymbol {
+                    name: "mod_god_mode_batch_f32",
+                })?;
+            let block_x: u32 = match self.policy.batch {
+                BatchKernelPolicy::Auto => 128,
+                BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+            };
             let block: BlockSize = (block_x, 1, 1).into();
-            let grid:  GridSize  = (1, 1, 1).into();
+            let grid: GridSize = (1, 1, 1).into();
+            self.validate_launch(grid, block)?;
             for &row_idx in &large_idxs {
                 let mut high_ptr = d_high.as_ref().map(|b| b.as_device_ptr().as_raw()).unwrap_or(0);
                 let mut low_ptr  = d_low.as_ref().map(|b| b.as_device_ptr().as_raw()).unwrap_or(0);
@@ -394,12 +524,12 @@ impl CudaModGodMode {
                     &mut hist_ptr as *mut _ as *mut c_void,
                 ];
                 unsafe {
-                    self.stream.launch(&func_fallback, grid, block, 0, args)
-                        .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+                    self.stream
+                        .launch(&func_fallback, grid, block, 0, args)?;
                 }
             }
         }
-        self.stream.synchronize().map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
 
         let outputs = DeviceArrayF32Triplet {
             wt1: DeviceArrayF32 { buf: d_wt, rows, cols: n },
@@ -480,19 +610,37 @@ impl CudaModGodMode {
         let use_vol = params.use_volume.unwrap_or(false) && volume_tm.is_some();
 
         // Skip high/low if volume is unused
-        let d_close = DeviceBuffer::from_slice(close_tm).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let d_high  = if use_vol { Some(DeviceBuffer::from_slice(high_tm).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?) } else { None };
-        let d_low   = if use_vol { Some(DeviceBuffer::from_slice(low_tm).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?) } else { None };
-        let d_vol   = if let Some(v) = volume_tm { Some(DeviceBuffer::from_slice(v).map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?) } else { None };
-        let mut d_wt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
-        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let d_close = DeviceBuffer::from_slice(close_tm)?;
+        let d_high = if use_vol {
+            Some(DeviceBuffer::from_slice(high_tm)?)
+        } else {
+            None
+        };
+        let d_low = if use_vol {
+            Some(DeviceBuffer::from_slice(low_tm)?)
+        } else {
+            None
+        };
+        let d_vol = if let Some(v) = volume_tm {
+            Some(DeviceBuffer::from_slice(v)?)
+        } else {
+            None
+        };
+        let mut d_wt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
+        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
+        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
-        let func = self.module.get_function("mod_god_mode_many_series_one_param_time_major_f32").map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        let func = self
+            .module
+            .get_function("mod_god_mode_many_series_one_param_time_major_f32")
+            .map_err(|_| CudaModGodModeError::MissingKernelSymbol {
+                name: "mod_god_mode_many_series_one_param_time_major_f32",
+            })?;
         // Kernel uses threadIdx.x == 0 only
         let bx: u32 = 1;
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (bx, 1, 1).into();
+        self.validate_launch(grid, block)?;
         if !self.debug_logged && std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             eprintln!(
                 "[mod_god_mode] many-series policy selected: block_x={} grid.x={}",
@@ -548,13 +696,9 @@ impl CudaModGodMode {
                 &mut sig_ptr as *mut _ as *mut c_void,
                 &mut hist_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaModGodModeError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         Ok(DeviceArrayF32Triplet {
             wt1: DeviceArrayF32 {
                 buf: d_wt,

@@ -21,22 +21,28 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CudaViError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf}, current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-
-impl fmt::Display for CudaViError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaViError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaViError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-        }
-    }
-}
-impl std::error::Error for CudaViError {}
 
 // Pair of VRAM-resident arrays (for VI+ and VI-)
 pub struct DeviceArrayF32Pair {
@@ -85,7 +91,8 @@ pub struct CudaViPolicy {
 pub struct CudaVi {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaViPolicy,
 }
 
@@ -95,10 +102,9 @@ impl CudaVi {
     }
 
     pub fn new_with_policy(device_id: usize, policy: CudaViPolicy) -> Result<Self, CudaViError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vi_kernel.ptx"));
         let jit = [
@@ -107,30 +113,46 @@ impl CudaVi {
         ];
         let module = Module::from_ptx(ptx, &jit)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy,
         })
     }
 
     #[inline]
-    fn mem_ok(bytes: usize, headroom: usize) -> bool {
-        if env::var("CUDA_MEM_CHECK")
-            .ok()
-            .filter(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-            .is_some()
-        {
-            return true;
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    #[inline]
+    pub fn device_id(&self) -> u32 { self.device_id }
+
+    #[inline]
+    fn mem_check_enabled() -> bool {
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
         }
-        mem_get_info().map(|(free, _)| bytes.saturating_add(headroom) <= free).unwrap_or(true)
+    }
+
+    #[inline]
+    fn will_fit(required_bytes: usize, headroom: usize) -> Result<bool, CudaViError> {
+        if !Self::mem_check_enabled() {
+            return Ok(true);
+        }
+        if let Ok((free, _total)) = mem_get_info() {
+            return Ok(required_bytes.saturating_add(headroom) <= free);
+        }
+        Ok(true)
+    }
+
+    #[inline]
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
     }
 
     /// Heuristic: prefer pinned host memory for >= 1 MiB transfers
@@ -144,26 +166,59 @@ impl CudaVi {
     fn h2d_upload<T: DeviceCopy>(&self, src: &[T]) -> Result<DeviceBuffer<T>, CudaViError> {
         let bytes = src.len() * std::mem::size_of::<T>();
         if Self::use_pinned(bytes) {
-            let h = LockedBuffer::from_slice(src).map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            let mut d = unsafe { DeviceBuffer::<T>::uninitialized(src.len()) }
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-            d.copy_from(&h).map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            let h = LockedBuffer::from_slice(src)?;
+            let mut d = unsafe { DeviceBuffer::<T>::uninitialized(src.len()) }?;
+            d.copy_from(&h)?;
             Ok(d)
         } else {
-            DeviceBuffer::from_slice(src).map_err(|e| CudaViError::Cuda(e.to_string()))
+            Ok(DeviceBuffer::from_slice(src)?)
         }
     }
 
     /// Ask the driver for an occupancy-friendly (grid, block), then clamp to work size.
     #[inline]
-    fn choose_launch_1d(&self, func: &Function, n_items: usize) -> (GridSize, BlockSize) {
+    fn choose_launch_1d(&self, func: &Function, n_items: usize) -> Result<(GridSize, BlockSize), CudaViError> {
         let (min_grid_suggest, block_suggest) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
             .unwrap_or((0, 256));
         let block_x = block_suggest.clamp(64, 1024);
         let mut grid_x = ((n_items as u32) + block_x - 1) / block_x;
-        if min_grid_suggest > 0 { grid_x = grid_x.max(min_grid_suggest); }
-        ((grid_x.max(1), 1, 1).into(), (block_x, 1, 1).into())
+        if min_grid_suggest > 0 {
+            grid_x = grid_x.max(min_grid_suggest);
+        }
+        let gx = grid_x.max(1);
+        // Validate against device limits when possible
+        if let Ok(device) = Device::get_device(self.device_id) {
+            if let Ok(max_grid_x) =
+                device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            {
+                if gx > max_grid_x as u32 {
+                    return Err(CudaViError::LaunchConfigTooLarge {
+                        gx,
+                        gy: 1,
+                        gz: 1,
+                        bx: block_x,
+                        by: 1,
+                        bz: 1,
+                    });
+                }
+            }
+            if let Ok(max_block_x) =
+                device.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            {
+                if block_x > max_block_x as u32 {
+                    return Err(CudaViError::LaunchConfigTooLarge {
+                        gx,
+                        gy: 1,
+                        gz: 1,
+                        bx: block_x,
+                        by: 1,
+                        bz: 1,
+                    });
+                }
+            }
+        }
+        Ok(((gx, 1, 1).into(), (block_x, 1, 1).into()))
     }
 
     // ---------------- Host prefix sums (single series) ----------------
@@ -322,10 +377,28 @@ impl CudaVi {
             if step == 0 || start == end {
                 return vec![ViParams { period: Some(start) }];
             }
-            (start..=end)
-                .step_by(step)
-                .map(|p| ViParams { period: Some(p) })
-                .collect()
+            if start < end {
+                return (start..=end)
+                    .step_by(step)
+                    .map(|p| ViParams { period: Some(p) })
+                    .collect();
+            }
+            let mut out = Vec::new();
+            let mut cur = start;
+            loop {
+                out.push(ViParams { period: Some(cur) });
+                if cur == end {
+                    break;
+                }
+                cur = match cur.checked_sub(step) {
+                    Some(v) => v,
+                    None => break,
+                };
+                if cur < end {
+                    break;
+                }
+            }
+            out
         }
         let combos = expand_grid_local(sweep);
         if combos.is_empty() {
@@ -352,22 +425,35 @@ impl CudaVi {
 
         // VRAM estimate (inputs already host-only; device: 3*pfx + periods + 2*out)
         let rows = combos.len();
-        let bytes = 3 * len * std::mem::size_of::<f32>()
-            + rows * std::mem::size_of::<i32>()
-            + 2 * rows * len * std::mem::size_of::<f32>();
+        let bytes = 3usize
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .and_then(|v| {
+                rows.checked_mul(std::mem::size_of::<i32>())
+                    .and_then(|p| v.checked_add(p))
+            })
+            .and_then(|v| {
+                rows.checked_mul(len)
+                    .and_then(|rc| rc.checked_mul(std::mem::size_of::<f32>()))
+                    .and_then(|out| v.checked_add(out))
+            })
+            .ok_or_else(|| CudaViError::InvalidInput("size overflow in VRAM estimate".into()))?;
         let headroom = env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(64 * 1024 * 1024);
-        if !Self::mem_ok(bytes, headroom) {
-            return Err(CudaViError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                bytes as f64 / (1024.0 * 1024.0)
-            )));
-            return Err(CudaViError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                bytes as f64 / (1024.0 * 1024.0)
-            )));
+        if !Self::will_fit(bytes, headroom)? {
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaViError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaViError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
         // Upload inputs (safe pinned-or-pageable synchronous path)
@@ -379,16 +465,17 @@ impl CudaVi {
         let d_periods = self.h2d_upload(&periods_host)?;
 
         // Allocate outputs
-        let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }
-            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-        let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }
-            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let total = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaViError::InvalidInput("rows*len overflow".into()))?;
+        let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(total) }?;
+        let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(total) }?;
 
         // Launch kernel
         let mut func: Function = self
             .module
             .get_function("vi_batch_f32")
-            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaViError::MissingKernelSymbol { name: "vi_batch_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let (grid, block) = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => {
@@ -396,7 +483,7 @@ impl CudaVi {
                 let gx = ((rows as u32) + bx - 1) / bx;
                 ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
             }
-            _ => self.choose_launch_1d(&func, rows),
+            _ => self.choose_launch_1d(&func, rows)?,
         };
 
         unsafe {
@@ -420,10 +507,11 @@ impl CudaVi {
                 &mut plus_ptr as *mut _ as *mut c_void,
                 &mut minus_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
+
+        // Ensure kernels have completed before exposing VRAM handles to higher layers.
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32Pair {
@@ -473,27 +561,37 @@ impl CudaVi {
         // Validate sufficient tail per series; if any series lacks enough tail, we still run and kernel will NaN-fill
 
         // VRAM estimate (3 * rows*cols + first_valids + 2*out)
-        let n = rows * cols;
-        let bytes = 3 * n * std::mem::size_of::<f32>()
-            + cols * std::mem::size_of::<i32>()
-            + 2 * n * std::mem::size_of::<f32>();
+        let n = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaViError::InvalidInput("rows*cols overflow".into()))?;
+        let bytes = 3usize
+            .checked_mul(n)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .and_then(|v| {
+                cols.checked_mul(std::mem::size_of::<i32>())
+                    .and_then(|p| v.checked_add(p))
+            })
+            .and_then(|v| {
+                n.checked_mul(std::mem::size_of::<f32>() * 2)
+                    .and_then(|out| v.checked_add(out))
+            })
+            .ok_or_else(|| CudaViError::InvalidInput("size overflow in VRAM estimate".into()))?;
         let headroom = env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(64 * 1024 * 1024);
-        let headroom = env::var("CUDA_MEM_HEADROOM")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(64 * 1024 * 1024);
-        if !Self::mem_ok(bytes, headroom) {
-            return Err(CudaViError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                bytes as f64 / (1024.0 * 1024.0)
-            )));
-            return Err(CudaViError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                bytes as f64 / (1024.0 * 1024.0)
-            )));
+        if !Self::will_fit(bytes, headroom)? {
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaViError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaViError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
         }
 
         // Upload inputs (safe pinned-or-pageable synchronous path)
@@ -503,16 +601,14 @@ impl CudaVi {
         let d_first = self.h2d_upload(&first_valids)?;
 
         // Allocate outputs
-        let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }
-            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
-        let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }
-            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+        let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }?;
+        let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }?;
 
         // Launch kernel
         let mut func: Function = self
             .module
             .get_function("vi_many_series_one_param_f32")
-            .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaViError::MissingKernelSymbol { name: "vi_many_series_one_param_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let (grid, block) = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => {
@@ -520,7 +616,7 @@ impl CudaVi {
                 let gx = ((cols as u32) + bx - 1) / bx;
                 ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
             }
-            _ => self.choose_launch_1d(&func, cols),
+            _ => self.choose_launch_1d(&func, cols)?,
         };
 
         unsafe {
@@ -544,10 +640,11 @@ impl CudaVi {
                 &mut plus_ptr as *mut _ as *mut c_void,
                 &mut minus_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(|e| CudaViError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
+
+        // Ensure kernels have completed before exposing VRAM handles to higher layers.
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Pair {
             a: DeviceArrayF32 { buf: d_plus, rows, cols },

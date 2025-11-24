@@ -21,12 +21,13 @@
 //!   - `signal`: The smoothed signal line
 //!
 //! ## Developer Notes
-//! ### Implementation Status
-//! - SIMD (per-row): Disabled by design — loop-carried ring-buffer deps make time-lane SIMD ineffective; runtime selection short-circuits to scalar.
-//! - AVX2/AVX512 stubs: Present for parity but delegate to the scalar path.
-//! - Scalar kernel: Single-pass, builds line and signal together; avoids modulo in hot paths; uses mul_add; stack-first rings (WASM-safe).
-//! - Memory: Uses `alloc_with_nan_prefix` and batch helpers; no O(N) temporaries beyond outputs and small rings.
-//! - Batch: Parallel-by-row; row-specific SIMD/caching not yet implemented (see TODO below).
+//! ### Implementation Status / Decision Log
+//! - SIMD (per-row): Disabled by design — loop-carried ring-buffer deps make time-lane SIMD ineffective; runtime selection short-circuits to scalar (scalar is reference).
+//! - AVX2/AVX512 stubs: Present for API parity only and delegate to the scalar path; `#[cfg(feature = "nightly-avx")]` + `#[cfg(target_arch = "x86_64")]` gated.
+//! - CUDA: Wrapper present under `#[cfg(feature = "cuda")]`, returns VRAM-backed handles used by Python; PTX is loaded with JIT opts matching ALMA.
+//! - Python interop: Uses the shared `DeviceArrayF32Py` handle from ALMA, with CUDA Array Interface v3 + DLPack v1.x implemented there; KST reuses these for GPU outputs.
+//! - Memory: Uses `alloc_with_nan_prefix` and batch helpers; no O(N) temporaries beyond outputs and small rings; checked arithmetic guards rows*cols/byte sizes.
+//! - Batch: Parallel-by-row scalar batch; row-specific SIMD/caching is not yet enabled but expand-grid / range handling is hardened for reversed and degenerate sweeps.
 //!
 //! ### TODO - Performance Improvements
 //! - [ ] Row-specific batch optimization: cache ROC streams shared across rows (by identical r1..r4), then update only SMA rings per row.
@@ -340,6 +341,14 @@ pub enum KstError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("kst: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("kst: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("kst: Invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("kst: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("kst: size arithmetic overflow")]
+    SizeOverflow,
 }
 
 #[inline]
@@ -395,10 +404,22 @@ fn kst_prepare<'a>(
         }
     }
 
-    let warm1 = r1 + s1 - 1;
-    let warm2 = r2 + s2 - 1;
-    let warm3 = r3 + s3 - 1;
-    let warm4 = r4 + s4 - 1;
+    let warm1 = r1
+        .checked_add(s1)
+        .and_then(|x| x.checked_sub(1))
+        .ok_or(KstError::SizeOverflow)?;
+    let warm2 = r2
+        .checked_add(s2)
+        .and_then(|x| x.checked_sub(1))
+        .ok_or(KstError::SizeOverflow)?;
+    let warm3 = r3
+        .checked_add(s3)
+        .and_then(|x| x.checked_sub(1))
+        .ok_or(KstError::SizeOverflow)?;
+    let warm4 = r4
+        .checked_add(s4)
+        .and_then(|x| x.checked_sub(1))
+        .ok_or(KstError::SizeOverflow)?;
     let warm_line = warm1.max(warm2).max(warm3).max(warm4);
     if len - first < warm_line {
         return Err(KstError::NotEnoughValidData {
@@ -406,7 +427,10 @@ fn kst_prepare<'a>(
             valid: len - first,
         });
     }
-    let warm_sig = warm_line + sig - 1;
+    let warm_sig = warm_line
+        .checked_add(sig)
+        .and_then(|x| x.checked_sub(1))
+        .ok_or(KstError::SizeOverflow)?;
     if warm_sig > len {
         return Err(KstError::NotEnoughValidData {
             needed: warm_sig,
@@ -655,8 +679,12 @@ pub fn kst_with_kernel(input: &KstInput, kernel: Kernel) -> Result<KstOutput, Ks
     let len = data.len();
 
     // Adjust warmup to account for NaN prefix
-    let actual_warm_line = first + warm_line;
-    let actual_warm_sig = first + warm_sig;
+    let actual_warm_line = first
+        .checked_add(warm_line)
+        .ok_or(KstError::SizeOverflow)?;
+    let actual_warm_sig = first
+        .checked_add(warm_sig)
+        .ok_or(KstError::SizeOverflow)?;
     let mut line = alloc_with_nan_prefix(len, actual_warm_line);
     let mut signal = alloc_with_nan_prefix(len, actual_warm_sig);
 
@@ -704,10 +732,11 @@ pub fn kst_into_slice(
     kernel: Kernel,
 ) -> Result<(), KstError> {
     let (data, s, r, sig, first, warm_line, warm_sig, _chosen) = kst_prepare(input, kernel)?;
-    if out_line.len() != data.len() || out_signal.len() != data.len() {
-        return Err(KstError::InvalidPeriod {
-            period: out_line.len(),
-            data_len: data.len(),
+    let expected = data.len();
+    if out_line.len() != expected || out_signal.len() != expected {
+        return Err(KstError::OutputLengthMismatch {
+            expected,
+            got: out_line.len().max(out_signal.len()),
         });
     }
 
@@ -800,12 +829,7 @@ pub fn kst_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(KstError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(KstError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -949,34 +973,127 @@ impl KstBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &KstBatchRange) -> Vec<KstParams> {
-    fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
-        }
-        (start..=end).step_by(step).collect()
+fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+    if step == 0 {
+        return vec![start];
     }
-    let s1 = axis(r.sma_period1);
-    let s2 = axis(r.sma_period2);
-    let s3 = axis(r.sma_period3);
-    let s4 = axis(r.sma_period4);
-    let r1 = axis(r.roc_period1);
-    let r2 = axis(r.roc_period2);
-    let r3 = axis(r.roc_period3);
-    let r4 = axis(r.roc_period4);
-    let sig = axis(r.signal_period);
+    if start == end {
+        return vec![start];
+    }
+    let mut out = Vec::new();
+    if start < end {
+        let mut v = start;
+        while v <= end {
+            out.push(v);
+            let next = match v.checked_add(step) {
+                Some(n) if n > v => n,
+                _ => break,
+            };
+            v = next;
+        }
+    } else {
+        let mut v = start;
+        while v >= end {
+            out.push(v);
+            if v - end < step {
+                break;
+            }
+            v -= step;
+        }
+    }
+    out
+}
 
-    let mut out = Vec::with_capacity(
-        s1.len()
-            * s2.len()
-            * s3.len()
-            * s4.len()
-            * r1.len()
-            * r2.len()
-            * r3.len()
-            * r4.len()
-            * sig.len(),
-    );
+#[inline(always)]
+fn expand_grid(r: &KstBatchRange) -> Result<Vec<KstParams>, KstError> {
+    let s1 = axis_usize(r.sma_period1);
+    let s2 = axis_usize(r.sma_period2);
+    let s3 = axis_usize(r.sma_period3);
+    let s4 = axis_usize(r.sma_period4);
+    let r1 = axis_usize(r.roc_period1);
+    let r2 = axis_usize(r.roc_period2);
+    let r3 = axis_usize(r.roc_period3);
+    let r4 = axis_usize(r.roc_period4);
+    let sig = axis_usize(r.signal_period);
+
+    // If any axis failed to expand, treat as an invalid range.
+    if s1.is_empty() {
+        return Err(KstError::InvalidRange {
+            start: r.sma_period1.0,
+            end: r.sma_period1.1,
+            step: r.sma_period1.2,
+        });
+    }
+    if s2.is_empty() {
+        return Err(KstError::InvalidRange {
+            start: r.sma_period2.0,
+            end: r.sma_period2.1,
+            step: r.sma_period2.2,
+        });
+    }
+    if s3.is_empty() {
+        return Err(KstError::InvalidRange {
+            start: r.sma_period3.0,
+            end: r.sma_period3.1,
+            step: r.sma_period3.2,
+        });
+    }
+    if s4.is_empty() {
+        return Err(KstError::InvalidRange {
+            start: r.sma_period4.0,
+            end: r.sma_period4.1,
+            step: r.sma_period4.2,
+        });
+    }
+    if r1.is_empty() {
+        return Err(KstError::InvalidRange {
+            start: r.roc_period1.0,
+            end: r.roc_period1.1,
+            step: r.roc_period1.2,
+        });
+    }
+    if r2.is_empty() {
+        return Err(KstError::InvalidRange {
+            start: r.roc_period2.0,
+            end: r.roc_period2.1,
+            step: r.roc_period2.2,
+        });
+    }
+    if r3.is_empty() {
+        return Err(KstError::InvalidRange {
+            start: r.roc_period3.0,
+            end: r.roc_period3.1,
+            step: r.roc_period3.2,
+        });
+    }
+    if r4.is_empty() {
+        return Err(KstError::InvalidRange {
+            start: r.roc_period4.0,
+            end: r.roc_period4.1,
+            step: r.roc_period4.2,
+        });
+    }
+    if sig.is_empty() {
+        return Err(KstError::InvalidRange {
+            start: r.signal_period.0,
+            end: r.signal_period.1,
+            step: r.signal_period.2,
+        });
+    }
+
+    let total = s1
+        .len()
+        .checked_mul(s2.len())
+        .and_then(|x| x.checked_mul(s3.len()))
+        .and_then(|x| x.checked_mul(s4.len()))
+        .and_then(|x| x.checked_mul(r1.len()))
+        .and_then(|x| x.checked_mul(r2.len()))
+        .and_then(|x| x.checked_mul(r3.len()))
+        .and_then(|x| x.checked_mul(r4.len()))
+        .and_then(|x| x.checked_mul(sig.len()))
+        .ok_or(KstError::SizeOverflow)?;
+
+    let mut out = Vec::with_capacity(total);
     for &s1v in &s1 {
         for &s2v in &s2 {
             for &s3v in &s3 {
@@ -1006,7 +1123,7 @@ fn expand_grid(r: &KstBatchRange) -> Vec<KstParams> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -1033,13 +1150,7 @@ fn kst_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<KstBatchOutput, KstError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(KstError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let cols = data.len();
     if cols == 0 {
         return Err(KstError::EmptyInputData);
@@ -1369,19 +1480,16 @@ fn kst_batch_inner_into(
     lines_out: &mut [f64],
     signals_out: &mut [f64],
 ) -> Result<Vec<KstParams>, KstError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(KstError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
     let cols = data.len();
     let rows = combos.len();
-    if lines_out.len() != rows * cols || signals_out.len() != rows * cols {
-        return Err(KstError::InvalidPeriod {
-            period: lines_out.len(),
-            data_len: rows * cols,
+    let total = rows
+        .checked_mul(cols)
+        .ok_or(KstError::SizeOverflow)?;
+    if lines_out.len() != total || signals_out.len() != total {
+        return Err(KstError::OutputLengthMismatch {
+            expected: total,
+            got: lines_out.len().max(signals_out.len()),
         });
     }
 
@@ -3151,11 +3259,15 @@ pub fn kst_batch_py<'py>(
     let rows;
     let cols = slice.len();
     let (line_arr, sig_arr) = {
-        let tmp_combos = expand_grid(&sweep);
+        let tmp_combos = expand_grid(&sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         rows = tmp_combos.len();
         combos = tmp_combos; // keep for metadata
-        let out_line = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-        let out_sig = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| PyValueError::new_err("kst: size overflow in batch output"))?;
+        let out_line = unsafe { PyArray1::<f64>::new(py, [total], false) };
+        let out_sig = unsafe { PyArray1::<f64>::new(py, [total], false) };
         let lo = unsafe { out_line.as_slice_mut()? };
         let so = unsafe { out_sig.as_slice_mut()? };
         py.allow_threads(|| {
@@ -3306,14 +3418,25 @@ pub fn kst_cuda_batch_dev_py(
         roc_period4: r4_range,
         signal_period: sig_range,
     };
-    let (pair, _combos) = py.allow_threads(|| {
+    let (pair, ctx, dev) = py.allow_threads(|| {
         let cuda = CudaKst::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
         cuda.kst_batch_dev(prices, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map(|res| (res, ctx, dev))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.line },
-        DeviceArrayF32Py { inner: pair.signal },
+        DeviceArrayF32Py {
+            inner: pair.line,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev),
+        },
+        DeviceArrayF32Py {
+            inner: pair.signal,
+            _ctx: Some(ctx),
+            device_id: Some(dev),
+        },
     ))
 }
 
@@ -3359,14 +3482,25 @@ pub fn kst_cuda_many_series_one_param_dev_py(
         roc_period4: Some(r4),
         signal_period: Some(sig),
     };
-    let pair = py.allow_threads(|| {
+    let (pair, ctx, dev) = py.allow_threads(|| {
         let cuda = CudaKst::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
         cuda.kst_many_series_one_param_time_major_dev(prices_tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map(|res| (res, ctx, dev))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.line },
-        DeviceArrayF32Py { inner: pair.signal },
+        DeviceArrayF32Py {
+            inner: pair.line,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev),
+        },
+        DeviceArrayF32Py {
+            inner: pair.signal,
+            _ctx: Some(ctx),
+            device_id: Some(dev),
+        },
     ))
 }
 
@@ -3537,13 +3671,16 @@ pub struct KstBatchJsOutput {
 pub fn kst_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let sweep: KstBatchRange = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {e}")))?;
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = data.len();
 
     // allocate flat buffers rows*cols for each output and fill
-    let mut lines = vec![0.0; rows * cols];
-    let mut sigs = vec![0.0; rows * cols];
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("kst: size overflow in kst_batch_unified_js"))?;
+    let mut lines = vec![0.0; total];
+    let mut sigs = vec![0.0; total];
     kst_batch_inner_into(
         data,
         &sweep,
@@ -3635,18 +3772,23 @@ pub fn kst_batch_into(
         };
 
         let rows = count_range(&sweep.sma_period1).max(1)
-            * count_range(&sweep.sma_period2).max(1)
-            * count_range(&sweep.sma_period3).max(1)
-            * count_range(&sweep.sma_period4).max(1)
-            * count_range(&sweep.roc_period1).max(1)
-            * count_range(&sweep.roc_period2).max(1)
-            * count_range(&sweep.roc_period3).max(1)
-            * count_range(&sweep.roc_period4).max(1)
-            * count_range(&sweep.signal_period).max(1);
+            .checked_mul(count_range(&sweep.sma_period2).max(1))
+            .and_then(|x| x.checked_mul(count_range(&sweep.sma_period3).max(1)))
+            .and_then(|x| x.checked_mul(count_range(&sweep.sma_period4).max(1)))
+            .and_then(|x| x.checked_mul(count_range(&sweep.roc_period1).max(1)))
+            .and_then(|x| x.checked_mul(count_range(&sweep.roc_period2).max(1)))
+            .and_then(|x| x.checked_mul(count_range(&sweep.roc_period3).max(1)))
+            .and_then(|x| x.checked_mul(count_range(&sweep.roc_period4).max(1)))
+            .and_then(|x| x.checked_mul(count_range(&sweep.signal_period).max(1)))
+            .ok_or_else(|| JsValue::from_str("kst: size overflow in kst_batch_into"))?;
         let cols = len;
 
-        let line_out = std::slice::from_raw_parts_mut(line_out_ptr, rows * cols);
-        let signal_out = std::slice::from_raw_parts_mut(signal_out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("kst: size overflow in kst_batch_into buffers"))?;
+
+        let line_out = std::slice::from_raw_parts_mut(line_out_ptr, total);
+        let signal_out = std::slice::from_raw_parts_mut(signal_out_ptr, total);
 
         kst_batch_inner_into(data, &sweep, Kernel::Auto, false, line_out, signal_out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

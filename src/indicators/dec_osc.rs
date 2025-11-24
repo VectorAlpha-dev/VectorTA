@@ -28,6 +28,7 @@
 //! - **Memory Optimization**: YES — uses `alloc_with_nan_prefix` and `make_uninit_matrix` helpers.
 //! - **Batch Operations**: Supported; parallel row execution. A future optimization is to group rows by equal `hp_period` and SIMD-scale across `k` per tick to avoid redundant filter work.
 //! - **Decision**: Single-series SIMD remains disabled due to IIR feedback; consider row-specific SIMD across `k` only if period-grouped workloads are common and show >5% gains.
+//! - **CUDA**: Wrapper present with typed errors and pre-synchronized launches; Python interop provides CAI v3 + DLPack and retains the CUDA context with the returned VRAM handle.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -222,6 +223,15 @@ pub enum DecOscError {
 
     #[error("dec_osc: Invalid K: k = {k}")]
     InvalidK { k: f64 },
+
+    #[error("dec_osc: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("dec_osc: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("dec_osc: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
 }
 
 #[inline]
@@ -317,9 +327,9 @@ pub fn dec_osc_into_slice(
     let (data, period, k_val, first, chosen) = dec_osc_prepare(input, kern)?;
 
     if dst.len() != data.len() {
-        return Err(DecOscError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(DecOscError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -471,12 +481,7 @@ pub fn dec_osc_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(DecOscError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(DecOscError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -582,39 +587,58 @@ impl DecOscBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &DecOscBatchRange) -> Vec<DecOscParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end {
-            return vec![start];
+fn expand_grid_checked(r: &DecOscBatchRange) -> Result<Vec<DecOscParams>, DecOscError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, DecOscError> {
+        if step == 0 || start == end { return Ok(vec![start]); }
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                v = match v.checked_add(step) { Some(n) if n != v => n, _ => break };
+            }
+        } else {
+            // reversed bounds
+            let mut v = start;
+            while v >= end {
+                out.push(v);
+                if v < end + step { break; }
+                v -= step;
+                if v == 0 { break; }
+            }
         }
-        (start..=end).step_by(step).collect()
+        if out.is_empty() {
+            return Err(DecOscError::InvalidRange { start, end, step });
+        }
+        Ok(out)
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
-        }
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return vec![start]; }
         let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        if start <= end {
+            let mut x = start;
+            while x <= end + 1e-12 { v.push(x); x += step; }
+        } else {
+            let mut x = start;
+            while x >= end - 1e-12 { v.push(x); x -= step.abs(); }
         }
         v
     }
 
-    let periods = axis_usize(r.hp_period);
+    let periods = axis_usize(r.hp_period)?;
     let ks = axis_f64(r.k);
-
-    let mut out = Vec::with_capacity(periods.len() * ks.len());
+    let cap = periods.len().checked_mul(ks.len()).ok_or(DecOscError::InvalidRange {
+        start: r.hp_period.0,
+        end: r.hp_period.1,
+        step: r.hp_period.2,
+    })?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &k in &ks {
-            out.push(DecOscParams {
-                hp_period: Some(p),
-                k: Some(k),
-            });
+            out.push(DecOscParams { hp_period: Some(p), k: Some(k) });
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline(always)]
@@ -642,13 +666,7 @@ fn dec_osc_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<DecOscBatchOutput, DecOscError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(DecOscError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_checked(sweep)?;
 
     let first = data
         .iter()
@@ -664,6 +682,9 @@ fn dec_osc_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(DecOscError::InvalidRange { start: rows, end: cols, step: 0 })?;
 
     // Use uninitialized memory with proper initialization (following ALMA pattern)
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -739,13 +760,7 @@ pub fn dec_osc_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<DecOscParams>, DecOscError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(DecOscError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid_checked(sweep)?;
 
     let first = data
         .iter()
@@ -762,11 +777,11 @@ pub fn dec_osc_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    if out.len() != rows * cols {
-        return Err(DecOscError::InvalidPeriod {
-            period: out.len(),
-            data_len: rows * cols,
-        });
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(DecOscError::InvalidRange { start: rows, end: cols, step: 0 })?;
+    if out.len() != expected {
+        return Err(DecOscError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     // Cast out -> MaybeUninit and initialize prefixes via helper
@@ -1877,11 +1892,15 @@ pub fn dec_osc_batch_py<'py>(
         k: k_range,
     };
 
-    let combos = expand_grid(&sweep);
-    let rows = combos.len();
+    let rows = expand_grid_checked(&sweep)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?
+        .len();
     let cols = slice_in.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in dec_osc_batch"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
@@ -1928,7 +1947,13 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaDecOsc;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "dec_osc_cuda_batch_dev")]
@@ -1938,7 +1963,7 @@ pub fn dec_osc_cuda_batch_dev_py(
     data: PyReadonlyArray1<'_, f64>,
     hp_period_range: (usize, usize, usize),
     k_range: (f64, f64, f64),
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DecOscDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA device not available"));
     }
@@ -1948,12 +1973,16 @@ pub fn dec_osc_cuda_batch_dev_py(
         hp_period: hp_period_range,
         k: k_range,
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaDecOsc::new(0).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.dec_osc_batch_dev(&data_f32, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let dev_id = cuda.device_id();
+        let ctx = cuda.context_arc();
+        let inner = cuda
+            .dec_osc_batch_dev(&data_f32, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((inner, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DecOscDeviceArrayF32Py { inner: Some(inner), _ctx_guard: ctx, _device_id: dev_id })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1966,12 +1995,15 @@ pub fn dec_osc_cuda_many_series_one_param_dev_py(
     rows: usize,
     hp_period: usize,
     k: f64,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<DecOscDeviceArrayF32Py> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA device not available"));
     }
     let slice = data_tm.as_slice()?;
-    if slice.len() != cols * rows {
+    let expected = cols
+        .checked_mul(rows)
+        .ok_or_else(|| PyValueError::new_err("cols*rows overflow"))?;
+    if slice.len() != expected {
         return Err(PyValueError::new_err(
             "time-major array length != cols*rows",
         ));
@@ -1981,12 +2013,254 @@ pub fn dec_osc_cuda_many_series_one_param_dev_py(
         hp_period: Some(hp_period),
         k: Some(k),
     };
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaDecOsc::new(0).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.dec_osc_many_series_one_param_time_major_dev(&data_f32, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let dev_id = cuda.device_id();
+        let ctx = cuda.context_arc();
+        let inner = cuda
+            .dec_osc_many_series_one_param_time_major_dev(&data_f32, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((inner, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DecOscDeviceArrayF32Py { inner: Some(inner), _ctx_guard: ctx, _device_id: dev_id })
+}
+
+// A dec_osc-specific Python VRAM handle that keeps the CUDA context alive.
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DecOscDeviceArrayF32")]
+pub struct DecOscDeviceArrayF32Py {
+    pub(crate) inner: Option<DeviceArrayF32>,
+    _ctx_guard: Arc<Context>,
+    _device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DecOscDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let itemsize = std::mem::size_of::<f32>();
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (inner.cols * itemsize, itemsize))?;
+        let nelems = inner.rows.saturating_mul(inner.cols);
+        let ptr_val: usize = if nelems == 0 {
+            0
+        } else {
+            inner.device_ptr() as usize
+        };
+        d.set_item("data", (ptr_val, false))?;
+        // Producing stream is synchronized before return; omit 'stream' per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(i64, i64)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CStr, CString};
+
+        // Move ownership once while keeping context guard alive in manager
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: usize,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLPackVersion { major: u32, minor: u32 }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            version: DLPackVersion,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensorVersioned)>,
+            flags: u64,
+            dl_tensor: DLTensor,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape_box: Box<[i64; 2]>,
+            _strides_box: Box<[i64; 2]>,
+            _ctx_guard: Arc<Context>,
+            _buf: DeviceBuffer<f32>,
+        }
+
+        unsafe extern "C" fn deleter_legacy(self_ptr: *mut DLManagedTensor) {
+            if self_ptr.is_null() { return; }
+            let mt = Box::from_raw(self_ptr);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ctx = Box::from_raw(ctx_ptr);
+                let _ = _ctx;
+            }
+            drop(mt);
+        }
+
+        unsafe extern "C" fn deleter_versioned(self_ptr: *mut DLManagedTensorVersioned) {
+            if self_ptr.is_null() { return; }
+            let mt = Box::from_raw(self_ptr);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ctx = Box::from_raw(ctx_ptr);
+                let _ = _ctx;
+            }
+            drop(mt);
+        }
+
+        // Validate optional device and copy semantics (kDLCUDA = 2)
+        if let Some((dev_type, dev_id)) = dl_device {
+            if dev_type == 2 && dev_id as u32 != self._device_id {
+                if copy.unwrap_or(false) {
+                    // Let consumer handle cross-device copies.
+                } else {
+                    return Err(PyValueError::new_err(
+                        "device mismatch without copy permission",
+                    ));
+                }
+            }
+        }
+
+        // Producer stream is synchronized internally; ignore consumer stream per Array API.
+        let _ = stream;
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let mut shape_box = Box::new([rows, cols]);
+        let mut strides_box = Box::new([cols, 1]);
+        let shape_ptr: *mut i64 = shape_box.as_mut_ptr();
+        let strides_ptr: *mut i64 = strides_box.as_mut_ptr();
+        let nelems = (rows as usize).saturating_mul(cols as usize);
+        let data_ptr = if nelems == 0 {
+            std::ptr::null_mut()
+        } else {
+            inner.buf.as_device_ptr().as_raw() as *mut c_void
+        };
+
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape_box: shape_box,
+            _strides_box: strides_box,
+            _ctx_guard: self._ctx_guard.clone(),
+            _buf: inner.buf,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let tensor = DLTensor {
+            data: data_ptr,
+            device: DLDevice { device_type: 2, device_id: self._device_id as i32 },
+            ndim: 2,
+            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+
+        let wants_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            if capsule.is_null() { return; }
+            let name_ptr = pyffi::PyCapsule_GetName(capsule);
+            if name_ptr.is_null() { return; }
+            let name = CStr::from_ptr(name_ptr).to_bytes();
+            if name == b"dltensor" {
+                let ptr = pyffi::PyCapsule_GetPointer(capsule, name_ptr);
+                if !ptr.is_null() {
+                    let mt = ptr as *mut DLManagedTensor;
+                    if let Some(del) = unsafe { (*mt).deleter } {
+                        unsafe { del(mt) };
+                    }
+                }
+            } else if name == b"dltensor_versioned" {
+                let ptr = pyffi::PyCapsule_GetPointer(capsule, name_ptr);
+                if !ptr.is_null() {
+                    let mt = ptr as *mut DLManagedTensorVersioned;
+                    if let Some(del) = unsafe { (*mt).deleter } {
+                        unsafe { del(mt) };
+                    }
+                }
+            } else {
+                // used_* capsules: do nothing.
+            }
+        }
+
+        unsafe {
+            if wants_versioned {
+                let mt = Box::new(DLManagedTensorVersioned {
+                    version: DLPackVersion { major: 1, minor: 0 },
+                    manager_ctx: mgr_ptr,
+                    deleter: Some(deleter_versioned),
+                    flags: 0,
+                    dl_tensor: tensor,
+                });
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack v1.x capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let mt = Box::new(DLManagedTensor {
+                    dl_tensor: tensor,
+                    manager_ctx: mgr_ptr,
+                    deleter: Some(deleter_legacy),
+                });
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
 }
 
 #[cfg(feature = "wasm")]
@@ -2142,10 +2416,14 @@ pub fn dec_osc_batch_into(
             k: (k_start, k_end, k_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid_checked(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         dec_osc_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

@@ -12,13 +12,15 @@
 //! - **Ok(VpciOutput)** on success (`vpci`, `vpcis` of same length as input).
 //! - **Err(VpciError)** otherwise.
 //!
-//! ## Developer Notes
+//! ## Developer Notes / Decision log
 //! - SIMD enabled: AVX2/AVX512 single-series kernels vectorize the VPCI pass using contiguous
 //!   prefix-differences; VPCIS stays scalar (rolling dependency). Typical speedups vs scalar at 100k:
 //!   AVX2 ~1.3–1.5×, AVX-512 up to ~1.5×+ (CPU dependent).
-//! - Batch: per-row execution now reuses shared prefix sums and selects AVX2/AVX512 per row when
+//! - Batch: per-row execution reuses shared prefix sums and selects AVX2/AVX512 per row when
 //!   `short_range <= long_range`; VPCIS remains scalar per row. Gains are modest (memory-bound),
 //!   but positive on 100k.
+//! - CUDA: wrapper provides one-series×many-params and many-series×one-param kernels, returning
+//!   VRAM-backed handles; Python interop exposes CUDA Array Interface v3 and DLPack v1.x capsules.
 //! - Streaming: O(1) ring-buffer implementation using rolling sums for
 //!   short/long windows; returns a proper VPCIS (volume-weighted average of
 //!   VPCI over the short window). See Decision note in VpciStream.
@@ -240,13 +242,13 @@ impl VpciStream {
         let long_range = params.long_range.unwrap_or(25);
 
         if short_range == 0 || long_range == 0 {
-            return Err(VpciError::InvalidRange {
+            return Err(VpciError::InvalidPeriod {
                 period: 0,
                 data_len: 0,
             });
         }
         if short_range > long_range {
-            return Err(VpciError::InvalidRange {
+            return Err(VpciError::InvalidPeriod {
                 period: short_range,
                 data_len: long_range,
             });
@@ -379,21 +381,37 @@ impl VpciStream {
 
 #[derive(Debug, Error)]
 pub enum VpciError {
+    #[error("vpci: Input data slice is empty.")]
+    EmptyInputData,
+
     #[error("vpci: All close or volume values are NaN.")]
     AllValuesNaN,
 
-    #[error("vpci: Invalid range: period = {period}, data length = {data_len}")]
-    InvalidRange { period: usize, data_len: usize },
+    #[error("vpci: Invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
 
     #[error("vpci: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
 
+    #[error("vpci: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+
+    #[error("vpci: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+
+    #[error("vpci: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+
+    #[error("vpci: invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("vpci: SMA error: {0}")]
     SmaError(#[from] SmaError),
 
-    #[error("vpci: Mismatched input lengths: close = {close_len}, volume = {volume_len}")]
+    #[error("vpci: mismatched input lengths: close = {close_len}, volume = {volume_len}")]
     MismatchedInputLengths { close_len: usize, volume_len: usize },
 
+    // Legacy variant kept for backwards compatibility where callers may have matched on it.
     #[error("vpci: Mismatched output lengths: vpci_len = {vpci_len}, vpcis_len = {vpcis_len}, expected = {data_len}")]
     MismatchedOutputLengths {
         vpci_len: usize,
@@ -478,20 +496,20 @@ fn vpci_prepare<'a>(
 
     let len = close.len();
     if len == 0 {
-        return Err(VpciError::AllValuesNaN);
+        return Err(VpciError::EmptyInputData);
     }
     let first = first_valid_both(close, volume).ok_or(VpciError::AllValuesNaN)?;
 
     let short = input.get_short_range();
     let long = input.get_long_range();
     if short == 0 || long == 0 || short > len || long > len {
-        return Err(VpciError::InvalidRange {
+        return Err(VpciError::InvalidPeriod {
             period: short.max(long),
             data_len: len,
         });
     }
     if short > long {
-        return Err(VpciError::InvalidRange {
+        return Err(VpciError::InvalidPeriod {
             period: short,
             data_len: long,
         });
@@ -688,10 +706,9 @@ pub fn vpci_into_slice(
 ) -> Result<(), VpciError> {
     let (close, volume, first, short, long, chosen) = vpci_prepare(input, kernel)?;
     if vpci_dst.len() != close.len() || vpcis_dst.len() != close.len() {
-        return Err(VpciError::MismatchedOutputLengths {
-            vpci_len: vpci_dst.len(),
-            vpcis_len: vpcis_dst.len(),
-            data_len: close.len(),
+        return Err(VpciError::OutputLengthMismatch {
+            expected: close.len(),
+            got: vpci_dst.len().min(vpcis_dst.len()),
         });
     }
     let warmup = first + long - 1;
@@ -1159,7 +1176,9 @@ pub fn vpci_batch_with_kernel(
             }
         }
         other if other.is_batch() => other,
-        _ => return Err(VpciError::KernelNotAvailable),
+        other => {
+            return Err(VpciError::InvalidKernelForBatch(other));
+        }
     };
     let simd = match k {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1247,12 +1266,36 @@ fn expand_grid(r: &VpciBatchRange) -> Vec<VpciParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start < end {
+            let mut v = start;
+            loop {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(next) if next <= end => v = next,
+                    _ => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            loop {
+                out.push(v);
+                if v == end {
+                    break;
+                }
+                match v.checked_sub(step) {
+                    Some(next) if next >= end => v = next,
+                    _ => break,
+                }
+            }
+        }
+        out
     }
+
     let shorts = axis_usize(r.short_range);
     let longs = axis_usize(r.long_range);
 
-    let mut out = Vec::with_capacity(shorts.len() * longs.len());
+    let mut out = Vec::with_capacity(shorts.len().saturating_mul(longs.len()));
     for &s in &shorts {
         for &l in &longs {
             out.push(VpciParams {
@@ -1296,11 +1339,12 @@ fn vpci_batch_inner(
     let combos = expand_grid(sweep);
     let cols = close.len();
     let rows = combos.len();
-    if cols == 0 || rows == 0 {
-        return Err(VpciError::InvalidRange {
-            period: 0,
-            data_len: cols,
-        });
+    if cols == 0 {
+        return Err(VpciError::EmptyInputData);
+    }
+    if rows == 0 {
+        let (start, end, step) = sweep.short_range;
+        return Err(VpciError::InvalidRange { start, end, step });
     }
 
     // Find first valid data and calculate warmup periods
@@ -1323,8 +1367,11 @@ fn vpci_batch_inner(
     let cap_s = vpcis_mu.capacity();
 
     // writable slices
-    let vpci_slice = unsafe { core::slice::from_raw_parts_mut(ptr_v, rows * cols) };
-    let vpcis_slice = unsafe { core::slice::from_raw_parts_mut(ptr_s, rows * cols) };
+    let total_len = rows
+        .checked_mul(cols)
+        .ok_or_else(|| VpciError::InvalidInput("rows*cols overflow in vpci_batch_inner".into()))?;
+    let vpci_slice = unsafe { core::slice::from_raw_parts_mut(ptr_v, total_len) };
+    let vpcis_slice = unsafe { core::slice::from_raw_parts_mut(ptr_s, total_len) };
 
     let kernel = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
@@ -1351,8 +1398,8 @@ fn vpci_batch_inner(
     // take ownership only now
     core::mem::forget(vpci_mu);
     core::mem::forget(vpcis_mu);
-    let vpci_vec = unsafe { Vec::from_raw_parts(ptr_v, rows * cols, cap_v) };
-    let vpcis_vec = unsafe { Vec::from_raw_parts(ptr_s, rows * cols, cap_s) };
+    let vpci_vec = unsafe { Vec::from_raw_parts(ptr_v, total_len, cap_v) };
+    let vpcis_vec = unsafe { Vec::from_raw_parts(ptr_s, total_len, cap_s) };
 
     Ok(VpciBatchOutput {
         vpci: vpci_vec,
@@ -1377,10 +1424,8 @@ fn vpci_batch_inner_into(
     ensure_same_len(close, volume)?;
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(VpciError::InvalidRange {
-            period: 0,
-            data_len: close.len(),
-        });
+        let (start, end, step) = sweep.short_range;
+        return Err(VpciError::InvalidRange { start, end, step });
     }
     let len = close.len();
     let first = first_valid_both(close, volume).ok_or(VpciError::AllValuesNaN)?;
@@ -2519,10 +2564,16 @@ pub fn vpci_batch_py<'py>(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = close_slice.len();
+    if rows == 0 || cols == 0 {
+        return Err(PyValueError::new_err("no parameter combinations or empty input"));
+    }
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in vpci_batch_py"))?;
 
     // Pre-allocate output arrays for batch operations
-    let vpci_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let vpcis_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let vpci_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let vpcis_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let vpci_slice = unsafe { vpci_arr.as_slice_mut()? };
     let vpcis_slice = unsafe { vpcis_arr.as_slice_mut()? };
 
@@ -2734,14 +2785,38 @@ pub fn vpci_cuda_batch_dev_py<'py>(
         short_range: short_range_tuple,
         long_range: long_range_tuple,
     };
-    let (pair, combos) = py.allow_threads(|| {
+    let (pair, combos, ctx, dev_id_u32) = py.allow_threads(|| {
         let cuda = CudaVpci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vpci_batch_dev(c, v, &sweep)
+        let ctx = cuda.context_arc();
+        let dev_id_u32 = cuda.device_id();
+        cuda
+            .vpci_batch_dev(c, v, &sweep)
+            .map(|(pair, combos)| (pair, combos, ctx, dev_id_u32))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("vpci", Py::new(py, DeviceArrayF32Py { inner: pair.a })?)?;
-    dict.set_item("vpcis", Py::new(py, DeviceArrayF32Py { inner: pair.b })?)?;
+    dict.set_item(
+        "vpci",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: pair.a,
+                _ctx: Some(ctx.clone()),
+                device_id: Some(dev_id_u32),
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "vpcis",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: pair.b,
+                _ctx: Some(ctx),
+                device_id: Some(dev_id_u32),
+            },
+        )?,
+    )?;
     dict.set_item("rows", combos.len())?;
     dict.set_item("cols", c.len())?;
     dict.set_item(
@@ -2795,14 +2870,38 @@ pub fn vpci_cuda_many_series_one_param_dev_py<'py>(
         short_range: Some(short_range),
         long_range: Some(long_range),
     };
-    let pair = py.allow_threads(|| {
+    let (pair, ctx, dev_id_u32) = py.allow_threads(|| {
         let cuda = CudaVpci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.vpci_many_series_one_param_time_major_dev(c, v, cols, rows, &params)
+        let ctx = cuda.context_arc();
+        let dev_id_u32 = cuda.device_id();
+        cuda
+            .vpci_many_series_one_param_time_major_dev(c, v, cols, rows, &params)
+            .map(|pair| (pair, ctx, dev_id_u32))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("vpci", Py::new(py, DeviceArrayF32Py { inner: pair.a })?)?;
-    dict.set_item("vpcis", Py::new(py, DeviceArrayF32Py { inner: pair.b })?)?;
+    dict.set_item(
+        "vpci",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: pair.a,
+                _ctx: Some(ctx.clone()),
+                device_id: Some(dev_id_u32),
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "vpcis",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: pair.b,
+                _ctx: Some(ctx),
+                device_id: Some(dev_id_u32),
+            },
+        )?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("short_range", short_range)?;
@@ -2840,7 +2939,12 @@ pub fn vpci_batch_into(
 
         let combos = expand_grid_vpci(&sweep);
         let rows = combos.len();
-        let total_len = rows * len;
+        if rows == 0 {
+            return Err(JsValue::from_str("no parameter combinations for vpci_batch_into"));
+        }
+        let total_len = rows
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("rows*len overflow in vpci_batch_into"))?;
 
         // Need to handle aliasing only between outputs and inputs
         let need_temp = close_ptr == vpci_ptr as *const f64

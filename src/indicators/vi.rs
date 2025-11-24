@@ -15,15 +15,14 @@
 //! - **minus**: VI- (negative vortex) line as `Vec<f64>` (length matches input)
 //!
 //! ## Developer Notes
-//! - SIMD status: Implementations present but short-circuited to scalar. The VI hot loop is a
-//!   sliding-window recurrence (rolling sums) with per-step dependencies; precomputing full
-//!   temporaries for SIMD regresses overall performance and allocation. Current scalar is fastest.
-//!   Revisit if data layout changes make wide precompute profitable.
-//! - Streaming update: O(1) sliding-window kernel via circular buffers for TR/VP/VM.
-//! - Batch optimization: Row-specific batch now shares precomputed prefix sums of TR/VP/VM across
-//!   all periods; avoids redundant work between rows while preserving exact outputs.
-//! - Memory optimization: Uses zero-copy/uninitialized output helpers and minimal temporaries.
-//! - Note: Streaming requires previous values (prev_high, prev_low, prev_close) for TR calculation.
+//! - SIMD: Implementations present but short-circuited to scalar. The VI hot loop is a sliding-window
+//!   recurrence with per-step dependencies; precomputing full temporaries for SIMD regresses overall
+//!   performance and allocation, so scalar remains the reference path.
+//! - CUDA: Enabled via `CudaVi` with host-precomputed TR/VP/VM prefix sums and VRAM-resident plus/minus
+//!   outputs. Kernels synchronize their NON_BLOCKING stream before returning, and Python reuses ALMA's
+//!   `DeviceArrayF32Py` for CAI v3 and DLPack v1.x (versioned + legacy) with primary-context guards.
+//! - Batch/streaming: Row-specific batch (CPU+CUDA) shares TR/VP/VM prefix sums across periods; the
+//!   streaming API uses O(1) ring buffers with the same warmup and NaN semantics as the scalar path.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -180,14 +179,22 @@ impl ViBuilder {
 
 #[derive(Debug, Error)]
 pub enum ViError {
-    #[error("vi: Empty data provided.")]
-    EmptyData,
+    #[error("vi: Input data slice is empty.")]
+    EmptyInputData,
+    #[error("vi: All values are NaN.")]
+    AllValuesNaN,
     #[error("vi: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("vi: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("vi: All values are NaN.")]
-    AllValuesNaN,
+    #[error("vi: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("vi: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("vi: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("vi: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -210,11 +217,11 @@ fn vi_prepare<'a>(
     };
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(ViError::EmptyData);
+        return Err(ViError::EmptyInputData);
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        return Err(ViError::EmptyData);
+        return Err(ViError::EmptyInputData);
     }
 
     let period = input.get_period();
@@ -289,10 +296,9 @@ pub fn vi_into_slice(
 ) -> Result<(), ViError> {
     let (h, l, c, period, first, chosen) = vi_prepare(input, kernel)?;
     if dst_plus.len() != h.len() || dst_minus.len() != h.len() {
-        return Err(ViError::InvalidPeriod {
-            period: dst_plus.len(),
-            data_len: h.len(),
-        });
+        let expected = h.len();
+        let got = dst_plus.len().max(dst_minus.len());
+        return Err(ViError::OutputLengthMismatch { expected, got });
     }
     vi_compute_into(h, l, c, period, first, chosen, dst_plus, dst_minus);
     let warm = first + period - 1;
@@ -667,16 +673,47 @@ impl ViBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &ViBatchRange) -> Vec<ViParams> {
-    let (start, end, step) = r.period;
-    if step == 0 || start == end {
-        return vec![ViParams {
-            period: Some(start),
-        }];
+    fn axis_usize(range: (usize, usize, usize)) -> Result<Vec<usize>, ViError> {
+        let (start, end, step) = range;
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step).collect();
+            if v.is_empty() {
+                return Err(ViError::InvalidRange { start, end, step });
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut cur = start;
+        loop {
+            v.push(cur);
+            if cur == end {
+                break;
+            }
+            cur = cur
+                .checked_sub(step)
+                .ok_or(ViError::InvalidRange { start, end, step })?;
+            if cur < end {
+                break;
+            }
+        }
+        if v.is_empty() {
+            return Err(ViError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    (start..=end)
-        .step_by(step)
-        .map(|p| ViParams { period: Some(p) })
-        .collect()
+
+    let periods = match axis_usize(r.period) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::with_capacity(periods.len());
+    for &p in &periods {
+        out.push(ViParams { period: Some(p) });
+    }
+    out
 }
 
 pub fn vi_batch_with_kernel(
@@ -689,11 +726,8 @@ pub fn vi_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(ViError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            });
+        other => {
+            return Err(ViError::InvalidKernelForBatch(other));
         }
     };
     let simd = match kernel {
@@ -734,13 +768,14 @@ fn vi_batch_inner(
 ) -> Result<ViBatchOutput, ViError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(ViError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(ViError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(ViError::EmptyData);
+        return Err(ViError::EmptyInputData);
     }
     let first = (0..high.len())
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
@@ -754,16 +789,29 @@ fn vi_batch_inner(
     }
     let rows = combos.len();
     let cols = high.len();
+    rows.checked_mul(cols)
+        .ok_or_else(|| {
+            ViError::InvalidRange {
+                start: sweep.period.0,
+                end: sweep.period.1,
+                step: sweep.period.2,
+            }
+        })?;
 
     // Use uninitialized memory for better performance
     let mut plus_mu = make_uninit_matrix(rows, cols);
     let mut minus_mu = make_uninit_matrix(rows, cols);
 
     // Calculate warmup periods for each parameter combination
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|c| first + c.period.unwrap() - 1)
-        .collect();
+    let mut warm: Vec<usize> = Vec::with_capacity(combos.len());
+    for c in &combos {
+        let p = c.period.unwrap();
+        let warm_i = first
+            .checked_add(p)
+            .and_then(|v| v.checked_sub(1))
+            .ok_or_else(|| ViError::InvalidPeriod { period: p, data_len: high.len() })?;
+        warm.push(warm_i);
+    }
 
     // Initialize the prefix with NaN
     init_matrix_prefixes(&mut plus_mu, cols, &warm);
@@ -984,18 +1032,27 @@ fn vi_batch_inner_into(
     let rows = combos.len();
     let cols = close.len();
     if rows == 0 {
-        return Err(ViError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(ViError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
-    if out_plus.len() != rows * cols || out_minus.len() != rows * cols {
-        return Err(ViError::EmptyData);
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| ViError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out_plus.len() != expected || out_minus.len() != expected {
+        let got = out_plus.len().max(out_minus.len());
+        return Err(ViError::OutputLengthMismatch { expected, got });
     }
 
     // find first valid once
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(ViError::EmptyData);
+        return Err(ViError::EmptyInputData);
     }
     let first = (0..high.len())
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
@@ -1527,9 +1584,12 @@ pub fn vi_batch_into(
         let combos = expand_grid(&sweep);
         let rows = combos.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in vi_into"))?;
 
-        let plus_out = std::slice::from_raw_parts_mut(plus_ptr, rows * cols);
-        let minus_out = std::slice::from_raw_parts_mut(minus_ptr, rows * cols);
+        let plus_out = std::slice::from_raw_parts_mut(plus_ptr, total);
+        let minus_out = std::slice::from_raw_parts_mut(minus_ptr, total);
 
         // Use the vi_batch_inner_into function
         let _ = vi_batch_inner_into(
@@ -2576,9 +2636,12 @@ pub fn vi_batch_py<'py>(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = h.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow in vi_batch_py"))?;
 
-    let out_plus = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let out_minus = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_plus = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let out_minus = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_plus = unsafe { out_plus.as_slice_mut()? };
     let slice_minus = unsafe { out_minus.as_slice_mut()? };
 
@@ -2707,14 +2770,37 @@ pub fn vi_cuda_batch_dev_py<'py>(
     let sweep = ViBatchRange {
         period: period_range,
     };
-    let (pair, combos) = py.allow_threads(|| {
+    let (pair, combos, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaVi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.vi_batch_dev(h, l, c, &sweep)
+            .map(|res| (res, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("plus", Py::new(py, DeviceArrayF32Py { inner: pair.a })?)?;
-    dict.set_item("minus", Py::new(py, DeviceArrayF32Py { inner: pair.b })?)?;
+    dict.set_item(
+        "plus",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: pair.a,
+                _ctx: Some(ctx.clone()),
+                device_id: Some(dev_id),
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "minus",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: pair.b,
+                _ctx: Some(ctx),
+                device_id: Some(dev_id),
+            },
+        )?,
+    )?;
     dict.set_item("rows", combos.len())?;
     dict.set_item("cols", h.len())?;
     dict.set_item(
@@ -2760,14 +2846,37 @@ pub fn vi_cuda_many_series_one_param_dev_py<'py>(
     let params = ViParams {
         period: Some(period),
     };
-    let pair = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaVi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
         cuda.vi_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
+            .map(|res| (res, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
-    dict.set_item("plus", Py::new(py, DeviceArrayF32Py { inner: pair.a })?)?;
-    dict.set_item("minus", Py::new(py, DeviceArrayF32Py { inner: pair.b })?)?;
+    dict.set_item(
+        "plus",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: pair.a,
+                _ctx: Some(ctx.clone()),
+                device_id: Some(dev_id),
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "minus",
+        Py::new(
+            py,
+            DeviceArrayF32Py {
+                inner: pair.b,
+                _ctx: Some(ctx),
+                device_id: Some(dev_id),
+            },
+        )?,
+    )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
     dict.set_item("period", period)?;

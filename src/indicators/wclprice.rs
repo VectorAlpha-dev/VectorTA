@@ -22,6 +22,7 @@
 //!   and avoid division; returns `None` if any input is NaN. No fast-math beyond FMA-style `mul_add`.
 //! - Memory: uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batch.
 //! - Batch: single-row only (no params); row SIMD reuses single-series kernels.
+//! - Decision log: SIMD enabled (AVX2/AVX512); CUDA wrapper present for batch/many-series; Python interop uses CAI v3 + DLPack v1.x; numerical outputs match scalar.
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaWclprice};
@@ -154,15 +155,21 @@ impl WclpriceBuilder {
 #[derive(Debug, Error)]
 pub enum WclpriceError {
     #[error("wclprice: empty input")]
-    EmptyData,
+    EmptyInputData,
     #[error("wclprice: all values are NaN")]
     AllValuesNaN,
-    #[error("wclprice: output len {out} must equal min(high,low,close)={min_len}")]
-    InvalidOutputLen { out: usize, min_len: usize },
+    #[error("wclprice: invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
+    #[error("wclprice: not enough valid data: needed = {needed}, valid = {valid}")]
+    NotEnoughValidData { needed: usize, valid: usize },
+    #[error("wclprice: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("wclprice: invalid range: start = {start}, end = {end}, step = {step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("wclprice: invalid kernel for batch mode: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error("wclprice: missing candle field '{field}'")]
     MissingField { field: &'static str },
-    #[error("wclprice: invalid kernel for batch mode: {0:?}")]
-    InvalidBatchKernel(Kernel),
 }
 
 #[inline(always)]
@@ -187,7 +194,7 @@ fn wclprice_prepare<'a>(
     };
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(WclpriceError::EmptyData);
+        return Err(WclpriceError::EmptyInputData);
     }
     let lh = high.len();
     let ll = low.len();
@@ -256,10 +263,7 @@ pub fn wclprice_into_slice(
 ) -> Result<(), WclpriceError> {
     let (high, low, close, len, first, chosen) = wclprice_prepare(input, kern)?;
     if dst.len() != len {
-        return Err(WclpriceError::InvalidOutputLen {
-            out: dst.len(),
-            min_len: len,
-        });
+        return Err(WclpriceError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
     // warmup prefix
     if first > 0 {
@@ -642,7 +646,7 @@ pub fn wclprice_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        other => return Err(WclpriceError::InvalidBatchKernel(other)),
+        other => return Err(WclpriceError::InvalidKernelForBatch(other)),
     };
     wclprice_batch_par_slice(high, low, close, kernel)
 }
@@ -691,7 +695,7 @@ pub fn wclprice_batch_inner(
     _parallel: bool,
 ) -> Result<WclpriceBatchOutput, WclpriceError> {
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(WclpriceError::EmptyData);
+        return Err(WclpriceError::EmptyInputData);
     }
     let len = high.len().min(low.len()).min(close.len());
     let first = (0..len)
@@ -750,14 +754,11 @@ fn wclprice_batch_inner_into(
     out: &mut [f64],
 ) -> Result<Vec<WclpriceParams>, WclpriceError> {
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(WclpriceError::EmptyData);
+        return Err(WclpriceError::EmptyInputData);
     }
     let len = high.len().min(low.len()).min(close.len());
     if out.len() < len {
-        return Err(WclpriceError::InvalidOutputLen {
-            out: out.len(),
-            min_len: len,
-        });
+        return Err(WclpriceError::OutputLengthMismatch { expected: len, got: out.len() });
     }
     let first = (0..len)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
@@ -869,7 +870,10 @@ pub fn wclprice_batch_py<'py>(
     let rows = 1usize;
     let cols = hs.len().min(ls.len()).min(cs.len());
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let size = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [size], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
@@ -915,14 +919,18 @@ pub fn wclprice_cuda_dev_py(
     let ls = low.as_slice()?;
     let cs = close.as_slice()?;
 
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.wclprice_batch_dev(hs, ls, cs, &WclpriceBatchRange)
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .wclprice_batch_dev(hs, ls, cs, &WclpriceBatchRange)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -941,13 +949,17 @@ pub fn wclprice_cuda_batch_dev_py(
     let hs = high_f32.as_slice()?;
     let ls = low_f32.as_slice()?;
     let cs = close_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.wclprice_batch_dev(hs, ls, cs, &WclpriceBatchRange)
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .wclprice_batch_dev(hs, ls, cs, &WclpriceBatchRange)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -975,13 +987,17 @@ pub fn wclprice_cuda_many_series_one_param_dev_py(
     let hs = high_tm_f32.as_slice()?;
     let ls = low_tm_f32.as_slice()?;
     let cs = close_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.wclprice_many_series_one_param_time_major_dev(hs, ls, cs, cols, rows)
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        cuda
+            .wclprice_many_series_one_param_time_major_dev(hs, ls, cs, cols, rows)
+            .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
 }
 
 #[cfg(feature = "wasm")]

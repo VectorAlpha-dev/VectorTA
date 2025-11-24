@@ -204,8 +204,8 @@ pub enum WmaError {
     #[error("wma: Invalid range expansion: start = {start}, end = {end}, step = {step}")]
     InvalidRange { start: usize, end: usize, step: usize },
 
-    #[error("wma: size overflow computing rows*cols")]
-    SizeOverflow,
+    #[error("wma: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -662,6 +662,11 @@ fn wma_batch_inner(
         return Err(WmaError::EmptyInputData);
     }
 
+    // Guard rows*cols before allocating backing storage
+    rows
+        .checked_mul(cols)
+        .ok_or_else(|| WmaError::InvalidInput("rows*cols overflow".into()))?;
+
     // Allocate uninitialized rows×cols
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
@@ -711,10 +716,8 @@ fn wma_batch_inner_into(
 ) -> Result<Vec<WmaParams>, WmaError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(WmaError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (start, end, step) = sweep.period;
+        return Err(WmaError::InvalidRange { start, end, step });
     }
 
     let first = data
@@ -735,7 +738,7 @@ fn wma_batch_inner_into(
     // Guard output slice length and multiplication overflow
     let needed = rows
         .checked_mul(cols)
-        .ok_or(WmaError::SizeOverflow)?;
+        .ok_or_else(|| WmaError::InvalidInput("rows*cols overflow".into()))?;
     if out.len() != needed {
         return Err(WmaError::OutputLengthMismatch {
             expected: needed,
@@ -1757,7 +1760,10 @@ pub fn wma_batch_py<'py>(
     let cols = slice_in.len();
 
     // 2. Pre-allocate NumPy array (1-D, will reshape later)
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let needed = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [needed], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // 3. Heavy work without the GIL
