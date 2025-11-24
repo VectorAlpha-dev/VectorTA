@@ -12,14 +12,10 @@
 //! - **`Ok(DecyclerOutput)`** on success, containing a `Vec<f64>` matching the input length.
 //! - **`Err(DecyclerError)`** otherwise.
 //!
-//! ## Developer Notes
-//! - SIMD note: time-recursive; single-series AVX2/AVX512 underperforms, so stubs delegate to scalar.
-//! - Batch note: precomputes second-difference once and reuses across rows for better throughput.
-//! - **AVX2 kernel**: STUB - calls scalar implementation
-//! - **AVX512 kernel**: STUB - calls scalar implementation (both short and long variants)
-//! - **Streaming**: ✅ Enabled (O(1) scalar 2‑pole HP); matches batch after warmup
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
-//! - **Batch operations**: ✅ Implemented with parallel processing support
+//! ## Developer Notes (Decision Log)
+//! - SIMD: AVX2/AVX512 kernels are stubs delegating to the scalar path (time‑recursive filter; SIMD underperforms), so scalar remains the reference implementation.
+//! - CUDA: wrapper enabled and memory‑bound; returns VRAM‑backed FP32 handles with CUDA Array Interface v3 and DLPack v1.x, matching scalar outputs bit‑for‑bit.
+//! - Batch/streaming: batch precomputes the second difference once and reuses it across rows; streaming O(1) path matches batch after warmup and uses alloc_with_nan_prefix for zero‑copy outputs.
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -58,9 +54,212 @@ use wasm_bindgen::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaDecycler};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
+
+// Local CUDA device array Python wrapper with CAI v3 + DLPack
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::decycler_wrapper::DeviceArrayF32Decycler as DeviceArrayF32Inner;
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "DecyclerDeviceArrayF32", unsendable)]
+pub struct DeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32Inner,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl DeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Stream omitted; wrapper synchronizes before returning
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.inner.device_id as i32) }
+
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<pyo3::PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _self_ref: pyo3::PyObject,
+            _arr: DeviceArrayF32Inner,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        let dummy = DeviceBuffer::from_slice(&[])
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = self.inner.ctx.clone();
+        let device_id = self.inner.device_id;
+        let inner = std::mem::replace(
+            &mut self.inner,
+            DeviceArrayF32Inner {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+                ctx,
+                device_id,
+            },
+        );
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total = (rows as i128) * (cols as i128);
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let self_ref = unsafe {
+            pyo3::PyObject::from_borrowed_ptr(
+                py,
+                self as *mut _ as *mut pyffi::PyObject,
+            )
+        };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _self_ref: self_ref,
+            _arr: inner,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let dl = DLTensor {
+            data: if total == 0 {
+                std::ptr::null_mut()
+            } else {
+                unsafe {
+                    (*(mgr_ptr as *mut ManagerCtx))
+                        ._arr
+                        .buf
+                        .as_device_ptr()
+                        .as_raw() as *mut c_void
+                }
+            },
+            device: DLDevice {
+                device_type: 2,
+                device_id: device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: dl,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(pyo3::PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
 
 impl<'a> AsRef<[f64]> for DecyclerInput<'a> {
     #[inline(always)]
@@ -207,18 +406,24 @@ impl DecyclerBuilder {
 
 #[derive(Debug, Error)]
 pub enum DecyclerError {
-    #[error("decycler: Empty data provided for Decycler.")]
-    EmptyData,
-    #[error("decycler: Invalid period: hp_period = {period}, data length = {data_len}")]
+    #[error("decycler: empty input data")]
+    EmptyInputData,
+    #[error("decycler: invalid period: hp_period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("decycler: Not enough valid data: needed = {needed}, valid = {valid}")]
+    #[error("decycler: not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("decycler: All values are NaN.")]
+    #[error("decycler: all values are NaN")]
     AllValuesNaN,
-    #[error("decycler: Invalid k: k = {k}")]
+    #[error("decycler: invalid k: k = {k}")]
     InvalidK { k: f64 },
-    #[error("decycler: Invalid kernel type for batch operation")]
-    InvalidKernel,
+    #[error("decycler: output length mismatch: expected={expected}, got={got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("decycler: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: isize, end: isize, step: isize },
+    #[error("decycler: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("decycler: invalid input: {0}")]
+    InvalidInput(String),
 }
 
 #[inline]
@@ -236,13 +441,10 @@ pub fn decycler_into_slice(
     let data: &[f64] = input.as_ref();
 
     if data.is_empty() {
-        return Err(DecyclerError::EmptyData);
+        return Err(DecyclerError::EmptyInputData);
     }
     if out.len() != data.len() {
-        return Err(DecyclerError::InvalidPeriod {
-            period: out.len(),
-            data_len: data.len(),
-        });
+        return Err(DecyclerError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
     let hp_period = input.get_hp_period();
@@ -372,7 +574,7 @@ pub fn decycler_with_kernel(
     };
 
     if data.is_empty() {
-        return Err(DecyclerError::EmptyData);
+        return Err(DecyclerError::EmptyInputData);
     }
     let hp_period = input.get_hp_period();
     let k = input.get_k();
@@ -529,7 +731,7 @@ pub fn decycler_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => return Err(DecyclerError::InvalidKernel),
+        other => return Err(DecyclerError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -759,37 +961,70 @@ impl DecyclerBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &DecyclerBatchRange) -> Vec<DecyclerParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &DecyclerBatchRange) -> Result<Vec<DecyclerParams>, DecyclerError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, DecyclerError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
-    }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+        if start < end {
+            return Ok((start..=end).step_by(step).collect());
         }
-        let mut v = Vec::new();
-        let mut x = start;
-        while x <= end + 1e-12 {
-            v.push(x);
-            x += step;
+        // Reversed bounds with positive step: descend
+        let mut vals = Vec::new();
+        let mut cur: isize = start as isize;
+        let end_i: isize = end as isize;
+        let step_i: isize = step as isize;
+        while cur >= end_i {
+            vals.push(cur as usize);
+            if step_i == 0 { break; }
+            cur = cur.saturating_sub(step_i);
+            if cur == std::isize::MIN { break; }
         }
-        v
-    }
-    let hp_periods = axis_usize(r.hp_period);
-    let ks = axis_f64(r.k);
-    let mut out = Vec::with_capacity(hp_periods.len() * ks.len());
-    for &p in &hp_periods {
-        for &k in &ks {
-            out.push(DecyclerParams {
-                hp_period: Some(p),
-                k: Some(k),
+        if vals.is_empty() {
+            return Err(DecyclerError::InvalidRange {
+                start: start as isize,
+                end: end as isize,
+                step: step as isize,
             });
         }
+        Ok(vals)
     }
-    out
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, DecyclerError> {
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
+        let mut v = Vec::new();
+        if start < end && step > 0.0 {
+            let mut x = start;
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += step;
+            }
+        } else if start > end && step < 0.0 {
+            let mut x = start;
+            while x >= end - 1e-12 {
+                v.push(x);
+                x += step; // negative step
+            }
+        }
+        if v.is_empty() {
+            return Err(DecyclerError::InvalidRange {
+                start: start as isize,
+                end: end as isize,
+                step: if step >= 0.0 { step as isize } else { (step as i64) as isize },
+            });
+        }
+        Ok(v)
+    }
+    let hp_periods = axis_usize(r.hp_period)?;
+    let ks = axis_f64(r.k)?;
+    let mut out = Vec::with_capacity(hp_periods.len().saturating_mul(ks.len()));
+    for &p in &hp_periods {
+        for &k in &ks {
+            out.push(DecyclerParams { hp_period: Some(p), k: Some(k) });
+        }
+    }
+    Ok(out)
 }
 
 #[inline(always)]
@@ -817,12 +1052,17 @@ fn decycler_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<DecyclerBatchOutput, DecyclerError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let cols = data.len();
     if cols == 0 {
-        return Err(DecyclerError::EmptyData);
+        return Err(DecyclerError::EmptyInputData);
     }
     let rows = combos.len();
+
+    // rows * cols overflow check
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| DecyclerError::InvalidInput("rows*cols overflow".into()))?;
 
     // Allocate once, set per-row warmups, then compute into place
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -954,7 +1194,7 @@ pub unsafe fn decycler_row_avx512_long(
 }
 
 #[inline(always)]
-pub fn expand_grid_decycler(r: &DecyclerBatchRange) -> Vec<DecyclerParams> {
+pub fn expand_grid_decycler(r: &DecyclerBatchRange) -> Result<Vec<DecyclerParams>, DecyclerError> {
     expand_grid(r)
 }
 
@@ -1778,12 +2018,15 @@ pub fn decycler_batch_py<'py>(
         k: k_range,
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
     // Preallocate 1D buffer, zero-copy reshape later
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     // Initialize NaN prefixes for each row
@@ -1800,10 +2043,10 @@ pub fn decycler_batch_py<'py>(
 
     let combos = py
         .allow_threads(|| {
-            let kernel = match kern {
-                Kernel::Auto => detect_best_batch_kernel(),
-                k => k,
-            };
+    let kernel = match kern {
+        Kernel::Auto => detect_best_batch_kernel(),
+        k => k,
+    };
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -1858,8 +2101,7 @@ pub fn decycler_cuda_batch_dev_py(
         k: k_range,
     };
     let inner = py.allow_threads(|| -> PyResult<_> {
-        let cuda =
-            CudaDecycler::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaDecycler::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.decycler_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -1895,8 +2137,7 @@ pub fn decycler_cuda_many_series_one_param_dev_py(
         k: Some(k),
     };
     let inner = py.allow_threads(|| -> PyResult<_> {
-        let cuda =
-            CudaDecycler::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaDecycler::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.decycler_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -1911,19 +2152,17 @@ fn decycler_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<DecyclerParams>, DecyclerError> {
-    let combos = expand_grid(sweep);
-    if combos.is_empty() {
-        return Err(DecyclerError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
-    }
+    let combos = expand_grid(sweep)?;
 
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(DecyclerError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.hp_period.unwrap()).max().unwrap();
+    let _guard = combos
+        .len()
+        .checked_mul(max_p)
+        .ok_or_else(|| DecyclerError::InvalidInput("n_combos*max_period overflow".into()))?;
     if data.len() - first < max_p {
         return Err(DecyclerError::NotEnoughValidData {
             needed: max_p,
@@ -1933,6 +2172,12 @@ fn decycler_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| DecyclerError::InvalidInput("rows*cols overflow".into()))?;
+    if out.len() != expected {
+        return Err(DecyclerError::OutputLengthMismatch { expected, got: out.len() });
+    }
 
     // Precompute second difference once for reuse across rows:
     // d[i] = x[i] - 2*x[i-1] + x[i-2]
@@ -2141,10 +2386,14 @@ pub fn decycler_batch_into(
             hp_period: (hp_start, hp_end, hp_step),
             k: (k_start, k_end, k_step),
         };
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         decycler_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)

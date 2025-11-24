@@ -1,4 +1,5 @@
 //! # Commodity Channel Index (CCI)
+//! Decision log: SIMD present but short‑circuited to scalar for stability; CUDA wrappers available; Python interop via CAI v3 and DLPack; numerical outputs unchanged.
 //!
 //! CCI measures the variation of a security's price from its statistical mean.
 //! It is calculated as the difference between typical price and its moving average,
@@ -20,7 +21,7 @@
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaCci;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -51,6 +52,10 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 // ---- Input/Output Structs ----
 
@@ -200,6 +205,12 @@ pub enum CciError {
     InvalidPeriod { period: usize, data_len: usize },
     #[error("cci: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
+    #[error("cci: output length mismatch: expected {expected}, got {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("cci: invalid range expansion: start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("cci: invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 // ---- Indicator API ----
@@ -290,9 +301,9 @@ pub fn cci_into_slice(dst: &mut [f64], input: &CciInput, kern: Kernel) -> Result
     let (data, period, first, chosen) = cci_prepare(input, kern)?;
 
     if dst.len() != data.len() {
-        return Err(CciError::InvalidPeriod {
-            period: dst.len(),
-            data_len: data.len(),
+        return Err(CciError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
         });
     }
 
@@ -1119,19 +1130,54 @@ impl CciBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &CciBatchRange) -> Vec<CciParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &CciBatchRange) -> Result<Vec<CciParams>, CciError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CciError> {
+        // Zero step => static; start==end => singleton; support reversed bounds.
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur <= end {
+                v.push(cur);
+                match cur.checked_add(step) {
+                    Some(next) => {
+                        if next == cur {
+                            break;
+                        }
+                        cur = next;
+                    }
+                    None => break,
+                }
+            }
+            if v.is_empty() { return Err(CciError::InvalidRange { start, end, step }); }
+            Ok(v)
+        } else {
+            // reversed bounds
+            let mut v = Vec::new();
+            let mut cur = start;
+            loop {
+                v.push(cur);
+                if cur <= end { break; }
+                // prevent underflow
+                if cur < step { break; }
+                cur -= step;
+                if cur == end { v.push(cur); break; }
+                if cur < end { break; }
+            }
+            v.sort_unstable();
+            v.dedup();
+            if v.is_empty() { return Err(CciError::InvalidRange { start, end, step }); }
+            Ok(v)
+        }
     }
-    let periods = axis_usize(r.period);
+    let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
         out.push(CciParams { period: Some(p) });
     }
-    out
+    Ok(out)
 }
 
 pub fn cci_batch_with_kernel(
@@ -1142,12 +1188,7 @@ pub fn cci_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(CciError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(CciError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1185,10 +1226,16 @@ fn cci_batch_inner(
     if data.is_empty() {
         return Err(CciError::EmptyInputData);
     }
-
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     let cols = data.len();
     let rows = combos.len();
+
+    // Guard potential overflow in matrix allocation.
+    rows.checked_mul(cols).ok_or(CciError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
     // 1. Allocate *uninitialised* matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -1236,12 +1283,9 @@ fn cci_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<CciParams>, CciError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(CciError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(CciError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
     }
 
     if data.is_empty() {
@@ -1262,6 +1306,21 @@ fn cci_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
+
+    // Checked matrix size and output slice length.
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(CciError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if out.len() != expected {
+        return Err(CciError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
 
     // Resolve kernel selection
     let kernel = match kern {
@@ -2150,6 +2209,221 @@ pub fn cci_batch_py<'py>(
 }
 
 // -------- Python CUDA bindings --------
+
+// Dedicated CCI VRAM handle with CAI v3 + DLPack v1.x
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "CciDeviceArrayF32", unsendable)]
+pub struct CciDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+    pub(crate) stream: usize,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl CciDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = &self.inner;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // CCI CUDA wrappers synchronize the producing stream before returning,
+        // so CAI v3 permits omitting the "stream" key.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature=(_stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        _stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _self_ref: PyObject,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_versioned(capsule: *mut pyffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let vptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                as *mut DLManagedTensorVersioned;
+            if !vptr.is_null() {
+                let mgr = (*vptr).manager;
+                if !mgr.is_null() {
+                    if let Some(del) = (*mgr).deleter {
+                        del(mgr);
+                    }
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                let _ = Box::from_raw(vptr);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let total_elems = (rows as i128) * (cols as i128);
+
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let self_ref = unsafe { PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _self_ref: self_ref,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr: *mut c_void = if total_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            slf.inner.device_ptr() as usize as *mut c_void
+        };
+        let tensor = DLTensor {
+            data: data_ptr,
+            device: DLDevice {
+                device_type: 2,
+                device_id: slf.device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: tensor,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(
+                    ptr,
+                    name.as_ptr(),
+                    Some(capsule_destructor_versioned),
+                );
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create versioned DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "cci_cuda_batch_dev")]
 #[pyo3(signature = (data, period_range, device_id=0))]
@@ -2158,7 +2432,7 @@ pub fn cci_cuda_batch_dev_py(
     data: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<CciDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -2167,12 +2441,25 @@ pub fn cci_cuda_batch_dev_py(
     let sweep = CciBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
-        let cuda = CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.cci_batch_dev(slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, dev_id, ctx, stream) = py.allow_threads(|| {
+        let cuda =
+            CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev_id = cuda.device_id();
+        let ctx = cuda.context_arc();
+        let out = cuda
+            .cci_batch_dev(slice, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.stream()
+            .synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((out, dev_id, ctx, cuda.stream_handle_usize()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(CciDeviceArrayF32Py {
+        inner,
+        _ctx: ctx,
+        device_id: dev_id,
+        stream,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2185,18 +2472,31 @@ pub fn cci_cuda_many_series_one_param_dev_py(
     rows: usize,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<CciDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data_tm.as_slice()?;
-    let inner = py.allow_threads(|| {
-        let cuda = CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.cci_many_series_one_param_time_major_dev(slice, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, dev_id, ctx, stream) = py.allow_threads(|| {
+        let cuda =
+            CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev_id = cuda.device_id();
+        let ctx = cuda.context_arc();
+        let out = cuda
+            .cci_many_series_one_param_time_major_dev(slice, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.stream()
+            .synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok((out, dev_id, ctx, cuda.stream_handle_usize()))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(CciDeviceArrayF32Py {
+        inner,
+        _ctx: ctx,
+        device_id: dev_id,
+        stream,
+    })
 }
 
 #[cfg(feature = "wasm")]
@@ -2304,7 +2604,7 @@ pub fn cci_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep);
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let mut metadata = Vec::with_capacity(combos.len());
 
     for combo in combos {
@@ -2379,7 +2679,7 @@ pub fn cci_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep);
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 

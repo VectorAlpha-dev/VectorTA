@@ -26,7 +26,7 @@
 use crate::cuda::{cuda_available, CudaSupertrend};
 use crate::indicators::atr::{atr, AtrData, AtrError, AtrInput, AtrOutput, AtrParams};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -49,6 +49,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::AsRef;
 use thiserror::Error;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -209,7 +213,7 @@ impl SuperTrendBuilder {
 #[derive(Debug, Error)]
 pub enum SuperTrendError {
     #[error("supertrend: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
     #[error("supertrend: All values are NaN.")]
     AllValuesNaN,
     #[error("supertrend: Invalid period: period = {period}, data length = {data_len}")]
@@ -218,6 +222,12 @@ pub enum SuperTrendError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("supertrend: Output slice length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
+    #[error("supertrend: Invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("supertrend: Invalid factor range: start={start}, end={end}, step={step}")]
+    InvalidFactorRange { start: f64, end: f64, step: f64 },
+    #[error("supertrend: Invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
     #[error(transparent)]
     AtrError(#[from] AtrError),
 }
@@ -247,7 +257,7 @@ fn supertrend_prepare<'a>(
     let (high, low, close) = input.as_hlc();
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(SuperTrendError::EmptyData);
+        return Err(SuperTrendError::EmptyInputData);
     }
 
     let period = input.get_period();
@@ -1058,6 +1068,215 @@ impl SuperTrendBatchOutput {
     }
 }
 
+// Python VRAM handle for CUDA SuperTrend results (CAI v3 + DLPack v1.x)
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct SupertrendDeviceArrayF32Py {
+    pub(crate) inner: DeviceArrayF32,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl SupertrendDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("shape", (self.inner.rows, self.inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                self.inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (self.inner.device_ptr() as usize, false))?;
+        // Producing kernels synchronize before returning these handles, so no stream is needed.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature=(_stream=None, max_version=None, _dl_device=None, _copy=None))]
+    fn __dlpack__<'py>(
+        slf: pyo3::PyRef<'py, Self>,
+        py: Python<'py>,
+        _stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        _dl_device: Option<(i32, i32)>,
+        _copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        #[repr(C)]
+        struct DLDevice { device_type: i32, device_id: i32 }
+        #[repr(C)]
+        struct DLDataType { code: u8, bits: u8, lanes: u16 }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _self_ref: PyObject,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx.is_null() {
+                drop(Box::from_raw(ctx));
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const _,
+            ) as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_versioned(capsule: *mut pyffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let vptr = pyffi::PyCapsule_GetPointer(
+                capsule,
+                name.as_ptr() as *const _,
+            ) as *mut DLManagedTensorVersioned;
+            if !vptr.is_null() {
+                let mgr = (*vptr).manager;
+                if !mgr.is_null() {
+                    if let Some(del) = (*mgr).deleter {
+                        del(mgr);
+                    }
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                let _ = Box::from_raw(vptr);
+            }
+        }
+
+        let rows = slf.inner.rows as i64;
+        let cols = slf.inner.cols as i64;
+        let total_elems = (rows as i128) * (cols as i128);
+
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let self_ref = unsafe { PyObject::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _self_ref: self_ref,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr: *mut c_void = if total_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            slf.inner.device_ptr() as usize as *mut c_void
+        };
+        let tensor = DLTensor {
+            data: data_ptr,
+            device: DLDevice {
+                device_type: 2,
+                device_id: slf.device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: tensor,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap = pyffi::PyCapsule_New(
+                    ptr,
+                    name.as_ptr(),
+                    Some(capsule_destructor_versioned),
+                );
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create versioned DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
 // ---------------- Python CUDA bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "supertrend_cuda_batch_dev")]
@@ -1082,19 +1301,43 @@ pub fn supertrend_cuda_batch_dev_py<'py>(
         period: period_range,
         factor: factor_range,
     };
-    let (trend, changed, combos) = py.allow_threads(|| {
+    let (trend, changed, combos, ctx_arc, dev_id) = py.allow_threads(|| -> PyResult<_> {
         let cuda =
             CudaSupertrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let h32: Vec<f32> = h.iter().map(|&v| v as f32).collect();
         let l32: Vec<f32> = l.iter().map(|&v| v as f32).collect();
         let c32: Vec<f32> = c.iter().map(|&v| v as f32).collect();
-        cuda.supertrend_batch_dev(&h32, &l32, &c32, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let (trend, changed, combos) = cuda
+            .supertrend_batch_dev(&h32, &l32, &c32, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx_arc = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        Ok((trend, changed, combos, ctx_arc, dev_id))
     })?;
 
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: trend })?)?;
-    dict.set_item("changed", Py::new(py, DeviceArrayF32Py { inner: changed })?)?;
+    dict.set_item(
+        "trend",
+        Py::new(
+            py,
+            SupertrendDeviceArrayF32Py {
+                inner: trend,
+                _ctx: ctx_arc.clone(),
+                device_id: dev_id,
+            },
+        )?,
+    )?;
+    dict.set_item(
+        "changed",
+        Py::new(
+            py,
+            SupertrendDeviceArrayF32Py {
+                inner: changed,
+                _ctx: ctx_arc,
+                device_id: dev_id,
+            },
+        )?,
+    )?;
     let periods: Vec<usize> = combos.iter().map(|p| p.period.unwrap()).collect();
     let factors: Vec<f64> = combos.iter().map(|p| p.factor.unwrap()).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
@@ -1129,26 +1372,47 @@ pub fn supertrend_cuda_many_series_one_param_dev_py<'py>(
     let h32: Vec<f32> = h.iter().map(|&v| v as f32).collect();
     let l32: Vec<f32> = l.iter().map(|&v| v as f32).collect();
     let c32: Vec<f32> = c.iter().map(|&v| v as f32).collect();
-    let out = py.allow_threads(|| {
+    let (out, ctx_arc, dev_id) = py.allow_threads(|| -> PyResult<_> {
         let cuda =
             CudaSupertrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.supertrend_many_series_one_param_time_major_dev(
-            &h32,
-            &l32,
-            &c32,
-            cols,
-            rows,
-            period,
-            factor as f32,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+        let out = cuda
+            .supertrend_many_series_one_param_time_major_dev(
+                &h32,
+                &l32,
+                &c32,
+                cols,
+                rows,
+                period,
+                factor as f32,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx_arc = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        Ok((out, ctx_arc, dev_id))
     })?;
 
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("trend", Py::new(py, DeviceArrayF32Py { inner: out.plus })?)?;
+    dict.set_item(
+        "trend",
+        Py::new(
+            py,
+            SupertrendDeviceArrayF32Py {
+                inner: out.plus,
+                _ctx: ctx_arc.clone(),
+                device_id: dev_id,
+            },
+        )?,
+    )?;
     dict.set_item(
         "changed",
-        Py::new(py, DeviceArrayF32Py { inner: out.minus })?,
+        Py::new(
+            py,
+            SupertrendDeviceArrayF32Py {
+                inner: out.minus,
+                _ctx: ctx_arc,
+                device_id: dev_id,
+            },
+        )?,
     )?;
     dict.set_item("cols", cols)?;
     dict.set_item("rows", rows)?;
@@ -1156,28 +1420,77 @@ pub fn supertrend_cuda_many_series_one_param_dev_py<'py>(
 }
 
 #[inline(always)]
-fn expand_grid(r: &SuperTrendBatchRange) -> Vec<SuperTrendParams> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+fn expand_grid(r: &SuperTrendBatchRange) -> Result<Vec<SuperTrendParams>, SuperTrendError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, SuperTrendError> {
         if step == 0 || start == end {
-            return vec![start];
+            return Ok(vec![start]);
         }
-        (start..=end).step_by(step).collect()
+        if start < end {
+            let v: Vec<usize> = (start..=end).step_by(step.max(1)).collect();
+            if v.is_empty() {
+                return Err(SuperTrendError::InvalidRange { start, end, step });
+            }
+            return Ok(v);
+        }
+        let mut v = Vec::new();
+        let mut cur = start;
+        let st = step.max(1);
+        while cur >= end {
+            v.push(cur);
+            let next = cur.saturating_sub(st);
+            if next == cur {
+                break;
+            }
+            cur = next;
+        }
+        if v.is_empty() {
+            return Err(SuperTrendError::InvalidRange { start, end, step });
+        }
+        Ok(v)
     }
-    fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
+    fn axis_f64(
+        (start, end, step): (f64, f64, f64),
+    ) -> Result<Vec<f64>, SuperTrendError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
-            return vec![start];
+            return Ok(vec![start]);
+        }
+        let st = step.abs();
+        if start < end {
+            let mut v = Vec::new();
+            let mut x = start;
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(SuperTrendError::InvalidFactorRange { start, end, step });
+            }
+            return Ok(v);
         }
         let mut v = Vec::new();
         let mut x = start;
-        while x <= end + 1e-12 {
+        while x + 1e-12 >= end {
             v.push(x);
-            x += step;
+            x -= st;
         }
-        v
+        if v.is_empty() {
+            return Err(SuperTrendError::InvalidFactorRange { start, end, step });
+        }
+        Ok(v)
     }
-    let periods = axis_usize(r.period);
-    let factors = axis_f64(r.factor);
-    let mut out = Vec::with_capacity(periods.len() * factors.len());
+    let periods = axis_usize(r.period)?;
+    let factors = axis_f64(r.factor)?;
+    let cap = periods
+        .len()
+        .checked_mul(factors.len())
+        .ok_or(SuperTrendError::InvalidRange {
+            start: r.period.0,
+            end: r.period.1,
+            step: r.period.2,
+        })?;
+    let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &f in &factors {
             out.push(SuperTrendParams {
@@ -1186,7 +1499,7 @@ fn expand_grid(r: &SuperTrendBatchRange) -> Vec<SuperTrendParams> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn supertrend_batch_with_kernel(
@@ -1200,10 +1513,7 @@ pub fn supertrend_batch_with_kernel(
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         _ => {
-            return Err(SuperTrendError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
+            return Err(SuperTrendError::InvalidKernelForBatch(k));
         }
     };
     let simd = match kernel {
@@ -1246,11 +1556,12 @@ fn supertrend_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<SuperTrendBatchOutput, SuperTrendError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(SuperTrendError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(SuperTrendError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
     let len = high.len();
@@ -1274,6 +1585,13 @@ fn supertrend_batch_inner(
     }
     let rows = combos.len();
     let cols = len;
+
+    // Guard against rows * cols overflow before allocating matrices.
+    rows.checked_mul(cols).ok_or(SuperTrendError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
     // For batch operations, use ManuallyDrop pattern like ALMA
     let mut trend_mu = make_uninit_matrix(rows, cols);
@@ -1660,11 +1978,6 @@ unsafe fn supertrend_row_avx512_long(
     );
 }
 
-#[inline(always)]
-fn expand_grid_supertrend(r: &SuperTrendBatchRange) -> Vec<SuperTrendParams> {
-    expand_grid(r)
-}
-
 #[cfg(feature = "python")]
 #[inline(always)]
 pub fn supertrend_batch_inner_into(
@@ -1677,11 +1990,12 @@ pub fn supertrend_batch_inner_into(
     trend_out: &mut [f64],
     changed_out: &mut [f64],
 ) -> Result<Vec<SuperTrendParams>, SuperTrendError> {
-    let combos = expand_grid(sweep);
+    let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(SuperTrendError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
+        return Err(SuperTrendError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         });
     }
     let len = high.len();
@@ -1705,6 +2019,26 @@ pub fn supertrend_batch_inner_into(
     }
     let rows = combos.len();
     let cols = len;
+
+    let expected_len = rows
+        .checked_mul(cols)
+        .ok_or(SuperTrendError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
+    if trend_out.len() != expected_len {
+        return Err(SuperTrendError::OutputLengthMismatch {
+            expected: expected_len,
+            got: trend_out.len(),
+        });
+    }
+    if changed_out.len() != expected_len {
+        return Err(SuperTrendError::OutputLengthMismatch {
+            expected: expected_len,
+            got: changed_out.len(),
+        });
+    }
 
     // Initialize NaN prefixes for each row based on warmup period
     for (row, combo) in combos.iter().enumerate() {
@@ -1872,13 +2206,23 @@ pub fn supertrend_batch_py<'py>(
         factor: factor_range,
     };
 
-    let combos = expand_grid(&sweep);
-    let rows = combos.len();
+    let grid_combos =
+        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    if grid_combos.is_empty() {
+        return Err(PyValueError::new_err(format!(
+            "supertrend: Invalid range: start={}, end={}, step={}",
+            sweep.period.0, sweep.period.1, sweep.period.2
+        )));
+    }
+    let rows = grid_combos.len();
     let cols = high_slice.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("supertrend: rows*cols overflow"))?;
 
-    let trend_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let trend_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let trend_out = unsafe { trend_arr.as_slice_mut()? };
-    let changed_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let changed_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let changed_out = unsafe { changed_arr.as_slice_mut()? };
 
     let combos = py

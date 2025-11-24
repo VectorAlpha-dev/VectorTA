@@ -90,12 +90,16 @@ pub enum CudaEhlersPmaError {
     Cuda(#[from] cust::error::CudaError),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("Launch config too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
     NotImplemented,
     #[error("CUDA driver error: {0}")]
@@ -106,6 +110,9 @@ pub enum CudaEhlersPmaError {
 pub struct DeviceEhlersPmaPair {
     pub predict: DeviceArrayF32,
     pub trigger: DeviceArrayF32,
+    // Keep the creating context alive so buffer drops occur under a valid context
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) _device_id: u32,
 }
 
 impl DeviceEhlersPmaPair {
@@ -393,6 +400,8 @@ impl CudaEhlersPma {
                 rows: n_combos,
                 cols: series_len,
             },
+            _ctx: self._context.clone(),
+            _device_id: self.device_id,
         })
     }
 
@@ -695,6 +704,8 @@ impl CudaEhlersPma {
                 rows,
                 cols,
             },
+            _ctx: self._context.clone(),
+            _device_id: self.device_id,
         })
     }
 
@@ -855,6 +866,14 @@ impl CudaEhlersPma {
                 series_len.saturating_sub(first_valid)
             )));
         }
+        // Ensure the current device matches this wrapper's device
+        unsafe {
+            let mut cur: i32 = 0;
+            let _ = cu::cuCtxGetDevice(&mut cur);
+            if cur as u32 != self.device_id {
+                return Err(CudaEhlersPmaError::DeviceMismatch { buf: self.device_id, current: cur as u32 });
+            }
+        }
         let combos = expand_grid(sweep);
         if combos.is_empty() {
             return Err(CudaEhlersPmaError::InvalidInput(
@@ -863,6 +882,19 @@ impl CudaEhlersPma {
         }
 
         let n_combos = combos.len();
+        // Memory headroom/fit check for outputs (inputs already resident)
+        let elem = std::mem::size_of::<f32>();
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaEhlersPmaError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes_one = out_elems
+            .checked_mul(elem)
+            .ok_or_else(|| CudaEhlersPmaError::InvalidInput("byte size overflow".into()))?;
+        let required = out_bytes_one
+            .checked_mul(2)
+            .ok_or_else(|| CudaEhlersPmaError::InvalidInput("byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024; // 64MB
+        Self::will_fit_checked(required, headroom)?;
         let mut d_predict: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len)? };
         let mut d_trigger: DeviceBuffer<f32> =
@@ -889,6 +921,8 @@ impl CudaEhlersPma {
                 rows: n_combos,
                 cols: series_len,
             },
+            _ctx: self._context.clone(),
+            _device_id: self.device_id,
         })
     }
 
@@ -913,6 +947,8 @@ impl CudaEhlersPma {
                 "arguments exceed kernel limits".into(),
             ));
         }
+        // Ensure current device matches this wrapper's device
+        unsafe { let mut cur: i32 = 0; let _ = cu::cuCtxGetDevice(&mut cur); if cur as u32 != self.device_id { return Err(CudaEhlersPmaError::DeviceMismatch { buf: self.device_id, current: cur as u32 }); } }
         self.launch_batch_kernel_select(
             d_prices,
             series_len,
@@ -979,6 +1015,8 @@ impl CudaEhlersPma {
                 "arguments exceed kernel limits".into(),
             ));
         }
+        // Ensure current device matches this wrapper's device
+        unsafe { let mut cur: i32 = 0; let _ = cu::cuCtxGetDevice(&mut cur); if cur as u32 != self.device_id { return Err(CudaEhlersPmaError::DeviceMismatch { buf: self.device_id, current: cur as u32 }); } }
         self.launch_many_series_kernel_select(
             d_prices_tm,
             cols,

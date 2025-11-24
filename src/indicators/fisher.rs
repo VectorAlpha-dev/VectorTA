@@ -20,6 +20,9 @@
 //! - Batch: reuses a shared HL2 midpoint precompute across rows to avoid redundant work.
 //! - Streaming: amortized O(1) min/max via monotonic deques (Lemire),
 //!   preserving arithmetic order and outputs.
+//! - Decision log: SIMD kept scalar-equivalent; CUDA wrapper returns VRAM handles, and Python
+//!   interop uses CUDA Array Interface v3 plus DLPack v1.x with versioned capsules; numerical
+//!   outputs match the scalar path.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -59,7 +62,11 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaFisher;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 impl<'a> FisherInput<'a> {
     #[inline(always)]
@@ -199,16 +206,28 @@ impl FisherBuilder {
 pub enum FisherError {
     #[error("fisher: Empty data provided.")]
     EmptyData,
+    // alias used by new call sites where requested by guidelines
+    #[error("fisher: Empty input data.")]
+    EmptyInputData,
     #[error("fisher: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("fisher: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("fisher: All values are NaN.")]
     AllValuesNaN,
+    // legacy variant (kept for compatibility)
     #[error("fisher: Invalid output length: expected = {expected}, actual = {actual}")]
     InvalidLength { expected: usize, actual: usize },
+    // preferred variant for out slice length mismatches
+    #[error("fisher: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
     #[error("fisher: Mismatched data length: high={high}, low={low}")]
     MismatchedDataLength { high: usize, low: usize },
+    // batch-only errors
+    #[error("fisher: Invalid range expansion: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("fisher: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 #[inline]
@@ -223,7 +242,7 @@ pub fn fisher_with_kernel(
     let (high, low) = input.get_high_low();
 
     if high.is_empty() || low.is_empty() {
-        return Err(FisherError::EmptyData);
+        return Err(FisherError::EmptyInputData);
     }
     if high.len() != low.len() {
         return Err(FisherError::MismatchedDataLength {
@@ -416,9 +435,9 @@ pub fn fisher_into_slice(
         return Err(FisherError::InvalidPeriod { period, data_len });
     }
     if fisher_dst.len() != data_len || signal_dst.len() != data_len {
-        return Err(FisherError::InvalidLength {
+        return Err(FisherError::OutputLengthMismatch {
             expected: data_len,
-            actual: fisher_dst.len().min(signal_dst.len()),
+            got: fisher_dst.len().min(signal_dst.len()),
         });
     }
 
@@ -464,12 +483,7 @@ pub fn fisher_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(FisherError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(FisherError::InvalidKernelForBatch(other)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -573,7 +587,26 @@ fn expand_grid(r: &FisherBatchRange) -> Vec<FisherParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start < end {
+            if step == 0 { return vec![start]; }
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) { Some(n) => v = n, None => break, }
+            }
+        } else {
+            // reversed bounds supported
+            if step == 0 { return vec![start]; }
+            let mut v = start;
+            while v >= end {
+                out.push(v);
+                if v < end + step { break; }
+                v -= step;
+                if v == 0 && end > 0 && step > 0 { if v < end { break; } }
+            }
+        }
+        out
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -612,10 +645,8 @@ fn fisher_batch_inner(
 ) -> Result<FisherBatchOutput, FisherError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(FisherError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, st) = sweep.period;
+        return Err(FisherError::InvalidRange { start: s, end: e, step: st });
     }
 
     let data_len = high.len().min(low.len());
@@ -639,16 +670,32 @@ fn fisher_batch_inner(
     }
     let rows = combos.len();
     let cols = data_len;
+    // checked arithmetic to avoid overflow on allocations / indexing
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(FisherError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
     // Use make_uninit_matrix for zero allocation
     let mut fisher_mu = make_uninit_matrix(rows, cols);
     let mut signal_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each parameter combination
-    let warmup_periods: Vec<usize> = combos
-        .iter()
-        .map(|c| first + c.period.unwrap() - 1)
-        .collect();
+    // Calculate warmup periods for each parameter combination with checked arithmetic
+    let mut warmup_periods: Vec<usize> = Vec::with_capacity(combos.len());
+    for c in &combos {
+        let p = c.period.unwrap_or(0);
+        let warm = first
+            .checked_add(p.saturating_sub(1))
+            .ok_or(FisherError::InvalidRange {
+                start: sweep.period.0,
+                end: sweep.period.1,
+                step: sweep.period.2,
+            })?;
+        warmup_periods.push(warm);
+    }
 
     // Initialize NaN prefixes
     init_matrix_prefixes(&mut fisher_mu, cols, &warmup_periods);
@@ -761,10 +808,8 @@ fn fisher_batch_inner_into(
 ) -> Result<Vec<FisherParams>, FisherError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(FisherError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        let (s, e, st) = sweep.period;
+        return Err(FisherError::InvalidRange { start: s, end: e, step: st });
     }
 
     let data_len = high.len().min(low.len());
@@ -780,6 +825,14 @@ fn fisher_batch_inner_into(
     let first = first.ok_or(FisherError::AllValuesNaN)?;
 
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    let _ = combos
+        .len()
+        .checked_mul(max_p)
+        .ok_or(FisherError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     if data_len - first < max_p {
         return Err(FisherError::NotEnoughValidData {
             needed: max_p,
@@ -789,10 +842,24 @@ fn fisher_batch_inner_into(
 
     let rows = combos.len();
     let cols = data_len;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or(FisherError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
     // Initialize NaN values for warmup periods in the pre-allocated buffers
     for (row, combo) in combos.iter().enumerate() {
-        let warmup = first + combo.period.unwrap() - 1;
+        let p = combo.period.unwrap_or(0);
+        let warmup = first
+            .checked_add(p.saturating_sub(1))
+            .ok_or(FisherError::InvalidRange {
+                start: sweep.period.0,
+                end: sweep.period.1,
+                step: sweep.period.2,
+            })?;
         let row_start = row * cols;
         for i in 0..warmup.min(cols) {
             fisher_out[row_start + i] = f64::NAN;
@@ -2133,29 +2200,36 @@ pub fn fisher_batch_py<'py>(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = high_slice.len();
+    let total_len = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("Fisher batch: rows*cols overflow"))?;
 
     // Pre-allocate uninitialized NumPy arrays (no copy)
-    let fisher_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
-    let signal_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let fisher_arr = unsafe { PyArray1::<f64>::new(py, [total_len], false) };
+    let signal_arr = unsafe { PyArray1::<f64>::new(py, [total_len], false) };
 
     // Compute first valid and warmups
     let first = (0..cols)
         .find(|&i| !high_slice[i].is_nan() && !low_slice[i].is_nan())
         .ok_or_else(|| PyValueError::new_err("All values are NaN"))?;
-    let warmups: Vec<usize> = combos
-        .iter()
-        .map(|c| first + c.period.unwrap() - 1)
-        .collect();
+    let mut warmups: Vec<usize> = Vec::with_capacity(combos.len());
+    for c in &combos {
+        let p = c.period.unwrap_or(0);
+        let warm = first
+            .checked_add(p.saturating_sub(1))
+            .ok_or_else(|| PyValueError::new_err("Fisher batch: warmup overflow"))?;
+        warmups.push(warm);
+    }
 
     // Initialize only warm prefixes using helpers, zero extra copies
     unsafe {
         let fisher_mu = std::slice::from_raw_parts_mut(
             fisher_arr.as_slice_mut()?.as_mut_ptr() as *mut MaybeUninit<f64>,
-            rows * cols,
+            total_len,
         );
         let signal_mu = std::slice::from_raw_parts_mut(
             signal_arr.as_slice_mut()?.as_mut_ptr() as *mut MaybeUninit<f64>,
-            rows * cols,
+            total_len,
         );
         init_matrix_prefixes(fisher_mu, cols, &warmups);
         init_matrix_prefixes(signal_mu, cols, &warmups);
@@ -2164,7 +2238,6 @@ pub fn fisher_batch_py<'py>(
     // Get raw pointers before entering allow_threads (convert to usize for Send)
     let fisher_ptr = unsafe { fisher_arr.as_slice_mut()?.as_mut_ptr() } as usize;
     let signal_ptr = unsafe { signal_arr.as_slice_mut()?.as_mut_ptr() } as usize;
-    let total_len = rows * cols;
 
     // Compute directly into the same buffers
     py.allow_threads(move || {
@@ -2213,6 +2286,267 @@ pub fn fisher_batch_py<'py>(
 
 // -------- Python CUDA bindings --------
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", name = "FisherDeviceArrayF32", unsendable)]
+pub struct FisherDeviceArrayF32Py {
+    pub(crate) inner: Option<DeviceArrayF32>,
+    ctx_guard: Arc<Context>,
+    device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl FisherDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        let itemsize = std::mem::size_of::<f32>();
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item("strides", (inner.cols * itemsize, itemsize))?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Producer stream is synchronized before return; no stream key needed per CAI v3.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        // 2 == kDLCUDA; use allocation device id.
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        // Array API stream semantics: producer is already synchronized, so we ignore stream
+        // except for basic validation of legacy sentinel values.
+        if let Some(s) = stream {
+            if s == 0 {
+                return Err(PyValueError::new_err(
+                    "__dlpack__ stream=0 is invalid for CUDA",
+                ));
+            }
+        }
+        if let Some((dev_ty, dev_id)) = dl_device {
+            if dev_ty != 2 || dev_id != self.device_id as i32 {
+                return Err(PyValueError::new_err(
+                    "dl_device mismatch; cross-device copy not supported",
+                ));
+            }
+        }
+        if let Some(true) = copy {
+            return Err(PyValueError::new_err(
+                "copy=True not supported for FisherDeviceArrayF32",
+            ));
+        }
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _self_ref: PyObject,
+            _ctx: Arc<Context>,
+            _arr: DeviceArrayF32,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor(capsule: *mut pyffi::PyObject) {
+            // Only free if still named "dltensor"
+            let name = b"dltensor\0";
+            let ptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+
+        unsafe extern "C" fn capsule_destructor_versioned(capsule: *mut pyffi::PyObject) {
+            // Only free if still named "dltensor_versioned"
+            let name = b"dltensor_versioned\0";
+            let vptr = pyffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const _)
+                as *mut DLManagedTensorVersioned;
+            if !vptr.is_null() {
+                let mgr = (*vptr).manager;
+                if !mgr.is_null() {
+                    if let Some(del) = (*mgr).deleter {
+                        del(mgr);
+                    }
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+                let _ = Box::from_raw(vptr);
+            }
+        }
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total_elems = (rows as i128) * (cols as i128);
+
+        // Element-based strides per DLPack (v1.2+ requires non-NULL strides)
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        // Keep this object alive through the capsule lifetime
+        let self_ref =
+            unsafe { PyObject::from_borrowed_ptr(py, self as *mut _ as *mut pyffi::PyObject) };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _self_ref: self_ref,
+            _ctx: self.ctx_guard.clone(),
+            _arr: inner,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr: *mut c_void = if total_elems == 0 {
+            std::ptr::null_mut()
+        } else {
+            unsafe {
+                (*(mgr_ptr as *mut ManagerCtx))
+                    ._arr
+                    .buf
+                    .as_device_ptr()
+                    .as_raw() as *mut c_void
+            }
+        };
+        let tensor = DLTensor {
+            data: data_ptr,
+            device: DLDevice {
+                device_type: 2,
+                device_id: self.device_id as i32,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: tensor,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
+        unsafe {
+            if want_versioned {
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor_versioned));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create versioned DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(capsule_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl FisherDeviceArrayF32Py {
+    pub fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
+        Self {
+            inner: Some(inner),
+            ctx_guard,
+            device_id,
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "fisher_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, period_range, device_id=0))]
 pub fn fisher_cuda_batch_dev_py<'py>(
@@ -2231,19 +2565,27 @@ pub fn fisher_cuda_batch_dev_py<'py>(
     let sweep = FisherBatchRange {
         period: period_range,
     };
+    let cuda = CudaFisher::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let ctx_guard = cuda.context_arc();
+    let dev_id = cuda.device_id();
     let ((pair, combos)) = py.allow_threads(|| {
-        let cuda = CudaFisher::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.fisher_batch_dev(high, low, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item(
         "fisher",
-        Py::new(py, DeviceArrayF32Py { inner: pair.fisher })?,
+        Py::new(
+            py,
+            FisherDeviceArrayF32Py::new_from_rust(pair.fisher, ctx_guard.clone(), dev_id),
+        )?,
     )?;
     dict.set_item(
         "signal",
-        Py::new(py, DeviceArrayF32Py { inner: pair.signal })?,
+        Py::new(
+            py,
+            FisherDeviceArrayF32Py::new_from_rust(pair.signal, ctx_guard, dev_id),
+        )?,
     )?;
     dict.set_item(
         "periods",
@@ -2275,19 +2617,27 @@ pub fn fisher_cuda_many_series_one_param_dev_py<'py>(
     }
     let high_tm = high_tm_f32.as_slice()?;
     let low_tm = low_tm_f32.as_slice()?;
+    let cuda = CudaFisher::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let ctx_guard = cuda.context_arc();
+    let dev_id = cuda.device_id();
     let pair = py.allow_threads(|| {
-        let cuda = CudaFisher::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.fisher_many_series_one_param_time_major_dev(high_tm, low_tm, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item(
         "fisher",
-        Py::new(py, DeviceArrayF32Py { inner: pair.fisher })?,
+        Py::new(
+            py,
+            FisherDeviceArrayF32Py::new_from_rust(pair.fisher, ctx_guard.clone(), dev_id),
+        )?,
     )?;
     dict.set_item(
         "signal",
-        Py::new(py, DeviceArrayF32Py { inner: pair.signal })?,
+        Py::new(
+            py,
+            FisherDeviceArrayF32Py::new_from_rust(pair.signal, ctx_guard, dev_id),
+        )?,
     )?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
@@ -2335,7 +2685,10 @@ pub fn fisher_js(high: &[f64], low: &[f64], period: usize) -> Result<FisherResul
     };
     let input = FisherInput::from_slices(high, low, params);
 
-    let mut out = vec![0.0_f64; len * 2];
+    let total = len
+        .checked_mul(2)
+        .ok_or_else(|| JsValue::from_str("fisher_js: len*2 overflow"))?;
+    let mut out = vec![0.0_f64; total];
     let (fisher_out, signal_out) = out.split_at_mut(len);
 
     fisher_into_slice(fisher_out, signal_out, &input, detect_best_kernel())
@@ -2366,7 +2719,10 @@ pub fn fisher_into(
         if high.len() != low.len() {
             return Err(JsValue::from_str("Mismatched data length"));
         }
-        let out = std::slice::from_raw_parts_mut(out_ptr, len * 2);
+        let total = len
+            .checked_mul(2)
+            .ok_or_else(|| JsValue::from_str("fisher_into: len*2 overflow"))?;
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
         let (fisher_out, signal_out) = out.split_at_mut(len);
 
         let params = FisherParams {
@@ -2433,10 +2789,13 @@ pub fn fisher_batch_unified_js(
     let combos = expand_grid(&sweep);
     let cols = high.len();
     let rows = combos.len();
+    let total_elems = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str("fisher_batch_unified_js: rows*cols overflow"))?;
 
     // Allocate combined buffer: fisher(rows*cols) + signal(rows*cols)
-    let mut fisher = vec![0.0; rows * cols];
-    let mut signal = vec![0.0; rows * cols];
+    let mut fisher = vec![0.0; total_elems];
+    let mut signal = vec![0.0; total_elems];
 
     fisher_batch_inner_into(
         high,
@@ -2450,7 +2809,10 @@ pub fn fisher_batch_unified_js(
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     // Interleave per combo without extra allocs
-    let mut values = Vec::with_capacity(2 * rows * cols);
+    let values_capacity = total_elems
+        .checked_mul(2)
+        .ok_or_else(|| JsValue::from_str("fisher_batch_unified_js: values capacity overflow"))?;
+    let mut values = Vec::with_capacity(values_capacity);
     for r in 0..rows {
         values.extend_from_slice(&fisher[r * cols..(r + 1) * cols]);
         values.extend_from_slice(&signal[r * cols..(r + 1) * cols]);
@@ -2492,7 +2854,9 @@ pub fn fisher_batch_into(
 
         let combos = expand_grid(&sweep);
         let rows = combos.len();
-        let total_size = rows * len;
+        let total_size = rows
+            .checked_mul(len)
+            .ok_or_else(|| JsValue::from_str("fisher_batch_into: rows*len overflow"))?;
 
         let fisher_out = std::slice::from_raw_parts_mut(fisher_ptr, total_size);
         let signal_out = std::slice::from_raw_parts_mut(signal_ptr, total_size);

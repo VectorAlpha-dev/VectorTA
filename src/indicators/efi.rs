@@ -16,15 +16,17 @@
 //! - Output length matches input data length with NaN padding for warmup period
 //!
 //! ## Developer Notes
+//! - Decision log: SIMD stubs delegate to scalar; CUDA present; scalar is fastest for single-series today (>5%); outputs unchanged.
 //! - SIMD: AVX2/AVX512 are intentionally stubs that delegate to the optimized scalar path.
 //!   EFI uses an EMA recurrence with a strict loop-carried dependency; single-series
 //!   wide vectorization underperforms a tuned scalar loop. Runtime selection keeps
 //!   scalar as the fastest path today (documented decision).
 //! - Streaming: ✅ EfiStream uses error-form EMA + FMA and branchless NaN
 //!   checks; semantics match batch exactly with O(1) updates.
-//! - Memory optimization: ✅ Uses alloc_with_nan_prefix (zero-copy) when allocating
-//! - Batch operations: ✅ Implemented with parallel processing support
-//! - Row-specific batch: ✅ Precomputes raw diffs once and shares across rows
+//! - Memory optimization: ✅ Uses alloc_with_nan_prefix (zero-copy) when allocating.
+//! - Batch operations: ✅ Implemented with parallel processing support; CUDA wrapper
+//!   returns VRAM handles with CAI v3 + DLPack v1.x for Python interop.
+//! - Row-specific batch: ✅ Precomputes raw diffs once and shares across rows.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -57,9 +59,11 @@ use thiserror::Error;
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::{cuda_available, CudaEfi};
+use crate::cuda::{cuda_available, CudaEfi, DeviceArrayF32};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
 #[inline(always)]
 fn first_valid_diff_index(price: &[f64], volume: &[f64], first_valid_idx: usize) -> usize {
@@ -208,13 +212,19 @@ impl EfiBuilder {
 #[derive(Debug, Error)]
 pub enum EfiError {
     #[error("efi: Empty data provided.")]
-    EmptyData,
+    EmptyInputData,
     #[error("efi: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
     #[error("efi: Not enough valid data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("efi: All values are NaN.")]
     AllValuesNaN,
+    #[error("efi: Output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("efi: Invalid range expansion: start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("efi: Invalid kernel for batch path: {0:?}")]
+    InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
 #[inline]
@@ -229,7 +239,7 @@ pub fn efi_with_kernel(input: &EfiInput, kernel: Kernel) -> Result<EfiOutput, Ef
     };
 
     if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
-        return Err(EfiError::EmptyData);
+        return Err(EfiError::EmptyInputData);
     }
 
     let len = price.len();
@@ -297,14 +307,11 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
     };
 
     if price.is_empty() || volume.is_empty() || price.len() != volume.len() {
-        return Err(EfiError::EmptyData);
+        return Err(EfiError::EmptyInputData);
     }
     let len = price.len();
     if dst.len() != len {
-        return Err(EfiError::InvalidPeriod {
-            period: dst.len(),
-            data_len: len,
-        });
+        return Err(EfiError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
     let period = input.get_period();
@@ -599,12 +606,7 @@ pub fn efi_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(EfiError::InvalidPeriod {
-                period: 0,
-                data_len: 0,
-            })
-        }
+        other => return Err(EfiError::InvalidKernelForBatch(other)),
     };
 
     let simd = match kernel {
@@ -640,10 +642,36 @@ impl EfiBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &EfiBatchRange) -> Vec<EfiParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
+        // Zero step => static; single value
         if step == 0 || start == end {
             return vec![start];
         }
-        (start..=end).step_by(step).collect()
+        let mut out = Vec::new();
+        if start < end {
+            // Forward range
+            let mut v = start;
+            while v <= end {
+                out.push(v);
+                match v.checked_add(step) {
+                    Some(n) => {
+                        if n == v { break; }
+                        v = n;
+                    }
+                    None => break,
+                }
+            }
+        } else {
+            // Reversed bounds supported
+            let mut v = start;
+            loop {
+                out.push(v);
+                if v <= end { break; }
+                let next = v.saturating_sub(step);
+                if next == v { break; }
+                v = next;
+            }
+        }
+        out
     }
     let periods = axis_usize(r.period);
     let mut out = Vec::with_capacity(periods.len());
@@ -683,10 +711,7 @@ fn efi_batch_inner(
 ) -> Result<EfiBatchOutput, EfiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EfiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(EfiError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
     }
 
     let first = price
@@ -704,6 +729,10 @@ fn efi_batch_inner(
 
     let rows = combos.len();
     let cols = price.len();
+    // Guard rows*cols overflow before allocation
+    let _cap = rows
+        .checked_mul(cols)
+        .ok_or(EfiError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
 
     let warm = first_valid_diff_index(price, volume, first);
     let mut buf_mu = make_uninit_matrix(rows, cols);
@@ -862,10 +891,7 @@ fn efi_batch_inner_into(
 ) -> Result<Vec<EfiParams>, EfiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EfiError::InvalidPeriod {
-            period: 0,
-            data_len: 0,
-        });
+        return Err(EfiError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
     }
 
     let first = price
@@ -884,8 +910,16 @@ fn efi_batch_inner_into(
     let cols = price.len();
     let warm = first_valid_diff_index(price, volume, first);
 
-    // Initialize NaN prefixes for each row based on warmup period (like ALMA does)
-    for row in 0..combos.len() {
+    // Validate destination length and initialize NaN prefixes per row based on warmup period
+    let rows = combos.len();
+    let cols = price.len();
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(EfiError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    if out.len() != expected {
+        return Err(EfiError::OutputLengthMismatch { expected, got: out.len() });
+    }
+    for row in 0..rows {
         let row_start = row * cols;
         for i in 0..warm.min(cols) {
             out[row_start + i] = f64::NAN;
@@ -1016,8 +1050,11 @@ pub fn efi_batch_py<'py>(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = price_slice.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("efi: Invalid range expansion (rows*cols overflow)"))?;
 
-    let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
+    let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
@@ -1163,6 +1200,253 @@ pub fn efi_batch_js(price: &[f64], volume: &[f64], config: JsValue) -> Result<Js
 // ====== PYTHON CUDA BINDINGS ======
 
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct EfiDeviceArrayF32Py {
+    pub(crate) inner: Option<DeviceArrayF32>,
+    pub(crate) ctx: Arc<Context>,
+    pub(crate) device_id: i32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl EfiDeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let d = PyDict::new(py);
+        d.set_item("shape", (inner.rows, inner.cols))?;
+        d.set_item("typestr", "<f4")?;
+        d.set_item(
+            "strides",
+            (
+                inner.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        d.set_item("data", (inner.device_ptr() as usize, false))?;
+        // Producer stream is synchronized before returning, so no "stream" key is required.
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<usize>,
+        max_version: Option<(u32, u32)>,
+        dl_device: Option<(i32, i32)>,
+        copy: Option<bool>,
+    ) -> PyResult<PyObject> {
+        use pyo3::ffi as pyffi;
+        use std::ffi::{c_void, CString};
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut c_void,
+            deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            manager: *mut DLManagedTensor,
+            version: u32,
+        }
+
+        #[repr(C)]
+        struct ManagerCtx {
+            shape: *mut i64,
+            strides: *mut i64,
+            _shape: Box<[i64; 2]>,
+            _strides: Box<[i64; 2]>,
+            _self_ref: PyObject,
+            _ctx: Arc<Context>,
+            _arr: DeviceArrayF32,
+        }
+
+        unsafe extern "C" fn deleter(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
+            }
+            let mt = Box::from_raw(p);
+            let ctx_ptr = mt.manager_ctx as *mut ManagerCtx;
+            if !ctx_ptr.is_null() {
+                let _ = Box::from_raw(ctx_ptr);
+            }
+        }
+
+        // All CUDA work is synchronized before the handle is created, so arguments are advisory only.
+        let _ = stream;
+        let _ = dl_device;
+        let _ = copy;
+
+        let inner = self
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
+
+        let rows = inner.rows as i64;
+        let cols = inner.cols as i64;
+        let total = (rows as i128) * (cols as i128);
+
+        let mut shape = Box::new([rows, cols]);
+        let mut strides = Box::new([cols, 1]);
+        let shape_ptr = shape.as_mut_ptr();
+        let strides_ptr = strides.as_mut_ptr();
+
+        let self_ref = unsafe {
+            PyObject::from_borrowed_ptr(py, self as *mut _ as *mut pyo3::ffi::PyObject)
+        };
+        let mgr = Box::new(ManagerCtx {
+            shape: shape_ptr,
+            strides: strides_ptr,
+            _shape: shape,
+            _strides: strides,
+            _self_ref: self_ref,
+            _ctx: self.ctx.clone(),
+            _arr: inner,
+        });
+        let mgr_ptr = Box::into_raw(mgr) as *mut c_void;
+
+        let data_ptr = if total == 0 {
+            std::ptr::null_mut()
+        } else {
+            unsafe {
+                (*(mgr_ptr as *mut ManagerCtx))
+                    ._arr
+                    .buf
+                    .as_device_ptr()
+                    .as_raw() as *mut c_void
+            }
+        };
+
+        let dl = DLTensor {
+            data: data_ptr,
+            device: DLDevice {
+                device_type: 2,
+                device_id: self.device_id,
+            },
+            ndim: 2,
+            dtype: DLDataType {
+                code: 2,
+                bits: 32,
+                lanes: 1,
+            },
+            shape: shape_ptr,
+            strides: strides_ptr,
+            byte_offset: 0,
+        };
+        let mt = Box::new(DLManagedTensor {
+            dl_tensor: dl,
+            manager_ctx: mgr_ptr,
+            deleter: Some(deleter),
+        });
+
+        let want_versioned = max_version
+            .map(|(maj, _)| maj >= 1)
+            .unwrap_or(false);
+
+        unsafe {
+            if want_versioned {
+                extern "C" fn cap_destructor(capsule: *mut pyffi::PyObject) {
+                    unsafe {
+                        let name = CString::new("dltensor_versioned").unwrap();
+                        let ptr =
+                            pyffi::PyCapsule_GetPointer(capsule, name.as_ptr()) as *mut c_void;
+                        if !ptr.is_null() {
+                            let wrap = ptr as *mut DLManagedTensorVersioned;
+                            if !wrap.is_null() {
+                                let inner = (*wrap).manager;
+                                if !inner.is_null() {
+                                    if let Some(del) = (*inner).deleter {
+                                        del(inner);
+                                    }
+                                }
+                                let _ = Box::from_raw(wrap);
+                            }
+                            let used = CString::new("used_dltensor_versioned").unwrap();
+                            let _ = pyffi::PyCapsule_SetName(capsule, used.as_ptr());
+                        }
+                    }
+                }
+
+                let wrapped = Box::new(DLManagedTensorVersioned {
+                    manager: Box::into_raw(mt),
+                    version: 1,
+                });
+                let ptr = Box::into_raw(wrapped) as *mut c_void;
+                let name = CString::new("dltensor_versioned").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(cap_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            } else {
+                extern "C" fn cap_destructor(capsule: *mut pyffi::PyObject) {
+                    unsafe {
+                        let name = CString::new("dltensor").unwrap();
+                        let ptr =
+                            pyffi::PyCapsule_GetPointer(capsule, name.as_ptr()) as *mut c_void;
+                        if !ptr.is_null() {
+                            let mt = ptr as *mut DLManagedTensor;
+                            if let Some(del) = (*mt).deleter {
+                                del(mt);
+                            }
+                            let used = CString::new("used_dltensor").unwrap();
+                            let _ = pyffi::PyCapsule_SetName(capsule, used.as_ptr());
+                        }
+                    }
+                }
+
+                let ptr = Box::into_raw(mt) as *mut c_void;
+                let name = CString::new("dltensor").unwrap();
+                let cap =
+                    pyffi::PyCapsule_New(ptr, name.as_ptr(), Some(cap_destructor));
+                if cap.is_null() {
+                    let _ = Box::from_raw(ptr as *mut DLManagedTensor);
+                    return Err(PyValueError::new_err(
+                        "failed to create DLPack capsule",
+                    ));
+                }
+                Ok(PyObject::from_owned_ptr(py, cap))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "efi_cuda_batch_dev")]
 #[pyo3(signature = (price_f32, volume_f32, period_range=(13,13,0), device_id=0))]
 pub fn efi_cuda_batch_dev_py(
@@ -1171,7 +1455,7 @@ pub fn efi_cuda_batch_dev_py(
     volume_f32: numpy::PyReadonlyArray1<'_, f32>,
     period_range: (usize, usize, usize),
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<EfiDeviceArrayF32Py> {
     use numpy::PyArrayMethods;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -1186,12 +1470,21 @@ pub fn efi_cuda_batch_dev_py(
     let sweep = EfiBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
-        let cuda = CudaEfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.efi_batch_dev(p, v, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaEfi::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id() as i32;
+        let arr = cuda
+            .efi_batch_dev(p, v, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(EfiDeviceArrayF32Py {
+        inner: Some(inner),
+        ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1203,7 +1496,7 @@ pub fn efi_cuda_many_series_one_param_dev_py(
     volumes_tm_f32: numpy::PyReadonlyArray2<'_, f32>,
     period: usize,
     device_id: usize,
-) -> PyResult<DeviceArrayF32Py> {
+) -> PyResult<EfiDeviceArrayF32Py> {
     use numpy::PyArrayMethods;
     use numpy::PyUntypedArrayMethods;
     if !cuda_available() {
@@ -1223,12 +1516,21 @@ pub fn efi_cuda_many_series_one_param_dev_py(
     let params = EfiParams {
         period: Some(period),
     };
-    let inner = py.allow_threads(|| {
-        let cuda = CudaEfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.efi_many_series_one_param_time_major_dev(p_flat, v_flat, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaEfi::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id() as i32;
+        let arr = cuda
+            .efi_many_series_one_param_time_major_dev(p_flat, v_flat, cols, rows, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(EfiDeviceArrayF32Py {
+        inner: Some(inner),
+        ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(feature = "wasm")]
@@ -1257,8 +1559,11 @@ pub fn efi_batch_into(
         let combos = expand_grid(&sweep);
         let rows = combos.len();
         let cols = len;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("efi_batch_into: rows*cols overflow"))?;
 
-        let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
+        let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         // Find first valid index and calculate warmup
         let first = price

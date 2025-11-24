@@ -21,21 +21,28 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::Arc;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum CudaMfiError {
-    Cuda(String),
+    #[error(transparent)]
+    Cuda(#[from] cust::error::CudaError),
+    #[error("out of memory: required={required} free={free} headroom={headroom}")]
+    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error("missing kernel symbol: {name}")]
+    MissingKernelSymbol { name: &'static str },
+    #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid policy: {0}")]
+    InvalidPolicy(&'static str),
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("device mismatch: buf={buf} current={current}")]
+    DeviceMismatch { buf: u32, current: u32 },
+    #[error("not implemented")]
+    NotImplemented,
 }
-impl fmt::Display for CudaMfiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CudaMfiError::Cuda(e) => write!(f, "CUDA error: {}", e),
-            CudaMfiError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-        }
-    }
-}
-impl std::error::Error for CudaMfiError {}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum BatchKernelPolicy {
@@ -73,7 +80,8 @@ pub enum ManySeriesKernelSelected {
 pub struct CudaMfi {
     module: Module,
     stream: Stream,
-    _context: Context,
+    context: Arc<Context>,
+    device_id: u32,
     policy: CudaMfiPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -83,30 +91,26 @@ pub struct CudaMfi {
 
 impl CudaMfi {
     pub fn new(device_id: usize) -> Result<Self, CudaMfiError> {
-        cust::init(CudaFlags::empty()).map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
-        let device =
-            Device::get_device(device_id as u32).map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
-        let context = Context::new(device).map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+        cust::init(CudaFlags::empty())?;
+        let device = Device::get_device(device_id as u32)?;
+        let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mfi_kernel.ptx"));
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {
             module,
             stream,
-            _context: context,
+            context,
+            device_id: device_id as u32,
             policy: CudaMfiPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -119,6 +123,8 @@ impl CudaMfi {
     pub fn policy(&self) -> &CudaMfiPolicy { &self.policy }
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -172,16 +178,36 @@ impl CudaMfi {
         }
     }
 
-    fn expand_grid(r: &MfiBatchRange) -> Vec<MfiParams> {
-        let (start, end, step) = r.period;
-        let periods = if step == 0 || start == end {
-            vec![start]
-        } else {
-            (start..=end).step_by(step).collect()
-        };
+    fn expand_grid(r: &MfiBatchRange) -> Result<Vec<MfiParams>, CudaMfiError> {
+        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaMfiError> {
+            if step == 0 || start == end {
+                return Ok(vec![start]);
+            }
+            if start < end {
+                return Ok((start..=end).step_by(step.max(1)).collect());
+            }
+            let mut v = Vec::new();
+            let mut x = start as isize;
+            let end_i = end as isize;
+            let st = (step as isize).max(1);
+            while x >= end_i {
+                v.push(x as usize);
+                x -= st;
+            }
+            if v.is_empty() {
+                return Err(CudaMfiError::InvalidInput(format!(
+                    "invalid period range: start={start} end={end} step={step}"
+                )));
+            }
+            Ok(v)
+        }
+
+        let periods = axis_usize(r.period)?;
         let mut out = Vec::with_capacity(periods.len());
-        for &p in &periods { out.push(MfiParams { period: Some(p) }); }
-        out
+        for &p in &periods {
+            out.push(MfiParams { period: Some(p) });
+        }
+        Ok(out)
     }
 
     fn prepare_batch_inputs(
@@ -201,12 +227,7 @@ impl CudaMfi {
             .zip(volume.iter())
             .position(|(p, v)| p.is_finite() && v.is_finite())
             .ok_or_else(|| CudaMfiError::InvalidInput("all values are NaN".into()))?;
-        let combos = Self::expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaMfiError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let combos = Self::expand_grid(sweep)?;
         for c in &combos {
             let p = c.period.unwrap_or(0);
             if p == 0 {
@@ -242,25 +263,47 @@ impl CudaMfi {
         let nb = ((len as u32 + block_x_scan - 1) / block_x_scan) as usize;
 
         // VRAM estimate: inputs + prefixes (float2) + block totals/offsets + periods + outputs
-        let bytes_inputs  = 2 * len * size_of::<f32>();
-        let bytes_prefix  = 2 * len * size_of::<[f32; 2]>();
-        let bytes_blk     = 4 * nb  * size_of::<[f32; 2]>();
-        let bytes_periods = combos.len() * size_of::<i32>();
-        let bytes_out     = combos.len() * len * size_of::<f32>();
-        let required      = bytes_inputs + bytes_prefix + bytes_blk + bytes_periods + bytes_out;
+        let rows = combos.len();
+        let cols = len;
+        let bytes_inputs = 2usize
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(size_of::<f32>()))
+            .ok_or_else(|| CudaMfiError::InvalidInput("size overflow (inputs)".into()))?;
+        let bytes_prefix = 2usize
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(size_of::<[f32; 2]>()))
+            .ok_or_else(|| CudaMfiError::InvalidInput("size overflow (prefix workspace)".into()))?;
+        let bytes_blk = 4usize
+            .checked_mul(nb)
+            .and_then(|v| v.checked_mul(size_of::<[f32; 2]>()))
+            .ok_or_else(|| CudaMfiError::InvalidInput("size overflow (block workspace)".into()))?;
+        let bytes_periods = rows
+            .checked_mul(size_of::<i32>())
+            .ok_or_else(|| CudaMfiError::InvalidInput("size overflow (periods)".into()))?;
+        let bytes_out = rows
+            .checked_mul(cols)
+            .and_then(|v| v.checked_mul(size_of::<f32>()))
+            .ok_or_else(|| CudaMfiError::InvalidInput("size overflow (outputs)".into()))?;
+        let required = bytes_inputs
+            .checked_add(bytes_prefix)
+            .and_then(|v| v.checked_add(bytes_blk))
+            .and_then(|v| v.checked_add(bytes_periods))
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaMfiError::InvalidInput("size overflow (aggregate)".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
-            return Err(CudaMfiError::InvalidInput(format!(
-                "estimated device memory {:.2} MB exceeds free VRAM",
-                (required as f64) / (1024.0 * 1024.0)
-            )));
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaMfiError::OutOfMemory { required, free, headroom });
+            } else {
+                return Err(CudaMfiError::InvalidInput(
+                    "insufficient device memory for MFI batch".into(),
+                ));
+            }
         }
 
         // Device buffers
-        let d_tp  = unsafe { DeviceBuffer::from_slice_async(typical_f32, &self.stream) }
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
-        let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_f32, &self.stream) }
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+        let d_tp = unsafe { DeviceBuffer::from_slice_async(typical_f32, &self.stream) }?;
+        let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_f32, &self.stream) }?;
 
         let periods_i32: Vec<i32> = combos
             .iter()
@@ -270,49 +313,53 @@ impl CudaMfi {
             .iter()
             .map(|c| c.period.unwrap_or(14) as i32)
             .collect();
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
 
         // Prefix workspace (float2)
-        let mut d_pos_ps: DeviceBuffer<[f32; 2]> = unsafe {
-            DeviceBuffer::uninitialized_async(len, &self.stream)
-                .map_err(|e| CudaMfiError::Cuda(e.to_string()))?
-        };
-        let mut d_neg_ps: DeviceBuffer<[f32; 2]> = unsafe {
-            DeviceBuffer::uninitialized_async(len, &self.stream)
-                .map_err(|e| CudaMfiError::Cuda(e.to_string()))?
-        };
-        let mut d_blk_tot_pos: DeviceBuffer<[f32; 2]> = unsafe {
-            DeviceBuffer::uninitialized_async(nb, &self.stream)
-                .map_err(|e| CudaMfiError::Cuda(e.to_string()))?
-        };
-        let mut d_blk_tot_neg: DeviceBuffer<[f32; 2]> = unsafe {
-            DeviceBuffer::uninitialized_async(nb, &self.stream)
-                .map_err(|e| CudaMfiError::Cuda(e.to_string()))?
-        };
-        let mut d_blk_off_pos: DeviceBuffer<[f32; 2]> = unsafe {
-            DeviceBuffer::uninitialized_async(nb, &self.stream)
-                .map_err(|e| CudaMfiError::Cuda(e.to_string()))?
-        };
-        let mut d_blk_off_neg: DeviceBuffer<[f32; 2]> = unsafe {
-            DeviceBuffer::uninitialized_async(nb, &self.stream)
-                .map_err(|e| CudaMfiError::Cuda(e.to_string()))?
-        };
+        let mut d_pos_ps: DeviceBuffer<[f32; 2]> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
+        let mut d_neg_ps: DeviceBuffer<[f32; 2]> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
+        let mut d_blk_tot_pos: DeviceBuffer<[f32; 2]> =
+            unsafe { DeviceBuffer::uninitialized_async(nb, &self.stream)? };
+        let mut d_blk_tot_neg: DeviceBuffer<[f32; 2]> =
+            unsafe { DeviceBuffer::uninitialized_async(nb, &self.stream)? };
+        let mut d_blk_off_pos: DeviceBuffer<[f32; 2]> =
+            unsafe { DeviceBuffer::uninitialized_async(nb, &self.stream)? };
+        let mut d_blk_off_neg: DeviceBuffer<[f32; 2]> =
+            unsafe { DeviceBuffer::uninitialized_async(nb, &self.stream)? };
 
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(len * combos.len(), &self.stream)
-                .map_err(|e| CudaMfiError::Cuda(e.to_string()))?
-        };
+        let total_out = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaMfiError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total_out, &self.stream)? };
 
         // Kernel symbols
-        let k1 = self.module.get_function("mfi_prefix_stage1_transform_scan_ds")
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
-        let k2 = self.module.get_function("mfi_prefix_stage2_scan_block_totals")
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
-        let k3 = self.module.get_function("mfi_prefix_stage3_add_offsets")
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
-        let k4 = self.module.get_function("mfi_batch_from_prefix_ds_f32")
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+        let k1 = self
+            .module
+            .get_function("mfi_prefix_stage1_transform_scan_ds")
+            .map_err(|_| CudaMfiError::MissingKernelSymbol {
+                name: "mfi_prefix_stage1_transform_scan_ds",
+            })?;
+        let k2 = self
+            .module
+            .get_function("mfi_prefix_stage2_scan_block_totals")
+            .map_err(|_| CudaMfiError::MissingKernelSymbol {
+                name: "mfi_prefix_stage2_scan_block_totals",
+            })?;
+        let k3 = self
+            .module
+            .get_function("mfi_prefix_stage3_add_offsets")
+            .map_err(|_| CudaMfiError::MissingKernelSymbol {
+                name: "mfi_prefix_stage3_add_offsets",
+            })?;
+        let k4 = self
+            .module
+            .get_function("mfi_batch_from_prefix_ds_f32")
+            .map_err(|_| CudaMfiError::MissingKernelSymbol {
+                name: "mfi_batch_from_prefix_ds_f32",
+            })?;
 
         unsafe { (*(self as *const _ as *mut CudaMfi)).last_batch = Some(BatchKernelSelected::Plain { block_x: block_x_scan }); }
 
@@ -339,8 +386,7 @@ impl CudaMfi {
                     &mut blk_tot_p as *mut _ as *mut c_void,
                     &mut blk_tot_n as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&k1, grid, block, 0, args)
-                    .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+                self.stream.launch(&k1, grid, block, 0, args)?;
             }
         }
 
@@ -361,8 +407,7 @@ impl CudaMfi {
                     &mut blk_off_n as *mut _ as *mut c_void,
                     &mut nb_i as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&k2, grid, block, 0, args)
-                    .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+                self.stream.launch(&k2, grid, block, 0, args)?;
             }
         }
 
@@ -383,8 +428,7 @@ impl CudaMfi {
                     &mut blk_off_n as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&k3, grid, block, 0, args)
-                    .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+                self.stream.launch(&k3, grid, block, 0, args)?;
             }
         }
 
@@ -415,13 +459,12 @@ impl CudaMfi {
                     &mut n_chunk_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&k4, grid, block, 0, args)
-                    .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+                self.stream.launch(&k4, grid, block, 0, args)?;
             }
             launched += chunk;
         }
 
-        self.stream.synchronize().map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         self.maybe_log_batch_debug();
         Ok((
             DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len },
@@ -440,7 +483,11 @@ impl CudaMfi {
         if typical_tm_f32.len() != volume_tm_f32.len() {
             return Err(CudaMfiError::InvalidInput("length mismatch".into()));
         }
-        if typical_tm_f32.len() != cols * rows {
+        if typical_tm_f32.len()
+            != cols
+                .checked_mul(rows)
+                .ok_or_else(|| CudaMfiError::InvalidInput("rows*cols overflow".into()))?
+        {
             return Err(CudaMfiError::InvalidInput("unexpected matrix size".into()));
         }
         if period == 0 {
@@ -466,22 +513,22 @@ impl CudaMfi {
             first_valids[s] = fv;
         }
 
-        let d_tp = unsafe { DeviceBuffer::from_slice_async(typical_tm_f32, &self.stream) }
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
-        let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_tm_f32, &self.stream) }
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
-        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+        let d_tp = unsafe { DeviceBuffer::from_slice_async(typical_tm_f32, &self.stream) }?;
+        let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_tm_f32, &self.stream) }?;
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
 
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(rows * cols, &self.stream)
-                .map_err(|e| CudaMfiError::Cuda(e.to_string()))?
-        };
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaMfiError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
 
         let func = self
             .module
             .get_function("mfi_many_series_one_param_f32")
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+            .map_err(|_| CudaMfiError::MissingKernelSymbol {
+                name: "mfi_many_series_one_param_f32",
+            })?;
 
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
@@ -512,14 +559,10 @@ impl CudaMfi {
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, shared_bytes, args)
-                .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+            self.stream.launch(&func, grid, block, shared_bytes, args)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(|e| CudaMfiError::Cuda(e.to_string()))?;
+        self.stream.synchronize()?;
         self.maybe_log_many_debug();
         Ok(DeviceArrayF32 { buf: d_out, rows, cols })
     }

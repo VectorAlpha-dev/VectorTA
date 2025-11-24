@@ -22,6 +22,8 @@
 //!   the streaming/scalar path bit-for-bit (no FMA). Gains observed on long series.
 //! - Row-specific batch not applicable (single cumulative row); batch SIMD stubs
 //!   short-circuit to scalar row compute.
+//! - CUDA wrapper returns VRAM handles with typed errors; Python interop exposes
+//!   CUDA Array Interface v3 and DLPack v1.x without changing numerical outputs.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -97,8 +99,12 @@ impl<'a> NviInput<'a> {
 
 #[derive(Debug, Error)]
 pub enum NviError {
+    #[error("nvi: input data slice is empty.")]
+    EmptyInputData,
     #[error("nvi: Empty data provided.")]
     EmptyData,
+    #[error("nvi: All values are NaN in both close and volume.")]
+    AllValuesNaN,
     #[error("nvi: All close values are NaN.")]
     AllCloseValuesNaN,
     #[error("nvi: All volume values are NaN.")]
@@ -115,6 +121,14 @@ pub enum NviError {
         close_len: usize,
         volume_len: usize,
     },
+    #[error("nvi: output length mismatch: expected = {expected}, got = {got}")]
+    OutputLengthMismatch { expected: usize, got: usize },
+    #[error("nvi: invalid range: start={start}, end={end}, step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
+    #[error("nvi: invalid kernel for batch: {0:?}")]
+    InvalidKernelForBatch(Kernel),
+    #[error("nvi: invalid period: period = {period}, data length = {data_len}")]
+    InvalidPeriod { period: usize, data_len: usize },
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -226,14 +240,14 @@ pub fn nvi_with_kernel(input: &NviInput, kernel: Kernel) -> Result<NviOutput, Nv
             let close = source_type(candles, close_source);
             let volume = candles
                 .select_candle_field("volume")
-                .map_err(|_| NviError::EmptyData)?;
+                .map_err(|_| NviError::EmptyInputData)?;
             (close, volume)
         }
         NviData::Slices { close, volume } => (*close, *volume),
     };
 
     if close.is_empty() || volume.is_empty() {
-        return Err(NviError::EmptyData);
+        return Err(NviError::EmptyInputData);
     }
     if close.len() != volume.len() {
         return Err(NviError::MismatchedLength {
@@ -292,7 +306,7 @@ pub fn nvi_into(input: &NviInput, out: &mut [f64]) -> Result<(), NviError> {
             let close = source_type(candles, close_source);
             let volume = candles
                 .select_candle_field("volume")
-                .map_err(|_| NviError::EmptyData)?;
+                .map_err(|_| NviError::EmptyInputData)?;
             (close, volume)
         }
         NviData::Slices { close, volume } => (*close, *volume),
@@ -309,7 +323,7 @@ pub fn nvi_into_slice(
     kern: Kernel,
 ) -> Result<(), NviError> {
     if close.is_empty() || volume.is_empty() {
-        return Err(NviError::EmptyData);
+        return Err(NviError::EmptyInputData);
     }
     if close.len() != volume.len() {
         return Err(NviError::MismatchedLength {
@@ -318,10 +332,9 @@ pub fn nvi_into_slice(
         });
     }
     if dst.len() != close.len() {
-        return Err(NviError::DestinationLengthMismatch {
-            dst_len: dst.len(),
-            close_len: close.len(),
-            volume_len: volume.len(),
+        return Err(NviError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
         });
     }
 
@@ -582,7 +595,7 @@ pub fn nvi_batch_with_kernel(
     k: Kernel,
 ) -> Result<NviBatchOutput, NviError> {
     if close.is_empty() || volume.is_empty() {
-        return Err(NviError::EmptyData);
+        return Err(NviError::EmptyInputData);
     }
     if close.len() != volume.len() {
         return Err(NviError::MismatchedLength {
@@ -622,7 +635,8 @@ pub fn nvi_batch_with_kernel(
     // Compute into row 0.
     let chosen = match k {
         Kernel::Auto => detect_best_batch_kernel(), // maps to Scalar/Avx2/Avx512 row kernels
-        other => other,
+        other if other.is_batch() => other,
+        other => return Err(NviError::InvalidKernelForBatch(other)),
     };
     unsafe {
         match chosen {
@@ -1414,7 +1428,7 @@ use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaNvi;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+use crate::cuda::moving_averages::wma_wrapper::DeviceArrayF32Py;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "nvi_cuda_batch_dev")]
@@ -1433,12 +1447,16 @@ pub fn nvi_cuda_batch_dev_py(
     if close_slice.len() != volume_slice.len() {
         return Err(PyValueError::new_err("mismatched input lengths"));
     }
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaNvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.nvi_batch_dev(close_slice, volume_slice)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .nvi_batch_dev(close_slice, volume_slice)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1457,10 +1475,14 @@ pub fn nvi_cuda_many_series_one_param_dev_py(
     }
     let close_slice = close_tm.as_slice()?;
     let volume_slice = volume_tm.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaNvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.nvi_many_series_one_param_time_major_dev(close_slice, volume_slice, cols, rows)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .nvi_many_series_one_param_time_major_dev(close_slice, volume_slice, cols, rows)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((arr, ctx, dev_id))
     })?;
-    Ok(DeviceArrayF32Py { inner })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }

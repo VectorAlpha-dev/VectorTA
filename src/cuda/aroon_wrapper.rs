@@ -21,6 +21,8 @@ use thiserror::Error;
 pub enum CudaAroonError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
+    #[error("invalid range: start={start} end={end} step={step}")]
+    InvalidRange { start: usize, end: usize, step: usize },
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required}B free={free}B headroom={headroom}B")]
@@ -127,7 +129,9 @@ impl CudaAroon {
             let mut v = start;
             loop { lens.push(v); if v == end { break; } let n = v.saturating_sub(step); if n==v { break; } v = n; if v < end { break; } }
         }
-        if lens.is_empty() { return Err(CudaAroonError::InvalidInput("invalid range expansion".into())); }
+        if lens.is_empty() {
+            return Err(CudaAroonError::InvalidRange { start, end, step });
+        }
         Ok(lens.into_iter().map(|l| AroonParams { length: Some(l) }).collect())
     }
 
@@ -168,10 +172,21 @@ impl CudaAroon {
         }
 
         let lengths_i32: Vec<i32> = combos.iter().map(|c| c.length.unwrap() as i32).collect();
-        let out_elems = combos.len().checked_mul(n).ok_or_else(|| CudaAroonError::InvalidInput("rows*cols overflow".into()))?;
+        let out_elems = combos
+            .len()
+            .checked_mul(n)
+            .ok_or_else(|| CudaAroonError::InvalidInput("rows*cols overflow".into()))?;
         let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
-        let bytes =
-            (high_f32.len() + low_f32.len()) * 4 + lengths_i32.len() * 4 + out_elems * 4 * 2;
+        let in_bytes = high_f32.len().saturating_mul(4) + low_f32.len().saturating_mul(4);
+        let param_bytes = lengths_i32.len().saturating_mul(4);
+        let out_bytes = out_elems
+            .checked_mul(4)
+            .and_then(|x| x.checked_mul(2))
+            .ok_or_else(|| CudaAroonError::InvalidInput("byte size overflow".into()))?;
+        let bytes = in_bytes
+            .checked_add(param_bytes)
+            .and_then(|b| b.checked_add(out_bytes))
+            .ok_or_else(|| CudaAroonError::InvalidInput("byte size overflow".into()))?;
         Self::will_fit(bytes, headroom)?;
 
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }?;
@@ -250,7 +265,9 @@ impl CudaAroon {
         if cols == 0 || rows == 0 {
             return Err(CudaAroonError::InvalidInput("empty matrix".into()));
         }
-        let n = cols.checked_mul(rows).ok_or_else(|| CudaAroonError::InvalidInput("rows*cols overflow".into()))?;
+        let n = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaAroonError::InvalidInput("rows*cols overflow".into()))?;
         if high_tm_f32.len() != n || low_tm_f32.len() != n {
             return Err(CudaAroonError::InvalidInput(
                 "matrix inputs mismatch".into(),
@@ -278,7 +295,17 @@ impl CudaAroon {
         }
 
         let headroom = 64 * 1024 * 1024;
-        let bytes = (high_tm_f32.len() + low_tm_f32.len()) * 4 + cols * 4 + n * 4 * 2;
+        let in_bytes =
+            high_tm_f32.len().saturating_mul(4) + low_tm_f32.len().saturating_mul(4);
+        let first_bytes = cols.saturating_mul(4);
+        let out_bytes = n
+            .checked_mul(4)
+            .and_then(|x| x.checked_mul(2))
+            .ok_or_else(|| CudaAroonError::InvalidInput("byte size overflow".into()))?;
+        let bytes = in_bytes
+            .checked_add(first_bytes)
+            .and_then(|b| b.checked_add(out_bytes))
+            .ok_or_else(|| CudaAroonError::InvalidInput("byte size overflow".into()))?;
         Self::will_fit(bytes, headroom)?;
 
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }?;
@@ -346,7 +373,9 @@ impl CudaAroon {
             self.aroon_batch_dev(high_f32, low_f32, sweep)?;
         let rows = outputs.rows();
         let cols = outputs.cols();
-        let expected = rows * cols;
+        let expected = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaAroonError::InvalidInput("rows*cols overflow".into()))?;
         if out_up.len() != expected || out_down.len() != expected {
             return Err(CudaAroonError::InvalidInput(
                 "output length mismatch".into(),
@@ -367,7 +396,9 @@ impl CudaAroon {
         let CudaAroonBatchResult { outputs, combos } = self.aroon_batch_dev(high_f32, low_f32, sweep)?;
         let rows = outputs.rows();
         let cols = outputs.cols();
-        let expected = rows * cols;
+        let expected = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaAroonError::InvalidInput("rows*cols overflow".into()))?;
         let mut pinned_up: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected)? };
         let mut pinned_dn: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected)? };
         unsafe {
