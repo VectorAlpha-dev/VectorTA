@@ -307,38 +307,35 @@ impl CudaDevStop {
                 .checked_add(v.len())
                 .ok_or_else(|| CudaDevStopError::InvalidInput("rows overflow".into()))?;
         }
-        let bytes_inputs = high
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_f2 = std::mem::size_of::<Float2>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let bytes_high = high
             .len()
-            .checked_mul(std::mem::size_of::<f32>())
-            .and_then(|b| {
-                b.checked_add(
-                    low.len()
-                        .checked_mul(std::mem::size_of::<f32>())
-                        .ok_or(())?,
-                )
-            })
-            .and_then(|b| {
-                b.checked_add(
-                    p1.len()
-                        .checked_mul(std::mem::size_of::<Float2>())
-                        .ok_or(())?,
-                )
-            })
-            .and_then(|b| {
-                b.checked_add(
-                    p2.len()
-                        .checked_mul(std::mem::size_of::<Float2>())
-                        .ok_or(())?,
-                )
-            })
-            .and_then(|b| {
-                b.checked_add(
-                    pc.len()
-                        .checked_mul(std::mem::size_of::<i32>())
-                        .ok_or(())?,
-                )
-            })
-            .map_err(|()| CudaDevStopError::InvalidInput("size overflow".into()))?;
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaDevStopError::InvalidInput("size overflow".into()))?;
+        let bytes_low = low
+            .len()
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaDevStopError::InvalidInput("size overflow".into()))?;
+        let bytes_p1 = p1
+            .len()
+            .checked_mul(sz_f2)
+            .ok_or_else(|| CudaDevStopError::InvalidInput("size overflow".into()))?;
+        let bytes_p2 = p2
+            .len()
+            .checked_mul(sz_f2)
+            .ok_or_else(|| CudaDevStopError::InvalidInput("size overflow".into()))?;
+        let bytes_pc = pc
+            .len()
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaDevStopError::InvalidInput("size overflow".into()))?;
+        let bytes_inputs = bytes_high
+            .checked_add(bytes_low)
+            .and_then(|b| b.checked_add(bytes_p1))
+            .and_then(|b| b.checked_add(bytes_p2))
+            .and_then(|b| b.checked_add(bytes_pc))
+            .ok_or_else(|| CudaDevStopError::InvalidInput("size overflow".into()))?;
         let elems_out = total_rows
             .checked_mul(len)
             .ok_or_else(|| CudaDevStopError::InvalidInput("rows*cols overflow".into()))?;

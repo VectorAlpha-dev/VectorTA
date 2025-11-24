@@ -100,11 +100,11 @@ impl CudaBollingerBands {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        Ok(Self { module, stream, context, sm_count, device_id: device_id as u32 })
+        Ok(Self { module, stream, _context: context, sm_count, device_id: device_id as u32 })
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
     #[inline]
     pub fn device_id(&self) -> u32 { self.device_id }
 

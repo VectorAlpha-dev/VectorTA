@@ -377,7 +377,7 @@ impl CudaEmd {
             .checked_mul(sz_f32)
             .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
         // Scratch rings: sp/sv (50 each) + bp (2*max_period)
-        let ring_stride_mid = max_p
+        let mut ring_stride_mid = max_p
             .checked_mul(2)
             .ok_or_else(|| CudaEmdError::InvalidInput("ring size overflow".into()))?;
         let ring_elems_per_combo = 50usize

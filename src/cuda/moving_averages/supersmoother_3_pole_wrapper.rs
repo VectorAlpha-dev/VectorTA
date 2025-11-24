@@ -196,22 +196,17 @@ impl CudaSupersmoother3Pole {
     }
 
     #[inline]
-    fn ptr_device_id<T: cust::memory::DeviceCopy>(buf: &DeviceBuffer<T>) -> Result<u32, CudaSuperSmoother3PoleError> {
+    fn ptr_device_id<T: cust::memory::DeviceCopy>(_buf: &DeviceBuffer<T>) -> Result<u32, CudaSuperSmoother3PoleError> {
         unsafe {
-            let mut dev_ordinal: i32 = -1;
-            let ptr = buf.as_device_ptr().as_raw() as *mut c_void;
             use cust::sys as cu;
-            let res = cu::cuPointerGetAttribute(
-                &mut dev_ordinal as *mut _ as *mut c_void,
-                cu::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
-                ptr,
-            );
-            if res == cu::CUresult::CUDA_SUCCESS && dev_ordinal >= 0 {
-                Ok(dev_ordinal as u32)
+            // We rely on the current CUDA context's device id rather than
+            // querying pointer attributes, to stay compatible with older
+            // driver bindings that lack DEVICE_ORDINAL.
+            let mut cur_dev: i32 = 0;
+            let _ = cu::cuCtxGetDevice(&mut cur_dev as *mut _);
+            if cur_dev < 0 {
+                Ok(0)
             } else {
-                // Fallback to current context device if attribute not available
-                let mut cur_dev: i32 = 0;
-                let _ = cu::cuCtxGetDevice(&mut cur_dev as *mut _);
                 Ok(cur_dev as u32)
             }
         }

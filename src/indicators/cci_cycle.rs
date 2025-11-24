@@ -1849,16 +1849,6 @@ pub fn cci_cycle_cuda_batch_dev_py(
         length: length_range,
         factor: factor_range,
     };
-<<<<<<< HEAD
-    let inner = py.allow_threads(|| {
-        let cuda =
-            CudaCciCycle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.cci_cycle_batch_dev(slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
-    Ok(DeviceArrayF32Py { inner })
-}
-=======
     let (inner, dev_id, ctx) = py.allow_threads(|| {
         let cuda = CudaCciCycle::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1871,7 +1861,6 @@ pub fn cci_cycle_cuda_batch_dev_py(
     })?;
     Ok(CciCycleDeviceArrayF32Py { inner: Some(inner), _ctx: ctx, device_id: dev_id })
 }
->>>>>>> simd-1
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "cci_cycle_cuda_many_series_one_param_dev")]
@@ -1897,16 +1886,6 @@ pub fn cci_cycle_cuda_many_series_one_param_dev_py(
         length: Some(length),
         factor: Some(factor),
     };
-<<<<<<< HEAD
-    let inner = py.allow_threads(|| {
-        let cuda =
-            CudaCciCycle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.cci_cycle_many_series_one_param_time_major_dev(slice, cols, rows, &params)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
-    })?;
-    Ok(DeviceArrayF32Py { inner })
-}
-=======
     let (inner, dev_id, ctx) = py.allow_threads(|| {
         let cuda = CudaCciCycle::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1919,7 +1898,6 @@ pub fn cci_cycle_cuda_many_series_one_param_dev_py(
     })?;
     Ok(CciCycleDeviceArrayF32Py { inner: Some(inner), _ctx: ctx, device_id: dev_id })
 }
-
 // Python VRAM handle for cci_cycle: CAI v3 + DLPack with context guard
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -2153,7 +2131,6 @@ impl CciCycleDeviceArrayF32Py {
         }
     }
 }
->>>>>>> simd-1
 
 // ==================== UNIT TESTS ====================
 #[cfg(test)]

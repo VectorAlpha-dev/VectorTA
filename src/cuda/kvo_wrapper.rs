@@ -234,12 +234,10 @@ impl CudaKvo {
         Self::will_fit(bytes, Self::headroom_bytes())?;
 
         // H2D
-        let d_vf = DeviceBuffer::from_slice(&vf).map_err(Into::into)?;
-        let d_shorts = DeviceBuffer::from_slice(&shorts).map_err(Into::into)?;
-        let d_longs = DeviceBuffer::from_slice(&longs).map_err(Into::into)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(out_elems).map_err(Into::into)?
-        };
+        let d_vf = DeviceBuffer::from_slice(&vf)?;
+        let d_shorts = DeviceBuffer::from_slice(&shorts)?;
+        let d_longs = DeviceBuffer::from_slice(&longs)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
 
         self.launch_batch_kernel(
             &d_vf,
@@ -250,7 +248,7 @@ impl CudaKvo {
             combos.len() as i32,
             &mut d_out,
         )?;
-        self.stream.synchronize().map_err(Into::into)?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {
@@ -308,7 +306,7 @@ impl CudaKvo {
                 &mut p_n as *mut _ as *mut c_void,
                 &mut p_out as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args).map_err(Into::into)?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -365,14 +363,12 @@ impl CudaKvo {
         Self::will_fit(bytes, Self::headroom_bytes())?;
 
         // H2D
-        let d_high = DeviceBuffer::from_slice(high_tm).map_err(Into::into)?;
-        let d_low = DeviceBuffer::from_slice(low_tm).map_err(Into::into)?;
-        let d_close = DeviceBuffer::from_slice(close_tm).map_err(Into::into)?;
-        let d_vol = DeviceBuffer::from_slice(volume_tm).map_err(Into::into)?;
-        let d_fv = DeviceBuffer::from_slice(&first_valids).map_err(Into::into)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(elems).map_err(Into::into)?
-        };
+        let d_high = DeviceBuffer::from_slice(high_tm)?;
+        let d_low = DeviceBuffer::from_slice(low_tm)?;
+        let d_close = DeviceBuffer::from_slice(close_tm)?;
+        let d_vol = DeviceBuffer::from_slice(volume_tm)?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         self.launch_many_series_kernel(
             &d_high,
@@ -386,7 +382,7 @@ impl CudaKvo {
             l as i32,
             &mut d_out,
         )?;
-        self.stream.synchronize().map_err(Into::into)?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -453,7 +449,7 @@ impl CudaKvo {
                 &mut p_lp as *mut _ as *mut c_void,
                 &mut p_out as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args).map_err(Into::into)?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }

@@ -256,23 +256,14 @@ impl CudaReflex {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaReflexError> {
-        // Validate that provided buffers belong to the current device/context
-        let buf_dev = unsafe {
-            let mut ord: i32 = 0;
-            let rc = cu::cuPointerGetAttribute(
-                (&mut ord as *mut i32).cast(),
-                cu::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
-                d_prices.as_device_ptr().as_raw() as *mut std::ffi::c_void,
-            );
-            if rc == cu::CUresult::CUDA_SUCCESS { ord as u32 } else { self.device_id }
-        };
+        // Validate that the current CUDA context is on the expected device.
         let cur_dev = unsafe {
             let mut dev: i32 = 0;
             let _ = cu::cuCtxGetDevice(&mut dev as *mut _);
             dev as u32
         };
-        if buf_dev != cur_dev {
-            return Err(CudaReflexError::DeviceMismatch { buf: buf_dev, current: cur_dev });
+        if cur_dev != self.device_id {
+            return Err(CudaReflexError::DeviceMismatch { buf: self.device_id, current: cur_dev });
         }
 
         if series_len == 0 || n_combos == 0 {
@@ -311,23 +302,14 @@ impl CudaReflex {
         d_first_valids: Option<&DeviceBuffer<i32>>,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaReflexError> {
-        // Validate device ownership of provided buffers
-        let buf_dev = unsafe {
-            let mut ord: i32 = 0;
-            let rc = cu::cuPointerGetAttribute(
-                (&mut ord as *mut i32).cast(),
-                cu::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
-                d_prices_tm.as_device_ptr().as_raw() as *mut std::ffi::c_void,
-            );
-            if rc == cu::CUresult::CUDA_SUCCESS { ord as u32 } else { self.device_id }
-        };
+        // Validate that the current CUDA context is on the expected device.
         let cur_dev = unsafe {
             let mut dev: i32 = 0;
             let _ = cu::cuCtxGetDevice(&mut dev as *mut _);
             dev as u32
         };
-        if buf_dev != cur_dev {
-            return Err(CudaReflexError::DeviceMismatch { buf: buf_dev, current: cur_dev });
+        if cur_dev != self.device_id {
+            return Err(CudaReflexError::DeviceMismatch { buf: self.device_id, current: cur_dev });
         }
 
         if period < 2 || num_series == 0 || series_len == 0 {

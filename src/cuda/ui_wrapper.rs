@@ -168,12 +168,7 @@ impl CudaUi {
                 smem_bytes as i32,
             );
             if r1 != sys::CUresult::CUDA_SUCCESS {
-                return Err(CudaUiError::Cuda(CudaError::UnknownError {
-                    msg: format!(
-                        "cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES={}) failed: {:?}",
-                        smem_bytes, r1
-                    ),
-                }));
+                return Err(CudaUiError::Cuda(CudaError::UnknownError));
             }
             let _ = sys::cuFuncSetAttribute(
                 f,

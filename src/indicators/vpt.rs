@@ -1389,7 +1389,7 @@ pub fn vpt_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     // VPT has no parameters, so single row output
-    let rows = 1;
+    let rows: usize = 1;
     let cols = price_slice.len();
 
     let total = rows

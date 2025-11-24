@@ -10,6 +10,7 @@
 //! - Many-series × one-param uses time-major layout; MA computed by the chosen CUDA MA wrapper.
 
 use crate::cuda::moving_averages::ma_selector::{CudaMaData, CudaMaSelector};
+use crate::cuda::moving_averages::{CudaEmaError, CudaSmaError, CudaWmaError, CudaZlemaError};
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::eri::{EriBatchRange, EriParams};
 use cust::context::Context;
@@ -59,6 +60,14 @@ impl Default for CudaEriPolicy {
 pub enum CudaEriError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
+    #[error(transparent)]
+    Ema(#[from] CudaEmaError),
+    #[error(transparent)]
+    Sma(#[from] CudaSmaError),
+    #[error(transparent)]
+    Wma(#[from] CudaWmaError),
+    #[error(transparent)]
+    Zlema(#[from] CudaZlemaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
     OutOfMemory { required: usize, free: usize, headroom: usize },
     #[error("missing kernel symbol: {name}")]

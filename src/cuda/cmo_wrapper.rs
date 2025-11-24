@@ -529,12 +529,8 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }?;
 
         unsafe {
-            d_prices_tm
-                .async_copy_from(&h_prices, &self.stream)
-                .map_err(Into::into)?;
-            d_first
-                .async_copy_from(&h_first, &self.stream)
-                .map_err(Into::into)?;
+            d_prices_tm.async_copy_from(&h_prices, &self.stream)?;
+            d_first.async_copy_from(&h_first, &self.stream)?;
         }
 
         self.launch_many_series_kernel(&d_prices_tm, &d_first, cols, rows, period, &mut d_out_tm)?;

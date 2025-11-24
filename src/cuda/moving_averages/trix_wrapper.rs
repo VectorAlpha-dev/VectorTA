@@ -201,8 +201,7 @@ impl CudaTrix {
             )));
         }
         let arr = self.run_batch_kernel(&inputs)?;
-        unsafe { arr.buf.async_copy_to(out, &self.stream) }
-            .map_err(Into::into)?;
+        unsafe { arr.buf.async_copy_to(out, &self.stream) }?;
         self.synchronize()?;
         Ok((arr.rows, arr.cols, inputs.combos))
     }
@@ -292,8 +291,7 @@ impl CudaTrix {
         }
         let prepared = Self::prepare_many_series_inputs(prices_tm_f32, cols, rows, period)?;
         let arr = self.run_many_series_kernel(prices_tm_f32, cols, rows, period, &prepared)?;
-        unsafe { arr.buf.async_copy_to(out_tm, &self.stream) }
-            .map_err(Into::into)?;
+        unsafe { arr.buf.async_copy_to(out_tm, &self.stream) }?;
         self.synchronize()?;
         Ok(())
     }
@@ -411,9 +409,7 @@ impl CudaTrix {
                     &mut first_valid_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    .map_err(Into::into)?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
             launched += chunk;
         }
@@ -459,9 +455,7 @@ impl CudaTrix {
                 &mut fvs_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)
-                .map_err(Into::into)?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }

@@ -196,21 +196,15 @@ impl CudaWto {
             let n3 = d_hist.len();
             let r1 = cu::cuMemsetD32Async(p1, QNAN_BITS, n1, st);
             if r1 != cu::CUresult::CUDA_SUCCESS {
-                return Err(CudaWtoError::Cuda(CudaError::UnknownError {
-                    msg: format!("cuMemsetD32Async wt1 failed: {:?}", r1),
-                }));
+                return Err(CudaWtoError::Cuda(CudaError::UnknownError));
             }
             let r2 = cu::cuMemsetD32Async(p2, QNAN_BITS, n2, st);
             if r2 != cu::CUresult::CUDA_SUCCESS {
-                return Err(CudaWtoError::Cuda(CudaError::UnknownError {
-                    msg: format!("cuMemsetD32Async wt2 failed: {:?}", r2),
-                }));
+                return Err(CudaWtoError::Cuda(CudaError::UnknownError));
             }
             let r3 = cu::cuMemsetD32Async(p3, QNAN_BITS, n3, st);
             if r3 != cu::CUresult::CUDA_SUCCESS {
-                return Err(CudaWtoError::Cuda(CudaError::UnknownError {
-                    msg: format!("cuMemsetD32Async hist failed: {:?}", r3),
-                }));
+                return Err(CudaWtoError::Cuda(CudaError::UnknownError));
             }
         }
         Ok(())

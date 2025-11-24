@@ -438,13 +438,18 @@ impl CudaAso {
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         // shared: ring_b/e (2*period*f32) + dq_min_idx/dq_max_idx (2*period*i32)
-        let smem_bytes_usize = 2usize
+        let elems = 2usize
             .checked_mul(period)
-            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
-            .and_then(|x| x.checked_add(2usize.checked_mul(period)
-                .and_then(|y| y.checked_mul(std::mem::size_of::<i32>()))
-                .ok_or(CudaAsoError::InvalidInput("shared memory size overflow".into()))?))
-            .ok_or(CudaAsoError::InvalidInput("shared memory size overflow".into()))?;
+            .ok_or_else(|| CudaAsoError::InvalidInput("shared memory size overflow".into()))?;
+        let bytes_f32 = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAsoError::InvalidInput("shared memory size overflow".into()))?;
+        let bytes_i32 = elems
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaAsoError::InvalidInput("shared memory size overflow".into()))?;
+        let smem_bytes_usize = bytes_f32
+            .checked_add(bytes_i32)
+            .ok_or_else(|| CudaAsoError::InvalidInput("shared memory size overflow".into()))?;
         let smem_bytes = smem_bytes_usize.min(u32::MAX as usize) as u32;
         set_kernel_smem_prefs(&mut func, smem_bytes)?;
         self.validate_launch((cols as u32, 1, 1), (block_x, 1, 1))?;

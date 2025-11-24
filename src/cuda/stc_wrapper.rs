@@ -215,7 +215,7 @@ impl CudaStc {
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     fn validate_first_valid(data: &[f32], max_needed: usize) -> Result<usize, CudaStcError> {

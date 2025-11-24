@@ -10,6 +10,7 @@
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
+use crate::cuda::moving_averages::CudaSmaError;
 use crate::cuda::moving_averages::ma_selector::{CudaMaData, CudaMaSelector, CudaMaSelectorError};
 use crate::indicators::kaufmanstop::{
     expand_grid_wrapper, KaufmanstopBatchRange, KaufmanstopParams,
@@ -31,6 +32,8 @@ use thiserror::Error;
 pub enum CudaKaufmanstopError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
+    #[error(transparent)]
+    Sma(#[from] CudaSmaError),
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("not implemented")]
